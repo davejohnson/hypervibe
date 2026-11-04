@@ -243,14 +243,10 @@ describe('repository variables through persisted spec, plan and apply', () => {
     expect(new EnvironmentRepository().findByProjectAndName(fixture.project.id, 'repository')!.platformBindings).toEqual(before);
   });
 
-  it('rejects case-colliding declarations and an unsupported registered provider explicitly', async () => {
+  it('rejects case-colliding declarations explicitly', async () => {
     const fixture = setup();
     replaceVariables(fixture, { FLAG: { value: 'one' }, flag: { value: 'two' } });
     expect(await new PlanService().plan(fixture.project, 'repository')).toMatchObject({ error: expect.stringMatching(/ambiguous/i) });
-    fixture.stored = new SpecStore().replace(fixture.project, projectSpecSchema.parse({ ...fixture.stored.spec,
-      gitRemoteUrl: 'https://gitlab.com/owner/example.git', devops: { ...fixture.stored.spec.devops,
-        code: { provider: 'gitlab', scope: 'owner/example' }, ci: { provider: 'gitlab-ci', repositoryVariables: { FLAG: { value: 'one' } } } } }));
-    expect(await new PlanService().plan(fixture.project, 'repository')).toMatchObject({ error: expect.stringMatching(/does not support repository configuration/i) });
     expect(writes).toEqual([]);
   });
 
@@ -273,9 +269,8 @@ describe('repository variables through persisted spec, plan and apply', () => {
   });
 
   it('keeps every registered CI provider in the reviewed repository-configuration capability matrix', () => {
-    expect(devOpsProviderRegistry.ciProviderIds().sort()).toEqual(['github-actions', 'gitlab-ci']);
+    expect(devOpsProviderRegistry.ciProviderIds().sort()).toEqual(['github-actions']);
     expect(typeof devOpsProviderRegistry.ciProvider('github-actions')!.repositoryConfiguration).toBe('function');
-    expect(devOpsProviderRegistry.ciProvider('gitlab-ci')!.repositoryConfiguration).toBeUndefined();
   });
 
   it('does not write when the pending journal cannot be persisted', async () => {

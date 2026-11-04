@@ -2,12 +2,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { databaseCredentialLifecycle } from '../../src/domain/ports/database-credential.port.js';
-import { SupabaseAdapter } from '../../src/adapters/providers/supabase/supabase.adapter.js';
-import { NeonAdapter } from '../../src/adapters/providers/neon/neon.adapter.js';
 import { CloudSqlAdapter } from '../../src/adapters/providers/gcp/cloudsql.adapter.js';
 import { AzurePostgresAdapter } from '../../src/adapters/providers/azure/azure-postgres.adapter.js';
-import { FlyDatabaseAdapter } from '../../src/adapters/providers/fly/fly-database.adapter.js';
-import { DigitalOceanDatabaseAdapter } from '../../src/adapters/providers/digitalocean/digitalocean-database.adapter.js';
 import { RdsAdapter } from '../../src/adapters/providers/aws/rds.adapter.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../src/adapters/providers/railway/railway-database.factory.js';
@@ -18,7 +14,7 @@ import { RDSClient } from '@aws-sdk/client-rds';
 import { Readable } from 'node:stream';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-const adapters = [new SupabaseAdapter(), new NeonAdapter(), new CloudSqlAdapter(), new AzurePostgresAdapter(), new FlyDatabaseAdapter(), new DigitalOceanDatabaseAdapter(), new RdsAdapter(),
+const adapters = [new CloudSqlAdapter(), new AzurePostgresAdapter(), new RdsAdapter(),
   createRailwayDatabaseAdapter({ hostingAdapter: new RailwayAdapter(), envRepo: { findById: () => null } as any })];
 
 it('every registered database provider has an actual database authentication rotation port', () => {
@@ -38,36 +34,6 @@ function database(adapter: IDatabaseAdapter, externalId = 'native-db', username 
 
 // These native HTTP observations are reconstructed from the official contracts
 // listed in docs/database-credential-rotation.md, not captured live success.
-it('Supabase resets the database password through its native management endpoint only', async () => {
-  const adapter = new SupabaseAdapter(); await adapter.connect({ accessToken: 'synthetic-token', organizationId: 'org' });
-  const component = database(adapter);
-  const requests: Array<{ path: string; method: string; body: unknown }> = [];
-  vi.stubGlobal('fetch', vi.fn(async (url, init) => { requests.push({ path: new URL(String(url)).pathname, method: init?.method ?? 'GET', body: JSON.parse(String(init?.body ?? '{}')) }); return Response.json({ message: 'Password updated' }); }));
-  const port = databaseCredentialLifecycle(adapter)!;
-  const target = await port.inspect(env, component, { environment: env.name, component: component.id, username: 'postgres', database: 'appdb' });
-  expect(await port.rotate(env, component, target, 'new-password')).toMatchObject({ state: 'acknowledged' });
-  expect(requests).toEqual([{ path: '/v1/projects/native-db/database/password', method: 'PATCH', body: { password: 'new-password' } }]);
-});
-
-it.each(['fly', 'digitalocean'] as const)('%s recovers the exact provider-generated password without another reset', async provider => {
-  const adapter = provider === 'fly' ? new FlyDatabaseAdapter() : new DigitalOceanDatabaseAdapter();
-  await adapter.connect(provider === 'fly' ? { apiToken: 'flyv1-synthetic', organizationSlug: 'org' } : { apiToken: 'dop_v1_synthetic' });
-  const component = database(adapter, 'native-db', 'app-user');
-  let password = 'old'; let resets = 0;
-  vi.stubGlobal('fetch', vi.fn(async (input, init) => {
-    const url = new URL(String(input));
-    if (init?.method === 'POST') { resets++; password = 'provider-generated-password'; throw new Error('lost acknowledgement'); }
-    expect(url.pathname).toBe(provider === 'fly' ? '/v1/postgres/native-db/users/app-user/credentials' : '/v2/databases/native-db/users/app-user');
-    return Response.json(provider === 'fly' ? { data: { username: 'app-user', password } } : { user: { name: 'app-user', password } });
-  }));
-  const port = databaseCredentialLifecycle(adapter)!;
-  const target = await port.inspect(env, component, { environment: env.name, component: component.id, username: 'app-user', database: 'appdb' });
-  expect(target.inputMode).toBe('provider-generated');
-  expect(await port.readCurrent(env, component, target)).toBe('old');
-  expect(await port.rotate(env, component, target)).toEqual({ state: 'unknown' });
-  expect(await port.readCurrent(env, component, target)).toBe('provider-generated-password');
-  expect(resets).toBe(1);
-});
 
 it('RDS changes the master authentication and refuses unrelated pending modifications', async () => {
   const adapter = new RdsAdapter();

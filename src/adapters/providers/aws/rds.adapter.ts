@@ -1,3 +1,4 @@
+import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
@@ -1535,7 +1536,7 @@ providerRegistry.register({
     },
     lifecycle: {
       databaseEngines: ['postgres'],
-      databaseConnectivity: { compatibleHostingProviders: ['ecs'] },
+      databaseConnectivity: nativeDatabaseConnectivity.rds,
     },
   },
   inspection: {

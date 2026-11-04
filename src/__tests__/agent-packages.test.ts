@@ -50,7 +50,7 @@ describe('released agent packages', () => {
     const cache = mkdtempSync(path.join(tmpdir(), 'hypervibe-pack-cache-'));
     directories.push(cache);
     const result = spawnSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', cache], {
-      cwd: root, encoding: 'utf8', timeout: 20_000,
+      cwd: root, encoding: 'utf8', timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, npm_config_cache: cache },
     });
     expect(result.status, result.stderr).toBe(0);

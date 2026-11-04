@@ -437,9 +437,6 @@ function environmentProviders(environment: EnvironmentSpec): DeclaredProviderCap
   for (const [name, storage] of Object.entries(environment.storage ?? {})) {
     providers.push({ capability: 'storage', provider: storage.provider, resource: name });
   }
-  if (environment.messaging) {
-    providers.push({ capability: 'messaging', provider: environment.messaging.provider });
-  }
   return sortCapabilities(providers);
 }
 
@@ -457,7 +454,7 @@ function environmentFeatures(environment: EnvironmentSpec): string[] {
   if (environment.domainRegistration) features.add('domain-registration');
   if (environment.loadBalancer) features.add('load-balancer');
   if (environment.email.enabled) features.add('email');
-  if (environment.messaging) features.add('messaging');
+  if (Object.keys(environment.webhooks ?? {}).length > 0) features.add('webhooks');
   if (Object.keys(environment.queues ?? {}).length > 0) features.add('queue');
   if (Object.keys(environment.storage ?? {}).length > 0) features.add('storage');
   if (environment.dataMigration) features.add('data-migration');

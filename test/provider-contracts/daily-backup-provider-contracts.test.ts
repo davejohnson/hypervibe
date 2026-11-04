@@ -8,19 +8,12 @@ import { S3StorageAdapter } from '../../src/adapters/providers/aws/s3.adapter.js
 import { AzurePostgresAdapter } from '../../src/adapters/providers/azure/azure-postgres.adapter.js';
 import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
 import { AzureBlobStorageAdapter } from '../../src/adapters/providers/azure/azure-blob.adapter.js';
-import { DigitalOceanDatabaseAdapter } from '../../src/adapters/providers/digitalocean/digitalocean-database.adapter.js';
-import { DigitalOceanAdapter } from '../../src/adapters/providers/digitalocean/digitalocean.adapter.js';
-import { FlyDatabaseAdapter } from '../../src/adapters/providers/fly/fly-database.adapter.js';
-import { FlyAdapter } from '../../src/adapters/providers/fly/fly.adapter.js';
 import { CloudSqlAdapter } from '../../src/adapters/providers/gcp/cloudsql.adapter.js';
 import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { GcsStorageAdapter } from '../../src/adapters/providers/gcp/gcs.adapter.js';
-import { NeonAdapter } from '../../src/adapters/providers/neon/neon.adapter.js';
-import { SupabaseAdapter } from '../../src/adapters/providers/supabase/supabase.adapter.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../src/adapters/providers/railway/railway-database.factory.js';
 import { createRailwayStorageAdapter } from '../../src/adapters/providers/railway/railway-storage.factory.js';
-import { VercelAdapter } from '../../src/adapters/providers/vercel/vercel.adapter.js';
 
 type Resource = 'database' | 'volume' | 'storage';
 interface EvidenceRow {
@@ -44,16 +37,11 @@ const adapters: Record<Resource, Map<string, object>> = {
     ['railway', createRailwayDatabaseAdapter({ hostingAdapter: railway, envRepo: {} as never })],
     ['cloudsql', new CloudSqlAdapter()],
     ['rds', new RdsAdapter()],
-    ['supabase', new SupabaseAdapter()],
     ['azure-postgres', new AzurePostgresAdapter()],
-    ['neon', new NeonAdapter()],
-    ['fly', new FlyDatabaseAdapter()],
-    ['digitalocean', new DigitalOceanDatabaseAdapter()],
   ]),
   volume: new Map<string, object>([
     ['railway', railway], ['cloudrun', new CloudRunAdapter()],
     ['ecs', new EcsExpressAdapter()], ['azure-container-apps', new AzureContainerAppsAdapter()],
-    ['fly', new FlyAdapter()], ['digitalocean', new DigitalOceanAdapter()], ['vercel', new VercelAdapter()],
   ]),
   storage: new Map<string, object>([
     ['railway', createRailwayStorageAdapter(railway)], ['s3', new S3StorageAdapter()],

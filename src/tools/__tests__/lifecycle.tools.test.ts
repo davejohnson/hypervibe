@@ -20,7 +20,6 @@ import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.j
 import { MemorystoreAdapter } from '../../adapters/providers/gcp/memorystore.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
-import { NeonAdapter } from '../../adapters/providers/neon/neon.adapter.js';
 import { AzurePostgresAdapter } from '../../adapters/providers/azure/azure-postgres.adapter.js';
 import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
@@ -538,7 +537,6 @@ describe('hv_inspect / hv_import', () => {
       expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref', 'pages']) }),
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
-      expect.objectContaining({ provider: 'fly', resources: expect.arrayContaining(['environment', 'database']) }),
       expect.objectContaining({
         provider: 'cloudsql',
         resources: expect.arrayContaining(['connection', 'database']),
@@ -581,10 +579,6 @@ describe('hv_inspect / hv_import', () => {
           },
         },
       });
-    const vercel = result.data.providers.find((entry: { provider: string }) => entry.provider === 'vercel');
-    expect(vercel.inspectionModes
-      .filter((mode: { resource: string }) => mode.resource === 'environment')
-      .every((mode: { optional: string[] }) => !mode.optional.includes('region'))).toBe(true);
     expect(providerRegistry.namesFor('storage').sort()).toEqual(['azureblob', 'gcs', 'railway', 's3']);
     for (const provider of providerRegistry.namesFor('hosting')) {
       expect(providerRegistry.get(provider)?.inspection?.resources, provider)
@@ -796,50 +790,50 @@ describe('hv_inspect / hv_import', () => {
     const first = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'database-first',
-      platformBindings: { provider: 'digitalocean', projectId: 'app-1' },
+      platformBindings: { provider: 'railway', projectId: 'app-1' },
     });
     const second = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'cache-first',
-      platformBindings: { provider: 'digitalocean', projectId: 'app-2' },
+      platformBindings: { provider: 'railway', projectId: 'app-2' },
     });
     const components = new ComponentRepository();
     const firstDatabase = components.create({
       environmentId: first.id,
       type: 'postgres',
       externalId: 'db-first',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const firstCache = components.create({
       environmentId: first.id,
       type: 'redis',
       externalId: 'cache-second',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const secondCache = components.create({
       environmentId: second.id,
       type: 'redis',
       externalId: 'cache-first',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const secondDatabase = components.create({
       environmentId: second.id,
       type: 'postgres',
       externalId: 'db-second',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const observeDatabase = vi.fn(async (_environment, component) => ({
-      provider: 'digitalocean', engine: 'postgres', externalId: component.externalId,
-      providerScope: { accountUuid: 'account-1' }, status: 'running',
+      provider: 'railway', engine: 'postgres', externalId: component.externalId,
+      providerScope: { projectId: 'project-1' }, status: 'running',
     }));
     const observeCache = vi.fn(async (_environment, component) => ({
-      provider: 'digitalocean', engine: 'redis', externalId: component.externalId,
-      providerScope: { accountUuid: 'account-1' }, status: 'running',
+      provider: 'railway', engine: 'redis', externalId: component.externalId,
+      providerScope: { projectId: 'project-1' }, status: 'running',
     }));
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'digitalocean',
+        name: 'railway',
         observeDatabase,
         observeCache,
         disconnect: async () => {},
@@ -848,10 +842,10 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     await t.call('hv_inspect', {
-      provider: 'digitalocean', project: project.name, env: first.name, resource: 'cache',
+      provider: 'railway', project: project.name, env: first.name, resource: 'cache',
     });
     await t.call('hv_inspect', {
-      provider: 'digitalocean', project: project.name, env: second.name, resource: 'database',
+      provider: 'railway', project: project.name, env: second.name, resource: 'database',
     });
 
     expect(observeCache).toHaveBeenCalledWith(first, expect.objectContaining({ id: firstCache.id }), expect.anything());
@@ -1523,50 +1517,6 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
-  it('hv_inspect does not pass an incompatible hosting binding to a datastore provider', async () => {
-    const project = new ProjectRepository().create({ name: 'incompatible-database-inventory-app' });
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'azure-container-apps',
-        projectId: '/subscriptions/sub/resourceGroups/unrelated',
-        environmentId: '/subscriptions/sub/resourceGroups/unrelated/providers/Microsoft.App/managedEnvironments/app',
-        services: { web: { serviceId: 'azure-web-id' } },
-      },
-    });
-    const connections = new ConnectionRepository();
-    const connection = connections.create({
-      provider: 'neon',
-      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'neon-token' }),
-    });
-    connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(NeonAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(NeonAdapter.prototype, 'disconnect').mockResolvedValue();
-    const inspect = vi.spyOn(NeonAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
-      observation: 'absent',
-      resource: 'database',
-      databases: [],
-      truncated: false,
-      partial: false,
-    });
-    const t = await makeClient();
-
-    const result = await t.call('hv_inspect', {
-      provider: 'neon',
-      project: project.name,
-      env: 'production',
-      resource: 'database',
-      name: 'selected-db',
-    });
-
-    expect(result.ok).toBe(true);
-    expect(inspect).toHaveBeenCalledWith(expect.not.objectContaining({
-      binding: expect.anything(),
-    }));
-    await t.close();
-  });
-
   it('hv_inspect uses provider-scoped forensics instead of passing a current-provider binding to an abandoned provider', async () => {
     const project = new ProjectRepository().create({ name: 'migrated-inspect-app' });
     new EnvironmentRepository().create({
@@ -1882,58 +1832,6 @@ describe('hv_inspect / hv_import', () => {
     expect(connectionWithEnv.error.code).toBe('VALIDATION');
     expect(connectionWithEnv.error.details.invalid).toEqual(['env']);
 
-    const connectionWithLimit = await t.call('hv_inspect', {
-      provider: 'openai',
-      limit: 5,
-    });
-    expect(connectionWithLimit.ok).toBe(false);
-    expect(connectionWithLimit.error.code).toBe('VALIDATION');
-    expect(connectionWithLimit.error.details.suggestedCall).toEqual({
-      command: 'hv_inspect',
-      input: { provider: 'openai' },
-    });
-    expect(connectionWithLimit.agentInstruction).toMatchObject({ action: 'continue' });
-
-    const neonConnection = new ConnectionRepository().create({
-      provider: 'neon',
-      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'neon-token' }),
-    });
-    new ConnectionRepository().updateStatus(neonConnection.id, 'verified');
-    vi.spyOn(NeonAdapter.prototype, 'connect').mockResolvedValue();
-    const inspectDatabase = vi.spyOn(NeonAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
-      observation: 'present',
-      resource: 'database',
-      databases: [{
-        id: 'neon-project-1',
-        engine: 'postgres',
-        name: 'selected-db',
-        status: 'ready',
-        providerScope: { projectId: 'neon-project-1', organizationId: 'org-1' },
-      }],
-      truncated: false,
-      partial: false,
-    });
-    const selectedDatabase = await t.call('hv_inspect', {
-      provider: 'neon',
-      project: project.name,
-      env: 'staging',
-      resource: 'database',
-      name: 'selected-db',
-    });
-    expect(selectedDatabase.ok).toBe(true);
-    expect(selectedDatabase.data).toMatchObject({
-      provider: 'neon',
-      mode: 'database',
-      project: project.name,
-      environment: 'staging',
-      observed: null,
-      binding: 'missing',
-      inventory: { databases: [{ id: 'neon-project-1', name: 'selected-db' }] },
-    });
-    expect(inspectDatabase).toHaveBeenCalledWith(expect.objectContaining({
-      resource: 'database',
-      name: 'selected-db',
-    }));
     await t.close();
   });
 

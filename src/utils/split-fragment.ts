@@ -1,5 +1,5 @@
 /**
- * Split a reference like "1password://vault/item#field" or "/path/.env#KEY"
+ * Split a reference like "aws-secrets://name#key" or "/path/.env#KEY"
  * into the target and the optional #fragment.
  */
 export function splitFragment(value: string): { target: string; fragment?: string } {

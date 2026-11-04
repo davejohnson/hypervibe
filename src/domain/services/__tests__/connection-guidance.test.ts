@@ -9,7 +9,6 @@ import {
   credentialFieldsFromSchema,
   formatConnectionGuidance,
   GITHUB_TOKEN_URLS,
-  GITLAB_TOKEN_URLS,
   getConnectionGuidance,
 } from '../connection-guidance.js';
 
@@ -226,62 +225,6 @@ describe('connection guidance', () => {
     expect(new URL(GITHUB_TOKEN_URLS.railwayAppScope).searchParams.get('scopes')).toBe('repo');
   });
 
-  it('provides exact GitLab API and registry token guidance without asking for chat secrets', () => {
-    const guidance = formatConnectionGuidance('gitlab', {
-      scope: 'https://gitlab.com/acme/storefront',
-    });
-    const apiUrl = new URL(GITLAB_TOKEN_URLS.api);
-
-    expect(apiUrl.pathname).toBe('/-/user_settings/personal_access_tokens');
-    expect(apiUrl.searchParams.get('name')).toBe('Hypervibe');
-    expect(apiUrl.searchParams.get('description')).toContain('Hypervibe');
-    expect(apiUrl.searchParams.get('scopes')).toBe('api');
-    expect(guidance).toContain('https://gitlab.com/-/user_settings/personal_access_tokens?');
-    expect(guidance).toContain('Maintainer');
-    expect(guidance).toContain('Owner');
-    expect(guidance).toContain('read_registry');
-    expect(guidance).toContain('registryUsername');
-    expect(guidance).toContain('registryReadToken');
-    expect(guidance).toContain('credentialsRef="file:');
-    expect(guidance).toContain('scope="https://gitlab.com/acme/storefront"');
-    expect(guidance).toContain('one exact locked project runner id');
-    expect(guidance).toContain('operator attestation');
-  });
-
-  it('explains where every Twilio credential and optional provider id comes from', () => {
-    const guidance = formatConnectionGuidance('twilio');
-
-    expect(guidance).toContain('Console Dashboard -> Account Info');
-    expect(guidance).toContain('AC...');
-    expect(guidance).toContain('SK...');
-    expect(guidance).toContain('Twilio displays the secret only once');
-    expect(guidance).toContain('primary Auth Token');
-    expect(guidance).toContain('twilio/messaging/services/list');
-    expect(guidance).toContain('twilio/messaging/services.phonenumbers/create');
-    expect(guidance).toContain('twilio/messaging/messages/create');
-    expect(guidance).toContain('Numbers & Senders -> Phone Numbers');
-    expect(guidance).toContain('PN... SID');
-    expect(guidance).toContain('Use the SID, not the +E.164 phone number');
-    expect(guidance).toContain('Do not add TWILIO_MESSAGING_SERVICE_SID');
-    expect(guidance).toContain('same account');
-
-    const schema = providerRegistry.get('twilio')!.metadata.credentialsSchema;
-    expect(credentialFieldsFromSchema(schema)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'accountSid',
-        description: expect.stringContaining('Console Dashboard -> Account Info'),
-      }),
-      expect.objectContaining({
-        name: 'apiKeySecret',
-        description: expect.stringContaining('displayed once'),
-      }),
-      expect.objectContaining({
-        name: 'authToken',
-        description: expect.stringContaining('X-Twilio-Signature'),
-      }),
-    ]));
-  });
-
   it('explains the fast scoped Stripe sandbox workflow and restricted-key permissions', () => {
     const guidance = formatConnectionGuidance('stripe', { scope: 'development-personas' });
 
@@ -307,16 +250,6 @@ describe('connection guidance', () => {
         'mail.send',
         'whitelabel.read',
         'Full Access',
-      ],
-      twilio: [
-        'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-        'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
-        'Restricted API Key',
-        'twilio/messaging/services.phonenumbers/list',
-        'twilio/messaging/messages/create',
-        'X-Twilio-Signature',
-        'credentialsRef="dotenv:/absolute/path/.env"',
-        'Hypervibe does not buy phone numbers',
       ],
       cloudrun: [
         'https://console.cloud.google.com/iam-admin/serviceaccounts',
@@ -377,64 +310,6 @@ describe('connection guidance', () => {
         'network, subnet, and security-group IDs are never connection credentials',
         'credentialsRef="file:/absolute/path/aws-ecs.json"',
       ],
-      supabase: [
-        'https://supabase.com/dashboard/account/tokens',
-        'personal access token',
-        'Owner or Administrator',
-      ],
-      neon: [
-        'https://console.neon.tech/app/settings/api-keys',
-        'personal API key or organization API key',
-        'create, read, and delete projects',
-        'project-scoped organization API key',
-        'organizationId',
-        'credentialsMap={"apiKey":"NEON_API_KEY"',
-      ],
-      digitalocean: [
-        'https://cloud.digitalocean.com/account/api/tokens',
-        'personal access token',
-        'database:read',
-        'database:view_credentials',
-        'database:create',
-        'regions:read',
-        'app:create',
-        'registry:read',
-        'registry:update',
-        'registry:create',
-        'account:read',
-        'custom-domain attach',
-        'free Starter registry',
-        'Full Access is a broader fallback',
-        'credentialsRef="file:/absolute/path/digitalocean.json"',
-      ],
-      fly: [
-        'https://fly.io/dashboard',
-        'https://fly.io/docs/security/tokens/',
-        'organization-scoped access token',
-        'Do not use fly auth token',
-        'Do not use an app deploy token',
-        'create/update Machines',
-        'Managed Postgres',
-        'organizationSlug',
-        'credentialsMap={"apiToken":"FLY_API_TOKEN","organizationSlug":"FLY_ORGANIZATION_SLUG"}',
-        'private to Fly networking',
-        'operation-scoped WireGuard peers',
-        'packaged userspace connector',
-      ],
-      vercel: [
-        'https://vercel.com/account/settings/tokens',
-        'personal access token',
-        'vcp_',
-        'Create Project',
-        'Full Production Deployment',
-        'Environment Variable Manager',
-        'teamId',
-        'source-less Vercel Projects',
-        'framework/static auto-detection',
-        'long-lived start commands',
-        'remove domains on the exact Project',
-        'credentialsRef="file:/absolute/path/vercel.json"',
-      ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',
@@ -448,26 +323,6 @@ describe('connection guidance', () => {
         'Team Key',
         'App Manager',
         'Admin role',
-      ],
-      doppler: [
-        'https://docs.doppler.com/docs/service-tokens',
-        'read-only service token',
-        'project/config',
-      ],
-      bitwarden: [
-        'https://bitwarden.com/help/access-tokens/',
-        'machine account',
-        'organizationId',
-      ],
-      vault: [
-        'https://developer.hashicorp.com/vault/docs/secrets/kv/kv-v2',
-        'Vault token',
-        'AppRole',
-      ],
-      '1password': [
-        'https://www.1password.dev/service-accounts/',
-        'service account token',
-        'vaults',
       ],
       'aws-secrets': [
         'https://docs.aws.amazon.com/secretsmanager/',
@@ -535,8 +390,6 @@ describe('credentialFieldsFromSchema', () => {
       s3: ['authMode', 'accessKeyId', 'secretAccessKey'],
       gcs: ['authMode', 'credentials'],
       azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
-      digitalocean: ['apiToken'],
-      fly: ['apiToken', 'organizationSlug'],
     };
 
     for (const [provider, fields] of Object.entries(expected)) {

@@ -23,22 +23,16 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 
 - **AWS** *(ready for live conformance)* - ECS Express hosting, RDS Postgres, ElastiCache Serverless Valkey/Redis, and private S3 buckets
 - **Azure** *(ready for live conformance)* - Container Apps hosting, PostgreSQL Flexible Server, Managed Redis, and private Blob Storage containers
-- **Fly.io** *(ready for live conformance)* - Apps/Machines hosting and Managed Postgres with operation-scoped private WireGuard access
 - **Google Cloud** *(ready for live conformance)* - Cloud Run hosting, Cloud SQL Postgres, Memorystore Redis with Direct VPC egress, private Cloud Storage buckets, and Pub/Sub queues
-- **DigitalOcean** *(ready for live conformance)* - App Platform hosting, Managed PostgreSQL, and Managed Valkey
 - **Railway** *(ready for live conformance)* - App hosting, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, postgres-backed queues, and [retain-only web-service volumes](docs/service-volumes.md) (contract-tested; live validation pending)
-- **Supabase** *(ready for live conformance)* - Managed Postgres with direct or pooled connectivity
-- **Neon** *(ready for live conformance)* - Managed Postgres
-- **Vercel** *(ready for live conformance)* - Projects and Deployments hosting
 - **Cloudflare** - DNS/domain management and a ready-for-live edge load balancer for two or more public HTTPS origins
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
-- **Twilio** - Messaging Services, webhook callbacks, existing-number attachment
+- **App Store Connect** - iOS release desired state
+- **Any API-key or webhook service** (Twilio, OpenAI, Anthropic, Slack, reCAPTCHA, ...) - declare keys under `secrets` and callbacks under `webhooks`; see [API key and webhook services](#api-key-and-webhook-services)
 
 **Secret Managers**
-- **HashiCorp Vault** - KV secrets with versioning
 - **AWS Secrets Manager** - Versioned reads with the AWS SDK default credential chain
-- **Doppler** - Simple config management
 - **Stripe Projects** - Resolve one service from an already-pulled active local environment
 
 **Workloads & Connected Infrastructure**
@@ -54,7 +48,7 @@ Lifecycle maturity is reported by `hv_inspect {}` and `hv_connections {}`. Every
 
 **Developer Experience**
 - **CLI and MCP parity** - Every supported command is available through both interfaces
-- **Provider-neutral DevOps** - Canonical code-host and CI interfaces cover GitHub/GitHub Actions and a ready-for-live GitLab/GitLab CI implementation without coupling hosting recipes to either vendor
+- **Provider-neutral DevOps** - Canonical code-host and CI interfaces cover GitHub/GitHub Actions
 - **Human and JSON output** - Readable terminal output by default, stable redacted envelopes with `--json`
 - **Natural language** - No YAML, no clicking through dashboards
 - **Resource orchestration** - Plan databases, caches, storage, queues, domains/DNS, and integrations together, then project only the required secret-safe runtime bindings into each service
@@ -215,8 +209,8 @@ You: "Plan and apply staging"
 You: "Verify the services and connected resources"
 ```
 
-Environment custom domains use the same spec/plan/apply loop for Cloud Run,
-DigitalOcean App Platform, Railway, and Vercel.
+Environment custom domains use the same spec/plan/apply loop for Cloud Run
+and Railway.
 Hypervibe attaches the hostname at the provider first, writes only returned
 Cloudflare records, persists exact provider/DNS ids, and confirmation-gates
 exact detach. Cloud Run stays DNS-only during its native certificate flow.
@@ -234,8 +228,8 @@ For credentials issued by another system or owned by another person, declare a
 delegated slot and supply a local or secret-manager reference when planning:
 
 ```
-You: "Connect to Vault at https://vault.mycompany.com"
-You: "Plan production with APP_SIGNING_KEY from vault://secret/myapp/runtime#signing-key"
+You: "Connect to AWS Secrets Manager in us-west-2"
+You: "Plan production with APP_SIGNING_KEY from aws-secrets://myapp/runtime#signing-key"
 Claude: Resolves the value locally, encrypts it into the reviewed plan, and injects it only during hv_apply.
 ```
 
@@ -319,7 +313,7 @@ For `hv_inspect`, any bounded selector requires `provider`; `project` plus `env`
 
 ### Database diagnostics
 
-`hv_db_query` can diagnose managed Postgres without asking you to expose it permanently. Railway uses a temporary TCP proxy, Cloud SQL uses a local authenticated connector, and an ECS-hosted RDS instance gets a separately labelled temporary `/32` security-group rule for the Hypervibe caller in addition to its workload-group-only runtime rule. Supabase normally uses its existing direct endpoint, so no temporary provider resource is needed. Hypervibe releases only access it created; concurrent queries share the same short-lived lease, and every response reports the access mode and cleanup status without returning database credentials or endpoints.
+`hv_db_query` can diagnose managed Postgres without asking you to expose it permanently. Railway uses a temporary TCP proxy, Cloud SQL uses a local authenticated connector, and an ECS-hosted RDS instance gets a separately labelled temporary `/32` security-group rule for the Hypervibe caller in addition to its workload-group-only runtime rule. Hypervibe releases only access it created; concurrent queries share the same short-lived lease, and every response reports the access mode and cleanup status without returning database credentials or endpoints.
 
 Diagnostic reads run in a PostgreSQL read-only transaction with a 30-second statement timeout. Results are capped at 500 rows and 512 KiB. Mutations still require `allowMutations=true`, and multi-statement SQL remains blocked.
 
@@ -466,91 +460,38 @@ in front of the webhook. Signature keys, OAuth tokens, message storage, and
 receipt APIs remain application-owned; Hypervibe does not currently provision
 or rotate those credentials.
 
-### Declarative Twilio messaging
+### API key and webhook services
 
-Twilio support deliberately covers the shared setup most applications need: a
-Messaging Service, optional inbound-message and delivery-status callbacks, the
-runtime credentials, and optional attachment of an existing phone number.
-
-Collect these values from the same Twilio account or subaccount:
-
-| Hypervibe field | Twilio value | Where to find it |
-| --- | --- | --- |
-| `accountSid` | `AC...` Account SID | [Console Dashboard](https://console.twilio.com/) -> Account Info |
-| `apiKeySid` | `SK...` Restricted API Key SID | [Settings -> Account settings -> API keys & auth tokens](https://console.twilio.com/us1/account/keys-credentials/api-keys) |
-| `apiKeySecret` | API Key Secret | Shown once when that key is created; copy it immediately |
-| `authToken` | Primary Account Auth Token | Console Dashboard -> Account Info -> Show, or the Auth Tokens section of API keys & auth tokens |
-| `messaging.sender.phoneNumberSid` | Optional existing `PN...` Phone Number SID | [Numbers & Senders -> Phone Numbers](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming); open the SMS-capable number and copy its SID, not its `+...` phone number |
-
-Do not look for an `MG...` SID before setup. The spec declares a friendly
-`service.name`; Hypervibe creates or explicitly adopts that Messaging Service,
-records its `MG...` SID, and projects `TWILIO_MESSAGING_SERVICE_SID` during
-apply.
+Services such as Twilio, Slack or an auth vendor need only an API key and a
+callback URL, so Hypervibe treats them generically instead of with a dedicated
+integration. Declare the keys under `secrets` and each callback under the
+environment's `webhooks`:
 
 ```json
 {
-  "services": {
-    "api": { "workloadKind": "web", "public": true }
+  "secrets": {
+    "TWILIO_ACCOUNT_SID": { "principal": "app owner", "environments": ["production"] },
+    "TWILIO_AUTH_TOKEN": { "principal": "app owner", "environments": ["production"] }
   },
-  "messaging": {
-    "provider": "twilio",
-    "services": ["api"],
-    "service": {
-      "name": "example-production",
-      "inbound": {
-        "service": "api",
-        "path": "/webhooks/twilio/messages"
-      },
-      "deliveryStatus": {
-        "service": "api",
-        "path": "/webhooks/twilio/status"
+  "environments": {
+    "production": {
+      "webhooks": {
+        "twilio-inbound": {
+          "vendor": "twilio",
+          "service": "web",
+          "path": "/webhooks/twilio/messages",
+          "signingSecretEnvVar": "TWILIO_AUTH_TOKEN"
+        }
       }
-    },
-    "sender": {
-      "phoneNumberSid": "PN0123456789abcdef0123456789abcdef"
     }
   }
 }
 ```
 
-Create a Restricted API key with these exact Twilio permissions:
-
-```text
-twilio/messaging/services/list
-twilio/messaging/services/read
-twilio/messaging/services/create
-twilio/messaging/services/update
-twilio/messaging/services.phonenumbers/list
-twilio/messaging/services.phonenumbers/create
-twilio/messaging/services.phonenumbers/delete
-twilio/messaging/messages/create
-```
-
-Keep the four connection values in a local, gitignored env file:
-
-```dotenv
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_API_KEY_SID=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_API_KEY_SECRET=replace-with-the-one-time-secret
-TWILIO_AUTH_TOKEN=replace-with-the-primary-auth-token
-```
-
-Connect that file by reference:
-
-```text
-hv_connections provider="twilio" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accountSid":"TWILIO_ACCOUNT_SID","apiKeySid":"TWILIO_API_KEY_SID","apiKeySecret":"TWILIO_API_KEY_SECRET","authToken":"TWILIO_AUTH_TOKEN"}
-```
-
-`hv_plan` reviews Messaging Service creation/adoption, sender attachment, and
-runtime projection separately. `hv_apply` derives webhook URLs from the target
-service's public binding and projects the Twilio values only to
-`messaging.services`. Moving a number from another sender pool requires exact
-action confirmation. Hypervibe does not buy numbers or manage Voice, Verify,
-WhatsApp, A2P registration, campaigns, or application message sending.
-Complete any A2P 10DLC, toll-free verification, or other regulatory setup in
-Twilio before production sending. The primary Auth Token is still required even
-when API calls use a restricted key because Twilio uses the account token to
-sign inbound and delivery-status webhooks.
+Create the keys in the service's dashboard and supply them when planning.
+`hv_status` reports each webhook's exact callback URL to paste into that
+dashboard, whether it uses HTTPS, and whether the signing secret is present on
+the receiving service. Hypervibe never calls the third-party service.
 
 ## Team-Shared Desired State
 
@@ -1030,11 +971,8 @@ The copy is authorized only while both source and target declare
 `"maintenance": { "enabled": true }` and Hypervibe freshly verifies the full
 boundary: a Cloudflare-owned static 503 marker, every hosting workload stopped,
 and PostgreSQL defaulting new sessions to read-only. Azure Container Apps, GCP
-Cloud Run, DigitalOcean App Platform, Railway, and Vercel implement reversible
-workload maintenance. AWS ECS Express currently fails closed before the copy.
-DigitalOcean's exact-app archive/restore path and Vercel's exact-ID pause/unpause
-path are implemented and remain behind their opt-in live maintenance promotion
-gates.
+Cloud Run, and Railway implement reversible workload maintenance. AWS ECS
+Express currently fails closed before the copy.
 No application maintenance flag, email dry-run switch, or AI dry-run switch is
 introduced.
 
@@ -1129,7 +1067,7 @@ For fresh environments, declare seed/bootstrap data on the database. This is pro
 ```json
 {
   "database": {
-    "provider": "supabase",
+    "provider": "railway",
     "engine": "postgres",
     "seedCommand": "npm run db:seed"
   }
@@ -1322,108 +1260,6 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 
 Fine-grained PATs can work for some GitHub API operations when granted the permissions in the table, but GitHub Packages/GHCR package authentication still requires a classic PAT. If you use a fine-grained PAT as `apiToken`, still provide a classic PAT with `read:packages` as `packageReadToken` for Railway GHCR deploys.
 
-### GitLab CI (ready for live validation)
-
-GitLab is selected through the canonical provider-neutral block, not a second
-top-level vendor object:
-
-```json
-{
-  "gitRemoteUrl": "https://gitlab.com/acme/storefront.git",
-  "devops": {
-    "code": {
-      "provider": "gitlab",
-      "scope": "https://gitlab.com/acme/storefront",
-      "repository": { "state": "present", "management": "external" }
-    },
-    "ci": { "provider": "gitlab-ci" },
-    "canonicalEnvironment": "production"
-  }
-}
-```
-
-The ready-for-live deploy path targets GitLab 18.1 or newer and renders the
-same provider-neutral hosting recipes for Railway, Vercel, DigitalOcean App
-Platform, Cloud Run, Azure Container Apps, and ECS Express. GitLab.com can use
-the tagged hosted Linux runner. Self-managed GitLab uses an explicit
-`devops.ci.runner` binding containing one numeric project-runner id, one manager
-system id, a dedicated tag, and declared capabilities. Hypervibe proves that
-the runner is locked, online, protected-ref-only, uncontested, and backed by
-exactly one online linux/amd64 manager. GitLab does not expose executor type or
-privileged-Docker mode through these APIs, so `docker-privileged` is an operator
-attestation mirrored exactly in the runner maintenance note.
-
-```json
-"ci": {
-  "provider": "gitlab-ci",
-  "runner": {
-    "mode": "self-managed",
-    "runnerId": "123",
-    "managerSystemId": "s_runner-host-1",
-    "tag": "hypervibe-prod",
-    "capabilities": ["linux-amd64", "docker-privileged"]
-  }
-}
-```
-
-Create an exact-project API token with `api` and Maintainer access (the
-[GitLab.com pre-filled PAT link](https://gitlab.com/-/user_settings/personal_access_tokens?name=Hypervibe&description=Manage+GitLab+repository+and+CI+with+Hypervibe&scopes=api)). Explicit managed project creation/deletion instead requires a personal token whose user owns the exact parent group, or its own personal namespace. Railway additionally needs a project deploy token with `read_registry` for its durable private-image pull. Store credentials outside the repository:
-
-```text
-hv_connections provider="gitlab" scope="https://gitlab.com/acme/storefront" credentialsRef="file:/absolute/path/gitlab-connection.json"
-```
-
-The JSON contains `apiToken`, optional `instanceUrl`, and the deploy token's
-`registryUsername`/`registryReadToken`. The first apply creates one atomic
-configuration commit and merge request, then stops pending human review. After
-merge, re-run plan/apply; Hypervibe proves the exact files and CI Lint include
-graph before creating project-specific, environment-scoped variables.
-
-The project must disable pipeline-variable overrides, enable forward-deployment
-protection, disable rollback retries, enable its container registry for image
-recipes, protect deploy branches against direct/force pushes, and—for
-production—protect the GitLab environment for Maintainers. Each
-`hypervibe-rollback-<environment>-*` protected-tag rule must allow only the exact
-authenticated GitLab user; the broader Maintainer role is rejected. This
-per-user rule requires GitLab Premium or Ultimate.
-
-Immediately before any hosting API mutation, the generated deploy job uses its
-short-lived GitLab job token to prove its exact deployment job, pipeline, SHA,
-environment, and ordering through the Deployments API. Unknown identity or a
-newer environment deployment fails closed.
-
-Status, bounded logs/artifacts, exact-SHA manual trigger, and evidence-backed
-rollback use the same `hv_ci_status`, `hv_ci_trigger`, and `hv_rollback`
-commands as GitHub. To remove managed CI, keep `devops.ci` selected and first
-change the environment deploy strategy to `manual`: Hypervibe reviews removal
-of its generated files, waits for active jobs, deletes each exact owned
-variable with confirmation, and finally removes its binding. Then remove
-`devops.ci`. Repository lifecycle is separately explicit:
-
-```json
-"repository": {
-  "state": "present",
-  "management": "managed",
-  "visibility": "private",
-  "defaultBranch": "main"
-}
-```
-
-Creation makes one initialized remote project and uses its verified numeric id
-as the durable identity. The declared default branch and visibility must also converge;
-setting drift blocks explicitly, and an acknowledged nonconverged project keeps
-its durable binding so creation is never retried blindly. It does not push or
-rewrite local Git history. Before deletion,
-tear down CI and branch deploys, then set `state` to `absent`; create/delete
-actions require exact action-id confirmation. GitLab.com keeps the binding
-during its 30-day deletion retention, while self-managed deletion is verified
-absent before local state is removed. If scheduled self-managed deletion is
-acknowledged but permanent removal fails, Hypervibe retains the binding and
-plans another confirmed retry against the same numeric id and full path. All of
-this remains `ready-for-live`, not
-publicly `supported`, until recent opt-in live contracts pass for the exact
-GitLab offering, runner mode, and hosting recipe.
-
 ### Push deploys
 
 `deploy.strategy: "branch"` defaults to `deploy.trigger: "ci"`. Hypervibe sets up push deploys through the selected CI provider and calls hosting APIs directly; it does not install or depend on provider CLIs.
@@ -1431,9 +1267,8 @@ GitLab offering, runner mode, and hosting recipe.
 Provider-native source ownership is exclusive. Only an explicit
 `deploy.trigger: "native"` may keep a repository connected at the hosting
 provider. Manual and CI modes stage source reconciliation before every other
-mutation: Railway disconnects through its provider API, while Vercel and
-DigitalOcean block with manual-disconnect guidance.
-Unknown source observation blocks for all three providers. After the source-only
+mutation: Railway disconnects through its provider API.
+Unknown source observation blocks. After the source-only
 plan converges, run `hv_plan` again to review storage, variable, workflow, or
 deployment work separately.
 
@@ -1562,9 +1397,9 @@ If the logs contain `docker buildx imagetools inspect ... ghcr.io ... 403 Forbid
 
 ### Secret managers and credential sources
 
-Vault, AWS Secrets Manager, Doppler, 1Password, and Bitwarden are resolve-only.
+AWS Secrets Manager is resolve-only.
 Hypervibe reads a referenced value while building an authorized plan and never
-writes, deletes, or rotates manager data. 1Password uses a [service account token](https://developer.1password.com/docs/service-accounts/) scoped only to required vaults. Bitwarden Secrets Manager uses a [machine account access token](https://bitwarden.com/help/access-tokens/) plus the organization id.
+writes, deletes, or rotates manager data.
 
 Stripe Projects is also resolve-only, but only from an already-pulled active
 environment using
@@ -1615,11 +1450,11 @@ Normal update flow:
 
 Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connections` for their own AWS, Azure, Cloudflare, GCP, GitHub, Railway, or SendGrid access after installing Hypervibe. SQLite schema upgrades run when their updated server starts.
 
-`workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway, Cloud Run, and DigitalOcean implement `web`, `worker`, and `cron`; Fly implements `web` and `worker`; ECS Express, Azure Container Apps, and Vercel currently implement `web` only. Registry-backed spec validation rejects an unsupported provider/workload combination before provider project or environment mutation. Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
+`workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway and Cloud Run implement `web`, `worker`, and `cron`; ECS Express and Azure Container Apps currently implement `web` only. Registry-backed spec validation rejects an unsupported provider/workload combination before provider project or environment mutation. Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
-The provider catalog is intentionally focused. Every implemented hosting lifecycle currently remains behind the provider-conformance live promotion gate and is `ready-for-live`, not `supported`. Hosting connections contain authentication and account/project scope only; geography belongs in optional `environments.<name>.hosting.region` desired state and otherwise uses a provider default. AWS project actions ensure the shared default-VPC prerequisite and own its tagged workload security group, ECR, IAM roles, and an ECS cluster; every Express mutation preserves the exact default subnets and workload group. RDS is ECS-only: it reuses that exact account/region/default-VPC binding and gives its managed database security group one durable PostgreSQL ingress source—the exact ECS workload group. Azure project actions own the resource group, ACR, role assignments, and managed environment; DigitalOcean project actions reuse or create a free Starter registry. Fly creates one source-less App and stopped Machine per logical service, then managed CI changes only the exact bound Machine to an immutable image digest. Users do not pre-create or paste those infrastructure IDs into credentials. Heroku and Render remain deliberately out of scope. Cloud SQL, Railway, RDS, Supabase, Neon, DigitalOcean, Fly Managed Postgres, and Azure PostgreSQL are ready-for-live database targets. None is promoted to `supported` without dated live lifecycle evidence. Fly Managed Postgres stays private: bounded local query, seed, and migration operations use an operation-scoped WireGuard peer and Hypervibe's packaged userspace connector, then remove the exact peer after the operation.
+The provider catalog is intentionally focused. Every implemented hosting lifecycle currently remains behind the provider-conformance live promotion gate and is `ready-for-live`, not `supported`. Hosting connections contain authentication and account/project scope only; geography belongs in optional `environments.<name>.hosting.region` desired state and otherwise uses a provider default. AWS project actions ensure the shared default-VPC prerequisite and own its tagged workload security group, ECR, IAM roles, and an ECS cluster; every Express mutation preserves the exact default subnets and workload group. RDS is ECS-only: it reuses that exact account/region/default-VPC binding and gives its managed database security group one durable PostgreSQL ingress source—the exact ECS workload group. Azure project actions own the resource group, ACR, role assignments, and managed environment; Users do not pre-create or paste those infrastructure IDs into credentials. Heroku and Render remain deliberately out of scope. Cloud SQL, Railway, RDS, and Azure PostgreSQL are ready-for-live database targets. None is promoted to `supported` without dated live lifecycle evidence.
 
-Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Amazon ElastiCache is `ready-for-live` with ECS Express: it reuses the auth-only `ecs` connection, resolves the bound default-VPC workload network, and accepts cache region/size only through desired state. Azure Managed Redis with Container Apps, GCP Memorystore with Cloud Run Direct VPC, DigitalOcean Managed Valkey, and Railway Redis are also implemented and `ready-for-live`. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
+Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Amazon ElastiCache is `ready-for-live` with ECS Express: it reuses the auth-only `ecs` connection, resolves the bound default-VPC workload network, and accepts cache region/size only through desired state. Azure Managed Redis with Container Apps, GCP Memorystore with Cloud Run Direct VPC and Railway Redis are also implemented and `ready-for-live`. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
 
 ### Reuse efficient application checks
 

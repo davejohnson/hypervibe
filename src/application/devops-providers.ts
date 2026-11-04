@@ -8,12 +8,6 @@ import {
   GitHubActionsOperationsAdapter,
   GitHubCodeHostIdentityAdapter,
 } from '../adapters/providers/github/github-devops.adapter.js';
-import {
-  GitLabAdapter,
-  type GitLabCredentials,
-} from '../adapters/providers/gitlab/gitlab.adapter.js';
-import { gitLabCiLifecycle } from '../adapters/providers/gitlab/gitlab-ci.lifecycle.js';
-import { executeGitLabCiRollback } from '../adapters/providers/gitlab/gitlab-ci.rollback.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import {
   applyGitHubActionsAppliedSpecHash,
@@ -21,6 +15,7 @@ import {
   planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
 } from '../domain/services/ci-deploy.service.js';
+import { executeManagedCiRollback } from '../domain/services/ci-rollback.service.js';
 
 devOpsProviderRegistry.registerCodeHost({
   id: 'github',
@@ -43,17 +38,20 @@ devOpsProviderRegistry.registerCiProvider({
     adapter.connect(credentials as GitHubCredentials);
     return new GitHubActionsOperationsAdapter(adapter);
   },
+  rollback: params => executeManagedCiRollback(params),
   lifecycle: {
     prepareCredentialRollout: params => prepareGitHubCredentialRollout(params),
     observeCredentialRollout: params => observeGitHubCredentialRollout(params),
     async planDeploy(params) {
-      return planGitHubActionsDeploy(params);
+      const result = await planGitHubActionsDeploy(params);
+      return { actions: result.action ? [result.action] : [], warnings: result.warnings, ...(result.error ? { error: result.error } : {}) };
     },
     async applyDeploy(params) {
       return applyGitHubActionsDeploy(params);
     },
     async planAppliedSpecHash(params) {
-      return planGitHubActionsAppliedSpecHash(params);
+      const result = await planGitHubActionsAppliedSpecHash(params);
+      return { actions: result.action ? [result.action] : [], warnings: result.warnings };
     },
     async applyAppliedSpecHash(params) {
       const desiredHash = typeof params.action.metadata?.desiredHash === 'string'
@@ -74,33 +72,4 @@ devOpsProviderRegistry.registerCiProvider({
       });
     },
   },
-});
-
-devOpsProviderRegistry.registerCodeHost({
-  id: 'gitlab',
-  connectionProvider: 'gitlab',
-  suggestedCiProvider: 'gitlab-ci',
-  create(credentials: unknown) {
-    const adapter = new GitLabAdapter();
-    adapter.connect(credentials as GitLabCredentials);
-    return adapter;
-  },
-  createLifecycle(credentials: unknown) {
-    const adapter = new GitLabAdapter();
-    adapter.connect(credentials as GitLabCredentials);
-    return adapter;
-  },
-});
-
-devOpsProviderRegistry.registerCiProvider({
-  id: 'gitlab-ci',
-  connectionProvider: 'gitlab',
-  compatibleCodeProviders: ['gitlab'],
-  create(credentials: unknown) {
-    const adapter = new GitLabAdapter();
-    adapter.connect(credentials as GitLabCredentials);
-    return adapter;
-  },
-  lifecycle: gitLabCiLifecycle,
-  rollback: executeGitLabCiRollback,
 });

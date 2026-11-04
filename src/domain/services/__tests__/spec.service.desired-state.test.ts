@@ -8,7 +8,7 @@ describe('spec.service desired state resolution', () => {
       environmentName: 'staging',
       services: ['web'],
       serviceName: 'web',
-      databaseProvider: 'supabase',
+      databaseProvider: 'railway',
       setupEmail: true,
       serviceConfig: undefined,
       envVars: undefined,

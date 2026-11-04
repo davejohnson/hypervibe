@@ -9,9 +9,12 @@ import { resolveInboundCallback } from './email-inbound-url.service.js';
 
 type MaterialStatus = 'present' | 'missing' | 'unknown' | 'not_managed';
 interface WebhookCheck {
-  provider: 'stripe' | 'twilio' | 'sendgrid';
+  /** Sending service: a managed integration or the vendor named on a declared webhook. */
+  provider: string;
   name: string;
   service: string;
+  /** Exact non-secret callback URL to register with the sending service, when known. */
+  url?: string;
   https: 'configured' | 'insecure' | 'unknown';
   urlEvidence: 'declared' | 'binding' | 'unavailable';
   providerSigning?: EventSigningReadiness['providerSigning'];
@@ -50,8 +53,10 @@ export function inspectWebhookReadiness(params: {
     const hash = live.envVarHashes[key];
     return { key, status: hash === emptyHash ? 'missing' : /^[a-f0-9]{64}$/i.test(hash ?? '') ? 'present' : 'unknown', evidence: 'observed' };
   };
+  // Only URLs Hypervibe composed from a service binding and a query-free path are
+  // reported; declared URLs may carry credentials in their query string.
   const add = (provider: WebhookCheck['provider'], name: string, service: string, url: string | undefined,
-    urlEvidence: WebhookCheck['urlEvidence'], key?: string) => {
+    urlEvidence: WebhookCheck['urlEvidence'], key?: string, reportUrl = false) => {
     let https: WebhookCheck['https'] = 'unknown';
     if (url !== undefined) {
       try {
@@ -59,7 +64,7 @@ export function inspectWebhookReadiness(params: {
         https = parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.hash ? 'configured' : 'insecure';
       } catch { https = 'insecure'; }
     }
-    webhooks.push({ provider, name, service, https, urlEvidence, signingMaterial: material(service, key) });
+    webhooks.push({ provider, name, service, ...(reportUrl && url && https === 'configured' ? { url } : {}), https, urlEvidence, signingMaterial: material(service, key) });
   };
   const boundUrl = (service: string): string | undefined => {
     const url = environment ? serviceBindingFor(environment, service)?.url : undefined;
@@ -71,7 +76,7 @@ export function inspectWebhookReadiness(params: {
     if (base !== undefined) {
       try { url = new URL(target.path, base).toString(); } catch { url = ''; }
     }
-    add(provider, name, target.service, url, base === undefined ? 'unavailable' : 'binding', key);
+    add(provider, name, target.service, url, base === undefined ? 'unavailable' : 'binding', key, true);
   };
   const stripe = spec.payments?.stripe;
   for (const [name, webhook] of Object.entries(stripe?.webhooks ?? {})) {
@@ -87,10 +92,8 @@ export function inspectWebhookReadiness(params: {
     add('stripe', 'environment configuration', service, values.STRIPE_WEBHOOK_URL,
       Object.hasOwn(values, 'STRIPE_WEBHOOK_URL') ? 'declared' : 'unavailable', 'STRIPE_WEBHOOK_SECRET');
   }
-  if (spec.messaging) {
-    const messaging = spec.messaging.service;
-    if (messaging.inbound) addBound('twilio', 'inbound', messaging.inbound, 'TWILIO_AUTH_TOKEN');
-    if (messaging.deliveryStatus) addBound('twilio', 'status callback', messaging.deliveryStatus, 'TWILIO_AUTH_TOKEN');
+  for (const [name, webhook] of Object.entries(spec.webhooks ?? {})) {
+    addBound(webhook.vendor, name, webhook, webhook.signingSecretEnvVar);
   }
   if (spec.email.enabled) {
     if (spec.email.inbound) {

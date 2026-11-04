@@ -86,8 +86,6 @@ Workload suspension is currently:
 | GCP Cloud Run | Sets manual service scaling to zero, pauses scheduler jobs, and restores the exact prior scaling/schedule state. |
 | Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
 | AWS ECS Express | Unsupported; plans fail closed. |
-| DigitalOcean App Platform | Archives the exact bound app, verifies that App Platform reports zero running component instances, and restores the exact prior maintenance spec without changing component scaling, autoscaling, schedules, ingress, or commands. Ready for opt-in live maintenance conformance. |
-| Vercel | Pauses the exact bound Project, verifies direct production origins, preserves an already-paused Project, and unpauses without redeploying. Ready for opt-in live maintenance conformance. |
 
 This matrix is deliberate. A provider is not marked supported until Hypervibe
 can stop background work and direct origins, retain exact restoration state,
@@ -97,7 +95,7 @@ and verify both directions using its ordinary connection credentials.
 
 PostgreSQL transfer uses `pg_dump`/`pg_restore` against bounded provider access.
 Provider adapters only provision resources and expose operation-scoped access,
-so Railway, RDS, Cloud SQL, Azure Database for PostgreSQL, Supabase, Neon, and
+so Railway, RDS, Cloud SQL, Azure Database for PostgreSQL, and
 other PostgreSQL providers use the same transfer engine. Installed PostgreSQL
 client tools must be compatible with the source server version.
 

@@ -7,7 +7,7 @@ export function isManagedCiCredentialAction(action: PlanAction): boolean {
   if (!['create', 'update'].includes(action.type) || !action.verified
     || action.metadata?.blockedReason || action.metadata?.workflowPublicationRequired === true) return false;
   const capability = resolvePlanActionAuthority(action)?.capability;
-  return capability === 'github.ci.sync' || capability === 'ci.variable.sync';
+  return capability === 'github.ci.sync';
 }
 
 /** A successful prerequisite apply proves its stage, never an application release. */

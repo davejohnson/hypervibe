@@ -191,7 +191,7 @@ describe('failed datastore provisioning identity retention', () => {
   });
 
   it('retains an unresolved database create marker and blocks a stale retry before adapter resolution', async () => {
-    const providerScope = { organizationId: 'org-hypervibe' };
+    const providerScope = { projectId: 'gcp-project', region: 'us-central1' };
     const unresolvedMutation = createUnresolvedDatastoreMutation(
       'database',
       'failed-provision-identity-staging-postgres',
@@ -203,13 +203,13 @@ describe('failed datastore provisioning identity retention', () => {
         environmentId: environment.id,
         type: 'postgres',
         externalId: null,
-        bindings: { provider: 'neon', providerScope, unresolvedMutation },
+        bindings: { provider: 'cloudsql', providerScope, unresolvedMutation },
         createdAt: new Date(),
         updatedAt: new Date(),
       } as Component,
       receipt: {
         success: false,
-        message: 'Neon create response was lost',
+        message: 'Cloud SQL create response was lost',
         error: 'socket closed after request transmission',
         data: { mutationAttempted: true, resourceCreated: 'unknown' },
       },
@@ -223,19 +223,19 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps' },
+          hosting: { provider: 'cloudrun' },
           services: {},
-          database: { provider: 'neon' },
+          database: { provider: 'cloudsql' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'database:neon',
+      id: 'database:cloudsql',
       type: 'create',
-      resource: { kind: 'database', name: 'postgres', provider: 'neon' },
+      resource: { kind: 'database', name: 'postgres', provider: 'cloudsql' },
       billable: true,
       verified: true,
-      reason: 'Create Neon PostgreSQL',
+      reason: 'Create Cloud SQL PostgreSQL',
     };
 
     const first = await applyAction({ ctx, project, environment, spec, action });
@@ -250,7 +250,7 @@ describe('failed datastore provisioning identity retention', () => {
     expect(ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres')).toMatchObject({
       externalId: null,
       bindings: {
-        provider: 'neon',
+        provider: 'cloudsql',
         providerScope,
         unresolvedMutation,
         provisioningIncomplete: true,

@@ -9,7 +9,6 @@ import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
-import '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
@@ -426,14 +425,6 @@ describe('ci-deploy.service', () => {
       expect(requiredProviderSecretNamesForGitHubActions('cloudrun')).toEqual([
         'GCP_SERVICE_ACCOUNT_JSON',
         'GCP_PROJECT_ID',
-      ]);
-    });
-
-    it('returns only the DigitalOcean API token', () => {
-      expect(
-        requiredProviderSecretNamesForGitHubActions('digitalocean')
-      ).toEqual([
-        'DIGITALOCEAN_TOKEN',
       ]);
     });
 
@@ -2571,7 +2562,7 @@ describe('ci-deploy.service', () => {
       expect(trigger).not.toHaveBeenCalled();
     });
   });
-  it.each(['railway', 'cloudrun', 'digitalocean'].flatMap(provider => [
+  it.each(['railway', 'cloudrun'].flatMap(provider => [
     { provider, order: ['production', 'staging'] },
     { provider, order: ['staging', 'production'] },
   ]))('isolates $provider migration secrets applied in $order order', async ({ provider, order }) => {

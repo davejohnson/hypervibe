@@ -8,7 +8,7 @@ import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'

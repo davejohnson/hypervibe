@@ -33,7 +33,6 @@ import { firstProviderSpecValidationFailure } from '../services/provider-spec-va
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import {
   EMAIL_MANAGED_ENV_KEYS,
-  MESSAGING_MANAGED_ENV_KEYS,
   type ProjectSpec,
   type EnvironmentSpec,
 } from '../spec/spec.schema.js';
@@ -86,7 +85,6 @@ import {
   planManagedCiAppliedSpecHash,
   planManagedCiDeploy,
 } from '../services/managed-ci.service.js';
-import { planManagedCodeRepository } from '../services/managed-code-repository.service.js';
 import { environmentUsesManagedCi, resolveDevOpsSelection } from '../spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 import { planIos } from '../services/appstore-plan.service.js';
@@ -131,7 +129,6 @@ import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services
 import { inspectWebhookReadiness, type WebhookReadiness } from '../services/webhook-readiness.service.js';
 import { reservedRuntimeEnvError } from '../services/runtime-env-policy.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
-import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
   isProviderNativeDeploySourceAction,
   planProviderNativeDeploySources,
@@ -897,7 +894,6 @@ export class PlanService {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
-    if (environmentSpec.messaging) required.push({ provider: 'twilio' });
     if (environmentSpec.deploy?.strategy === 'branch' && environmentSpec.deploy.trigger !== 'native') {
       const selection = projectSpec ? resolveDevOpsSelection(projectSpec) : null;
       if (selection?.ci) {
@@ -1820,68 +1816,6 @@ export class PlanService {
           ...(selectedScope === 'backup-readiness' ? { backupReadiness: readiness } : {}) };
       }
     }
-    if (scope !== 'retained-cleanup') {
-      const codeRepository = await planManagedCodeRepository({
-        project: projectForPlan,
-        spec: specResult.spec,
-        environmentName,
-      });
-      if (codeRepository.error) return { error: codeRepository.error };
-      if (codeRepository.stageRequired && codeRepository.action) {
-        const incompatibleInputs = [
-          options?.serviceFilter?.length ? 'services' : null,
-          Object.keys(options?.envVarOverrides ?? {}).length > 0 ? 'envVars' : null,
-          options?.envFile ? 'envFile' : null,
-          options?.includeEnvFile === false ? 'includeEnvFile' : null,
-          Object.keys(options?.secretRefs ?? {}).length > 0 ? 'secretRefs' : null,
-        ].filter((name): name is string => Boolean(name));
-        if (incompatibleInputs.length > 0) {
-          return {
-            error: `Repository lifecycle is an isolated plan stage and does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
-          };
-        }
-        const actions = [codeRepository.action];
-        const warnings = [
-          ...(specResult.adopted && specResult.source?.kind === 'repo'
-            ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
-            : []),
-          ...(codeRepository.warning ? [codeRepository.warning] : []),
-        ];
-        const document: PlanRunDocument = {
-          kind: 'hv_plan',
-          scope: 'full',
-          environmentName,
-          specRevision: specResult.revision,
-          observedFingerprint: null,
-          actions,
-          unmanaged: [],
-          warnings,
-        };
-        const lifecycleEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName)
-          ?? this.envRepo.create({ projectId: project.id, name: environmentName });
-        const run = this.runRepo.create({
-          projectId: project.id,
-          environmentId: lifecycleEnvironment.id,
-          type: 'plan',
-          plan: document as unknown as Record<string, unknown>,
-        });
-        this.runRepo.updateStatus(run.id, 'succeeded');
-        return {
-          planRunId: run.id,
-          scope: 'full',
-          specRevision: specResult.revision,
-          specSource: specResult.source ?? { kind: 'local' },
-          environmentName,
-          verified: codeRepository.action.verified,
-          observed: null,
-          actions,
-          unmanaged: [],
-          warnings,
-          inputRequired: [],
-          blocked: [],
-        };
-      }
-    }
     if (scope === 'full') {
       const variables = await this.planRepositoryVariableStage(projectForPlan, environmentName, specResult, options);
       if (variables) return variables;
@@ -2012,15 +1946,6 @@ export class PlanService {
         error: `Email-managed keys cannot be passed through envVars: ${emailOverrideCollisions.join(', ')}. Configure environments.${environmentName}.email instead.`,
       };
     }
-    const messagingOverrideCollisions = environmentSpec.messaging
-      ? Object.keys(envVarOverrides ?? {})
-        .filter((key) => (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key))
-      : [];
-    if (messagingOverrideCollisions.length > 0) {
-      return {
-        error: `Messaging-managed keys cannot be passed through envVars: ${messagingOverrideCollisions.join(', ')}. Configure environments.${environmentName}.messaging instead.`,
-      };
-    }
     const managedSecretOverrideCollisions = Object.keys(envVarOverrides ?? {})
       .filter((key) => reservedSecretKeys.has(key));
     if (managedSecretOverrideCollisions.length > 0) {
@@ -2066,7 +1991,6 @@ export class PlanService {
         .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
       ...stripeManagedEnvKeys(environmentSpec),
       ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
-      ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
       ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
       ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
       ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
@@ -2589,19 +2513,6 @@ export class PlanService {
       });
     const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined, inboundSigningReadiness: 'inboundSigningReadiness' in email ? email.inboundSigningReadiness : undefined });
     actions.push(...email.actions);
-    const messaging = serviceFilter
-      ? { actions: [], warnings: [], fingerprint: undefined }
-      : await planTwilioMessaging({
-        project: projectForPlan,
-        environmentName,
-        environmentSpec,
-        environment,
-        observed,
-        serviceDependencies: actions
-          .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
-          .map((action) => action.id),
-      });
-    actions.push(...messaging.actions);
     const queues = await planQueues({ project: projectForPlan, environmentSpec, environment });
     if (queues.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
@@ -2774,7 +2685,7 @@ export class PlanService {
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
         && action.metadata?.operation !== DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
-        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email', 'messaging']
+        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
       : [];
@@ -3380,8 +3291,6 @@ export class PlanService {
         ? { stripe: stripeSync.fingerprint } : {}),
       ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint
         ? { email: email.fingerprint } : {}),
-      ...((!ciBindingStageActive || actionKinds.has('messaging')) && messaging.fingerprint
-        ? { messaging: messaging.fingerprint } : {}),
     };
 
     try {
@@ -3409,7 +3318,7 @@ export class PlanService {
       ...(Object.keys(integrationFingerprints).length > 0 ? { integrationFingerprints } : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...filterWarnings],
       ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
       ...(planOverrides ? { overrides: planOverrides } : {}),
     };

@@ -33,12 +33,8 @@ function resources(environment: EnvironmentSpec): Map<string, unknown> {
       if (environment.email[kind]) result.set(`email:${kind}`, true);
     }
   }
-  if (environment.messaging) {
-    result.set('messaging', { provider: environment.messaging.provider, services: [...environment.messaging.services].sort() });
-    if (environment.messaging.sender) result.set('messaging:sender', true);
-    for (const kind of ['inbound', 'deliveryStatus'] as const) {
-      if (environment.messaging.service[kind]) result.set(`messaging:${kind}`, true);
-    }
+  for (const [name, webhook] of Object.entries(environment.webhooks ?? {})) {
+    result.set(`webhooks:${name}`, { vendor: webhook.vendor, service: webhook.service, path: webhook.path });
   }
   for (const [name, payment] of Object.entries(environment.payments ?? {})) {
     if (payment) result.set(`payments:${name}`, true);

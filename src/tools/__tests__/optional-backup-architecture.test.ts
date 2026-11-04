@@ -9,7 +9,6 @@ const ordinaryDeploymentFiles = [
   '../../application/apply-plan.ts',
   '../hv-deploy.tools.ts',
   '../../domain/services/github-ops.service.ts',
-  '../../adapters/providers/gitlab/gitlab-ci.lifecycle.ts',
 ];
 const backupAdmissionModule = /(?:^|\/)backup-(?:readiness|health\.service|policy\.service|deploy-gate\.service)(?:\.[cm]?[jt]s)?$/;
 

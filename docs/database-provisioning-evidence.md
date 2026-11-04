@@ -36,13 +36,9 @@ three separate claims. No project incident cause is established by this review.
 | Provider | Native storage and implemented creation path | Independent evidence and limits |
 | --- | --- | --- |
 | Railway | Reviewed creation uses the official PostgreSQL database template through `templateDeployV2`, then verifies its service and attached volume. Persistence depends on the actual data directory and mount, not its icon. | Railway documents [service construction](https://docs.railway.com/databases/build-a-database-service) and [persistent volumes](https://docs.railway.com/volumes). The [official image contract](https://github.com/docker-library/docs/blob/master/postgres/README.md) distinguishes version-specific data-directory defaults. Template or volume acknowledgement alone cannot verify the resulting attachment. |
-| Supabase | Native hosted project with its own PostgreSQL instance and provider-managed disk; `POST /v1/projects`. | [Compute and disk](https://supabase.com/docs/guides/platform/compute-and-disk) and the [project API](https://supabase.com/docs/reference/api/v1-create-a-project). Project readiness does not prove backup entitlement or a tested restore. |
-| Neon | Native project/branch with durable storage separated from ephemeral compute; `POST /api/v2/projects`. | [Architecture](https://neon.com/docs/introduction/architecture-overview) and [create API](https://api-docs.neon.tech/reference/createproject). Endpoint suspension does not mean loss of branch data; project/branch deletion remains destructive. |
 | Cloud SQL | Native Cloud SQL instance, using provider-default database disk configuration; SQL Admin `instances.insert`. | [Instance API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances/insert) and [storage settings](https://docs.cloud.google.com/sql/docs/postgres/instance-settings). No Cloud Run database-image fallback exists in this path. Default capacity and live recovery remain unverified here. |
 | RDS | Native RDS instance with explicit encrypted 20 GiB `gp3` storage. | [CreateDBInstance](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html) and [EBS-backed database storage](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html). Existing tests exercise SDK command inputs and lifecycle behavior; this review does not upgrade that evidence to create wire-schema or live certification. |
 | Azure PostgreSQL | Native Flexible Server with explicit 32 GiB managed disk and auto-grow. | [Create API](https://learn.microsoft.com/en-us/rest/api/postgresql/servers/create-or-update?view=rest-postgresql-2025-08-01) and [managed storage](https://learn.microsoft.com/en-us/azure/postgresql/compute-storage/concepts-storage). Subscription/resource-group ownership and runtime access are prerequisites, separate from durability. |
-| Fly | Native Managed Postgres cluster with explicit 10 GiB storage, through `/v1/postgres`; not an unmanaged app Machine. | [Official API announcement](https://fly.io/changelog/managed-postgres-machines-api/) identifies asynchronous MPG v2 operations; [product documentation](https://fly.io/docs/about/pricing/) distinguishes MPG storage and its lifetime from app deletion. MPG v1 is outside this API; live compatibility is unverified. |
-| DigitalOcean | Native managed PostgreSQL cluster with storage provided by its selected database size; `POST /v2/databases`, engine `pg`. | [Cluster creation](https://docs.digitalocean.com/products/databases/postgresql/how-to/create/) and [API contract](https://docs.digitalocean.com/products/databases/postgresql/reference/api/). This path does not create an App Platform development database. Online state is distinct from retained backups and restore proof. |
 
 The bounded review found no second image-without-volume provisioning path among
 the other seven providers. That is a source-and-contract finding, not proof that
@@ -55,8 +51,8 @@ stage. The optional provider-neutral database capability observes the exact
 bound resource and returns only its direct-URL variable name plus a fingerprint
 of identity and key presence. Railway implements this capability using its
 [variable API](https://docs.railway.com/integrations/api/manage-variables) and the
-recorded official PostgreSQL template. Supabase, Neon, Cloud SQL, RDS, Azure
-PostgreSQL, Fly and DigitalOcean explicitly do not implement this service-variable
+recorded official PostgreSQL template. Cloud SQL, RDS and Azure
+PostgreSQL explicitly do not implement this service-variable
 metadata capability; their native URL projection is unchanged. The provider
 matrix and ordinary CI require that distinction for every registered database.
 
@@ -120,13 +116,9 @@ that an unavailable checkpoint succeeded.
 | Provider | Native boundary and admission for this operation |
 | --- | --- |
 | Railway | Implemented for the exact existing PostgreSQL 16 service using the supported stock startup, with complete project/environment scope and independently proven absence of a volume. [Volume creation](https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-volumes.md) attaches a new persistent volume to a service; it does not recover old filesystem data. Offline contracts do not establish live initialization success. |
-| Supabase | Unsupported. Each project owns its [dedicated PostgreSQL instance and disk](https://supabase.com/docs/guides/platform/compute-and-disk); [project backups and restores](https://supabase.com/docs/guides/platform/backups) are separate operations. |
-| Neon | Unsupported. [Durable storage is separate from compute](https://neon.com/docs/introduction/architecture-overview); [branch reset and restore](https://neon.com/docs/manage/branches) change branch data/history, not a service volume. |
 | Cloud SQL | Unsupported. [Restore can overwrite the target instance and restart it](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore); the [restore API returns an Operation](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/instances/restoreBackup). That is a distinct restore lifecycle. |
 | RDS | Unsupported. [Snapshot restore creates a new DB instance](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html), with its own identity; it is not initialization of an unattached hosting volume. |
 | Azure PostgreSQL | Unsupported. [Flexible Server restore creates a new server without overwriting the original](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore). Managed storage cannot be treated as a missing workload mount. |
-| Fly | Unsupported. The registered adapter uses Managed Postgres; [MPG restore creates a new cluster](https://fly.io/docs/flyctl/mpg/). Unmanaged Fly Machines and volumes are outside this database operation. |
-| DigitalOcean | Unsupported. [Creating from a backup creates a new managed cluster, moving from `creating` to `online`](https://docs.digitalocean.com/reference/api/reference/databases/). It is not an empty-volume attachment to an existing service. |
 
 Railway's pinned official documentation distinguishes the required steps.
 [Variable updates](https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/integrations/api/manage-variables.md)
@@ -193,8 +185,7 @@ verified deployment and provider operation IDs. Progress and receipt must agree.
 Legacy receipts and their seed fingerprints remain unchanged. Bootstrap observes
 the separately verified activation when present; seed generation includes the
 same validated receipt. A retry issues no additional volume, variable, deployment
-or cleanup mutation. Supabase, Neon, Cloud SQL, RDS, Azure PostgreSQL, Fly MPG and
-DigitalOcean remain explicitly unsupported for fresh initialization: this receipt
+or cleanup mutation. Cloud SQL, RDS and Azure PostgreSQL remain explicitly unsupported for fresh initialization: this receipt
 extension does not admit any of their reset or restore APIs.
 
 Regression checks first failed through the real Railway client and serialized
@@ -220,10 +211,8 @@ this does not run a seed or migration during initialization or bypass ordinary
 task, release or backup prerequisites.
 
 The native-scope conformance review found a separate shared-schema defect:
-reusing the recovery scope allowlist rejected Fly's `organizationSlug` and
-DigitalOcean's `accountUuid` before their unsupported capability could be
-reported. Both native-scope regression cases were observed failing against the
-original schema; the other five passed. Fresh initialization now accepts safe
+reusing the recovery scope allowlist rejected some providers' native scope
+coordinates before their unsupported capability could be reported. Fresh initialization now accepts safe
 native scope coordinates, and lifecycle admission still requires every scope
 key declared by the actual provider registry. This does not add initialization
 support to either provider.
@@ -259,12 +248,12 @@ establish BillForge's observed regional map or live initialization compatibility
 
 `database-provisioning-provider-contracts.test.ts` compares the named matrix with
 the complete database registry, so an added provider cannot bypass this review.
-Its native API checks call the real Supabase, Neon, Cloud SQL, Azure PostgreSQL,
-Fly and DigitalOcean adapters through serialized HTTP. Reconstructed preflight
+Its native API checks call the real Cloud SQL and Azure PostgreSQL
+adapters through serialized HTTP. Reconstructed preflight
 responses permit one native database create, which is rejected with HTTP 400.
 The assertions require a failed receipt and no hosting-resource fallback or
 follow-on mutation. Authentication is synthetic; no provider is contacted.
-These checks supplement the pinned Supabase/Neon schemas and existing provider
+These checks supplement the existing provider
 lifecycle tests. They do not validate complete response schemas, successful
 creation, disk contents, restarts, or recovery. RDS has existing SDK-command
 coverage rather than a new create-transport case in this test.

@@ -16,7 +16,7 @@ const spec = (extra: Record<string, unknown> = {}) => environmentSpecSchema.pars
 const bound = (url: string): Environment => ({ id: 'env-1', projectId: 'project-1', name: 'production', createdAt: new Date(), updatedAt: new Date(), platformBindings: { services: { web: { url } } } });
 
 // Product policy requires HTTPS and verification inputs. Provider distinctions are
-// sourced from Stripe webhooks/signature and Twilio webhook-security/SendGrid docs.
+// sourced from Stripe webhooks/signature and SendGrid docs; declared webhooks are vendor-neutral.
 // These are configuration tests, not provider transport or live signature tests.
 describe('webhook readiness', () => {
   it('does not infer inbound webhooks from API credentials alone and makes no requests', () => {
@@ -77,11 +77,26 @@ describe('webhook readiness', () => {
     expect(result?.status).toBe('needs_attention');
   });
 
-  it('reports Twilio auth-token wiring and the durable callback URL', () => {
-    const environmentSpec = spec({ messaging: { services: ['web'], service: { name: 'messages', inbound: { service: 'web' }, deliveryStatus: { service: 'web' } } } });
-    const result = inspectWebhookReadiness({ environmentSpec, environment: bound('http://example.com'), observed: observation([service('web', ['TWILIO_API_KEY_SECRET'], { TWILIO_API_KEY_SECRET: digest('api-secret') })]) });
-    expect(result?.webhooks).toHaveLength(2);
-    expect(result?.webhooks[0]).toMatchObject({ https: 'insecure', urlEvidence: 'binding', signingMaterial: { key: 'TWILIO_AUTH_TOKEN', status: 'missing' } });
+  it('reports a declared webhook\'s callback URL and signing-secret wiring', () => {
+    const environmentSpec = spec({ webhooks: {
+      'twilio-inbound': { vendor: 'twilio', service: 'web', path: '/webhooks/twilio/messages', signingSecretEnvVar: 'TWILIO_AUTH_TOKEN' },
+      'slack-events': { vendor: 'slack', service: 'web', path: '/webhooks/slack' },
+    } });
+    const result = inspectWebhookReadiness({ environmentSpec, environment: bound('https://app.example.com'),
+      observed: observation([service('web', ['TWILIO_AUTH_TOKEN'], { TWILIO_AUTH_TOKEN: digest('auth-token') })]) });
+    expect(result?.webhooks).toEqual([
+      expect.objectContaining({ provider: 'twilio', name: 'twilio-inbound', url: 'https://app.example.com/webhooks/twilio/messages',
+        https: 'configured', urlEvidence: 'binding', signingMaterial: { key: 'TWILIO_AUTH_TOKEN', status: 'present', evidence: 'observed' } }),
+      expect.objectContaining({ provider: 'slack', name: 'slack-events', url: 'https://app.example.com/webhooks/slack',
+        signingMaterial: { status: 'not_managed', evidence: 'unavailable' } }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain('auth-token');
+  });
+  it('flags a declared webhook whose signing secret is missing or whose service is not HTTPS', () => {
+    const environmentSpec = spec({ webhooks: { inbound: { vendor: 'twilio', service: 'web', path: '/hooks/in', signingSecretEnvVar: 'TWILIO_AUTH_TOKEN' } } });
+    const result = inspectWebhookReadiness({ environmentSpec, environment: bound('http://example.com'), observed: observation([service('web')]) });
+    expect(result).toMatchObject({ status: 'needs_attention', webhooks: [{ https: 'insecure', signingMaterial: { key: 'TWILIO_AUTH_TOKEN', status: 'missing' } }] });
+    expect(result?.webhooks[0]).not.toHaveProperty('url');
     expect(inspectWebhookReadiness({ environmentSpec, environment: null, observed: null })?.status).toBe('unknown');
   });
   it('does not mistake SendGrid API credentials for public-key verification', () => {

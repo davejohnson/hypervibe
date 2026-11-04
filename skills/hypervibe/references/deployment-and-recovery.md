@@ -147,7 +147,7 @@ new access paths, session termination or data changes.
 For ordinary repository configuration flags, use
 `devops.ci.repositoryVariables` in the existing canonical DevOps selection.
 GitHub Actions supports selected non-secret values on an existing external
-repository; GitLab CI is not yet supported for this facet. Follow the current
+repository. Follow the current
 spec schema, plan the canonical environment, and apply only that persisted plan.
 Existing variables require explicit `adoptExisting: true`; adoption performs no
 provider write, and a different desired value needs another reviewed plan.
