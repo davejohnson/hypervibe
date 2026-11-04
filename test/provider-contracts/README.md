@@ -129,6 +129,24 @@ SQLite/apply path. Generated execution readers run as emitted JavaScript in norm
 CI. [Evidence and remaining native gates](../../docs/connect-cloud-prepared-hosting.md#local-first-release-migrations)
 distinguish this operator path from unchanged hosted installer restrictions.
 
+Ordinary Cloud Run service-update polling has a separate final-response regression
+in `cloudrun.adapter.test.ts`. The real deployment adapter receives reconstructed
+HTTP operations whose sixtieth GET succeeds, fails, changes identity, or remains
+pending. The initial operation plus all sixty fetched responses are inspected;
+there are still at most sixty status GETs and no automatic PATCH or migration
+replay. Expected terminal semantics come from Google's
+[Operation contract](https://cloud.google.com/run/docs/reference/rest/v2/projects.locations.operations).
+This boundary defect was reproduced independently; it is not proven to have caused
+a particular live timeout.
+
+This correction does not add restart recovery to ordinary service updates. That
+path keeps the accepted operation identity in memory and omits it from a timeout
+receipt. A timeout therefore leaves native completion unknown, not failed or
+cancelled. Restarting the deployment can run its release command again before
+PATCH, so the failed receipt alone does not authorize a retry. Read-only native
+operation/service evidence and a fresh reviewed plan are required to establish
+what remains; exact durable update-operation recovery is still a separate gap.
+
 `cloud-deployment-provider-roster.test.ts` pins every hosting provider against the
 [keyless deployment contract](../../docs/connect-cloud-deployment-contract.md).
 The shared deployment/install/session suites distinguish provision, release and runtime

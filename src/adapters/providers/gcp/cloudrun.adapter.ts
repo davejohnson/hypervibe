@@ -6902,7 +6902,7 @@ export class CloudRunAdapter implements
     const operationName = operation.name;
 
     let current = operation;
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (let attempt = 0; attempt <= 60; attempt++) {
       if (current.name !== operationName) {
         throw new Error(`Cloud Run ${description} operation status returned a different operation identity.`);
       }
@@ -6920,6 +6920,8 @@ export class CloudRunAdapter implements
         }
         return current;
       }
+      // Inspect the last allowed GET before declaring the wait exhausted.
+      if (attempt === 60) break;
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const response = await this.request(`https://run.googleapis.com/v2/${operationName}`, {

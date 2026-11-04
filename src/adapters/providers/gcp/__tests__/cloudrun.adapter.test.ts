@@ -861,6 +861,7 @@ type DirectServiceOperationOverride =
 async function deployWithDirectServiceEvidence(params: {
   evidenceOverride?: DirectServiceEvidenceOverride;
   operationOverride?: DirectServiceOperationOverride;
+  finalPollOutcome?: 'success' | 'failed' | 'pending' | 'wrong operation' | 'wrong resource';
   releaseJobBound?: boolean;
   releaseJobInitiallyPresent?: boolean;
   retryAfterServiceFailure?: boolean;
@@ -914,9 +915,22 @@ async function deployWithDirectServiceEvidence(params: {
   let releaseJobCreated = params.releaseJobInitiallyPresent ?? false;
   let releaseJobSpec: Record<string, unknown> | undefined;
   let serviceUpdateAttempts = 0;
+  let serviceOperationPolls = 0;
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
+
+    if (url === 'https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/operations/update-direct-service' && method === 'GET') {
+      serviceOperationPolls += 1;
+      const name = 'projects/gcp-project/locations/us-central1/operations/update-direct-service';
+      if (serviceOperationPolls < 60 || params.finalPollOutcome === 'pending') return Response.json({ name, done: false });
+      if (params.finalPollOutcome === 'failed') return Response.json({ name, done: true, error: { code: 13, status: 'INTERNAL' } });
+      return Response.json({
+        name: params.finalPollOutcome === 'wrong operation' ? `${name}-other` : name,
+        done: true,
+        response: { name: params.finalPollOutcome === 'wrong resource' ? `${EXPECTED_SERVICE_RESOURCE}-other` : EXPECTED_SERVICE_RESOURCE },
+      });
+    }
 
     if (url.includes('/jobs/gcp-project-web-migration:run') && method === 'POST') {
       return Response.json({
@@ -1034,6 +1048,7 @@ async function deployWithDirectServiceEvidence(params: {
         done: true,
         response: { name: EXPECTED_SERVICE_RESOURCE },
       };
+      if (params.finalPollOutcome) return Response.json({ name: operation.name, done: false });
       switch (params.operationOverride) {
         case 'missing operation identity':
           return Response.json({ done: true, response: operation.response });
@@ -1209,6 +1224,35 @@ it.each([
     status: 'failed',
     receipt: { success: false, error: expect.stringMatching(expectedError) },
   });
+});
+
+// Google Cloud Run Operation contract: done:true carries the terminal result,
+// including when it arrives on the last permitted status read. Reconstructed
+// transport fixture; this does not establish the cause of a live rollout timeout.
+// https://cloud.google.com/run/docs/reference/rest/v2/projects.locations.operations
+it.each([
+  ['success', undefined],
+  ['failed', /operation failed: INTERNAL/],
+  ['wrong operation', /different operation identity/],
+  ['wrong resource', /different resource identity/],
+  ['pending', /did not finish before timeout/],
+] as const)('uses the final Cloud Run operation response for %s without replaying deployment', async (finalPollOutcome, expectedError) => {
+  vi.useFakeTimers();
+  try {
+    const deploying = deployWithDirectServiceEvidence({ finalPollOutcome });
+    await vi.runAllTimersAsync();
+    const { result, fetchMock } = await deploying;
+    if (expectedError) {
+      expect(result).toMatchObject({ status: 'failed', receipt: { success: false, error: expect.stringMatching(expectedError) } });
+    } else {
+      expect(result).toMatchObject({ status: 'deployed', receipt: { success: true } });
+    }
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/operations/update-direct-service'))).toHaveLength(60);
+    expect(fetchMock.mock.calls.filter(([url, init]) => String(url).includes('/services/gcp-project-web?updateMask=') && init?.method === 'PATCH')).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith('/jobs/gcp-project-web-migration:run') && init?.method === 'POST')).toHaveLength(1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('rejects a runtime service account from a different GCP project', async () => {
