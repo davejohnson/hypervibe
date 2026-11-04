@@ -3416,7 +3416,8 @@ export class CloudRunAdapter implements
       const readiness = this.cloudRunServiceReadiness(liveService);
       const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
       const observedImage = liveService.template?.containers?.length === 1 && typeof liveService.uid === 'string' && liveService.uid.trim()
-        && (!boundUid || liveService.uid === boundUid) && container?.image && this.isImmutableContainerImage(container.image)
+        && typeof boundUid === 'string' && boundUid.trim() && liveService.uid === boundUid
+        && container?.image && this.isImmutableContainerImage(container.image)
         ? container.image : undefined;
       const startCommand = this.containerStartCommand(container);
       const healthCheckPath = container?.startupProbe?.httpGet?.path ?? container?.livenessProbe?.httpGet?.path;
@@ -3513,7 +3514,8 @@ export class CloudRunAdapter implements
       const pendingActivation = bindingKey ? serviceBindings[bindingKey]?.scheduleActivation : undefined;
       const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
       const observedImage = liveJob.template?.template?.containers?.length === 1 && typeof liveJob.uid === 'string' && liveJob.uid.trim()
-        && (!boundUid || liveJob.uid === boundUid) && container?.image && this.isImmutableContainerImage(container.image)
+        && typeof boundUid === 'string' && boundUid.trim() && liveJob.uid === boundUid
+        && container?.image && this.isImmutableContainerImage(container.image)
         ? container.image : undefined;
       if (boundUid && liveJob.uid !== boundUid) {
         serviceObservationKnown = false;

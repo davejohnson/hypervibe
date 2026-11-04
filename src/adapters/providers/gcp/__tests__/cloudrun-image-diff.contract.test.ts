@@ -108,6 +108,14 @@ describe('Cloud Run image selection is observed configuration, not runtime envir
     expect(observed.services[0]?.config).not.toHaveProperty('imageUri');
   });
 
+  it.each([false, true])('does not infer image convergence for a same-name replacement when the legacy binding lacks a retained lifetime (job=%s)', async job => {
+    const { observed, planned } = await observeAndPlan({ job, uid: 'replacement-lifetime', legacyBinding: true });
+    expect(observed.services[0]?.config).not.toHaveProperty('imageUri');
+    if (!job) expect(planned.actions.find(action => action.id === 'service:web')).toMatchObject({
+      type: 'update', verified: false, metadata: { blockedReason: 'service_image_unknown' },
+    });
+  });
+
   it('uses the same specific-over-global priority as deployment and trims selector values', async () => {
     const { planned } = await observeAndPlan({ envVars: { IMAGE_URI: otherImage, IMAGE_URI_WEB: ` ${image} ` } });
     expect(planned.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'noop' });

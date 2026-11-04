@@ -152,6 +152,10 @@ generic planning with reconstructed REST responses. An immutable native image
 is configuration evidence, not an invented `IMAGE_URI` runtime environment hash.
 Cloud Run's registered selector priority is shared with deployment and runtime
 input filtering; ambiguous/missing image or lifetime evidence cannot prove noop.
+An existing binding must retain the exact native lifetime UID. A legacy binding
+without it cannot infer image convergence from a same-name resource, even if the
+native response has a valid UID and matching image. It needs supported planning
+with independent ownership proof; this check never adopts the current UID by name.
 The legacy `env:<selector>` plan field identifies the desired input and preserves
 saved action authority. Ordinary environment changes remain independently compared.
 
