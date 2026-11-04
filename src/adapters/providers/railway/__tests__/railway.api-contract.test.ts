@@ -163,6 +163,21 @@ describe('pinned provider API contract', () => {
       expect([...entry.instances.keys()]).toEqual([productionId]);
     }
     const stagingService = [...fixture.services.values()].find((entry) => entry.id.startsWith('staging-'))!;
+    if (kind === 'redis') {
+      expect(created[0].args.input.source).toEqual({ image: 'bitnami/redis:7.4' });
+      const variables = fixture.variables.get(`${stagingService.id}/${stagingId}`)!;
+      expect(variables.REDIS_PASSWORD).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(variables.ALLOW_EMPTY_PASSWORD).toBe('no');
+      expect(variables.REDIS_URL).toContain('@redis-db.railway.internal:6379');
+      const target = { projectId, environmentId: stagingId, serviceId: stagingService.id, mountPath: '/bitnami/redis/data' };
+      expect(fixture.mutations.map(({ field }) => field)).toEqual([
+        'serviceCreate', 'variableCollectionUpsert', 'volumeCreate', 'serviceInstanceRedeploy',
+      ]);
+      expect(fixture.mutations.find(({ field }) => field === 'volumeCreate')!.args.input).toEqual(target);
+      expect(first).toMatchObject({ component: { bindings: {
+        providerScope: { projectId, environmentId: stagingId }, volumeId: expect.any(String), volumeTarget: target,
+      } } });
+    }
     if (kind === 'web') {
       // Legacy provider names remain valid: runtime updates use the bound id.
       stagingService.name = 'web-staging';
@@ -223,7 +238,9 @@ describe('pinned provider API contract', () => {
         instanceScope: { projectId, environmentId: stagingId }, region: 'sjc', services: [], envKeys: [] },
     };
     expect((await plan()).actions.every((action) => action.type === 'noop')).toBe(true);
-    expect(await fixture.adapter.destroyStorage(fixture.environment, 'bucket-documents')).toMatchObject({ success: true });
+    expect(await fixture.adapter.destroyStorage(fixture.environment, 'bucket-documents')).toMatchObject({
+      success: true, data: { externalId: 'bucket-documents', deleted: true },
+    });
     expect((await fixture.adapter.observe(fixture.environment)).storage).toEqual([]);
     const afterDelete = fixture.mutations.length;
     expect(await fixture.adapter.destroyStorage(fixture.environment, 'bucket-documents')).toMatchObject({ success: true });
@@ -269,7 +286,7 @@ describe('pinned provider API contract', () => {
     await vi.runAllTimersAsync();
     const result = await resultPromise;
     expect(result).toMatchObject({ success: false, data: {
-      pending: true, verification: 'pending',
+      externalId: 'bucket-documents', patchSubmitted: true, pending: true, verification: 'pending',
       storageCreateRecovery: { state: 'identified', externalId: 'bucket-documents',
         providerScope: { projectId, environmentId: stagingId } },
     } });
@@ -364,7 +381,19 @@ describe('pinned provider API contract', () => {
     const fixture = await railwayHttpFixture({ dropCreateResponse: true });
     const result = await fixture.adapter.ensureComponent('redis', fixture.environment);
     expect(result.receipt.success).toBe(false);
-    expect(result.component.externalId).toBeTruthy();
+    expect(result.component).toMatchObject({
+      externalId: 'staging-redis-db',
+      bindings: {
+        provider: 'railway',
+        providerScope: { projectId, environmentId: stagingId },
+        resourceKind: 'service',
+        pluginName: 'redis-db',
+      },
+    });
+    expect(result.receipt.data).toMatchObject({
+      mutationAttempted: true,
+      recoveredServiceId: 'staging-redis-db',
+    });
     expect(fixture.mutations.map(({ field }) => field)).toEqual(['serviceCreate']);
     expect(fixture.contractErrors).toEqual([]);
   });

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  APPLIED_SPEC_HASH_VARIABLE,
   environmentDeploymentContract,
   environmentDeploymentContractHash,
 } from '../deployment-contract.service.js';
@@ -42,10 +41,6 @@ const SPEC = {
 };
 
 describe('environment deployment contract', () => {
-  it('uses the shared environment-scoped GitHub variable name', () => {
-    expect(APPLIED_SPEC_HASH_VARIABLE).toBe('HYPERVIBE_APPLIED_SPEC_HASH');
-  });
-
   it('includes only the selected environment and its applicable delegated secrets', () => {
     expect(environmentDeploymentContract(SPEC, 'staging')).toEqual({
       version: 1,

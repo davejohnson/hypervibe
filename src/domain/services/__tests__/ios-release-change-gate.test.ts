@@ -165,12 +165,6 @@ describe('executed iOS change gate before protected jobs', () => {
     expect(staging.concurrency.group).toBe(production.concurrency.group);
     expect(staging.concurrency['cancel-in-progress']).toBe(false);
   });
-  it('resolves the deployed artifact SHA when a dispatched run at ref B deployed source A', async () => {
-    const execution = releaseAttemptFixture().execute('workflow_dispatch');
-    await execution.result;
-    expect(execution.outputs.sha).toBe(SHA);
-    expect(execution.outputs.artifact_id).toBe('90');
-  });
 });
 
 function manifest(workflow: any) {

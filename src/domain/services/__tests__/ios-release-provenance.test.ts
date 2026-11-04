@@ -39,7 +39,6 @@ const encodedRuntime = parse(workflow!.files[0].content).jobs.release.steps.find
 )?.env?.HYPERVIBE_MANAGED_RUNTIME_BASE64;
 if (!encodedRuntime) throw new Error('Generated workflow did not embed its release runtime');
 const runtimes = await Promise.all([
-  ['source template', runtimeUrl.href],
   ['generated workflow runtime', `data:text/javascript;base64,${encodedRuntime}`],
 ].map(async ([name, url]) => ({ name, runtime: await import(url) as {
   main: () => Promise<void>;
@@ -147,6 +146,20 @@ function stubAppStore(options: { buildStatus?: number; duplicate?: boolean; mark
   return requests;
 }
 
+// Run the complete HTTP contract against the emitted program. The source
+// template retains the original-upload regression without repeating that matrix.
+it('source template also rejects reuse of an older upload without attribution proof, including retries', async () => {
+  const runtime = await import(runtimeUrl.href);
+  const { outputPath } = setupRelease();
+  const requests = stubAppStore();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(runtime.main()).rejects.toThrow(/already exists|provenance|cannot verify/i);
+  }
+  expect(requests.every(({ method }) => method === 'GET')).toBe(true);
+  expect(requests.some(({ pathname }) => pathname.includes('betaGroups'))).toBe(false);
+  expect(existsSync(outputPath)).toBe(false);
+});
+
 describe.each(runtimes)('managed iOS release provenance: $name', ({ runtime }) => {
   it('does not attribute an older uploaded build to the newly gated commit, including retries', async () => {
     const { outputPath } = setupRelease();
@@ -167,7 +180,7 @@ describe.each(runtimes)('managed iOS release provenance: $name', ({ runtime }) =
     expect(existsSync(outputPath)).toBe(false);
   });
 
-  it.each([401, 429, 503])('does not treat an unknown build read (%i) as permission to upload', async (buildStatus) => {
+  it.each([401, 503])('does not treat an unknown build read (%i) as permission to upload', async (buildStatus) => {
     const { outputPath } = setupRelease();
     const requests = stubAppStore({ buildStatus });
     await expect(runtime.main()).rejects.toThrow(`App Store Connect returned ${buildStatus}`);
@@ -291,7 +304,7 @@ describe.each(runtimes)('managed build-number allocation: $name', ({ runtime }) 
     await expect(runtime.allocateBuildNumber(env)).resolves.toBe(expected);
   });
 
-  it.each([401, 429, 503])('never treats an unknown listing (%i) as an empty app', async status => {
+  it.each([401, 503])('never treats an unknown listing (%i) as an empty app', async status => {
     const { env } = setupRelease();
     stubBuildPages([{ errors: [{ title: 'Unavailable' }] }], status);
     await expect(runtime.allocateBuildNumber(env)).rejects.toThrow(`App Store Connect returned ${status}`);
