@@ -1385,6 +1385,14 @@
       "destination": "docs/development/product.md#who-we-build-and-write-for",
       "destinationSha256": "35273f29b61babc7a9870e0cde9f63a0824f907a776f3b1fe7a3d63515b7a80d",
       "reason": "Explicit user request after confusing cloud and credential-request approvals: make the vibe-coder audience and plain, actionable copy apply to every human-facing surface, preserving exact consent and evidence boundaries."
+    },
+    {
+      "date": "2026-11-04",
+      "sourcePath": "User instruction: stop progressive disclosure sections on cloud connection pages",
+      "destination": "docs/development/product.md#who-we-build-and-write-for",
+      "destinationSha256": "46904a023cfab3b10ede043c2453d9754bdd579cc0464213abeb218847e08f8d",
+      "hashScope": "Heading and section body, trimmed with one trailing newline; prior historical hashes are unchanged.",
+      "reason": "Replace optional-detail piles with one visible task and focused linked pages. Preserve material costs, exact destination and access consequences at approval; remove irrelevant information rather than expanding every section."
     }
   ]
 }

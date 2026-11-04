@@ -47,10 +47,13 @@ values for authorized agents; do not present those contracts as the human interf
   primary copy unless the person needs the term to make this decision.
 - **Design the choice, not a wall of explanation.** Give each step one clear
   primary action. Present alternatives, such as signing in yourself or inviting
-  an administrator, as alternatives. Put exact IAM resources, internal IDs,
-  revisions and setup-step counts in optional details unless an identifier is
-  needed to distinguish the destination or verify consent. Keep material costs,
-  access, recipients and consequences visible beside the action.
+  an administrator, as alternatives. Do not stack expandable sections or
+  accordions on setup, approval or recovery screens. Keep the next action and
+  the app, environment and destination visible. Remove facts irrelevant to that
+  decision; put technical inspection and separate tasks such as inviting help
+  or removing access on focused pages reached by ordinary links. Do not replace
+  collapsed clutter with an expanded wall of text. Keep material costs, access,
+  recipients and consequences visible beside the action they authorize.
 - **Explain errors from evidence.** Say what Hypervibe could not do, what
   remains saved or incomplete, and the next supported action. Do not blame the
   person's account for a failure in Hypervibe's hosted access. Do not turn an
