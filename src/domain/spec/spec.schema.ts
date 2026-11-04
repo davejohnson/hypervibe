@@ -495,6 +495,8 @@ export const githubCheckAutomationSpecSchema = z.object({
    * validators that intentionally inspect those files.
    */
   changeScope: z.enum(['application', 'all']).default('application'),
+  /** Whole-job limit on the managed GitHub-hosted runner; omission preserves 30 minutes. */
+  timeoutMinutes: z.number().int().min(1).max(360).optional(),
   commands: z.array(z.string().min(1)).min(1),
   failureArtifacts: z.array(githubFailureArtifactPathSchema).default([]),
 }).strict();

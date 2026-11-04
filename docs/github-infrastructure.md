@@ -190,6 +190,15 @@ commands. Mixed or unrecognized changes run the complete check. Set
 `changeScope: "all"` on a dedicated infrastructure validator that should run
 for those files too.
 
+Check actions also accept `timeoutMinutes`, an integer from 1 to 360. Omit it
+to keep the 30-minute default. The limit covers the whole job, including setup
+and evidence upload; it does not change test selection or per-command behavior.
+For example, set `github.actions.acceptance.timeoutMinutes: 45` when a complete
+acceptance run needs more time. This option applies only to `kind: "check"`.
+GitHub cancels a job at its configured limit; the managed `ubuntu-latest`
+runner has a six-hour maximum ([workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes),
+[Actions limits](https://docs.github.com/en/actions/reference/limits)).
+
 Autofix runs only for a failed run from the same repository on the configured
 target branch. It always opens a draft pull request. The generated patch cannot
 change `.github/`, `.hypervibe/`, agent instruction files, or `.env` files, and

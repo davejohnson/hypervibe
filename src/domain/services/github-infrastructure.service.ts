@@ -381,7 +381,7 @@ function buildCheckWorkflow(
     '  check:',
     `    name: ${yamlString(githubWorkflowName(id))}`,
     '    runs-on: ubuntu-latest',
-    '    timeout-minutes: 30',
+    `    timeout-minutes: ${automation.timeoutMinutes ?? 30}`,
     '    steps:',
     ...(applicationScoped ? pullRequestChangeClassifier() : []),
     '      - uses: actions/checkout@v7',
