@@ -52,7 +52,7 @@ provider's verified scope; proposals are not creation authority.
 | Cloud Run | Google Secret Manager only: verify connected project ID and number; create an absent secret with automatic replication and scoped ownership labels; read back exact native name, `createTime`, labels and empty version metadata. |
 | ECS Express | AWS runtime references and direct delivery are supported separately; automatic empty-container setup is unsupported. |
 | Azure Container Apps | Key Vault runtime references and direct delivery are supported separately; automatic vault/container setup is unsupported. |
-| Railway, Fly.io, DigitalOcean App Platform, Vercel | Setup unsupported; no fallback to provider variables or local values. |
+| Railway | Setup unsupported; no fallback to provider variables or local values. |
 
 The creation intent binds canonical repository identity, environment, key,
 destination and random attempt. It is durable before POST and exported through
@@ -84,7 +84,7 @@ live API enablement, IAM grants, billing availability or deployment success.
 
 ## Hosting reference matrix
 
-All seven registered hosting providers are accounted for. Native support does
+All four registered hosting providers are accounted for. Native support does
 not imply that Hypervibe's existing deployment implementation preserves it.
 
 | Hosting provider | Native reference contract |
@@ -93,9 +93,6 @@ not imply that Hypervibe's existing deployment implementation preserves it.
 | ECS Express | `primaryContainer.secrets[].valueFrom` (the native API names the field `primaryContainer`, not an app-owned abstraction) accepts a Secrets Manager ARN with a pinned version suffix; task execution identity needs access. |
 | Azure Container Apps | App configuration secret uses a versioned `keyVaultUrl` and explicit managed identity; container env uses `secretRef`. |
 | Railway | External-manager reference delivery unsupported. Ordinary provider variables do not establish this contract. |
-| Fly.io | External-manager reference delivery unsupported. |
-| DigitalOcean App Platform | External-manager reference delivery unsupported. |
-| Vercel | External-manager reference delivery unsupported. |
 
 For a first Cloud Run or ECS Express workload, a complete observation and no
 local workload binding permit a conditional creation intent, not an assertion
@@ -284,8 +281,8 @@ gate: cross-project-capable authentication could write a manually pinned foreign
 numeric parent, and missing/inactive/mismatched project evidence was ignored.
 The shared delivery/runtime provider helper now enforces the same CRM contract;
 correct project ID/number pairs retain successful service and job updates.
-The shared creation-only admission matrix now covers Railway, Fly, Cloud Run
-and ECS, with Azure Container Apps, DigitalOcean and Vercel still rejected.
+The shared creation-only admission matrix covers Railway, Cloud Run and ECS,
+with Azure Container Apps still rejected.
 GCP/ECS positive controls require references in the guarded creation payload
 and prohibit an environment pre-sync. All supported adapters retain negative
 controls for missing capability, missing provisioning intent and non-deferred

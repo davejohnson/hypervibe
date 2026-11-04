@@ -11,7 +11,7 @@ import type { ObservedState } from '../../src/domain/ports/observe.port.js';
 
 const bounds = { min: 0, max: 1 };
 const environment = { hosting: { provider: 'cloudrun' }, services: { web: { instanceBounds: bounds } } };
-const providers = ['azure-container-apps', 'cloudrun', 'digitalocean', 'ecs', 'fly', 'railway', 'vercel'];
+const providers = ['azure-container-apps', 'cloudrun', 'ecs', 'railway'];
 afterEach(() => vi.unstubAllGlobals());
 
 describe('reviewed service instance bounds', () => {

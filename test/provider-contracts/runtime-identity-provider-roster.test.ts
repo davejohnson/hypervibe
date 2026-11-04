@@ -5,7 +5,7 @@ import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapt
 import { EcsExpressAdapter } from '../../src/adapters/providers/aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
 // Named review: docs/connect-cloud-azure-evidence.md. Registry presence is not live certification.
-const reviewed = ['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'fly', 'digitalocean', 'vercel'];
+const reviewed = ['railway', 'cloudrun', 'ecs', 'azure-container-apps'];
 describe('runtime identity provider contract roster', () => {
   it('requires an explicit review when a hosting provider is added', () => {
     expect(providerRegistry.namesFor('hosting').sort()).toEqual([...reviewed].sort());

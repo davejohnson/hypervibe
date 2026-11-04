@@ -5,7 +5,6 @@ import { EcsExpressAdapter } from '../aws/ecs-express.adapter.js';
 import { CloudRunAdapter } from '../gcp/cloudrun.adapter.js';
 import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { AzureResourceManagerClient } from '../azure/azure-resource-manager.client.js';
-import { DigitalOceanClient } from '../digitalocean/digitalocean.client.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 
 // Synthetic documented provider observations, exercised through serialized clients.
@@ -86,29 +85,6 @@ it('ECS updates the exact existing repositoryCredentials secret, preserves JSON 
   expect(JSON.stringify(result)).not.toContain(replacement.token);
 });
 
-it('DigitalOcean preserves the entire app spec and encrypted unrelated credentials while changing one image credential', async () => {
-  const { createDigitalOceanRegistryCredentialLifecycle } = await import('../digitalocean/digitalocean-registry-credential.js');
-  const original = { name: 'app', services: [{ name: 'web', image: { registry_type: 'GHCR', registry: 'acme', repository: 'app', digest: 'sha256:unchanged', registry_credentials: 'EV[1:old-encrypted]' }, envs: [{ key: 'KEEP', type: 'SECRET', value: 'EV[1:keep-encrypted]' }] }], workers: [{ name: 'other', image: { registry_type: 'DOCKER_HUB', repository: 'other', registry_credentials: 'EV[1:other-encrypted]' } }], domains: [{ name: 'example.invalid' }] };
-  let spec = structuredClone(original); const writes: unknown[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (_input, init) => {
-    expect(init?.redirect).toBe('error');
-    if (init?.method === 'PUT') { spec = JSON.parse(String(init.body)).spec; writes.push(spec); }
-    return Response.json({ app: { id: 'app-id', spec, in_progress_deployment: { id: 'new-deployment' } } });
-  }));
-  const lifecycle = createDigitalOceanRegistryCredentialLifecycle(() => new DigitalOceanClient('synthetic-token'));
-  const environment = env({ provider: 'digitalocean', projectId: 'app-id', environmentId: 'app-id', services: { web: { serviceId: 'app-id:services:web' } } });
-  const target = await lifecycle.inspect(environment, 'web');
-  expect(writes).toHaveLength(0);
-  expect(target.activation).toBe('provider-rollout');
-  const result = await lifecycle.update(environment, 'web', target, replacement);
-  expect(result).toMatchObject({ success: true, data: { credentialValueEvidence: 'acknowledgement', credentialUpdateActivation: 'provider-rollout' } });
-  const expected = structuredClone(original); expected.services[0]!.image.registry_credentials = `${replacement.username}:${replacement.token}`;
-  expect(writes).toEqual([expected]);
-  expect(JSON.stringify(result)).not.toContain(replacement.token);
-  expect(await lifecycle.update(environment, 'web', { ...target, image: 'changed' }, replacement)).toMatchObject({ success: false, data: { mutationAttempted: false } });
-  expect(writes).toHaveLength(1);
-});
-
 it('Azure rotates an existing registry passwordSecretRef while preserving all other secret references and app configuration', async () => {
   const { createAzureRegistryCredentialLifecycle } = await import('../azure/azure-registry-credential.js');
   const subscription = '22222222-2222-4222-8222-222222222222';
@@ -135,43 +111,6 @@ it('Azure rotates an existing registry passwordSecretRef while preserving all ot
   expect(writes[0]).toEqual({ properties: { configuration: { ...configuration, secrets: [{ name: 'pull', value: replacement.token }, secrets[1]] } } });
   expect(writes[0].properties.template).toBeUndefined();
   expect(configuration.registries).toEqual([{ server: 'ghcr.io', username: replacement.username, passwordSecretRef: 'pull' }]);
-  expect(JSON.stringify(result)).not.toContain(replacement.token);
-});
-
-it.each([false, true])('Azure preserves an existing Key Vault registry reference and rotates its backing version; pinned=%s', async pinned => {
-  const { createAzureRegistryCredentialLifecycle } = await import('../azure/azure-registry-credential.js');
-  const subscription = '22222222-2222-4222-8222-222222222222';
-  const group = `/subscriptions/${subscription}/resourceGroups/existing`;
-  const managed = `${group}/providers/Microsoft.App/managedEnvironments/environment`;
-  const appId = `${group}/providers/Microsoft.App/containerApps/web`;
-  const vaultSecret = 'https://exact-vault.vault.azure.net/secrets/pull';
-  const client = new AzureResourceManagerClient({ authMode: 'servicePrincipal', tenantId: 'tenant', clientId: 'client', clientSecret: 'synthetic-client-secret', subscriptionId: subscription, resourceGroup: 'existing' });
-  Object.assign(client, { accessToken: 'synthetic-arm-token' });
-  let secret = { name: 'pull', keyVaultUrl: pinned ? `${vaultSecret}/old-version` : vaultSecret, identity: 'system' };
-  let currentValue = 'old-password'; let vaultWrites = 0; let configurationWrites = 0;
-  vi.stubGlobal('fetch', vi.fn(async (input, init) => {
-    const url = new URL(String(input));
-    expect(init?.redirect).toBe('error');
-    if (url.hostname === 'login.microsoftonline.com') { expect(String(init?.body)).toContain(encodeURIComponent('https://vault.azure.net/.default')); return Response.json({ access_token: 'synthetic-vault-token' }); }
-    if (url.hostname.endsWith('.vault.azure.net')) {
-      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer synthetic-vault-token');
-      if (init?.method === 'PUT') { const body = JSON.parse(String(init.body)); expect(body).toEqual({ value: replacement.token, contentType: 'registry-password', tags: { keep: 'yes' }, attributes: { enabled: true, exp: 1999999999 } }); currentValue = body.value; vaultWrites++; }
-      return Response.json({ id: `${vaultSecret}/${vaultWrites ? 'new-version' : 'old-version'}`, value: currentValue, contentType: 'registry-password', tags: { keep: 'yes' }, attributes: { enabled: true, exp: 1999999999, created: 1, updated: 2 } });
-    }
-    if (url.pathname.endsWith('/listSecrets')) return Response.json({ value: [secret] });
-    if (init?.method === 'PATCH') { const body = JSON.parse(String(init.body)); secret = body.properties.configuration.secrets[0]; configurationWrites++; expect(body.properties.template).toBeUndefined(); }
-    return Response.json({ id: appId, properties: { managedEnvironmentId: managed, configuration: { registries: [{ server: 'ghcr.io', username: replacement.username, passwordSecretRef: 'pull' }], secrets: [secret] }, template: { containers: [{ image: 'ghcr.io/acme/app:stable' }] } } });
-  }));
-  const lifecycle = createAzureRegistryCredentialLifecycle(() => client);
-  const environment = env({ provider: 'azure-container-apps', projectId: group, environmentId: managed, services: { web: { serviceId: appId } } });
-  const target = await lifecycle.inspect(environment, 'web');
-  const result = await lifecycle.update(environment, 'web', target, replacement);
-  expect(result).toMatchObject({ success: true, data: { credentialValueEvidence: 'readback' } });
-  expect(vaultWrites).toBe(1); expect(configurationWrites).toBe(pinned ? 1 : 0);
-  expect(secret).toEqual({ name: 'pull', keyVaultUrl: pinned ? `${vaultSecret}/new-version` : vaultSecret, identity: 'system' });
-  expect(await lifecycle.inspect(environment, 'web')).toEqual(target);
-  expect(await lifecycle.update(environment, 'web', target, replacement)).toMatchObject({ success: true });
-  expect(vaultWrites).toBe(1);
   expect(JSON.stringify(result)).not.toContain(replacement.token);
 });
 

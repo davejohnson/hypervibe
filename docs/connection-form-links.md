@@ -16,7 +16,6 @@ input to the person. Agents should preserve the generated link.
 | --- | --- | --- |
 | GitHub fine-grained PAT | [GitHub's form documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#pre-filling-fine-grained-personal-access-token-details-using-url-parameters): `name` (40 characters), `description` (1024), `target_name`, `expires_in`, and named permissions. | Select repositories; review permissions and organization policy; create/approve the token. A repository name is not a documented query parameter. |
 | GitHub classic PAT | Existing `description` and `scopes` template retained. [VS Code's GitHub authentication implementation](https://github.com/microsoft/vscode/blob/main/extensions/github-authentication/src/flows.ts) independently constructs that exact path and those fields. This is primary integration source, not a published GitHub form schema. | Review expiry and scopes. Naming a repository in the note does not restrict classic token access to it. No new classic-only query fields are claimed. |
-| GitLab PAT | [GitLab's form documentation](https://docs.gitlab.com/user/profile/personal_access_tokens/#prefill-personal-access-token-details): `name`, `description`, `scopes`, on the selected HTTPS instance. [Token API documentation](https://docs.gitlab.com/api/user_tokens/) limits the description to 255 characters. | Set expiration manually; review scope and token principal. Project/group/deploy token creation remains separate. |
 | Cloudflare user/account token | [Cloudflare's template contract](https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/): `name` and `permissionGroupKeys`; user templates also take `accountId` and `zoneId`. Account templates use the documented `to` path and omit those scope parameters. [Token schema](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/create/) limits names to 120 characters. | Select actual account/zone resources and optional permissions. A DNS domain does not establish native account/zone IDs. Description and expiry query parameters are not documented. |
 
 These are the existing form-template providers affected by the change. Other
@@ -31,7 +30,7 @@ fields are emitted. Supplied credential values never enter URL construction.
 Cloudflare Registrar reconnect guidance can reuse the independently stored
 non-secret account ID; a domain alone still cannot supply a zone ID. Account
 token templates never receive the user-template-only account/zone parameters.
-The classic description and GitLab name caps are conservative product bounds,
+The classic description caps are conservative product bounds,
 not additional claims about their browser-form schemas.
 
 ## Validation
@@ -45,9 +44,9 @@ and desired acceptance commands both include that suite. Live branch protection,
 authenticated browser forms, and actual agent responses remain separate checks.
 
 Observed regression sequence: the first five MCP cases failed before runtime
-changes (GitHub add/reconnect owner, GitLab instance, Cloudflare label, and
+changes (GitHub add/reconnect owner, Cloudflare label, and
 project discovery). Two further cases exposed missing project context in hints
-and a duplicate GitLab command scope. The direct Railway app-scope, GHCR pull,
+and a duplicate command scope. The direct Railway app-scope, GHCR pull,
 and Cloudflare Registrar cases also failed before their fixes. After isolating this PR from concurrent provider work, the baseline reproduced
 30 failing connection checks before the runtime port; all 161 tests in four
 focused connection/guidance/CI suites then passed. These checks

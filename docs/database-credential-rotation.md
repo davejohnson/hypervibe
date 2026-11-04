@@ -17,13 +17,9 @@ received the first replacement.
 | Registered provider | Actual authentication update | Bound identity and recovery |
 | --- | --- | --- |
 | Railway | PostgreSQL `ALTER ROLE` through an existing reachable connection, followed by an additive `POSTGRES_PASSWORD` issuer update with `skipDeploys: true`. Public proxy creation is disabled. | Exact project, environment, service, database and SQL session user. Copied aliases must first pass the existing `database-credential-aliases` reviewed plan; authored references remain intact. A fresh password connection recovers uncertain SQL, and exact issuer readback recovers its separate metadata update. |
-| Supabase | The managed `postgres` owner uses `PATCH /v1/projects/{ref}/database/password`; explicitly bound other roles use their own PostgreSQL session. | Project and organization/region bindings, exact SQL user/database. The replacement is frozen before mutation; an independent fresh connection proves authentication. |
-| Neon | PostgreSQL `ALTER ROLE` for the existing bound role. | Project/account plus branch and endpoint bindings. A supplied frozen password avoids a second API-generated password on retry. Fresh authentication confirms the result. |
 | Cloud SQL | `users.update` sends only the exact user's name and frozen password. | Bound GCP project/instance and database/user. The returned operation and its completion must belong to that project/instance. Operation completion and fresh SQL authentication are separate evidence. |
 | Amazon RDS | `ModifyDBInstance` changes the bound master password; a separately bound non-master role uses its own PostgreSQL session. A Secrets Manager-owned master uses `RotateMasterUserPassword` and retains provider ownership. | Bound AWS account/region/instance plus database/user and, for managed credentials, exact secret ARN. Unrelated pending instance modifications block `ApplyImmediately`. Generated-reset SDK retries are disabled; the existing Secrets Manager reader recovers the exact user's new password. A fresh connection confirms actual authentication. |
 | Azure PostgreSQL | Flexible Server `PATCH` changes only `administratorLoginPassword`; an explicitly bound non-admin role uses its own PostgreSQL session. | Exact subscription/resource group/server identity and SQL database/user. Existing ARM long-operation handling is reused, then a fresh SQL connection verifies authentication. |
-| Fly Managed Postgres | MPG v2 `POST /v1/postgres/{id}/users/{username}/rotate_password`, preserving existing sessions. | Exact organization, cluster and username. The provider generates the replacement; encrypt it immediately. After a lost response, read the exact user's `/credentials` endpoint and compare with the frozen prior value; do not generate again. |
-| DigitalOcean PostgreSQL | `POST /v2/databases/{id}/users/{username}/reset_auth`. | Exact account/region/cluster and username. The provider generates the replacement; recover a lost response with the exact user's GET, comparing with the frozen prior value before accepting it. |
 
 Provider generation is an explicit reviewed input mode. An API that generates a
 password must not be treated as accepting a locally chosen password.
@@ -61,10 +57,6 @@ unchanged.
 - Railway [variables](https://docs.railway.com/guides/variables) and the existing
   pinned GraphQL schema under `test/provider-contracts/railway` establish additive
   variable updates and deployment deferral. PostgreSQL establishes authentication.
-- Supabase [database password update](https://supabase.com/docs/reference/api/v1-update-database-password)
-  and [database roles](https://supabase.com/docs/guides/database/postgres/roles).
-- Neon [official role documentation source](https://github.com/neondatabase/website/blob/main/content/docs/manage/roles.md)
-  describes chosen-password SQL updates and branch scope.
 - Cloud SQL [users.update](https://cloud.google.com/sql/docs/postgres/admin-api/rest/v1/users/update)
   and [operations](https://cloud.google.com/sql/docs/postgres/admin-api/rest/v1/operations).
 - RDS [ModifyDBInstance](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_ModifyDBInstance.html)
@@ -73,14 +65,6 @@ unchanged.
   establishes provider-generated rotation and the exact managed secret ARN.
 - Azure [Flexible Server update](https://learn.microsoft.com/en-us/rest/api/postgresql/servers/update?view=rest-postgresql-2025-08-01)
   defines `administratorLoginPassword` and ARM completion.
-- Fly's [official API client](https://github.com/superfly/fly-go/blob/master/flaps/flaps_managed_postgres.go)
-  and [official MPG v2 CLI](https://github.com/superfly/flyctl/blob/master/internal/command/mpg/v2/run_users.go)
-  define the exact reset path, no automatic reset retry, credentials readback and
-  the distinction between new connections and existing sessions.
-- DigitalOcean [database API](https://docs.digitalocean.com/reference/api/reference/databases/)
-  defines generated `reset_auth` and exact-user credential readback;
-  [PostgreSQL role restrictions](https://docs.digitalocean.com/products/databases/postgresql/how-to/modify-user-privileges/)
-  make a universal administrative SQL assumption unsafe.
 
 ## Executable evidence and limits
 

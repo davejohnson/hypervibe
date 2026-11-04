@@ -13,7 +13,7 @@ import type { CloudDeploymentAdapterCapabilityV1, CloudDeploymentAdapterInputV1 
 import type { LocalCloudScopePreparationCapability, OperatorArtifactCapability } from '../ports/cloud-installation.port.js';
 import { CloudDeploymentAccessError, validateCloudDeploymentAdapterInputV1 } from '../services/cloud-deployment-authentication.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai' | 'identity';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai' | 'identity';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'

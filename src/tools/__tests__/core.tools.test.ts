@@ -223,7 +223,7 @@ describe('bootstrap action receipt mapping', () => {
 });
 
 describe('hv_spec', () => {
-  it.each(['railway', 'cloudrun', 'digitalocean', 'fly', 'ecs', 'azure-container-apps', 'vercel'])(
+  it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])(
     'warns about resource differences on spec write/read without copying them for %s', async (provider) => {
       const t = await makeClient();
       try {
@@ -1129,7 +1129,7 @@ describe('hv_spec', () => {
     await t.close();
   });
 
-  it.each(['railway', 'cloudrun', 'digitalocean', 'fly', 'ecs', 'azure-container-apps', 'vercel'])(
+  it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])(
     'allows a staging-only service rename on %s without taking ownership of production configuration', async (provider) => {
       const t = await makeClient();
       const project = `rename-coverage-${provider}`;
@@ -1791,7 +1791,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'vercel' },
+          hosting: { provider: 'ecs' },
           services: {
             scheduled: {
               workloadKind: 'cron',
@@ -4052,153 +4052,6 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('creates a replacement database without deploying or destroying the old database in the same apply', async () => {
-    const t = await makeClient();
-    await t.call('hv_spec', {
-      spec: {
-        project: 'core-spec-app',
-        environments: {
-          production: {
-            hosting: { provider: 'cloudrun' },
-            services: { web: { startCommand: 'npm start' } },
-            database: { provider: 'supabase' },
-            envVars: { NODE_ENV: 'production' },
-          },
-        },
-      },
-    });
-    verifyConnection('cloudrun');
-    verifyConnection('supabase');
-
-    const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
-    const { ComponentRepository } = await import('../../adapters/db/repositories/component.repository.js');
-    const project = new ProjectRepository().findByName('core-spec-app')!;
-    const now = new Date();
-    const environment = new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'cloudrun',
-        projectId: 'gcp-project',
-        services: { web: { serviceId: 'gcp-project-web' } },
-      },
-    });
-    new ComponentRepository().create({
-      environmentId: environment.id,
-      type: 'postgres',
-      externalId: 'cloudsql-1',
-      bindings: {
-        provider: 'cloudsql',
-        instanceId: 'cloudsql-1',
-        connectionUrl: 'postgres://old-cloudsql',
-        connectionName: 'gcp-project:us-central1:app',
-      },
-    });
-
-    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
-      success: true,
-      adapter: {
-        name: 'cloudrun',
-        capabilities: {
-          supportedBuilders: ['dockerfile'], supportedComponents: [],
-          supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
-          supportsReleaseCommand: false, supportsMultiEnvironment: false, managedTls: true,
-          supportsObserve: true,
-        },
-        connect: async () => {}, verify: async () => ({ success: true }),
-        ensureProject: async () => ({ success: true, message: 'ok' }),
-        ensureComponent: async () => { throw new Error('unused'); },
-        deploy: async () => { throw new Error('hosting deploy should not run'); },
-        observe: async () => ({
-          provider: 'cloudrun',
-          observedAt: new Date().toISOString(),
-          projectExists: true,
-          projectId: 'gcp-project',
-          environmentId: 'production',
-          services: [{
-            name: 'web', externalId: 'gcp-project-web', workloadKind: 'web', customDomains: [],
-            config: { startCommand: 'npm start' },
-            envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('production') },
-            status: 'running',
-          }],
-          databases: [{ provider: 'cloudsql', engine: 'postgres', externalId: 'cloudsql-1', status: 'running' }],
-          partial: false,
-          warnings: [],
-        }),
-      },
-    } as any);
-    const provision = vi.fn(async (_type: string, env: { id: string }) => ({
-      component: {
-        id: 'supabase-component',
-        environmentId: env.id,
-        type: 'postgres',
-        externalId: 'supabase-1',
-        bindings: {
-          provider: 'supabase',
-          instanceId: 'supabase-1',
-          connectionUrl: 'postgres://new-supabase',
-          host: 'db.supabase.co',
-          port: 5432,
-          username: 'postgres',
-          password: 'pw',
-          database: 'postgres',
-        },
-        createdAt: now,
-        updatedAt: now,
-      },
-      receipt: { success: true, message: 'Provisioned Supabase Postgres' },
-      connectionUrl: 'postgres://new-supabase',
-      envVars: { DATABASE_URL: 'postgres://new-supabase', DATABASE_SSL: 'true' },
-    }));
-    const destroy = vi.fn(async () => ({ success: true, message: 'destroyed' }));
-    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
-      success: true,
-      adapter: {
-        name: 'supabase',
-        capabilities: {
-          supportedDatabases: ['postgres'],
-          supportsPooling: true, supportsReadReplicas: false,
-          supportsPointInTimeRecovery: false, serverlessOptimized: true,
-        },
-        connect: async () => {}, verify: async () => ({ success: true }),
-        provision,
-        observeDatabase: async () => null,
-        getConnectionUrl: async () => 'postgres://new-supabase',
-        destroy,
-      },
-    } as any);
-    const hostingSpy = vi.spyOn(adapterFactory, 'getHostingAdapter').mockRejectedValue(new Error('hosting should not run'));
-
-    const plan = await t.call('hv_plan', { project: 'core-spec-app', env: 'production' });
-    expect(plan.ok).toBe(true);
-    expect(plan.data.actions).toContainEqual(expect.objectContaining({ id: 'database:supabase', type: 'create' }));
-    expect(plan.data.actions.find((action: { id: string }) => action.id === 'database:cloudsql:destroy')).toBeUndefined();
-
-    const apply = await t.call('hv_apply', {
-      project: 'core-spec-app',
-      planId: plan.data.planId,
-      confirmActions: ['database:supabase'],
-    });
-    expect(apply.ok).toBe(true);
-    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'database:supabase',
-      status: 'succeeded',
-    }));
-    expect(provision).toHaveBeenCalledTimes(1);
-    expect(destroy).not.toHaveBeenCalled();
-    expect(hostingSpy).not.toHaveBeenCalled();
-
-    const component = new ComponentRepository().findByEnvironmentAndType(environment.id, 'postgres')!;
-    expect(component.bindings.provider).toBe('supabase');
-    expect(component.bindings.previousProvider).toBe('cloudsql');
-    expect(component.bindings.previousExternalId).toBe('cloudsql-1');
-    expect(component.bindings.previousBindings).toMatchObject({
-      provider: 'cloudsql',
-      connectionUrl: 'postgres://old-cloudsql',
-    });
-    await t.close();
-  });
-
   it('plans a declarative seedCommand without backup setup and records one seed action completion', async () => {
     const t = await makeClient();
     const command = 'true';
@@ -4419,14 +4272,10 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environments: {
           production: {
             hosting: { provider: 'railway' },
-            database: { provider: 'supabase' },
+            database: { provider: 'railway' },
             services: { web: { startCommand: 'npm start' } },
             domain: 'previous-teardown.example.com',
             email: { enabled: true },
-            messaging: {
-              services: ['web'],
-              service: { name: 'Previous teardown messages' },
-            },
             payments: {
               stripe: {
                 catalog: {

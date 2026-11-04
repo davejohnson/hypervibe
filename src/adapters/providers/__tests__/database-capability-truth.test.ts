@@ -2,11 +2,7 @@ import { describe, expect, it } from 'vitest';
 import '../../../application/providers.js';
 import { RdsAdapter } from '../aws/rds.adapter.js';
 import { AzurePostgresAdapter } from '../azure/azure-postgres.adapter.js';
-import { DigitalOceanDatabaseAdapter } from '../digitalocean/digitalocean-database.adapter.js';
-import { FlyDatabaseAdapter } from '../fly/fly-database.adapter.js';
 import { CloudSqlAdapter } from '../gcp/cloudsql.adapter.js';
-import { NeonAdapter } from '../neon/neon.adapter.js';
-import { SupabaseAdapter } from '../supabase/supabase.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../railway/railway-database.factory.js';
 import { supportsDatabaseLifecycle } from '../../../domain/ports/database.port.js';
@@ -17,13 +13,9 @@ describe('database capability truth', () => {
     const railway = new RailwayAdapter();
     const adapters = new Map<string, unknown>([
       ['railway', createRailwayDatabaseAdapter({ hostingAdapter: railway, envRepo: {} as never })],
-      ['supabase', new SupabaseAdapter()],
       ['cloudsql', new CloudSqlAdapter()],
       ['rds', new RdsAdapter()],
       ['azure-postgres', new AzurePostgresAdapter()],
-      ['neon', new NeonAdapter()],
-      ['fly', new FlyDatabaseAdapter()],
-      ['digitalocean', new DigitalOceanDatabaseAdapter()],
     ]);
 
     expect([...adapters.keys()].sort()).toEqual(providerRegistry.namesFor('database').sort());
@@ -49,10 +41,6 @@ describe('database capability truth', () => {
     const adapters = [
       new RdsAdapter(),
       new AzurePostgresAdapter(),
-      new DigitalOceanDatabaseAdapter(),
-      new FlyDatabaseAdapter(),
-      new NeonAdapter(),
-      new SupabaseAdapter(),
     ];
     for (const adapter of adapters) {
       expect(adapter.capabilities.supportsReadReplicas, adapter.name).toBe(false);
@@ -63,13 +51,9 @@ describe('database capability truth', () => {
   it('declares every provider-specific database network boundary explicitly', () => {
     const expected = new Map<string, string[] | undefined>([
       ['railway', ['railway']],
-      ['supabase', undefined],
       ['cloudsql', ['cloudrun']],
       ['rds', ['ecs']],
       ['azure-postgres', ['azure-container-apps']],
-      ['neon', undefined],
-      ['fly', ['fly']],
-      ['digitalocean', undefined],
     ]);
 
     expect([...expected.keys()].sort()).toEqual(providerRegistry.namesFor('database').sort());

@@ -7,7 +7,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { createServer } from '../../server.js';
-import { connectionSetupDetails, connectionSetupUrl, GITHUB_TOKEN_URLS, GITLAB_TOKEN_URLS, CLOUDFLARE_TOKEN_URLS } from '../../domain/services/connection-guidance.js';
+import { connectionSetupUrl, GITHUB_TOKEN_URLS, CLOUDFLARE_TOKEN_URLS } from '../../domain/services/connection-guidance.js';
 import { parseToolEnvelope } from './tool-result.js';
 import { buildRailwayGitHubRepoAccessHelp, buildRailwaySetupHelpInstructions } from '../../domain/services/railway-help.js';
 import { missingProviderSecretsMessage } from '../../domain/services/ci-deploy.service.js';
@@ -123,24 +123,6 @@ describe('contextual credential forms through MCP', () => {
     });
   });
 
-  it('uses a declared GitLab instance and only its documented form fields', async () => {
-    await withClient(async client => {
-      const response = await client.callTool({ name: 'hv_connections', arguments: {
-        provider: 'gitlab', action: 'verify', scope: 'https://gitlab.example.test/acme/storefront',
-      } });
-      const setup = (parseToolEnvelope(response).error?.details as { connectionSetup: { setupUrls: string[]; recommendedSetupUrl: string; notes: string[] } }).connectionSetup;
-      const form = new URL(setup.recommendedSetupUrl);
-      expect(form.origin).toBe('https://gitlab.example.test');
-      expect(form.pathname).toBe('/-/user_settings/personal_access_tokens');
-      expect(form.searchParams.get('description')).toBe('Hypervibe GitLab repository and CI for gitlab.example.test/acme/storefront');
-      expect(form.searchParams.get('name')).toContain('acme/storefront');
-      expect([...form.searchParams.keys()].sort()).toEqual(['description', 'name', 'scopes']);
-      expect(form.searchParams.get('scopes')).toBe('api');
-      expect(setup.notes.join(' ')).toContain('expiration manually');
-      expect(JSON.stringify(response.content)).toContain(form.href);
-    });
-  });
-
   it('names Cloudflare forms for the domain without pretending a domain is an account or zone id', async () => {
     await withClient(async client => {
       const response = await client.callTool({ name: 'hv_connections', arguments: {
@@ -194,12 +176,6 @@ describe('contextual credential forms through MCP', () => {
     });
   });
 
-  it('uses the selected GitLab scope only once in the connect command', () => {
-    const setup = connectionSetupDetails('gitlab', { scope: 'https://gitlab.example.test/acme/storefront' });
-    expect(setup.credentialExample.match(/scope=/g)).toHaveLength(1);
-    expect(setup.credentialExample).toContain('scope="https://gitlab.example.test/acme/storefront"');
-  });
-
   it('bounds names and encodes labels without adding parameters or guessing ownership', () => {
     const project = 'shop & café / staging?admin=true';
     const fine = new URL(connectionSetupUrl(GITHUB_TOKEN_URLS.fineGrained, { project }));
@@ -212,8 +188,6 @@ describe('contextual credential forms through MCP', () => {
     expect(long.searchParams.get('target_name')).toBe('acme');
     expect(long.searchParams.get('description')).toContain(longestScope);
     expect(long.searchParams.get('name')!.length).toBe(40);
-    const gitlab = new URL(connectionSetupUrl(GITLAB_TOKEN_URLS.api, { project: 'x'.repeat(1500) }));
-    expect(gitlab.searchParams.get('description')!.length).toBe(255);
     const cloudflare = new URL(connectionSetupUrl(CLOUDFLARE_TOKEN_URLS.user, { project: 'x'.repeat(1500) }));
     expect(cloudflare.searchParams.get('name')!.length).toBe(120);
   });
@@ -222,7 +196,6 @@ describe('contextual credential forms through MCP', () => {
     for (const scope of ['*', 'acme/storefront?admin=true', 'github_pat_secretshouldnotbeemitted', 'https://github.com/acme/storefront']) {
       expect(connectionSetupUrl(GITHUB_TOKEN_URLS.fineGrained, { scope })).toBe(GITHUB_TOKEN_URLS.fineGrained);
     }
-    expect(connectionSetupUrl(GITLAB_TOKEN_URLS.api, { scope: 'https://user:password@gitlab.example.test/acme/storefront' })).toBe(GITLAB_TOKEN_URLS.api);
     expect(connectionSetupUrl(GITHUB_TOKEN_URLS.api, { project: 'github_pat_secretshouldnotbeemitted' })).toBe(GITHUB_TOKEN_URLS.api);
     expect(connectionSetupUrl('https://example.test/form?existing=true', { project: 'storefront' })).toBe('https://example.test/form?existing=true');
     const wildcard = new URL(connectionSetupUrl(GITHUB_TOKEN_URLS.fineGrained, { scope: 'acme/*' }));

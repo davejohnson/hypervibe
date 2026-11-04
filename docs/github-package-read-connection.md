@@ -58,14 +58,10 @@ copying an API-management token into runtime, or changing deployment strategy.
 | Registered deployment provider | Secondary-only credential update |
 | --- | --- |
 | GitHub | Implemented only for `packageReadToken` on an existing verified exact-scope connection. |
-| GitLab | Unsupported by this capability; complete credential input remains required. |
 | Railway | Unsupported by this capability; complete credential input remains required. |
 | Cloud Run | Unsupported by this capability; existing explicit/native authentication behavior is unchanged. |
 | ECS Express | Unsupported by this capability; existing AWS credential selection is unchanged. |
 | Azure Container Apps | Unsupported by this capability; complete credential input remains required. |
-| DigitalOcean | Unsupported by this capability; complete credential input remains required. |
-| Fly | Unsupported by this capability; complete credential input remains required. |
-| Vercel | Unsupported by this capability; complete credential input remains required. |
 
 The roster and opt-in check run in ordinary `npm test`, alongside the actual
 tool/reference/serialized GitHub regressions and role-provenance tests. The

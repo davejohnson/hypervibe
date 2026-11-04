@@ -5,16 +5,15 @@ schema. Every supported provider must pass the same resource contract through
 the normal desired-state loop.
 
 The [pinned API contract gate](../test/provider-contracts/README.md) validates
-Railway query documents and executes real-client request/response tests, plus
-focused Supabase/Neon REST request contracts. It runs offline in ordinary PR
+Railway query documents and executes real-client request/response tests. It runs offline in ordinary PR
 acceptance and the existing scheduled contract entrypoint. Schema updates are
 explicitly reviewed, never fetched automatically during tests. This evidence
 does not replace the live lifecycle gate below.
 
 Catalog and blueprint work is intentionally separate from this contract.
-The active provider scope deliberately excludes Heroku and Render. Fly.io Apps,
-Machines, certificates, and Managed Postgres are now in scope as
-`ready-for-live` candidates. Supabase and Neon remain in scope.
+The active provider scope is recorded in ARCHITECTURE.md (Provider Scope):
+Railway, Google Cloud, AWS and Azure for hosting and data, GitHub for code and
+CI, Cloudflare, SendGrid, Stripe and App Store Connect.
 
 ## Contract families
 
@@ -58,17 +57,13 @@ vendor offers:
 | --- | --- | --- | --- |
 | Railway | yes | yes | yes |
 | GCP Cloud Run | yes | yes | yes |
-| DigitalOcean App Platform | yes | yes | yes |
-| Fly.io Machines | yes | yes | no |
 | AWS ECS Express Mode | yes | no | no |
 | Azure Container Apps | yes | no | no |
-| Vercel | yes | no | no |
 
 `hv_spec`, `hv_plan`, and `hv_apply` read this contract from provider registry
 metadata. Unsupported services fail with their exact spec path before any
-hosting project, environment, or service mutation. Fly.io's adapter implements
-always-on Machines for web and worker workloads but not provider-native cron
-schedules. ECS Express, Azure Container Apps, and Vercel currently implement
+hosting project, environment, or service mutation. ECS Express and Azure
+Container Apps currently implement
 only their public web lifecycle; Hypervibe does not reinterpret those adapters
 as background-worker or scheduled-job implementations.
 
@@ -96,44 +91,19 @@ issues instead of treating missing evidence as a clean audit.
 ### Code-host and CI conformance
 
 Code hosting and primary CI use separate open registries and normalized ports;
-they are not hosting-provider lifecycle ids. GitHub/GitHub Actions retain the
-legacy compatibility route. GitLab/GitLab CI is currently `ready-for-live` for
-mocked project create/delete, reviewed whole-root configuration and teardown,
-environment-scoped variables, exact-SHA dispatch/evidence/rollback, and the
-portable Azure Container Apps, Cloud Run, DigitalOcean, ECS Express, Railway,
-and Vercel deploy recipes. GitLab.com 18.1+ uses its exact hosted-runner tag.
-Self-managed execution requires one exact locked project runner and manager,
-an uncontested tag, protected-ref-only execution, and an operator capability
-attestation; GitLab's project APIs do not prove executor or privileged-Docker
-configuration.
-
-Mocked contracts cover tri-state repository/file observation, nested durable
-identity, exact namespace/project lifecycle authority, confirmed destructive
-actions, atomic merge-request configuration and removal, exact CI Lint include
-provenance, unowned/overlapping variable refusal, one-variable-per-action
-mutation/deletion, exact-SHA dispatch, evidence-bound rollback-tag creation,
-normalized runs/jobs/logs/artifacts, secret erasure, and zero-mutation noop.
-Runner observation rejects project/group runners that can claim the hosted tag
-and multiple managers for a self-managed runner. A Bitbucket-shaped fake
-provider remains registerable without editing the spec schema, generic tools,
-hosting adapter, or application router.
-
-This does not establish public GitLab support. There is no recent live receipt
-for project lifecycle, rollback/teardown, any portable hosting recipe, or a
-self-managed runner. Live evidence must name the exact GitLab offering,
-version/edition, runner mode, and hosting recipe; GitLab.com evidence never
-promotes self-managed instances or a different host. See [the accepted GitLab
-architecture and evidence boundary](gitlab-integration.md).
+they are not hosting-provider lifecycle ids. GitHub and GitHub Actions are the
+only registered code host and CI provider. Hypervibe never creates or deletes
+repositories. A fake provider remains registerable without editing the spec
+schema, generic tools, hosting adapter, or application router.
 
 ### Environment custom domains
 
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live
 fixture for environment domains. It declares one DNS-only subdomain under
 `domain-test.hypervibe.dev` for each hosting provider: AWS ECS Express Mode,
-Azure Container Apps, Cloud Run, DigitalOcean App Platform, Fly.io, Railway,
-and Vercel. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
-`hv_apply`, and `hv_status`; do not apply the entire seven-provider fixture as one
-opaque batch.
+Azure Container Apps, Cloud Run, and Railway. Run each environment
+stage-by-stage through `hv_spec`, `hv_plan`, `hv_apply`, and `hv_status`; do not
+apply the entire fixture as one opaque batch.
 
 Hosting credential schemas contain authentication and durable account/project
 scope only. Region/location is optional desired state at
@@ -147,7 +117,7 @@ and record ids, explicit pending certificate receipts, noop convergence, and a
 confirmation-gated exact detach with terminal provider and DNS absence. An
 already-attached hostname without the durable binding blocks for explicit
 `hv_import`. Cloud Run, ECS Express Mode, and Azure Container Apps declare
-DNS-only traffic; Railway, DigitalOcean, Vercel, and Fly.io may opt into proxying only
+DNS-only traffic; Railway may opt into proxying only
 after direct certificate validation succeeds.
 
 ### Environment maintenance and data cutover
@@ -160,25 +130,11 @@ only after normal workload/database state is verified. Migration copy authority
 requires active source and target maintenance observations and hashes both into
 the reviewed action; apply re-observes both before creating a fresh data target.
 
-Azure Container Apps, Cloud Run, DigitalOcean App Platform, Railway, and Vercel
-expose the workload-maintenance port. DigitalOcean resolves the exact bound app
-and component, uses the documented app archive/restore setting, and requires a
-terminal deployment plus zero provider-reported running instances before entry
-converges. The full observed App Spec is preserved during each write, while the
-durable snapshot stores only the prior non-secret maintenance object. Vercel
-resolves only its durable Project binding, verifies the documented paused state
-and direct production origins, preserves Projects paused before Hypervibe
-maintenance, and resumes without a deployment. DigitalOcean and Vercel remain
-`maintenance: ready-for-live` until their opt-in entry/noop/exit paths pass. ECS
-Express and Fly.io report `maintenance: unsupported`, so generic planning
-blocks before mutation.
+Azure Container Apps, Cloud Run, and Railway expose the workload-maintenance
+port. ECS Express reports `maintenance: unsupported`, so generic planning blocks
+before mutation.
 
-The DigitalOcean contract follows the provider's documented
-[archive/restore App Spec operation](https://docs.digitalocean.com/products/app-platform/how-to/archive-restore/)
-and verifies terminal shutdown through the Apps API
-[running-instances endpoint](https://docs.digitalocean.com/reference/api/reference/apps/#get-retrieve-app-instances).
-
-Redis/Valkey conformance covers Azure Managed Redis, DigitalOcean, ElastiCache,
+Redis/Valkey conformance covers Azure Managed Redis, ElastiCache,
 Memorystore, and Railway. The Railway adapter slice is `ready-for-live`, not
 `supported`, until the opt-in live teardown contract passes.
 
@@ -193,63 +149,6 @@ conformance does not schedule or create drill clones. The infrastructure live
 profile now proves backup-policy convergence, replica lifecycle, reviewed
 workflow publication, manual dispatch, terminal clone cleanup evidence, and
 dependency-ordered teardown in an isolated project/repository.
-
-Neon is the first newly implemented database slice. Its registry, credential
-schema, provider adapter, connection guidance, and mocked create/observe/destroy
-contract are green. It is `ready-for-live`, not `supported`, until the opt-in
-live contract proves create, noop, and terminal teardown against an isolated
-Neon account.
-
-DigitalOcean is the first combined hosting/database/cache slice. One registered
-deployment provider exposes App Platform directly and derives Managed
-PostgreSQL and Managed Valkey adapters through the provider registry. Its mocked
-contracts pin complete pagination, durable-ID-first observation, duplicate-name
-blocking, partial-create identity preservation, secret-safe receipts, and
-provider-confirmed terminal deletion. New Redis-compatible clusters use
-DigitalOcean's current `valkey` engine; observation also recognizes legacy
-`redis` clusters.
-
-DigitalOcean App Platform, Managed PostgreSQL, and Managed Valkey are
-`ready-for-live`. Hypervibe generates a provider-owned GitHub
-Actions workflow that publishes one DOCR image tagged with the exact checked-
-out Git SHA, updates only already-bound App Platform components, waits for that
-exact deployment ID to become `ACTIVE`, and verifies the active component
-image. CI never creates infrastructure. The reviewed project action
-deterministically reuses an existing team registry, or creates a free Starter
-registry when none exists; the connection contains only the API token.
-
-The review-gated managed-workflow harness and provider-neutral Docker fixture
-can now prove one full desired-state stack: App Platform, Managed PostgreSQL, and
-Managed Valkey create/observe/wire, exact-SHA deploy, noop, update, dependency-
-ordered destruction, and terminal absence. Promotion to `supported` still
-requires one successful opt-in run against an isolated DigitalOcean team.
-
-Fly.io is a combined hosting/database candidate registered under one `fly`
-connection. The hosting adapter uses the Machines HTTP API directly and creates
-one deterministic App per logical service. Apply allocates only the reviewed
-service's shared IPv4/IPv6 ingress, reconciles app secrets, and creates a
-stopped source-less Machine with ownership metadata; it never starts the
-bootstrap image with the application's command. The provider-owned GitHub
-workflow and provider-neutral portable recipe used by GitLab publish the
-checked-out commit, resolve its immutable registry digest, update only the
-single existing owned Machine with optimistic version checking, and wait for
-the exact Machine and health checks to converge. CI cannot create Apps,
-Machines, IPs, certificates, or databases.
-
-The derived Fly Managed Postgres adapter creates one cluster, one logical
-database, and one dedicated `schema_admin` user. If a downstream create step
-fails, it removes the exact partial cluster and verifies absence; if rollback
-cannot be verified, the failed receipt retains the cluster id and explicitly
-requires cleanup. Normal teardown also waits for provider-confirmed absence.
-The cluster endpoints remain private to Fly networking. For each bounded local
-query, seed, or migration operation, Hypervibe now creates one uniquely named
-organization WireGuard peer, re-observes its durable id and public key, starts
-the packaged userspace connector with its private key over stdin, verifies the
-database with `SELECT 1`, and removes the exact peer after the operation. An
-existing matching peer blocks instead of being treated as stale and deleted.
-No Fly CLI or public PostgreSQL proxy is installed or created. The matrix keeps
-both Fly entries at `ready-for-live`; promotion now requires a successful
-isolated hosting/database lifecycle using the packaged connector.
 
 Cloudflare provides the first provider-managed edge load-balancer lifecycle.
 An environment may declare one load balancer at its existing `domain`, with at
@@ -290,34 +189,6 @@ The extended matrix also includes:
   for PostgreSQL, and [Azure Managed Redis](https://learn.microsoft.com/en-us/azure/redis/overview)
   for Redis. They use separate provider ids because they have independent
   resource types, durable identities, observation, and deletion lifecycles.
-- [Vercel Projects and Deployments](https://vercel.com/docs/rest-api) for
-  hosting. Vercel is intentionally absent from the database matrix because
-  [Vercel Postgres is no longer available](https://vercel.com/docs/postgres);
-  its current Postgres offerings are provider-owned Marketplace integrations.
-  The replacement hosting slice binds a verified personal or Team scope,
-  creates one source-less Project per logical web service, and keeps project,
-  production-variable, and deletion mutations inside spec/plan/apply. Its
-  managed workflow uploads the exact checked-out files through the REST API,
-  reconciles deployments by repository and full Git SHA before creating one,
-  and blocks Vercel-native Git links. It supports public framework/static web
-  projects and rejects arbitrary long-lived start commands or build overrides
-  it cannot apply. Its review-gated managed-workflow harness is now available,
-  so the matrix entry is `ready-for-live`; promotion still requires a
-  successful opt-in create/deploy/noop/update/destroy run.
-- [Fly.io Machines](https://fly.io/docs/machines/api/) and the
-  [Machines API reference](https://docs.machines.dev/) for hosting, plus
-  [Fly Managed Postgres](https://fly.io/docs/mpg/) for PostgreSQL. Hypervibe
-  uses organization-scoped tokens and provider HTTP APIs rather than `flyctl`.
-  It records the organization scope beside App and cluster identities, blocks
-  name-only adoption, keeps placement in desired state, and uses a packaged
-  userspace WireGuard connector for bounded access to private database
-  endpoints. These are `ready-for-live` entries rather than support claims
-  until their opt-in live lifecycle evidence is complete.
-- [Neon Postgres](https://api-docs.neon.tech/reference/use-cases) as its own
-  database provider. Neon owns the project, branch, endpoint, database, and
-  deletion lifecycle even when a Vercel integration wires it to an app. Its
-  adapter uses the public Neon API directly and does not depend on a provider
-  CLI.
 - [Amazon ElastiCache Serverless](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/wwe-getting-started.html)
   under the `elasticache` cache provider. It reuses the verified auth-only
   `ecs` connection; region and size are desired cache fields, never credential
@@ -392,10 +263,7 @@ then select exactly one contract:
 
 ```sh
 HYPERVIBE_LIVE_HOSTING=railway npm run test:providers:live
-HYPERVIBE_LIVE_HOSTING=fly npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=cloudsql npm run test:providers:live
-HYPERVIBE_LIVE_DATABASE=neon npm run test:providers:live
-HYPERVIBE_LIVE_DATABASE=fly npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=azure-postgres npm run test:providers:live
 HYPERVIBE_LIVE_CACHE=railway npm run test:providers:live
 HYPERVIBE_LIVE_CACHE=memorystore npm run test:providers:live
@@ -405,22 +273,6 @@ HYPERVIBE_LIVE_CACHE=azure-managed-redis npm run test:providers:live
 
 The runner accepts only `ready-for-live` or live-proven entries and refuses any
 `planned` entry before reading credentials or creating billable resources.
-
-The Neon contract requires `HYPERVIBE_TEST_NEON_API_KEY` plus the Railway
-fixture-host credentials. Set `HYPERVIBE_TEST_NEON_ORGANIZATION_ID` when a
-personal Neon key should target an organization, and optionally set
-`HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
-the contract creates and destroys real provider resources.
-
-The Fly contracts require `HYPERVIBE_TEST_FLY_API_TOKEN` and
-`HYPERVIBE_TEST_FLY_ORGANIZATION_SLUG`. Use a short-lived organization-scoped
-token for the exact isolated organization; an app deploy token cannot create
-the reviewed Apps or Managed Postgres cluster. The database contract creates a
-billable Basic Managed Postgres cluster with 10 GB of storage, exercises the
-packaged private WireGuard connector with `SELECT 1`, and verifies terminal
-cluster and peer absence during teardown. Fly prorates clusters deleted during
-the month, but the operator must still explicitly authorize this billable live
-run before starting it.
 
 The runner copies a tiny HTTP fixture into a temporary worktree and writes a
 mode-`0600` temporary credential object. Hypervibe consumes it through
@@ -570,8 +422,8 @@ are enabled:
 
 | Provider id | Fixture directory | Workflow | Managed datastores | Health URL |
 | --- | --- | --- | --- | --- |
-| `vercel` | `test/provider-conformance/fixture-vercel` | `deploy-vercel-production.yml` | none | HTTPS `/api/health` |
-| `digitalocean` | `test/provider-conformance/fixture` | `deploy-digitalocean-production.yml` | PostgreSQL + Valkey | HTTPS `/health` |
+| `ecs` | `test/provider-conformance/fixture` | `deploy-ecs-production.yml` | RDS PostgreSQL | HTTPS `/health` |
+| `azure-container-apps` | `test/provider-conformance/fixture` | `deploy-azure-container-apps-production.yml` | none | HTTPS `/health` |
 
 The harness never merges its own infrastructure pull request: it applies the
 reviewed plan, prints the Hypervibe PR URL, waits for a human merge, and then
@@ -602,7 +454,8 @@ provider:
       "services": {
         "web": {
           "workloadKind": "web",
-          "healthCheckPath": "/api/health",
+          "startCommand": "node server.mjs",
+          "healthCheckPath": "/health",
           "public": true
         }
       },
@@ -623,30 +476,8 @@ provider:
 }
 ```
 
-For `vercel`, use provider `vercel` and keep the service block above. For
-`digitalocean`, replace the service block with this exact object:
-
-```json
-{
-  "workloadKind": "web",
-  "startCommand": "node server.mjs",
-  "healthCheckPath": "/health",
-  "public": true
-}
-```
-
-The `digitalocean` profile also requires these environment fields:
-
-```json
-"database": {
-  "provider": "digitalocean",
-  "engine": "postgres"
-},
-"cache": {
-  "provider": "digitalocean",
-  "engine": "redis"
-}
-```
+The `ecs` profile also declares `"database": { "engine": "postgres" }`, which
+defaults to RDS on ECS.
 
 Commit and push those files to `main` before running the harness. The test
 proves the local spec is byte-for-byte committed at `HEAD` and that every
@@ -663,18 +494,10 @@ export HYPERVIBE_LIVE_DATA_DIR="/absolute/path/to/persistent-live-state"
 export HYPERVIBE_TEST_GITHUB_REPOSITORY="OWNER/REPOSITORY"
 export HYPERVIBE_TEST_GITHUB_API_TOKEN="<fine-grained repository PAT, or classic PAT with repo + workflow>"
 
-# Select exactly one configured provider:
-export HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN="<Vercel personal or Team token>"
-# Required only when the token should operate in a Team:
-export HYPERVIBE_TEST_VERCEL_TEAM_ID="team_..."
-HYPERVIBE_LIVE_MANAGED_HOSTING=vercel npm run test:providers:managed-live
-
-# Add this explicit opt-in to pause, verify, retry, and unpause the disposable
-# Vercel Project after its exact-SHA health check:
-HYPERVIBE_LIVE_MANAGED_HOSTING=vercel HYPERVIBE_LIVE_MAINTENANCE=1 npm run test:providers:managed-live
-
-# Or, after exporting the provider variables described below:
-HYPERVIBE_LIVE_MANAGED_HOSTING=digitalocean npm run test:providers:managed-live
+# Export the provider credential variables named by the provider matrix, then
+# select exactly one configured provider:
+HYPERVIBE_LIVE_MANAGED_HOSTING=ecs npm run test:providers:managed-live
+HYPERVIBE_LIVE_MANAGED_HOSTING=azure-container-apps npm run test:providers:managed-live
 ```
 
 The recommended GitHub credential is a
@@ -684,28 +507,10 @@ plus Administration, Actions, Contents, Pull requests, Secrets, and Workflows
 read/write. A classic PAT with `repo` and `workflow` also works but cannot be
 restricted to one repository. The credential is stored through a repository-
 scoped `credentialsRef`; none of these hosting profiles needs package-read
-permission on that repository-management token. The Vercel credential is a
-[personal access token](https://vercel.com/account/settings/tokens) scoped to
-the intended personal account or Team. It must be able to read that scope and
-create, configure, deploy, and delete Projects there; include the immutable
-`teamId` for a Team-scoped run. The harness writes temporary
+permission on that repository-management token. The harness writes temporary
 mode-`0600` credential files inside the persistent data directory and removes
 them immediately after Hypervibe verifies each connection; values never enter
 command arguments, plans, receipts, or test output.
-
-For DigitalOcean App Platform, create a
-[custom-scope PAT](https://cloud.digitalocean.com/account/api/tokens) for the
-isolated team. Grant `app:read`, `app:create`, `app:update`, `app:delete`,
-`registry:read`, `registry:update`, `registry:create`, and `account:read`, plus
-the region, size, and action read scopes described in the DigitalOcean section
-above. Export only `HYPERVIBE_TEST_DIGITALOCEAN_TOKEN`. The reviewed project
-action reuses an existing registry or creates a free Starter registry when none
-exists. This account-level support registry is not removed by environment
-teardown. The full-stack profile also
-requires `database:read`, `database:view_credentials`, `database:create`,
-`database:update`, and `database:delete`; the created PostgreSQL and Valkey
-clusters are billable and are removed by exact confirmed actions during
-teardown.
 
 The default review and workflow timeouts are 30 minutes. Override them with
 positive millisecond values in `HYPERVIBE_LIVE_REVIEW_TIMEOUT_MS` and

@@ -62,7 +62,7 @@ describe('reduced secret command surface', () => {
     expect(await client.names()).toEqual(['hv_secrets']);
     const result = await client.call('hv_secrets');
     expect(result.ok).toBe(true);
-    expect(result.data.sources).toContainEqual({ source: 'vault', status: 'missing' });
+    expect(result.data.sources).toContainEqual({ source: 'aws-secrets', status: 'missing' });
     expect(result.data.sources).toContainEqual({ source: 'github', status: 'missing' });
     expect(await client.names()).not.toContain('hv_secrets_sync');
     expect(await client.names()).not.toContain('hv_secrets_set');
@@ -89,8 +89,8 @@ describe('secret reads', () => {
     const t = await makeClient();
 
     const managerLookup = await t.call('hv_secrets', {
-      provider: '1password',
-      path: 'vault/item',
+      provider: 'aws-secrets',
+      path: 'apps/item',
       env: 'production',
     });
     expect(managerLookup.ok).toBe(false);
@@ -108,23 +108,12 @@ describe('secret reads', () => {
     await t.close();
   });
 
-  it('returns project-scoped setup for missing manager and GitHub connections', async () => {
+  it('returns project-scoped setup for a missing GitHub connection', async () => {
     const project = new ProjectRepository().create({
       name: 'secret-setup-app',
       gitRemoteUrl: 'https://github.com/davejohnson/secret-setup-app',
     });
     const client = await makeClient();
-
-    const manager = await client.call('hv_secrets', {
-      project: project.name,
-      provider: 'vault',
-      path: 'apps/production',
-    });
-    expect(manager.error.code).toBe('MISSING_CONNECTION');
-    expectActionableConnectionSetup(manager.error.details.connectionSetup, {
-      provider: 'vault',
-      project: project.name,
-    });
 
     const github = await client.call('hv_secrets', { project: project.name, include: ['github'] });
     expect(github.error.code).toBe('MISSING_CONNECTION');
@@ -142,7 +131,7 @@ describe('secret reads', () => {
 
     const result = await client.call('hv_secrets', {
       project: 'does-not-exist',
-      provider: 'vault',
+      provider: 'aws-secrets',
       path: 'apps/prod',
     });
 
@@ -249,13 +238,13 @@ describe('secret reads', () => {
   it('fully redacts manager values and never exposes mutation methods', async () => {
     const repo = new ConnectionRepository();
     const connection = repo.create({
-      provider: 'vault',
-      credentialsEncrypted: getSecretStore().encryptObject({ address: 'https://vault.example', token: 'token' }),
+      provider: 'aws-secrets',
+      credentialsEncrypted: getSecretStore().encryptObject({ region: 'us-east-1', accessKeyId: 'AKIAEXAMPLE', secretAccessKey: 'secret' }),
     });
     repo.updateStatus(connection.id, 'verified');
     const getSecret = vi.fn(async () => ({ value: 'manager-secret-value', version: '3' }));
     const adapter: ISecretManagerAdapter = {
-      name: 'vault',
+      name: 'aws-secrets',
       async connect() {},
       async verify() { return { success: true }; },
       getSecret,
@@ -265,14 +254,14 @@ describe('secret reads', () => {
     const client = await makeClient();
 
     const result = await client.call('hv_secrets', {
-      provider: 'vault',
+      provider: 'aws-secrets',
       path: 'apps/prod',
       key: 'API_KEY',
       version: '3',
     });
 
     expect(result.data).toEqual({
-      secretRef: 'vault://apps/prod#API_KEY@3',
+      secretRef: 'aws-secrets://apps/prod#API_KEY@3',
       value: '[redacted]',
       present: true,
       version: '3',
@@ -287,7 +276,7 @@ describe('secret reads', () => {
     const client = await makeClient();
 
     const result = await client.rawCall('hv_secrets', {
-      provider: 'vault',
+      provider: 'aws-secrets',
       path: '',
     });
 

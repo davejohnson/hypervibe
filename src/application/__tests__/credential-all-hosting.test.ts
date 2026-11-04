@@ -10,10 +10,6 @@ import { railwayHttpFixture, projectId as railwayProject, stagingId } from '../.
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../../adapters/providers/aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../../adapters/providers/azure/azure-container-apps.adapter.js';
-import { FlyAdapter } from '../../adapters/providers/fly/fly.adapter.js';
-import { DigitalOceanAdapter } from '../../adapters/providers/digitalocean/digitalocean.adapter.js';
-import { VercelAdapter } from '../../adapters/providers/vercel/vercel.adapter.js';
-import { formatFlyEnvironmentBinding, formatFlyServiceBinding } from '../../adapters/providers/fly/fly.binding.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService, type PlanOptions } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
@@ -72,7 +68,7 @@ async function providerWire(provider: string, environment: Environment) {
     Object.assign(adapter, { clients: { ecs: client }, accountId: account });
     binding = { provider, projectId: cluster, environmentId: cluster, services: { web: { serviceId: arn } } };
     transport = async () => { throw new Error('Unexpected non-SDK request'); };
-  } else if (provider === 'azure-container-apps') {
+  } else {
     const subscription = '22222222-2222-4222-8222-222222222222'; const group = `/subscriptions/${subscription}/resourceGroups/bound`; const managed = `${group}/providers/Microsoft.App/managedEnvironments/bound-env`; const id = `${group}/providers/Microsoft.App/containerApps/bound-web`;
     adapter = new AzureContainerAppsAdapter(); await adapter.connect({ tenantId: '11111111-1111-4111-8111-111111111111', subscriptionId: subscription, clientId: '33333333-3333-4333-8333-333333333333', clientSecret: 'synthetic', location: 'canadacentral' });
     let app: any = { id, name: 'bound-web', location: 'canadacentral', tags: { 'managed-by': 'hypervibe', 'hypervibe-environment-id': environment.id }, identity: { type: 'SystemAssigned', principalId: 'runtime' }, properties: { managedEnvironmentId: managed, provisioningState: 'Succeeded', latestReadyRevisionName: 'old', latestRevisionName: 'old', template: { containers: [{ name: 'main', image: 'registry/web:retained', env: envEntries() }] }, configuration: { secrets: [] } } };
@@ -91,37 +87,6 @@ async function providerWire(provider: string, environment: Environment) {
       }
       return Response.json(app);
     };
-  } else if (provider === 'fly') {
-    adapter = new FlyAdapter(); await adapter.connect({ apiToken: 'flyv1-synthetic', organizationSlug: 'example' });
-    const env = formatFlyEnvironmentBinding({ organizationSlug: 'example', projectName: 'existing', environmentName: 'staging' });
-    const app = { id: 'app-id', name: 'bound-app', organization: { slug: 'example' } };
-    const machine = { id: 'machine-id', instance_id: 'old', state: 'started', config: { image: 'registry/web:retained', metadata: { hypervibe_managed: 'true', hypervibe_project_id: 'existing', hypervibe_environment_id: env, hypervibe_service_name: 'web', hypervibe_workload_kind: 'web' } } };
-    binding = { provider, projectId: 'flyorg:example', environmentId: env, services: { web: { serviceId: formatFlyServiceBinding({ organizationSlug: 'example', appId: app.id, appName: app.name, machineId: machine.id }) } } };
-    transport = async (input, init) => {
-      const url = new URL(String(input));
-      if (init?.method === 'POST') { expect(url.pathname).toBe('/v1/apps/bound-app/secrets'); record(JSON.parse(String(init.body)).values); return Response.json({ version: serial }); }
-      if (url.pathname.endsWith('/machines')) return Response.json([machine]);
-      if (url.pathname.endsWith('/secrets')) return Response.json({ secrets: Object.keys(values).map(name => ({ name, digest: 'opaque' })) });
-      if (url.pathname === '/v1/apps/bound-app') return Response.json(app);
-      throw new Error('Unexpected Fly route');
-    };
-  } else if (provider === 'digitalocean') {
-    adapter = new DigitalOceanAdapter(); await adapter.connect({ apiToken: 'dop_v1_synthetic' });
-    let spec: any = { name: 'bound-app', services: [{ name: 'web', image: { registry_type: 'DOCR', registry: 'registry', repository: 'web', tag: 'retained' }, envs: Object.entries(values).map(([key, value]) => ({ key, value, type: 'SECRET', scope: 'RUN_TIME' })) }] };
-    binding = { provider, projectId: 'bound-app', services: { web: { serviceId: 'bound-app:services:web' } } };
-    transport = async (input, init) => { expect(new URL(String(input)).pathname).toBe('/v2/apps/bound-app'); if (init?.method === 'PUT') { spec = JSON.parse(String(init.body)).spec; record(Object.fromEntries(spec.services[0].envs.map((entry: any) => [entry.key, entry.value]))); } return Response.json({ app: { id: 'bound-app', spec, active_deployment: { id: `deployment-${serial}`, phase: 'ACTIVE' } } }); };
-  } else {
-    adapter = new VercelAdapter(); await adapter.connect({ accessToken: 'synthetic-token', teamId: 'team_1234567890' });
-    binding = { provider, projectId: 'team:team_1234567890', services: { web: { serviceId: 'team:team_1234567890:prj_1234567890' } } };
-    transport = async (input, init) => {
-      const url = new URL(String(input));
-      if (url.pathname === '/v2/user') return Response.json({ id: 'user_1234567890', username: 'owner', email: 'owner@example.invalid' });
-      if (url.pathname === '/v2/teams/team_1234567890') return Response.json({ id: 'team_1234567890', slug: 'example', name: 'Example' });
-      if (url.pathname === '/v9/projects/prj_1234567890') return Response.json({ id: 'prj_1234567890', accountId: 'team_1234567890', name: 'bound-project' });
-      if (url.pathname.endsWith('/env')) { if (init?.method === 'POST') { record(Object.fromEntries(JSON.parse(String(init.body)).map((entry: any) => [entry.key, entry.value]))); return Response.json({}); } return Response.json({ envs: Object.keys(values).map(key => ({ id: `env-${key}`, key, value: 'masked', type: 'sensitive', target: ['production'], comment: 'Managed by Hypervibe' })), pagination: { next: null } }); }
-      if (url.pathname === '/v7/deployments') return Response.json({ deployments: [{ uid: 'dpl_old', projectId: 'prj_1234567890', name: 'bound-project', url: 'example.vercel.app', createdAt: 1700000000000, readyState: 'READY', target: 'production' }], pagination: { next: null } });
-      throw new Error('Unexpected Vercel route');
-    };
   }
   vi.stubGlobal('fetch', vi.fn(transport));
   vi.spyOn(adapter, 'observe').mockImplementation(async (): Promise<ObservedState> => ({ provider, observedAt: new Date().toISOString(), projectExists: true, projectId: binding.projectId, environmentId: binding.environmentId,
@@ -130,7 +95,7 @@ async function providerWire(provider: string, environment: Environment) {
   return { adapter, binding, values: () => values, writes: () => writes };
 }
 
-it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'fly', 'digitalocean', 'vercel'])('%s composes a scoped two-alias rotation with pending activation and a stable retry', async provider => {
+it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])('%s composes a scoped two-alias rotation with pending activation and a stable retry', async provider => {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: `credential-${provider}`, defaultPlatform: provider });
   const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging', platformBindings: {} });

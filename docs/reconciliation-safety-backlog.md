@@ -71,18 +71,6 @@ The target invariant is:
 - [x] Preserve a Railway datastore volume unless deletion of its owning service
       is confirmed. An unknown/failed service delete must stop database cleanup.
 
-### Supabase
-
-- [x] Implement `observeDatabase` and distinguish not-found from failed or
-      unsupported observation. Until then, use a matching local component as
-      unverified state instead of planning a create.
-- [x] Stop using the logical `databaseName` option as the Supabase project name.
-      Current apply passes `app`, causing staging and production to contend for
-      the same Supabase project name. Project identity must include the
-      Hypervibe project/environment; logical database naming is separate.
-- [x] Verify deletion to terminal absence and make repeated deletion
-      idempotent. A successful HTTP DELETE response alone is not convergence.
-
 ### Cloud SQL
 
 - [x] Make instance lookup return not-found only for an actual 404. Propagate
@@ -160,9 +148,8 @@ The target invariant is:
 - [x] Confirmation contract: every billable or data-bearing action is skipped
       unless its exact action id is confirmed.
 - [x] Provider parity matrix: run the database lifecycle contract against
-      Railway, Supabase, Cloud SQL, and RDS adapters.
-      The shared contract also covers Fly; full import round trips remain the
-      separate unchecked contract above.
+      Railway, Cloud SQL, RDS and Azure PostgreSQL adapters. Full import round
+      trips remain the separate unchecked contract above.
 
 ## Exit Criteria
 

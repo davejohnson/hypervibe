@@ -7,12 +7,8 @@ import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import type { Environment } from '../../src/domain/entities/environment.entity.js';
 import type { IDatabaseAdapter } from '../../src/domain/ports/database.port.js';
-import { SupabaseAdapter } from '../../src/adapters/providers/supabase/supabase.adapter.js';
-import { NeonAdapter } from '../../src/adapters/providers/neon/neon.adapter.js';
 import { CloudSqlAdapter } from '../../src/adapters/providers/gcp/cloudsql.adapter.js';
 import { AzurePostgresAdapter } from '../../src/adapters/providers/azure/azure-postgres.adapter.js';
-import { FlyDatabaseAdapter } from '../../src/adapters/providers/fly/fly-database.adapter.js';
-import { DigitalOceanDatabaseAdapter } from '../../src/adapters/providers/digitalocean/digitalocean-database.adapter.js';
 import { RdsAdapter } from '../../src/adapters/providers/aws/rds.adapter.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { databaseFreshInitializationIntentSchema } from '../../src/domain/ports/database-fresh-initialization.port.js';
@@ -59,35 +55,27 @@ const evidence = JSON.parse(readFileSync(
 // reconstructed HTTP preflights and rejected writes, not recorded live success.
 // Only the transport is intercepted; request encoding and response/error parsing
 // remain in each real adapter/client, including provider-owned authentication.
-const nativeHttpProviders = ['supabase', 'neon', 'cloudsql', 'azure-postgres', 'fly', 'digitalocean'] as const;
+const nativeHttpProviders = ['cloudsql', 'azure-postgres'] as const;
 // Native account/project coordinates follow the matrix's linked provider APIs.
 // Hypervibe's key spellings are checked separately against the actual registry;
 // do not derive these fixtures from the fresh-initialization schema.
 const unsupportedInitializationProviders = [
-  { provider: 'supabase', hosting: 'railway', scope: { organizationId: 'contract-org' } },
-  { provider: 'neon', hosting: 'railway', scope: { projectId: 'contract-neon-project' } },
   { provider: 'cloudsql', hosting: 'cloudrun', scope: { projectId: 'contract-gcp-project' } },
   { provider: 'rds', hosting: 'ecs', scope: { accountId: '123456789012', region: 'us-east-1' } },
   { provider: 'azure-postgres', hosting: 'azure-container-apps', scope: {
     subscriptionId: '22222222-2222-4222-8222-222222222222', resourceGroup: 'contract-group',
   } },
-  { provider: 'fly', hosting: 'fly', scope: { organizationSlug: 'contract-org' } },
-  { provider: 'digitalocean', hosting: 'digitalocean', scope: { accountUuid: '44444444-4444-4444-8444-444444444444' } },
 ] as const;
 type NativeHttpProvider = typeof nativeHttpProviders[number];
 const subscriptionId = '22222222-2222-4222-8222-222222222222';
 const resourceGroupId = `/subscriptions/${subscriptionId}/resourceGroups/contract-group`;
 const resourceName = 'contract-postgres';
 const nativeRequests: Record<NativeHttpProvider, { method: string; url: string }> = {
-  supabase: { method: 'POST', url: 'https://api.supabase.com/v1/projects' },
-  neon: { method: 'POST', url: 'https://console.neon.tech/api/v2/projects' },
   cloudsql: { method: 'POST', url: 'https://sqladmin.googleapis.com/v1/projects/contract-project/instances' },
   'azure-postgres': {
     method: 'PUT',
     url: `https://management.azure.com${resourceGroupId}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${resourceName}`,
   },
-  fly: { method: 'POST', url: 'https://api.machines.dev/v1/postgres' },
-  digitalocean: { method: 'POST', url: 'https://api.digitalocean.com/v2/databases' },
 };
 
 function environment(provider: NativeHttpProvider): Environment {
@@ -103,16 +91,6 @@ function environment(provider: NativeHttpProvider): Environment {
 }
 
 async function connected(provider: NativeHttpProvider): Promise<IDatabaseAdapter> {
-  if (provider === 'supabase') {
-    const adapter = new SupabaseAdapter();
-    await adapter.connect({ accessToken: 'synthetic-supabase-token', organizationId: 'contract-org-id' });
-    return adapter;
-  }
-  if (provider === 'neon') {
-    const adapter = new NeonAdapter();
-    await adapter.connect({ apiKey: 'synthetic-neon-token', organizationId: 'contract-org', regionId: 'aws-us-east-1' });
-    return adapter;
-  }
   if (provider === 'cloudsql') {
     const adapter = new CloudSqlAdapter();
     const { privateKey } = generateKeyPairSync('rsa', {
@@ -125,32 +103,21 @@ async function connected(provider: NativeHttpProvider): Promise<IDatabaseAdapter
     }) });
     return adapter;
   }
-  if (provider === 'azure-postgres') {
+  {
     const adapter = new AzurePostgresAdapter();
     await adapter.connect({ tenantId: '11111111-1111-4111-8111-111111111111', subscriptionId,
       clientId: '33333333-3333-4333-8333-333333333333', clientSecret: 'synthetic-azure-secret' });
     return adapter;
   }
-  if (provider === 'fly') {
-    const adapter = new FlyDatabaseAdapter();
-    await adapter.connect({ apiToken: 'flyv1-synthetic-token', organizationSlug: 'contract-org' });
-    return adapter;
-  }
-  const adapter = new DigitalOceanDatabaseAdapter();
-  await adapter.connect({ apiToken: 'dop_v1_synthetic-token', region: 'nyc1', databaseSize: 'db-s-1vcpu-1gb', postgresVersion: '17' });
-  return adapter;
 }
 
 async function registeredDatabaseAdapters(): Promise<Record<string, IDatabaseAdapter>> {
   const railway = await providerRegistry.get('railway')!.derivedAdapters!.database!(new RailwayAdapter(), {
-    environment: environment('supabase'),
+    environment: environment('cloudsql'),
   }) as IDatabaseAdapter;
   return {
-    railway, supabase: new SupabaseAdapter(), neon: new NeonAdapter(),
-    cloudsql: new CloudSqlAdapter(), rds: new RdsAdapter(),
-    'azure-postgres': new AzurePostgresAdapter(), fly: new FlyDatabaseAdapter(),
-    digitalocean: new DigitalOceanDatabaseAdapter(),
-  };
+    railway, cloudsql: new CloudSqlAdapter(), rds: new RdsAdapter(),
+    'azure-postgres': new AzurePostgresAdapter(), };
 }
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -324,11 +291,6 @@ describe('complete database provisioning persistence contract', () => {
         expect(endpoint).toBe(expected.url);
         return Response.json({ error: { code: 'InvalidParameter', message: 'Synthetic create rejection' }, message: 'Synthetic create rejection' }, { status: 400 });
       }
-      if (provider === 'supabase' && endpoint === 'https://api.supabase.com/v1/organizations') {
-        return Response.json([{ id: 'contract-org-id', slug: 'contract-org-slug', name: 'Contract organization' }]);
-      }
-      if (provider === 'supabase' && endpoint === expected.url) return Response.json([]);
-      if (provider === 'neon' && endpoint === expected.url) return Response.json({ projects: [], pagination: {} });
       if (provider === 'cloudsql' && endpoint === `${expected.url}/${resourceName}`) {
         return Response.json({ error: { code: 404, message: 'Not found', status: 'NOT_FOUND' } }, { status: 404 });
       }
@@ -339,11 +301,6 @@ describe('complete database provisioning persistence contract', () => {
       if (provider === 'azure-postgres' && endpoint === expected.url.replace(`/${resourceName}`, '')) {
         return Response.json({ value: [] });
       }
-      if (provider === 'fly' && endpoint === expected.url) return Response.json({ data: [] });
-      if (provider === 'digitalocean' && endpoint === expected.url) return Response.json({ databases: [], links: {} });
-      if (provider === 'digitalocean' && endpoint === 'https://api.digitalocean.com/v2/account') {
-        return Response.json({ account: { uuid: 'contract-account' } });
-      }
       throw new Error(`Unexpected read in ${provider} provisioning contract: ${endpoint}`);
     }));
     const adapter = await connected(provider);
@@ -352,11 +309,7 @@ describe('complete database provisioning persistence contract', () => {
     expect(result.connectionUrl).toBeUndefined();
     expect(mutations.map(({ method, url }) => ({ method, url }))).toEqual([expected]);
     const body = mutations[0].body;
-    if (provider === 'supabase') expect(body).toMatchObject({ organization_slug: 'contract-org-slug', name: resourceName });
-    if (provider === 'neon') expect(body).toMatchObject({ project: { org_id: 'contract-org', name: resourceName } });
     if (provider === 'cloudsql') expect(body).toMatchObject({ name: resourceName, databaseVersion: 'POSTGRES_15' });
     if (provider === 'azure-postgres') expect(body).toMatchObject({ properties: { storage: { storageSizeGB: 32, autoGrow: 'Enabled' } } });
-    if (provider === 'fly') expect(body).toMatchObject({ name: resourceName, org_slug: 'contract-org', disk_size_gb: 10 });
-    if (provider === 'digitalocean') expect(body).toMatchObject({ name: resourceName, engine: 'pg', size: 'db-s-1vcpu-1gb' });
   });
 });

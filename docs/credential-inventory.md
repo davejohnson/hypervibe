@@ -66,10 +66,9 @@ the old deployment. These outcomes must remain visible independently.
 
 | Category | Named providers | Inventory evidence and limits |
 | --- | --- | --- |
-| Hosting | Railway, Cloud Run, ECS Express, Azure Container Apps, Fly.io, DigitalOcean App Platform, Vercel | Reuses the existing observation capability and exact bindings. Unsupported, incomplete, masked, or mismatched observations remain unknown. No new hosting mutation/activation capability is claimed. See the [existing native-semantics review](scoped-secret-updates.md#provider-review). |
+| Hosting | Railway, Cloud Run, ECS Express, Azure Container Apps | Reuses the existing observation capability and exact bindings. Unsupported, incomplete, masked, or mismatched observations remain unknown. No new hosting mutation/activation capability is claimed. See the [existing native-semantics review](scoped-secret-updates.md#provider-review). |
 | CI | GitHub Actions | New GET-only scope/metadata reader, using [Actions secrets](https://docs.github.com/en/rest/actions/secrets) and [environment inventory](https://docs.github.com/en/rest/deployments/environments). The four operations are pinned under `test/provider-contracts/github/secret-inventory`. Lists are bounded to 1,000 items per scope; values cannot be read. |
-| CI | GitLab CI | CI destination aggregation is not implemented; inventory reports that gap. It does not reinterpret GitLab state as GitHub state. |
-| Secret references | Vault, AWS Secrets Manager, Doppler, 1Password, Bitwarden, Stripe Projects | Displays declared provider/path/key/version descriptors without resolving values or asserting validity, expiry, rotation, or account identity. |
+| Secret references | AWS Secrets Manager, Stripe Projects | Displays declared provider/path/key/version descriptors without resolving values or asserting validity, expiry, rotation, or account identity. |
 
 Regression evidence is in `src/application/__tests__/credential-inventory.test.ts`
 and `src/adapters/providers/github/__tests__/github.secret-inventory.api-contract.test.ts`.

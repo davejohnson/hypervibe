@@ -71,7 +71,7 @@ export function resolveLocalSecretRef(ref: string, provider?: string, onResolved
     onResolved?.({ resolvedRef: `file:${filePath}` });
     return value;
   }
-  throw new Error('Unsupported credentialsRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field.');
+  throw new Error('Unsupported credentialsRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like aws-secrets://name#key.');
 }
 
 function defaultScalarCredentialKey(provider: string): string | undefined {

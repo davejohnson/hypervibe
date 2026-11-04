@@ -162,41 +162,5 @@ export interface ProviderCiDeployMetadata {
   secretCredentialKeys?: Record<string, string>;
   requiresGitHubPackagePull?: boolean;
   buildGitHubActionsSteps: (target: BranchDeployTarget) => BranchDeployStepResult;
-  /** Provider-neutral recipe consumed by non-GitHub CI renderers. */
-  buildPortableRecipe?: (target: BranchDeployTarget) => PortableCiDeployRecipe;
-  /** Static runner trust requirements used before provider bindings are available. */
-  portableRunnerCapabilities?: Array<'linux-amd64' | 'docker-privileged'>;
   diagnoseWorkflowLog?: (text: string) => CiWorkflowDiagnostic[];
-}
-
-export type PortableCiValueSource =
-  | { kind: 'connection'; provider: string; credentialKey: string }
-  | { kind: 'literal'; value: string };
-
-export interface PortableCiValue {
-  name: string;
-  source: PortableCiValueSource;
-  secret: boolean;
-  /** Encoding applied before the value crosses the CI variable boundary. */
-  transform?: 'base64';
-}
-
-export interface PortableCiDeployRecipe {
-  version: 1;
-  provider: string;
-  kind: 'container' | 'repository';
-  runnerCapabilities: Array<'linux-amd64' | 'docker-privileged'>;
-  values: PortableCiValue[];
-  runtime: {
-    path: string;
-    content: string;
-    npmPackages?: string[];
-  };
-  /** Safe CMD used only to build an image whose provider release installs exact per-resource commands. */
-  containerBuildStartCommand?: string;
-  /** Provider-owned release identities that portable CI must preserve and verify. */
-  releaseEvidence?: {
-    providerResources: string[];
-    requiresImmutableImage: boolean;
-  };
 }

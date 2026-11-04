@@ -1,19 +1,19 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import { devOpsProviderRegistry, type CiApplyResult, type CiLifecycleResult } from '../registry/devops.registry.js';
+import {
+  devOpsProviderRegistry,
+  type CiApplyResult,
+  type CiProviderRegistration,
+} from '../registry/devops.registry.js';
 import { resolveDevOpsSelection } from '../spec/devops-selection.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
-import {
-  applyGitHubActionsAppliedSpecHash,
-  applyGitHubActionsDeploy,
-  planGitHubActionsAppliedSpecHash,
-  planGitHubActionsDeploy,
-} from './ci-deploy.service.js';
 
-function actions(result: CiLifecycleResult): PlanAction[] {
-  return [...(result.actions ?? []), ...(result.action ? [result.action] : [])];
-}
+/**
+ * The single route between planning/apply and the selected primary CI
+ * provider. Canonical `devops` and legacy top-level GitHub specs resolve to the
+ * same selection, so both always go through the registered CI lifecycle.
+ */
 
 function hasRetainedCiBinding(environment: Environment | null): boolean {
   const ci = environment?.platformBindings.ci;
@@ -25,6 +25,20 @@ function hasRetainedCiBinding(environment: Environment | null): boolean {
   );
 }
 
+function selectedCiProvider(spec: ProjectSpec):
+  | { registration: CiProviderRegistration }
+  | { error: string }
+  | null {
+  const selection = resolveDevOpsSelection(spec);
+  if (!selection?.ci) return null;
+  const registration = devOpsProviderRegistry.ciProvider(selection.ci.provider);
+  if (!registration) return { error: `CI provider "${selection.ci.provider}" is not registered` };
+  if (!devOpsProviderRegistry.compatible(selection.code.provider, selection.ci.provider)) {
+    return { error: `CI provider "${selection.ci.provider}" is not compatible with code host "${selection.code.provider}"` };
+  }
+  return { registration };
+}
+
 export async function planManagedCiDeploy(params: {
   project: Project;
   spec: ProjectSpec;
@@ -34,8 +48,8 @@ export async function planManagedCiDeploy(params: {
   dependsOn?: string[];
   includeBackupCredentials?: boolean;
 }): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string }> {
-  const selection = resolveDevOpsSelection(params.spec);
-  if (!selection?.ci) {
+  const selected = selectedCiProvider(params.spec);
+  if (!selected) {
     return hasRetainedCiBinding(params.environment)
       ? {
           actions: [],
@@ -44,38 +58,12 @@ export async function planManagedCiDeploy(params: {
         }
       : { actions: [], warnings: [] };
   }
-
-  // This is pinned compatibility behavior, not provider inference for new
-  // desired state. It can be deleted when legacy specs are migrated.
-  if (selection.source === 'legacy-github') {
-    const result = await planGitHubActionsDeploy(params);
-    return {
-      actions: result.action ? [result.action] : [],
-      warnings: result.warnings,
-      ...(result.error ? { error: result.error } : {}),
-    };
-  }
-
-  const registration = devOpsProviderRegistry.ciProvider(selection.ci.provider);
-  if (!registration) {
-    return { actions: [], warnings: [], error: `CI provider "${selection.ci.provider}" is not registered` };
-  }
-  if (!devOpsProviderRegistry.compatible(selection.code.provider, selection.ci.provider)) {
-    return {
-      actions: [],
-      warnings: [],
-      error: `CI provider "${selection.ci.provider}" is not compatible with code host "${selection.code.provider}"`,
-    };
-  }
-  const backupPlanner = params.includeBackupCredentials ? registration.lifecycle.planBackupCredentials : undefined;
-  const result = await (backupPlanner ?? registration.lifecycle.planDeploy)(params);
+  if ('error' in selected) return { actions: [], warnings: [], error: selected.error };
+  const backupPlanner = params.includeBackupCredentials ? selected.registration.lifecycle.planBackupCredentials : undefined;
+  const result = await (backupPlanner ?? selected.registration.lifecycle.planDeploy)(params);
   if (params.includeBackupCredentials && !backupPlanner) result.warnings.push(
     'The selected CI provider has no separate backup credential preparation capability. Application credential preparation does not establish backup access.');
-  return {
-    actions: actions(result),
-    warnings: result.warnings,
-    ...(result.error ? { error: result.error } : {}),
-  };
+  return result;
 }
 
 export async function planManagedCiAppliedSpecHash(params: {
@@ -86,16 +74,10 @@ export async function planManagedCiAppliedSpecHash(params: {
   environment: Environment | null;
   dependsOn?: string[];
 }): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string }> {
-  const selection = resolveDevOpsSelection(params.spec);
-  if (!selection?.ci) return { actions: [], warnings: [] };
-  if (selection.source === 'legacy-github') {
-    const result = await planGitHubActionsAppliedSpecHash(params);
-    return { actions: result.action ? [result.action] : [], warnings: result.warnings };
-  }
-  const registration = devOpsProviderRegistry.ciProvider(selection.ci.provider);
-  if (!registration?.lifecycle.planAppliedSpecHash) return { actions: [], warnings: [] };
-  const result = await registration.lifecycle.planAppliedSpecHash(params);
-  return { actions: actions(result), warnings: result.warnings, ...(result.error ? { error: result.error } : {}) };
+  const selected = selectedCiProvider(params.spec);
+  if (!selected) return { actions: [], warnings: [] };
+  if ('error' in selected) return { actions: [], warnings: [], error: selected.error };
+  return selected.registration.lifecycle.planAppliedSpecHash(params);
 }
 
 export async function applyManagedCiAction(params: {
@@ -105,40 +87,26 @@ export async function applyManagedCiAction(params: {
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
   appliedSpecHash: boolean;
+  authority?: 'publication-only' | 'secret-sync';
 }): Promise<CiApplyResult> {
-  const selection = resolveDevOpsSelection(params.spec);
-  if (!selection?.ci) {
+  const selected = selectedCiProvider(params.spec);
+  if (!selected) {
     return { success: false, status: 'blocked', message: 'Managed CI is no longer selected', error: 'Re-run hv_plan.' };
   }
-  if (selection.source === 'legacy-github') {
-    if (params.appliedSpecHash) {
-      const desiredHash = typeof params.action.metadata?.desiredHash === 'string'
-        ? params.action.metadata.desiredHash
-        : '';
-      if (!desiredHash) return { success: false, status: 'blocked', message: 'Applied-spec action is stale', error: 'Re-run hv_plan.' };
-      return applyGitHubActionsAppliedSpecHash({
-        project: params.project,
-        environmentName: params.environmentName,
-        desiredHash,
-      });
-    }
-    return applyGitHubActionsDeploy(params);
+  if ('error' in selected) {
+    return { success: false, status: 'blocked', message: 'Managed CI provider is unavailable', error: selected.error };
   }
-  const actionProvider = typeof params.action.metadata?.ciProvider === 'string'
-    ? params.action.metadata.ciProvider
-    : '';
-  if (actionProvider !== selection.ci.provider) {
-    return { success: false, status: 'blocked', message: 'Managed CI action is stale', error: 'The selected CI provider changed; re-run hv_plan.' };
+  const { registration } = selected;
+  // The reviewed action must belong to the currently selected provider's connection.
+  if (params.action.resource.provider !== registration.connectionProvider) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Managed CI action is stale',
+      error: 'The selected CI provider changed after planning; re-run hv_plan.',
+    };
   }
-  const registration = devOpsProviderRegistry.ciProvider(actionProvider);
-  if (!registration) {
-    return { success: false, status: 'blocked', message: 'Managed CI provider is unavailable', error: `CI provider "${actionProvider}" is not registered.` };
-  }
-  if (params.appliedSpecHash) {
-    if (!registration.lifecycle.applyAppliedSpecHash) {
-      return { success: false, status: 'blocked', message: 'Applied deployment contract is unsupported', error: `${actionProvider} does not implement applied-spec synchronization.` };
-    }
-    return registration.lifecycle.applyAppliedSpecHash(params);
-  }
-  return registration.lifecycle.applyDeploy(params);
+  return params.appliedSpecHash
+    ? registration.lifecycle.applyAppliedSpecHash(params)
+    : registration.lifecycle.applyDeploy(params);
 }

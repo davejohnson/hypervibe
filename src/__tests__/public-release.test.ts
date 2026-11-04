@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -166,10 +166,7 @@ describe('public release configuration', () => {
     ) as {
       secrets?: Record<string, unknown>;
     };
-    // The normal bindings exporter removes an empty public projection.
-    const bindingsPath = new URL('../../.hypervibe/bindings.json', import.meta.url);
-    const bindings = (existsSync(bindingsPath)
-      ? JSON.parse(readFileSync(bindingsPath, 'utf8')) : {}) as {
+    let bindings: {
       environments?: {
         repository?: {
           platformBindings?: {
@@ -179,7 +176,15 @@ describe('public release configuration', () => {
           };
         };
       };
-    };
+    } = {};
+    try {
+      bindings = JSON.parse(
+        readFileSync(new URL('../../.hypervibe/bindings.json', import.meta.url), 'utf8')
+      );
+    } catch (error) {
+      // Hypervibe removes this optional export when no public bindings remain.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
 
     expect(spec.secrets?.NPM_TOKEN).toBeUndefined();
     expect(

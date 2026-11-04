@@ -9,9 +9,6 @@ import { createRailwayStorageAdapter } from '../../src/adapters/providers/railwa
 import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../../src/adapters/providers/aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
-import { FlyAdapter } from '../../src/adapters/providers/fly/fly.adapter.js';
-import { DigitalOceanAdapter } from '../../src/adapters/providers/digitalocean/digitalocean.adapter.js';
-import { VercelAdapter } from '../../src/adapters/providers/vercel/vercel.adapter.js';
 
 // This roster enforces the reviewed scope in docs/storage-runtime-access-evidence.md.
 // Constructors only; no credentials or live provider calls. Native contracts and
@@ -37,11 +34,10 @@ describe('complete named storage workload-access contract', () => {
     } else expect(port).toBeUndefined();
   });
   it('pins every hosting queue backend affected by runtime identity preparation', () => {
-    const hosts = [new RailwayAdapter(), new CloudRunAdapter(), new EcsExpressAdapter(), new AzureContainerAppsAdapter(),
-      new FlyAdapter(), new DigitalOceanAdapter(), new VercelAdapter()];
+    const hosts = [new RailwayAdapter(), new CloudRunAdapter(), new EcsExpressAdapter(), new AzureContainerAppsAdapter()];
     expect(hosts.map(adapter => adapter.name).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
     expect(Object.fromEntries(hosts.map(adapter => [adapter.name, adapter.capabilities.queues?.backend ?? null]))).toEqual({
-      railway: 'postgres', cloudrun: 'pubsub', ecs: null, 'azure-container-apps': null, fly: null, digitalocean: null, vercel: null,
+      railway: 'postgres', cloudrun: 'pubsub', ecs: null, 'azure-container-apps': null,
     });
   });
 });

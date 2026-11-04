@@ -281,7 +281,7 @@ export function resolveDatabaseProviderForProject(
   return overrides.databaseProvider
     ?? policyState?.databaseProvider
     ?? inferExistingDatabaseProvider(project.id, overrides.environmentName ?? policyState?.environmentName ?? 'staging')
-    ?? 'supabase';
+    ?? 'railway';
 }
 
 export function resolveDesiredState(
@@ -317,7 +317,7 @@ export function resolveDesiredState(
     serviceName: workloads.services[0] ?? Object.keys(workloads.crons ?? {})[0] ?? fallbackPrimaryService,
     crons: workloads.crons,
     domain: overrides.domain ?? policyState?.domain,
-    databaseProvider: overrides.databaseProvider ?? policyState?.databaseProvider ?? 'supabase',
+    databaseProvider: overrides.databaseProvider ?? policyState?.databaseProvider ?? 'railway',
     setupEmail: overrides.setupEmail ?? policyState?.setupEmail ?? true,
     serviceConfig: workloads.serviceConfig,
     envVars: normalizeEnvVars(overrides.envVars) ?? normalizeEnvVars(policyState?.envVars),

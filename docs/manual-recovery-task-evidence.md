@@ -19,9 +19,6 @@ native point-in-time restore or application compatibility.
 | ECS | RunTask returns task identities under a cluster and accepts its own client token; native consistency and task-definition authority differ from Cloud Run operations. | Unsupported; no durable manual recovery adapter. |
 | Azure Container Apps | Job definitions and their executions have separate start/completion identities and managed-identity configuration. | Unsupported; no durable manual recovery adapter. |
 | Railway | The existing private helper uses project/environment/service/deployment identities. Its scheduled execution is not this persisted task capability. | Unsupported; no durable manual recovery adapter. |
-| Fly | Machine identity and current instance identity are distinct; native start/stop/delete and lease behavior need their own contract. | Unsupported; no durable manual recovery adapter. |
-| DigitalOcean | App Platform deployment jobs and cron jobs have app/deployment execution scope. | Unsupported; no durable manual recovery adapter. |
-| Vercel | Cron invokes deployed functions; that does not establish a private immutable backup-container lifecycle. | Unsupported; no durable manual recovery adapter. |
 
 Official sources reviewed on 2026-11-02:
 
@@ -162,4 +159,4 @@ run, and reject changed identity, mapping, secret version and resource limits.
 These reconstructed transports use recorded native transformations and synthetic
 identities. They run in normal acceptance and establish parser/recovery behavior;
 completion of the retained live attempt and cleanup remain separate acceptance
-steps. The seven-provider capability matrix above is unchanged.
+steps. The four-provider capability matrix above is unchanged.

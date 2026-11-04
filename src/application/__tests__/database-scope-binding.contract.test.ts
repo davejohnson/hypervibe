@@ -385,7 +385,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(f.http.mutations).toEqual([]);
   });
 
-  it.each(['railway', 'cloudsql', 'rds', 'supabase', 'azure-postgres', 'neon', 'fly', 'digitalocean'])('keeps %s recovery-scope support explicit', async provider => {
+  it.each(['railway', 'cloudsql', 'rds', 'azure-postgres'])('keeps %s recovery-scope support explicit', async provider => {
     const f = await fixture();
     f.spec.environments.staging.database!.provider = provider;
     ctx.repos.components.updateBindings(f.component.id, { provider });
@@ -410,6 +410,6 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
 
   it('covers every registered database provider in the named repair review', () => {
     expect(providerRegistry.namesFor('database').sort())
-      .toEqual(['railway', 'cloudsql', 'rds', 'supabase', 'azure-postgres', 'neon', 'fly', 'digitalocean'].sort());
+      .toEqual(['railway', 'cloudsql', 'rds', 'azure-postgres'].sort());
   });
 });

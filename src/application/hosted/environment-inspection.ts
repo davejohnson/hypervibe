@@ -129,7 +129,6 @@ function declaredResources(spec: EnvironmentSpec, environment: string, hasRuntim
   if (spec.domainRegistration) unsupported('domain-registration', 'domain-registration', spec.domainRegistration.provider);
   if (spec.loadBalancer) unsupported('load-balancer', 'load-balancer', spec.loadBalancer.provider);
   if (spec.email.enabled) unsupported('email', 'email', 'unverified');
-  if (spec.messaging) unsupported('messaging', 'messaging', spec.messaging.provider);
   if (spec.payments?.stripe) unsupported('payment', 'payment', 'stripe');
   if (spec.maintenance) unsupported('maintenance', 'maintenance');
   if (spec.dataMigration) unsupported('data-migration', 'data-migration');

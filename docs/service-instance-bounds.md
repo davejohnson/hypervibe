@@ -15,9 +15,6 @@ Provider review completed 2026-10-25 before adapter changes:
 | ECS Express | [Express resources](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-work.html) carry service autoscaling targets; [Application Auto Scaling](https://docs.aws.amazon.com/autoscaling/application/userguide/getting-started.html) has separate target identity and min/max capacity. | Explicitly unavailable here; no implicit target/IAM creation. |
 | Azure Container Apps | [Scale rules](https://learn.microsoft.com/en-us/azure/container-apps/scale-app) define per-revision min/max, create a new revision, and permit transient extra replicas during maintenance. | Explicitly unavailable here; do not pretend revision bounds are service-wide. |
 | Railway | [Scaling](https://docs.railway.com/deployments/scaling) uses manually assigned regional replica counts, distinct from vertical autoscaling. | Explicitly unavailable here. |
-| Fly | [Autostop/autostart](https://docs.fly.io/launch/autostop-autostart) starts/stops existing Machines; maximum capacity is constrained by allocated Machines, whose creation is a separate lifecycle. | Explicitly unavailable here; no hidden Machine creation. |
-| DigitalOcean App Platform | [Scaling](https://docs.digitalocean.com/products/app-platform/how-to/scale-app/) has component autoscaling min/max and metric/instance-size prerequisites. | Explicitly unavailable here pending complete component reconciliation. |
-| Vercel | [Concurrency scaling](https://vercel.com/docs/functions/concurrency-scaling) is platform-managed function concurrency, not this managed-service replica contract. | Unsupported native model; no fabricated bounds. |
 
 The selected provider must advertise the complete capability before spec/apply
 acceptance. Registry coverage belongs in normal `npm test`, including explicit

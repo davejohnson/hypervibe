@@ -4,7 +4,6 @@ import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 import { resolveDevOpsSelection } from '../spec/devops-selection.js';
 import { SpecStore } from '../spec/spec.store.js';
 import {
-  executeManagedCiRollback,
   type CiRollbackFailure,
   type CiRollbackResult,
 } from './ci-rollback.service.js';
@@ -62,19 +61,13 @@ export async function executeRollback(params: {
   }
 
   const ciProvider = storedSpec ? resolveDevOpsSelection(storedSpec)?.ci?.provider : undefined;
-  if (ciProvider !== 'github-actions') {
-    const rollback = ciProvider
-      ? devOpsProviderRegistry.ciProvider(ciProvider)?.rollback
-      : undefined;
-    if (rollback) {
-      return rollback({ project, environment, toSha: params.toSha });
-    }
+  const registration = ciProvider ? devOpsProviderRegistry.ciProvider(ciProvider) : undefined;
+  if (!registration) {
     return {
       ok: false,
       reason: 'unsupported',
-      error: `Managed rollback is not implemented for ${ciProvider ?? 'the selected CI provider'} yet. Inspect the exact release with hv_ci_status; Hypervibe will not dispatch an unverified rollback through a GitHub-specific path.`,
+      error: `Managed rollback is not available for ${ciProvider ?? 'the selected CI provider'}. Inspect the exact release with hv_ci_status; Hypervibe will not dispatch an unverified rollback.`,
     };
   }
-
-  return executeManagedCiRollback({ project, environment, toSha: params.toSha });
+  return registration.rollback({ project, environment, toSha: params.toSha });
 }

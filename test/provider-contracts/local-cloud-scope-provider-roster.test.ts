@@ -6,8 +6,7 @@ import { parseCloudInstallationIntentV1 } from '../../src/domain/services/cloud-
 
 // Explicit capability review; schema/registry presence is not live certification.
 // See docs/local-cloud-scope-preparation.md and connect-cloud-scope-preparation.md.
-const reviewed = { railway: false, cloudrun: true, ecs: false, 'azure-container-apps': false,
-  fly: false, digitalocean: false, vercel: false };
+const reviewed = { railway: false, cloudrun: true, ecs: false, 'azure-container-apps': false };
 const nativeScope = { scopeKind: 'project-allocation', allocationMode: 'create-exclusive-v1', projectId: 'new-project', displayName: 'New Project' };
 describe('local empty-project capability provider roster', () => {
   it('requires all registered hosting providers to have an explicit local allocation review', () => {

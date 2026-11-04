@@ -6,9 +6,6 @@ import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.ada
 import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../../src/adapters/providers/aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
-import { FlyAdapter } from '../../src/adapters/providers/fly/fly.adapter.js';
-import { DigitalOceanAdapter } from '../../src/adapters/providers/digitalocean/digitalocean.adapter.js';
-import { VercelAdapter } from '../../src/adapters/providers/vercel/vercel.adapter.js';
 import type { IHostingAdapter } from '../../src/domain/ports/hosting.port.js';
 import { registryCredentialLifecycle } from '../../src/domain/ports/registry-credential.port.js';
 
@@ -19,11 +16,8 @@ const reviewed: Array<[string, Pick<IHostingAdapter, 'capabilities' | 'observe' 
   ['cloudrun', new CloudRunAdapter(), 'Cloud Run', false],
   ['ecs', new EcsExpressAdapter(), 'ECS Express', false],
   ['azure-container-apps', new AzureContainerAppsAdapter(), 'Azure Container Apps', false],
-  ['fly', new FlyAdapter(), 'Fly.io', false],
-  ['digitalocean', new DigitalOceanAdapter(), 'DigitalOcean App Platform', false],
-  ['vercel', new VercelAdapter(), 'Vercel', false],
 ];
-const registryPasswordCopies = new Set(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'digitalocean']);
+const registryPasswordCopies = new Set(['railway', 'cloudrun', 'ecs', 'azure-container-apps']);
 // Pin both the admitted evidence and its limit. These are documentation review
 // assertions; real transport and shared rollout tests prove their behavior.
 const databaseEvidence: Record<string, [string, string]> = {
@@ -31,9 +25,6 @@ const databaseEvidence: Record<string, [string, string]> = {
   cloudrun: ['selected revision or immutable execution', 'unresolved secret references do not become plaintext equality proof'],
   ecs: ['Accepted selected-key writes retain native deployment identity', 'task retirement and resolved external secret values remain separate'],
   'azure-container-apps': ['corresponding new revision or restart evidence', 'prevent an already-existing ready revision from proving activation'],
-  fly: ['managed Machine updates require that minimum version', 'unknown write-only value equality'],
-  digitalocean: ['exact native deployment identity and selected-key coverage', 'encrypted value comparison and individual instance retirement remain separate'],
-  vercel: ['Accepted production-target writes join the exact managed deployment', 'sensitive value equality and process retirement remain unknown'],
 };
 
 describe('named-provider secret-only contract coverage', () => {

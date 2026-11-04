@@ -68,22 +68,12 @@ import {
 } from '../domain/services/delegated-secret.service.js';
 import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
 import {
-  applyGitHubActionsAppliedSpecHash,
-  applyGitHubActionsDeploy,
   applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
 import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
-import { applyManagedCodeRepositoryAction } from '../domain/services/managed-code-repository.service.js';
-import {
-  CI_APPLIED_SPEC_SYNC_OPERATION,
-  CI_BINDING_REMOVE_OPERATION,
-  CI_CONFIGURATION_SYNC_OPERATION,
-  CI_VARIABLE_DELETE_OPERATION,
-  CI_VARIABLE_SYNC_OPERATION,
-} from '../domain/services/managed-ci.contract.js';
 import {
   applyGitHubCollaboration,
   resolveCollaborationRepository,
@@ -92,7 +82,6 @@ import {
   applyGitHubInfrastructure,
   applyGitHubDelegatedSecret,
   applyGitHubNativeSetting,
-  applyGitHubOpenAISecret,
   resolveGitHubInfrastructureRepository,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
@@ -153,11 +142,6 @@ import {
   emailIntegrationFingerprint,
   resolveEmailIntegrationState,
 } from '../domain/services/email-plan.service.js';
-import {
-  applyTwilioMessagingAction,
-  resolveTwilioMessagingState,
-  twilioMessagingFingerprint,
-} from '../domain/services/twilio-messaging.service.js';
 import {
   applyProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
@@ -710,21 +694,8 @@ async function executeRepositoryPlanApply(
       };
     }
     if (
-      authority.capability === 'code.repository.create'
-      || authority.capability === 'code.repository.destroy'
-      || authority.capability === 'code.repository.binding.remove'
-    ) {
-      return applyManagedCodeRepositoryAction({
-        project: projectForApply,
-        spec: params.spec,
-        environmentName: params.envName,
-        action,
-      });
-    }
-    if (
       action.resource.name !== expectedRepository
       && authority.capability !== 'github.pages-dns.sync'
-      && authority.capability !== 'github.openai-secret.sync'
       && authority.capability !== 'github.delegated-secret.sync'
     ) {
       return blockedActionIdentity(
@@ -763,18 +734,6 @@ async function executeRepositoryPlanApply(
         }
         return applyGitHubPagesDns({
           spec: params.spec,
-          action,
-        });
-      case 'github.openai-secret.sync':
-        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-          return blockedActionIdentity(
-            action,
-            `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
-          );
-        }
-        return applyGitHubOpenAISecret({
-          project: projectForApply,
-          environmentName: params.envName,
           action,
         });
       case 'github.delegated-secret.sync':
@@ -848,7 +807,21 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
-  if ('error' in loaded) return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
+  if ('error' in loaded) {
+    return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
+  }
+  // Older persisted plans may put GitHub secret writes before reviewed file
+  // publication. Require the prerequisite before any effects, including when
+  // publication was moved to the end for confirmation.
+  const githubPublication = loaded.document.actions.find(action =>
+    action.type !== 'noop' && resolvePlanActionAuthority(action)?.capability === 'github.infrastructure.sync');
+  if (githubPublication && loaded.document.actions.some(action =>
+    action.type !== 'noop'
+    && resolvePlanActionAuthority(action)?.capability === 'github.delegated-secret.sync'
+    && !action.dependsOn?.includes(githubPublication.id))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'github',
+      reason: 'This plan must publish and verify the reviewed GitHub workflows before changing their keys. Run hv_plan again.' }] };
+  }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -990,16 +963,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? withBackupStorageDefaults(rawEnvironmentSpec) : rawEnvironmentSpec;
   if (!envSpec) {
     if (secretsOnly) return { kind: 'env_missing', envName };
-    const repositoryLifecycleOnly = loaded.document.actions.length > 0
-      && loaded.document.actions.every((action) => {
-        const capability = resolvePlanActionAuthority(action)?.capability;
-        return capability === 'code.repository.create'
-          || capability === 'code.repository.destroy'
-          || capability === 'code.repository.binding.remove';
-      });
     return shouldPlanGitHubInfrastructure(spec, envName)
       || shouldPlanGitHubDelegatedSecrets(spec, envName)
-      || repositoryLifecycleOnly
       ? executeRepositoryPlanApply(ctx, {
           project,
           spec,
@@ -1399,22 +1364,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       email: emailIntegrationFingerprint(emailState),
     };
   }
-  if (shouldRefreshIntegration(Boolean(envSpec.messaging), loaded.document.integrationFingerprints?.messaging)) {
-    if (!envSpec.messaging) {
-      return {
-        kind: 'blocked',
-        applyBlocked: [{ category: 'prerequisite', provider: 'twilio', reason: 'Twilio messaging desired state changed after planning.', policy: 'hard' }],
-      };
-    }
-    const messagingState = await resolveTwilioMessagingState({
-      project: projectForPreflight,
-      spec: envSpec.messaging,
-    });
-    freshIntegrationFingerprints = {
-      ...(freshIntegrationFingerprints ?? {}),
-      messaging: twilioMessagingFingerprint(messagingState),
-    };
-  }
   const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
   const actionScopedWarnings = softActionScopedBlocked.map((entry) =>
     `${entry.reason} This blocks only the related action; independent service and CI actions will still be applied.`
@@ -1651,8 +1600,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const deployNeedsVolumes = (!managedCiBindingsOnly || createsDeferredWorkload) && (
       capability === 'hosting.service.converge' || capability === 'hosting.service.rollback'
       || capability === 'github.ci.release' || capability === 'github.ci.rollback'
-      || capability === 'gitlab.ci.rollback' || capability === 'github.applied-spec-hash.sync'
-      || capability === 'ci.applied-spec-hash.sync'
+      || capability === 'github.applied-spec-hash.sync'
     );
     const preparingAfterWorkloadIdentity = serviceIdentityOnly && deferredIdentityCreation
       && providerRegistry.getMetadata(envSpec.hosting.provider)?.lifecycle?.hosting?.runtimeIdentityTiming !== 'before-workload'
@@ -1667,19 +1615,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });
       const pendingVolume = planServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, observed: { serviceVolumes: liveVolumes } as ObservedState }).actions.find((a) => a.type !== 'noop');
       if (pendingVolume) return { success: false, status: 'blocked', message: `Deployment requires verified retained volume attachment: ${pendingVolume.reason}` };
-    }
-
-    if (
-      capability === 'code.repository.create'
-      || capability === 'code.repository.destroy'
-      || capability === 'code.repository.binding.remove'
-    ) {
-      return applyManagedCodeRepositoryAction({
-        project: applyProject,
-        spec,
-        environmentName: envName,
-        action,
-      });
     }
 
     if (capability.startsWith('maintenance.')) {
@@ -1736,33 +1671,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
           `The GitHub deploy target must be ${expectedRepository ?? 'an unset repository'}/${envName} for ${envSpec.hosting.provider}.`
         );
       }
-      return applyGitHubActionsDeploy({
-        project: applyProject,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        action,
-        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
-      });
-    }
-    if (
-      capability === 'ci.configuration.sync'
-      || capability === 'ci.variable.sync'
-      || capability === 'ci.variable.delete'
-      || capability === 'ci.binding.remove'
-    ) {
-      const expectedOperation = capability === 'ci.configuration.sync'
-        ? CI_CONFIGURATION_SYNC_OPERATION
-        : capability === 'ci.variable.sync'
-          ? CI_VARIABLE_SYNC_OPERATION
-          : capability === 'ci.variable.delete'
-            ? CI_VARIABLE_DELETE_OPERATION
-            : CI_BINDING_REMOVE_OPERATION;
-      if (
-        action.metadata?.operation !== expectedOperation
-        || action.metadata?.ciProvider !== action.resource.provider
-      ) {
-        return blockedActionIdentity(action, 'The reviewed CI provider, operation, or resource identity no longer matches.');
-      }
       return applyManagedCiAction({
         project: applyProject,
         spec,
@@ -1770,6 +1678,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
         action,
         appliedSpecHash: false,
+        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
       });
     }
     if (capability === 'github.applied-spec-hash.sync') {
@@ -1787,20 +1696,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
           message: 'Applied deployment contract action has stale mutation authority',
           error: 'The reviewed repository, environment, resource name, or desired hash no longer matches. Re-run hv_plan.',
         };
-      }
-      return applyGitHubActionsAppliedSpecHash({
-        project: applyProject,
-        environmentName: envName,
-        desiredHash,
-      });
-    }
-    if (capability === 'ci.applied-spec-hash.sync') {
-      if (
-        action.metadata?.operation !== CI_APPLIED_SPEC_SYNC_OPERATION
-        || action.metadata?.ciProvider !== action.resource.provider
-        || action.metadata?.environmentName !== envName
-      ) {
-        return blockedActionIdentity(action, 'The reviewed applied-spec CI action no longer matches the environment or provider.');
       }
       return applyManagedCiAction({
         project: applyProject,
@@ -1911,16 +1806,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
       return applyGitHubPagesDns({ spec, action });
-    }
-    if (capability === 'github.openai-secret.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
-        );
-      }
-      return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
     }
     if (capability === 'github.delegated-secret.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
@@ -2565,18 +2450,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
         action,
         confirmedActionIds,
-      });
-    }
-    if (
-      capability === 'messaging.service.mutate'
-      || capability === 'messaging.sender.mutate'
-      || capability === 'messaging.runtime.sync'
-    ) {
-      return applyTwilioMessagingAction({
-        project: applyProject,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        action,
       });
     }
     if (capability === 'local.environment.record') {

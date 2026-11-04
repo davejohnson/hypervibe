@@ -1,3 +1,4 @@
+import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createRailwayRegistryCredentialLifecycle } from './railway-registry-credential.js';
 import { railwayDeploySource } from './railway-deploy-source.js';
 import { runRailwayDatabaseTask } from './railway-database-task.js';
@@ -55,7 +56,6 @@ import {
   diagnoseRailwayWorkflowLog,
   RAILWAY_CI_REQUIRED_SECRETS,
 } from './railway-ci.workflow.js';
-import { buildRailwayPortableRecipe } from './railway-ci.recipe.js';
 import {
   normalizeProviderDnsRecord,
   providerDnsRecordsAreConfigured,
@@ -8034,7 +8034,7 @@ providerRegistry.register({
         databaseInitializationTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
-      databaseConnectivity: { compatibleHostingProviders: ['railway'] },
+      databaseConnectivity: nativeDatabaseConnectivity.railway,
       dailyBackups: { database: true, volume: true },
       databaseResilience: { checkpoints: true },
       cacheEngines: ['redis'],
@@ -8066,8 +8066,6 @@ providerRegistry.register({
         },
         requiresGitHubPackagePull: true,
         buildGitHubActionsSteps: buildRailwayGitHubActionsSteps,
-        buildPortableRecipe: buildRailwayPortableRecipe,
-        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
         diagnoseWorkflowLog: diagnoseRailwayWorkflowLog,
       },
       nativeBranchDeploy: {

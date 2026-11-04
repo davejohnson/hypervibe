@@ -18,11 +18,11 @@ import { planRunDocumentSchema } from '../../plan/converge.executor.js';
 import * as operatorApplications from '../operator-application.service.js';
 
 // Independent lifecycle invariant: retained uncertain work cannot be bypassed by
-// changing desired providers. Native HTTP bodies are synthetic transport data.
+// changing desired repository scope or selecting another lifecycle stage. Native HTTP bodies are synthetic transport data.
 describe('retained repository-variable outcome precedes other lifecycle stages', () => {
   let directory: string;
   const githubScope = 'owner/original';
-  const gitlabScope = 'https://gitlab.example.com/acme/apps/replacement';
+  const replacementScope = 'owner/replacement';
   let methods: string[];
 
   beforeEach(() => {
@@ -31,7 +31,7 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
     initializeDatabase(path.join(directory, 'state.db'));
     for (const [provider, scope, credentials] of [
       ['github', githubScope, { apiToken: 'synthetic-test-token' }],
-      ['gitlab', gitlabScope, { apiToken: 'synthetic-test-token', instanceUrl: 'https://gitlab.example.com' }],
+      ['github', replacementScope, { apiToken: 'synthetic-test-token' }],
     ] as const) {
       const connection = new ConnectionRepository().create({ provider, scope,
         credentialsEncrypted: getSecretStore().encryptObject(credentials) });
@@ -46,15 +46,12 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
         if (method === 'GET' && url.pathname === `/repos/${githubScope}`) return Response.json({
           id: 321, full_name: githubScope, default_branch: 'main',
         });
+        if (method === 'GET' && url.pathname === `/repos/${replacementScope}`) return Response.json({
+          id: 322, full_name: replacementScope, default_branch: 'main',
+        });
         if (method === 'GET' && url.pathname.endsWith('/actions/variables')) return Response.json({ total_count: 0, variables: [] });
         if (method === 'POST' && url.pathname.endsWith('/actions/variables')) return Response.json({}, { status: 500 });
       }
-      const pathname = decodeURIComponent(url.pathname);
-      if (method === 'GET' && pathname.endsWith('/user')) return Response.json({ id: 3, username: 'owner', can_create_project: true });
-      if (method === 'GET' && pathname.endsWith('/namespaces/acme/apps')) return Response.json({ id: 8, full_path: 'acme/apps', kind: 'group' });
-      if (method === 'GET' && pathname.endsWith('/groups/8')) return Response.json({ id: 8, full_path: 'acme/apps', project_creation_level: 'developer' });
-      if (method === 'GET' && pathname.endsWith('/groups/8/members/all/3')) return Response.json({ access_level: 50 });
-      if (method === 'GET' && pathname.endsWith('/projects/acme/apps/replacement')) return Response.json({}, { status: 404 });
       throw new Error('Unexpected synthetic transport request');
     }));
   });
@@ -65,7 +62,7 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it('blocks a new managed repository stage while the original variable write remains uncertain', async () => {
+  it('blocks a different repository plan while the original variable write remains uncertain', async () => {
     const project = new ProjectRepository().create({ name: 'stage-guard', defaultPlatform: 'unconfigured',
       gitRemoteUrl: `https://github.com/${githubScope}.git` });
     const original = new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name,
@@ -80,8 +77,8 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
     const state = new EnvironmentRepository().findByProjectAndName(project.id, 'repository')!.platformBindings.repositoryVariableOwnership;
     expect(state).toMatchObject({ pending: { variableName: 'HEALTH_ENABLED' } });
     new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name,
-      gitRemoteUrl: `${gitlabScope}.git`, devops: { code: { provider: 'gitlab', scope: gitlabScope,
-        repository: { state: 'present', management: 'managed', defaultBranch: 'main', visibility: 'private' } },
+      gitRemoteUrl: `https://github.com/${replacementScope}.git`, devops: { code: { provider: 'github', scope: replacementScope },
+        ci: { provider: 'github-actions', repositoryVariables: { HEALTH_ENABLED: { value: 'true' } } },
         canonicalEnvironment: 'repository' }, environments: {} }));
     methods.length = 0;
     const next = await new PlanService().plan(project, 'repository');
@@ -90,17 +87,17 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
     expect(new EnvironmentRepository().findByProjectAndName(project.id, 'repository')!.platformBindings.repositoryVariableOwnership).toEqual(state);
   });
 
-  it('blocks an already persisted managed-repository apply when another write becomes pending', async () => {
+  it('blocks an already persisted different-repository variable apply when another write becomes pending', async () => {
     const project = new ProjectRepository().create({ name: 'existing-plan-guard', defaultPlatform: 'unconfigured',
-      gitRemoteUrl: `${gitlabScope}.git` });
+      gitRemoteUrl: `https://github.com/${replacementScope}.git` });
     const desired = new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name,
-      gitRemoteUrl: project.gitRemoteUrl, devops: { code: { provider: 'gitlab', scope: gitlabScope,
-        repository: { state: 'present', management: 'managed', defaultBranch: 'main', visibility: 'private' } },
+      gitRemoteUrl: project.gitRemoteUrl, devops: { code: { provider: 'github', scope: replacementScope },
+        ci: { provider: 'github-actions', repositoryVariables: { HEALTH_ENABLED: { value: 'true' } } },
         canonicalEnvironment: 'repository' }, environments: {} }));
     const plan = await new PlanService().plan(project, 'repository');
     if ('error' in plan) throw new Error(plan.error);
     expect(plan.actions).toHaveLength(1);
-    expect(plan.actions[0]).toMatchObject({ type: 'create', resource: { provider: 'gitlab' } });
+    expect(plan.actions[0]).toMatchObject({ type: 'create', resource: { provider: 'github-actions' } });
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'repository')!;
     // Simulate an independently retained earlier attempt arriving after planning;
     // it must gate apply even though this saved plan's spec revision still matches.
@@ -117,7 +114,11 @@ describe('retained repository-variable outcome precedes other lifecycle stages',
     const result = await executePlanApply(createToolContext(), { project, spec: desired.spec,
       specRevision: desired.revision, planId: plan.planRunId, confirmActions: [plan.actions[0].id] });
     expect(methods.every(method => method === 'GET')).toBe(true);
-    expect(result).toMatchObject({ kind: 'blocked' });
+    // A full repository-variable plan reaches the existing readback handler;
+    // unlike removed repository creation, it is not rejected at the outer stage.
+    // The exact handler must still refuse the new write and retain the original attempt.
+    expect(result).toMatchObject({ kind: 'executed', result: { success: false,
+      receipts: [{ status: 'blocked', message: expect.stringMatching(/retained state|reconciled first/) }] } });
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.repositoryVariableOwnership).toEqual(retained);
   });
 

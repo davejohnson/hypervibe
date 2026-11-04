@@ -6,7 +6,7 @@ import { managedRecoveryTaskCheckpointSchema } from '../../src/domain/ports/mana
 // Capability admission, not live support. Native distinctions and evidence limits
 // are recorded in docs/manual-recovery-task-evidence.md.
 describe('durable manual recovery task admission', () => {
-  const names = ['azure-container-apps', 'cloudrun', 'digitalocean', 'ecs', 'fly', 'railway', 'vercel'];
+  const names = ['azure-container-apps', 'cloudrun', 'ecs', 'railway'];
   it('requires an explicit named review for every registered hosting provider', () => {
     expect(providerRegistry.namesFor('hosting').sort()).toEqual(names);
   });

@@ -339,7 +339,7 @@ This is enough to render relationships such as:
 staging
 ├── api            Cloud Run
 ├── worker         Cloud Run
-├── primary-db     Supabase
+├── primary-db     Railway Postgres
 │   ├── used by api
 │   └── used by worker
 └── documents      Amazon S3
@@ -419,7 +419,7 @@ chat intent → hv_spec → hv_plan → review → hv_apply → hv_status
 
 The companion may offer **Change provider…**, but the action should copy or hand off a structured request to chat, for example:
 
-> Move `primary-db` in `staging` from Supabase to Cloud SQL. Preserve data and show me the plan before applying.
+> Move `primary-db` in `staging` from Railway Postgres to Cloud SQL. Preserve data and show me the plan before applying.
 
 The app never edits the database row or calls a provider directly.
 

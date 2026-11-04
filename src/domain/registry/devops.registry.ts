@@ -1,15 +1,13 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { CodeHostIdentityPort, CodeRepositoryLifecyclePort, CiOperationsPort, RepositoryConfigurationPort } from '../ports/devops.port.js';
+import type { CodeHostIdentityPort, CiOperationsPort, RepositoryConfigurationPort } from '../ports/devops.port.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import type { CiRollbackFailure, CiRollbackResult } from '../services/ci-rollback.service.js';
 
 export interface CiLifecycleResult {
   /** One provider mutation per action; secret/config bundles are never implicit. */
-  actions?: PlanAction[];
-  /** Compatibility for the existing GitHub lifecycle while it is migrated. */
-  action?: PlanAction;
+  actions: PlanAction[];
   warnings: string[];
   /** Fail-closed planning result for unknown authority or unsupported semantics. */
   error?: string;
@@ -42,8 +40,10 @@ export interface CiLifecyclePort {
     environmentName: string;
     environmentSpec: EnvironmentSpec;
     action: PlanAction;
+    /** Publication-only applies the reviewed workflow without syncing deployment secrets. */
+    authority?: 'publication-only' | 'secret-sync';
   }): Promise<CiApplyResult>;
-  planAppliedSpecHash?(params: {
+  planAppliedSpecHash(params: {
     project: Project;
     spec: ProjectSpec;
     environmentName: string;
@@ -51,7 +51,7 @@ export interface CiLifecyclePort {
     environment: Environment | null;
     dependsOn?: string[];
   }): Promise<CiLifecycleResult>;
-  applyAppliedSpecHash?(params: {
+  applyAppliedSpecHash(params: {
     project: Project;
     spec: ProjectSpec;
     environmentName: string;
@@ -64,8 +64,6 @@ export interface CodeHostRegistration {
   connectionProvider: string;
   suggestedCiProvider?: string;
   create(credentials: unknown): CodeHostIdentityPort;
-  /** Optional explicit repository lifecycle; file ports never bootstrap projects. */
-  createLifecycle?: (credentials: unknown) => CodeRepositoryLifecyclePort;
 }
 
 export interface CiProviderRegistration {
@@ -76,11 +74,12 @@ export interface CiProviderRegistration {
   /** Optional repository configuration facet; does not grant deployment-secret authority. */
   repositoryConfiguration?: (credentials: unknown) => RepositoryConfigurationPort;
   lifecycle: CiLifecyclePort;
-  rollback?: (params: {
+  /** Redeploys an exact previously verified release through this provider. */
+  rollback(params: {
     project: Project;
     environment: Environment;
     toSha?: string;
-  }) => Promise<CiRollbackFailure | CiRollbackResult>;
+  }): Promise<CiRollbackFailure | CiRollbackResult>;
 }
 
 export class DevOpsProviderRegistry {

@@ -7,7 +7,6 @@ import type {
   GitHubAdapter,
   GitHubPullRequestSummary,
 } from '../../adapters/providers/github/github.adapter.js';
-import type { OpenAIAdapter } from '../../adapters/providers/openai/openai.adapter.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -28,7 +27,6 @@ import {
   githubActionsCanonicalEnvironment,
   resolveGitHubActionsSelection,
 } from '../spec/devops-selection.js';
-import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
 import { compileManagedBackupFiles } from './managed-backup-workflows.service.js';
 import { isManagedBackupFilePath, managedBackupFilePaths, parseBackupRetirementFiles, type BackupRetirementFile } from './backup-workflow.service.js';
@@ -55,7 +53,6 @@ export const GITHUB_INFRASTRUCTURE_MANIFEST = '.github/hypervibe/manifest.json';
 export const GITHUB_PULL_REQUEST_TEMPLATE = '.github/pull_request_template.md';
 export const OPENAI_ACTIONS_SECRET = 'OPENAI_API_KEY';
 export const GITHUB_INFRASTRUCTURE_ACTION_ID = 'repo:github-infrastructure-pr';
-export const GITHUB_OPENAI_SECRET_ACTION_ID = 'secret:github-openai-actions';
 export const GITHUB_SECURITY_SETTINGS_ACTION_ID = 'repo:github-security-settings';
 export const GITHUB_CODE_SCANNING_ACTION_ID = 'repo:github-code-scanning';
 export const GITHUB_ACTIONS_PR_PERMISSION_ACTION_ID = 'repo:github-actions-pr-permission';
@@ -1338,7 +1335,7 @@ export function githubInfrastructureConnectionBlock(params: {
     ? githubDelegatedSecretActionIds(params.spec, params.environmentName, environment)
     : [];
   const actionIds = [
-    ...(plansInfrastructure ? [GITHUB_INFRASTRUCTURE_ACTION_ID, GITHUB_OPENAI_SECRET_ACTION_ID] : []),
+    ...(plansInfrastructure ? [GITHUB_INFRASTRUCTURE_ACTION_ID] : []),
     ...delegatedActionIds,
   ];
   if (actionIds.length === 0) return null;
@@ -1409,10 +1406,6 @@ function infrastructureAction(params: {
 
 export function isGitHubInfrastructureAction(action: PlanAction): boolean {
   return action.metadata?.operation === GITHUB_INFRASTRUCTURE_OPERATION;
-}
-
-export function isGitHubOpenAISecretAction(action: PlanAction): boolean {
-  return action.id === GITHUB_OPENAI_SECRET_ACTION_ID && action.metadata?.operation === 'githubOpenAIActionsSecret';
 }
 
 export function isGitHubNativeSettingAction(action: PlanAction): boolean {
@@ -1957,7 +1950,7 @@ export async function planGitHubInfrastructure(params: {
     : restoreDrillBlockedReason ?? backupPreservationBlockedReason ?? taskPrerequisites.blockedReason;
   const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
   const taskWorkflowDrift = drift.some((path) => taskPrerequisites.paths.has(path));
-  const actions: PlanAction[] = [infrastructureAction({
+  const publicationAction = infrastructureAction({
     repository,
     files,
     type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
@@ -1967,7 +1960,8 @@ export async function planGitHubInfrastructure(params: {
     requiresConfirm: !infrastructureBlockedReason && taskWorkflowDrift,
     preservedManagedPaths: [...deferredBackupPaths].sort(),
     ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
-  })];
+  });
+  const actions: PlanAction[] = [publicationAction];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];
   const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
   const delegatedSecrets = await planGitHubDelegatedSecrets({
@@ -1979,7 +1973,14 @@ export async function planGitHubInfrastructure(params: {
     environment,
     suppliedValues: params.suppliedSecretValues ?? {},
   });
-  actions.push(...delegatedSecrets.actions);
+  // Secret writes and retirement must follow the reviewed files even when a
+  // full plan moves confirmation-gated publication behind ordinary actions.
+  // Accepted secrets remain noops; secret-only setups have no publication.
+  actions.push(...delegatedSecrets.actions.map((action) => (
+    action.type !== 'noop' && publicationAction.type !== 'noop'
+      ? { ...action, dependsOn: [GITHUB_INFRASTRUCTURE_ACTION_ID] }
+      : action
+  )));
   warnings.push(...delegatedSecrets.warnings);
 
   if (drift.length === 0) {
@@ -1994,59 +1995,18 @@ export async function planGitHubInfrastructure(params: {
     blocked.push(...pages.blocked);
   }
 
-  // Secrets/settings are a second stage. A file PR must merge before Hypervibe
-  // exposes an AI key to the newly reviewed workflows.
-  if (drift.length === 0 && githubSpecNeedsOpenAI(githubSpec)) {
-    let secretPresent = false;
-    try {
-      secretPresent = (await adapterResult.adapter.listRepositorySecrets(parts.owner, parts.repo))
-        .includes(OPENAI_ACTIONS_SECRET);
-    } catch (error) {
-      verified = false;
-      warnings.push(`Cannot observe GitHub Actions secret names: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    const openAIConnection = new ConnectionRepository().findBestVerifiedMatch('openai', repository);
-    let desiredSecretHash: string | undefined;
-    if (openAIConnection) {
-      const openAIAdapter = await adapterFactory.getProviderAdapter('openai', params.project);
-      if (openAIAdapter.success && openAIAdapter.adapter) {
-        desiredSecretHash = (openAIAdapter.adapter as unknown as OpenAIAdapter).actionsApiKeyHash();
-      }
-    }
-    const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
-    const githubBindings = environment?.platformBindings.github;
-    const bindingRecord = githubBindings && typeof githubBindings === 'object' && !Array.isArray(githubBindings)
-      ? githubBindings as Record<string, unknown>
-      : {};
-    const storedSecretHash = typeof bindingRecord.openAIActionsSecretHash === 'string'
-      ? bindingRecord.openAIActionsSecretHash
-      : undefined;
-    const secretInSync = secretPresent && Boolean(desiredSecretHash) && storedSecretHash === desiredSecretHash;
-    actions.push({
-      id: GITHUB_OPENAI_SECRET_ACTION_ID,
-      type: secretInSync ? 'noop' : 'update',
-      resource: { kind: 'secret', name: OPENAI_ACTIONS_SECRET, provider: 'github' },
-      verified,
-      reason: secretInSync
-        ? 'OpenAI Actions secret is configured and matches the verified connection'
-        : 'OpenAI Actions secret must be synced from the verified OpenAI connection',
-      metadata: {
-        operation: 'githubOpenAIActionsSecret',
-        repository,
-        secretName: OPENAI_ACTIONS_SECRET,
-        canonicalEnvironment: params.environmentName,
-      },
-    });
-    if (!openAIConnection) {
+  // AI-backed automations read OPENAI_API_KEY like any other user-supplied
+  // API key: a delegated project secret delivered to GitHub Actions.
+  if (githubSpecNeedsOpenAI(githubSpec)) {
+    const declared = params.spec.secrets?.[OPENAI_ACTIONS_SECRET];
+    const deliveredToActions = Boolean(declared && 'githubActions' in declared && declared.githubActions?.repository);
+    if (!deliveredToActions) {
       blocked.push({
-        provider: 'openai',
+        provider: 'github',
         scope: repository,
-        policy: 'action-scoped-if-independent-actions',
-        actionIds: [GITHUB_OPENAI_SECRET_ACTION_ID],
-        reason: `No verified OpenAI connection for ${repository}. ${formatConnectionGuidance('openai', {
-          scope: repository,
-          intro: 'Connect OpenAI only if this repository should run autofix, pull-request review, or code-audit automations.',
-        })}`,
+        policy: 'hard',
+        reason: `Autofix, pull-request review and code-audit automations need ${OPENAI_ACTIONS_SECRET} in GitHub Actions. `
+          + `Declare secrets.${OPENAI_ACTIONS_SECRET} with githubActions.repository=true, then supply the key you create in your OpenAI account as a secretRef when planning.`,
       });
     }
   }
@@ -2220,7 +2180,6 @@ export async function planGitHubInfrastructure(params: {
   }
   const actionPriority = (action: PlanAction): number => {
     if (action.id === GITHUB_INFRASTRUCTURE_ACTION_ID) return 0;
-    if (action.id === GITHUB_OPENAI_SECRET_ACTION_ID) return 20;
     if (action.id === GITHUB_CODE_SCANNING_ACTION_ID) return 30;
     return 10;
   };
@@ -2930,51 +2889,6 @@ export async function applyGitHubInfrastructure(params: {
       ? { preservedManagedPaths: params.action.metadata.preservedManagedPaths.filter((path): path is string => typeof path === 'string') }
       : {}),
   });
-}
-
-export async function applyGitHubOpenAISecret(params: {
-  project: Project;
-  environmentName: string;
-  action: PlanAction;
-}): Promise<{ success: boolean; status?: 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
-  const repository = typeof params.action.metadata?.repository === 'string' ? params.action.metadata.repository : undefined;
-  if (!repository) return { success: false, message: 'OpenAI secret plan action is invalid', error: 'Repository is missing.' };
-  const parts = repoParts(repository);
-  if (!parts) return { success: false, message: 'GitHub repository is invalid', error: `Could not parse ${repository}.` };
-  const githubResult = getGitHubAdapter(repository);
-  if ('error' in githubResult) return { success: false, status: 'blocked', message: 'GitHub connection is unavailable', error: githubResult.error };
-  const openAIResult = await adapterFactory.getProviderAdapter('openai', params.project);
-  if (!openAIResult.success || !openAIResult.adapter) {
-    return { success: false, status: 'blocked', message: 'OpenAI connection is unavailable', error: openAIResult.error };
-  }
-  const openAIAdapter = openAIResult.adapter as unknown as OpenAIAdapter;
-  const apiKey = openAIAdapter.actionsApiKey();
-  await (githubResult.adapter as GitHubAdapter).setRepositorySecret(
-    parts.owner,
-    parts.repo,
-    OPENAI_ACTIONS_SECRET,
-    apiKey
-  );
-  const environments = new EnvironmentRepository();
-  const environment = environments.findByProjectAndName(params.project.id, params.environmentName)
-    ?? environments.create({ projectId: params.project.id, name: params.environmentName });
-  const currentGitHub = environment.platformBindings.github;
-  const githubBindings = currentGitHub && typeof currentGitHub === 'object' && !Array.isArray(currentGitHub)
-    ? currentGitHub as Record<string, unknown>
-    : {};
-  environments.updatePlatformBindings(environment.id, {
-    github: {
-      ...githubBindings,
-      openAIActionsSecretName: OPENAI_ACTIONS_SECRET,
-      openAIActionsSecretHash: openAIAdapter.actionsApiKeyHash(),
-      openAIActionsSecretSyncedAt: new Date().toISOString(),
-    },
-  });
-  return {
-    success: true,
-    message: `Synced ${OPENAI_ACTIONS_SECRET} for OpenAI-backed GitHub automations`,
-    data: { repository, secretName: OPENAI_ACTIONS_SECRET },
-  };
 }
 
 export async function applyGitHubDelegatedSecret(params: {

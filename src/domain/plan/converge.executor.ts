@@ -20,7 +20,6 @@ import { isLocalCloudScopeAction, LOCAL_CLOUD_SCOPE_OPERATION, localCloudScopePl
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
-import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction, isRuntimeQueuePrerequisite } from './plan-stage.js';
@@ -41,7 +40,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
+    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),
@@ -542,10 +541,6 @@ export const planRunDocumentSchema = z.object({
         action.resource.provider === 'github'
           && (action.type === 'create' || action.type === 'update')
           && action.metadata?.operation === 'githubActionsDeployBranch'
-        || action.resource.provider === 'gitlab-ci'
-          && action.type === 'update'
-          && action.resource.name === 'configuration'
-          && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
       )
     );
     if (document.actions.length === 0 || invalidAction) {
