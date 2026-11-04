@@ -20,7 +20,9 @@ describe('operator image package and command boundary', () => {
       "const fs=require('node:fs'),crypto=require('node:crypto');console.log(crypto.createHash('sha256').update(fs.readFileSync(0)).digest('hex'))"],
       { input: 'synthetic-sensitive-input' });
     expect(output.trim()).toBe(createHash('sha256').update('synthetic-sensitive-input').digest('hex'));
-    await expect(runOperatorCommand(process.execPath, ['-e', 'process.exit(9)'])).rejects.toThrow('Operator artifact command failed.');
+    await expect(runOperatorCommand(process.execPath, ['-e', 'process.exit(9)'])).rejects.toMatchObject({
+      name: 'OperatorArtifactCommandError', commandFailure: { kind: 'exit', exitCode: 9 },
+    });
   });
   it('builds from actual npm packed bytes and the shipped dependency lock; never logs in or publishes during preparation', async () => {
     const root=mkdtempSync(path.join(tmpdir(),'hv-packed-image-contract-'));temporary.push(root);
@@ -69,8 +71,12 @@ describe('operator image package and command boundary', () => {
     expect(operations.some(args=>['push','login','pull'].includes(args[0]))).toBe(false);
   });
   it('rejects a credential echo from an actual failing child process without exposing its output', async () => {
-    await expect(runOperatorCommand(process.execPath,['-e',"process.stdin.resume();process.stdin.on('data',v=>process.stderr.write(v));process.stdin.on('end',()=>process.exit(1))"],
-      {input:'synthetic-sensitive-password'})).rejects.toThrow('Operator artifact command failed.');
+    const failure = await runOperatorCommand(process.execPath,['-e',"process.stdin.resume();process.stdin.on('data',v=>process.stderr.write(v));process.stdin.on('end',()=>process.exit(1))"],
+      {input:'synthetic-sensitive-password'}).catch(error => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({ name: 'OperatorArtifactCommandError', commandFailure: { kind: 'exit', exitCode: 1 } });
+    expect(String(failure)).not.toContain('synthetic-sensitive-password');
+    expect(JSON.stringify(failure)).not.toContain('synthetic-sensitive-password');
   });
   it('does not mistake registry manifest digest for the reviewed Docker configuration identity', async()=>{
     const command:OperatorCommand=async()=>JSON.stringify([{Id:'sha256:'+'b'.repeat(64),Os:'linux',Architecture:'arm64',Config:{User:'node',Labels:{}}}]);
