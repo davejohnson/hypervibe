@@ -6,31 +6,85 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { OperatorArtifactCommandError, OPERATOR_BUILD_REPORTED_MARKERS, type OperatorBuildReportedMarker } from '../../../domain/ports/operator-artifact.port.js';
+import { OperatorArtifactCommandError, OPERATOR_BUILD_REPORTED_MARKERS, type OperatorBuildReportedMarker, type OperatorBuildStep } from '../../../domain/ports/operator-artifact.port.js';
 
 export interface OperatorCommandOptions { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; signal?: AbortSignal;
-  /** Number of lines in the reviewed archived Dockerfile, for bounded diagnostic headers only. */
-  dockerfileLineCount?: number }
+  /** Exact archived build input, interpreted transiently and never emitted. */
+  reviewedDockerfile?: { path: string; contents: string } }
 export type OperatorCommand = (program: string, args: string[], options?: OperatorCommandOptions) => Promise<string>;
+
+function standardBuildStep(value:string):OperatorBuildStep|undefined {
+  const command=value.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s]+)\s+)+/,'');
+  // A mixed RUN instruction cannot identify the particular failed subcommand.
+  if(/[;&|]/.test(command)) {
+    const parts=command.split(/\s+&&\s+/);
+    if(parts.length>1&&parts.every(part=>!/[;&|]/.test(part)&&(/^apt-get (?:update|install)(?: |$)/.test(part)||part==='rm -rf /var/lib/apt/lists/*'))
+      &&parts.some(part=>part.startsWith('apt-get ')))return 'system-package';
+    return undefined;
+  }
+  if(/^npm (?:ci|install)(?: |$)/.test(command))return 'npm-install';
+  if(/^npm (?:run|run-script)(?: |$)/.test(command))return 'npm-script';
+  if(/^node(?: |$)/.test(command))return 'node-command';
+  if(/^apt-get (?:update|install)(?: |$)/.test(command))return 'system-package';
+  return undefined;
+}
+/** Bounded subset of Dockerfile shell RUN parsing. Keep continuation indentation
+ * and quoted whitespace; unsupported escapes, heredocs and exec forms stay unknown. */
+function reviewedRunCommands(contents:string) {
+  if(/^#\s*escape\s*=/im.test(contents)||/^\s*SHELL\s/im.test(contents)||contents.includes('<<'))return [];
+  const lines=contents.split('\n'),runs:Array<{line:number;end:number;quoted:string;step?:OperatorBuildStep}>=[];
+  const continues=(line:string)=>/(?:^|[^\\])\\[ \t]*$/.test(line);
+  for(let index=0;index<lines.length;index++) {
+    const start=index;let text=lines[index].replace(/\r$/,'').trimStart();
+    if(/^(?:#|$)/.test(text))continue;
+    const run=/^RUN\s/i.test(text);
+    let continued=continues(text);if(continued)text=text.replace(/\\[ \t]*$/,'');
+    while(continued&&index+1<lines.length) {
+      const next=lines[++index].replace(/\r$/,'');
+      if(/^\s*(?:#|$)/.test(next))continue;
+      continued=continues(next);text+=continued?next.replace(/\\[ \t]*$/,''):next;
+    }
+    if(continued||!run)continue;
+    let command=text.replace(/^RUN\s+/i,'').trimEnd();
+    while(/^--(?:mount|network|security)=[^\s]+\s/.test(command))command=command.replace(/^--(?:mount|network|security)=[^\s]+\s+/,'');
+    if(command.startsWith('--')||command.startsWith('[')||command.includes('<<')||command.length>3500||/[^\x20-\x7e\t]/.test(command))continue;
+    // For this printable ASCII subset JSON's encoder equals Go %q. Do not decode
+    // arbitrary native Go escapes as JSON or persist the quoted process text.
+    runs.push({line:start+1,end:index+1,quoted:JSON.stringify('/bin/sh -c '+command),step:standardBuildStep(command)});
+  }
+  return runs;
+}
 /** Transient, bounded stderr recognition for BuildKit only. A marker describes
  * emitted text, never establishes its cause or grants retry authority. */
-function buildReportedMarkers(lineCount?:number) {
-  const reported=new Set<OperatorBuildReportedMarker>(); let carry='',dropping=false,dockerfileLine:number|undefined;
-  const maximum=typeof lineCount==='number'&&Number.isInteger(lineCount)&&lineCount>0&&lineCount<=100000?lineCount:undefined;
+function buildReportedMarkers(reviewed:OperatorCommandOptions['reviewedDockerfile'],args:string[]) {
+  const reported=new Set<OperatorBuildReportedMarker>(),headers=new Set<number>(),failedCommands=new Set<string>();let carry='',dropping=false;
+  const fileIndex=args.indexOf('--file');
+  const accepted=reviewed&&typeof reviewed.path==='string'&&typeof reviewed.contents==='string'&&fileIndex>=0
+    &&args.filter(arg=>arg==='--file'||arg==='-f'||arg.startsWith('--file=')).length===1
+    &&args[fileIndex+1]===reviewed.path&&reviewed.path.length>0&&reviewed.path.length<=4096
+    &&!/[\x00-\x1f\x7f]/.test(reviewed.path)&&Buffer.byteLength(reviewed.contents,'utf8')<=1024*1024
+    &&reviewed.contents.split('\n').length<=100000?reviewed:undefined;
+  const maximum=accepted?.contents.split('\n').length,runs=accepted?reviewedRunCommands(accepted.contents):[];
   function observe(raw:string) {
     const line=raw.replace(/\r$/,'').replace(/\x1b\[[0-9;]{0,32}m/g,'').replace(/^#[0-9]{1,6} (?:[0-9]{1,8}(?:\.[0-9]{1,9})? )?/,'');
     if(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(line))return;
     const npm=/^npm (?:ERR!|error) code (E401|E403|E404|EINTEGRITY|ENOSPC)$/.exec(line);
     if(npm)reported.add(npm[1]==='ENOSPC'?'disk-full':`npm-${npm[1]}` as OperatorBuildReportedMarker);
+    if(/^npm (?:ERR!|error) code 1$/.test(line))reported.add('npm-code-1');
+    if(line==='gyp ERR! configure error')reported.add('native-gyp-configure');
+    if(line==='gyp ERR! build error')reported.add('native-gyp-build');
     if(/^(?:[A-Za-z0-9_./-]+\.(?:[cm]?ts|tsx)\([1-9][0-9]*,[1-9][0-9]*\): )?error TS[1-9][0-9]{3,4}: .+$/.test(line))reported.add('typescript-error');
-    if(/^(?:ERROR|error): (?:failed to build: )?(?:failed to solve: )?process "[^\r\n]+" did not complete successfully: exit code: [1-9][0-9]{0,2}$/.test(line))reported.add('build-command-failed');
+    const failed=/^(?:ERROR|error): (?:failed to build: )?(?:failed to solve: )?process ("[^\r\n]+") did not complete successfully: exit code: [1-9][0-9]{0,2}$/.exec(line);
+    if(failed){reported.add('build-command-failed');if(failedCommands.size<2)failedCommands.add(failed[1]);}
     if(/^(?:ERROR|error): (?:failed to build: )?failed to solve: [^\r\n]+: no space left on device$/.test(line))reported.add('disk-full');
     if(/^(?:ERROR|error): (?:failed to build: )?failed to solve: [^\r\n]*failed to resolve source metadata for [^\r\n]+$/.test(line)) {
       reported.add('image-metadata-failed');
       if(/(?:429 Too Many Requests|toomanyrequests: [^\r\n]+)$/.test(line))reported.add('registry-rate-limit');
     }
-    const header=/^Dockerfile:([1-9][0-9]{0,5})$/.exec(line);
-    if(header&&maximum!==undefined&&Number(header[1])<=maximum)dockerfileLine=Number(header[1]);
+    if(accepted&&line.startsWith(accepted.path+':')) {
+      const number=line.slice(accepted.path.length+1);
+      if(/^[1-9][0-9]{0,5}$/.test(number)&&Number(number)<=maximum!&&headers.size<2)headers.add(Number(number));
+    }
   }
   function fragment(value:string,end:boolean) {
     if(!dropping&&carry.length+value.length<=4096)carry+=value;
@@ -43,7 +97,11 @@ function buildReportedMarkers(lineCount?:number) {
       if(start<value.length)fragment(value.slice(start),false);},
     finish(){if(carry&&!dropping)observe(carry);carry='';dropping=false;},
     details(){const markers=OPERATOR_BUILD_REPORTED_MARKERS.filter(marker=>reported.has(marker));
-      return {...(markers.length?{reported:markers}:{}),...(dockerfileLine?{dockerfileLine}:{})};},
+      let dockerfileLine=headers.size===1?[...headers][0]:undefined,buildStep:OperatorBuildStep|undefined;
+      if(failedCommands.size===1&&headers.size<=1){const quoted=[...failedCommands][0];
+        const matches=runs.filter(run=>run.quoted===quoted&&(dockerfileLine===undefined||dockerfileLine>=run.line&&dockerfileLine<=run.end));
+        if(matches.length===1){dockerfileLine=matches[0].line;buildStep=matches[0].step;}}
+      return {...(markers.length?{reported:markers}:{}),...(dockerfileLine?{dockerfileLine}:{}),...(buildStep?{buildStep}:{})};},
   };
 }
 /** No shell, bounded captured output, no native output or credential echo on errors. */
@@ -57,7 +115,7 @@ export const runOperatorCommand: OperatorCommand = async (program, args, options
       stdio: [options.input ? 'pipe' : 'ignore', 'pipe', 'pipe'], signal: options.signal }); }
     catch { reject(new OperatorArtifactCommandError({kind:options.signal?.aborted?'abort':'spawn'})); return; }
     const output: Buffer[] = []; let bytes = 0, limitExceeded = false;
-    const diagnostic=program==='docker'&&args[0]==='buildx'&&args[1]==='build'?buildReportedMarkers(options.dockerfileLineCount):undefined;
+    const diagnostic=program==='docker'&&args[0]==='buildx'&&args[1]==='build'?buildReportedMarkers(options.reviewedDockerfile,args):undefined;
     const exceedsLimit = () => { if (bytes <= 64 * 1024 * 1024) return false;
       if (!limitExceeded) { limitExceeded=true; child.kill('SIGTERM'); } return true; };
     const consume = (chunk: Buffer) => { bytes += chunk.length; if (!exceedsLimit()) output.push(chunk); };

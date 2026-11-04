@@ -354,13 +354,38 @@ The local command boundary additionally reports only its closed lifecycle outcom
 (`spawn`, `exit`, `abort`, or `output-limit`) and a native nonzero exit code when
 available. Only for `docker buildx build`, a bounded transient stderr parser can
 also report finite markers for selected npm error codes, disk-full text, TypeScript
-errors, failed build commands, image metadata or registry rate-limit messages. A
-Dockerfile line is included only when it falls within the reviewed archived file.
+errors, native dependency configuration/build errors, failed build commands,
+image metadata or registry rate-limit messages. The exact archived Dockerfile
+path and contents must match the build's sole `--file` argument. Only that path's
+bounded line header is admitted; another filename or an out-of-range line is not.
+An exact match between the reported failed process and a unique reviewed shell
+`RUN` instruction can additionally identify the npm install, npm script, Node
+command or system-package step. Continuation indentation and quoted whitespace
+are preserved. Heredocs, custom shell/escape directives, exec-form instructions,
+mixed commands and ambiguous matches remain unclassified. Only a small printable
+ASCII subset of Go's quoted process format is matched; unknown escapes are not
+decoded as JSON. Raw archived source and commands remain transient.
 No raw lines, paths, package names or messages are retained or printed. These are
 reported messages, not verified causes; source code itself can emit such text.
 Real child-process tests cover these outcomes and secret echoes, and the SQLite
 plan test checks that safe fields reach the existing preparation error. Neither
 these observations nor an exit code authorize retry or establish the build cause.
+
+The source-line/step counterexample was a real isolated child emitting BuildKit's
+absolute Dockerfile header and Go-quoted npm-install process: the previous parser
+accepted only the literal `Dockerfile` header and lost both the line and step.
+That regression failed before the fix. Official BuildKit
+[source headers](https://github.com/moby/buildkit/blob/v0.31.0/solver/errdefs/source.go)
+preserve the supplied filename; its
+[exec error](https://github.com/moby/buildkit/blob/v0.31.0/solver/llbsolver/ops/exec.go)
+uses Go `%q` over joined process arguments. The
+[Dockerfile parser](https://github.com/moby/buildkit/blob/v0.31.0/frontend/dockerfile/parser/parser.go)
+preserves continuation indentation, and mount flags remain separate from process
+arguments. The exact node-gyp markers come from its
+[command error reporting](https://github.com/nodejs/node-gyp/blob/main/bin/node-gyp.js).
+Fixtures reconstruct those contracts; they are not recordings of the failed
+native build, whose underlying cause is still unknown. The installed Docker daemon
+version was not established by these offline checks.
 
 A 2026-11-03 failed build exposed a separate cleanup assumption: image inspection
 failure was treated as incomplete cleanup even if no image was ever loaded. Fresh

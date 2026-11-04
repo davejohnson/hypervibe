@@ -172,7 +172,7 @@ export async function prepareApplicationCandidate(nativeScope: Record<string,str
     phase='image-build';
     const output=await checkedCommand('docker',['buildx','build','--builder',builder,'--load','--platform','linux/amd64','--progress','plain','--secret',`id=npm_token,src=${secret}`,
       ...Object.entries(applicationCandidateLabels(source)).flatMap(([key,value])=>['--label',`${key}=${value}`]),'--tag',tag,'--file',path.join(context,'Dockerfile'),context],
-      {...options,dockerfileLineCount:readFileSync(path.join(context,'Dockerfile'),'utf8').split('\n').length});
+      {...options,reviewedDockerfile:{path:path.join(context,'Dockerfile'),contents:readFileSync(path.join(context,'Dockerfile'),'utf8')}});
     rmSync(secret);if(output.includes(token))fail();
     phase='image-verification';
     const image=await inspectApplicationCandidate(tag,source,checkedCommand,options);

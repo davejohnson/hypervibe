@@ -2,15 +2,19 @@ import { z } from 'zod';
 import type { PlanAction } from '../plan/plan.types.js';
 import { operatorRetirementDeclarationSchema } from './operator-retirement.port.js';
 
-export const OPERATOR_BUILD_REPORTED_MARKERS = ['npm-E401','npm-E403','npm-E404','npm-EINTEGRITY','disk-full','typescript-error','build-command-failed','image-metadata-failed','registry-rate-limit'] as const;
+export const OPERATOR_BUILD_REPORTED_MARKERS = ['npm-E401','npm-E403','npm-E404','npm-EINTEGRITY','npm-code-1','native-gyp-configure','native-gyp-build','disk-full','typescript-error','build-command-failed','image-metadata-failed','registry-rate-limit'] as const;
 export type OperatorBuildReportedMarker = typeof OPERATOR_BUILD_REPORTED_MARKERS[number];
+export const OPERATOR_BUILD_STEPS = ['npm-install','npm-script','node-command','system-package'] as const;
+export type OperatorBuildStep = typeof OPERATOR_BUILD_STEPS[number];
 const commandFailureSchema = z.object({
   kind: z.enum(['spawn','exit','abort','output-limit']),
   exitCode: z.number().int().min(1).max(0xffffffff).optional(),
   reported: z.array(z.enum(OPERATOR_BUILD_REPORTED_MARKERS)).min(1).max(OPERATOR_BUILD_REPORTED_MARKERS.length)
     .refine(values=>new Set(values).size===values.length).optional(),
   dockerfileLine: z.number().int().min(1).max(100000).optional(),
-}).strict().refine(value => value.exitCode === undefined || value.kind === 'exit');
+  buildStep: z.enum(OPERATOR_BUILD_STEPS).optional(),
+}).strict().refine(value => value.exitCode === undefined || value.kind === 'exit')
+  .refine(value => !value.buildStep || !!value.dockerfileLine && value.reported?.includes('build-command-failed'));
 export type OperatorArtifactCommandFailure = z.infer<typeof commandFailureSchema>;
 /** Native command lifecycle facts only; never copy an Error message or output. */
 export class OperatorArtifactCommandError extends Error {
@@ -51,9 +55,13 @@ function preparationMessage(value: OperatorArtifactPreparationFailure): string {
     : 'Ask your coding agent to diagnose this local preparation step before using hv_plan to prepare the image again.';
   const command = value.commandFailure ? `, command=${value.commandFailure.kind}${value.commandFailure.exitCode === undefined ? '' : `, exitCode=${value.commandFailure.exitCode}`}` : '';
   const reportedText:Record<OperatorBuildReportedMarker,string>={'npm-E401':'npm E401','npm-E403':'npm E403','npm-E404':'npm E404','npm-EINTEGRITY':'npm EINTEGRITY',
+    'npm-code-1':'npm exit code 1','native-gyp-configure':'a native dependency configuration error','native-gyp-build':'a native dependency build error',
     'disk-full':'no space left','typescript-error':'a TypeScript compiler error','build-command-failed':'a failed build command',
     'image-metadata-failed':'an image metadata lookup failure','registry-rate-limit':'a registry rate-limit response'};
+  const steps:Record<OperatorBuildStep,string>={'npm-install':'the reviewed npm dependency-install instruction','npm-script':'the reviewed npm script instruction',
+    'node-command':'the reviewed Node command instruction','system-package':'the reviewed system-package instruction'};
   const reported = [...(value.commandFailure?.reported?.map(marker=>reportedText[marker])??[]),
+    ...(value.commandFailure?.buildStep ? [steps[value.commandFailure.buildStep]] : []),
     ...(value.commandFailure?.dockerfileLine ? [`Dockerfile line ${value.commandFailure.dockerfileLine}`] : [])];
   const observation = reported.length ? ` Build reported ${reported.join(', ')}. These are observed messages, not a verified cause.` : '';
   return `App preparation stopped while ${preparationPhaseText[value.phase]} (phase=${value.phase}, reason=${value.reason}, cleanup=${value.cleanup}${command}).${observation} ${next} This preparation did not upload or deploy an image.`;

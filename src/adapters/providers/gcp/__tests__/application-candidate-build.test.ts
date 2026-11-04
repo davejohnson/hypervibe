@@ -31,6 +31,7 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
   const command: OperatorCommand = async (program,args,opts) => {
     if(program !== 'docker') return runOperatorCommand(program,args,opts);
     commands.push(args); expect(JSON.stringify({args,env:opts?.env})).not.toContain(token);
+    if(args[0]!=='buildx'||args[1]!=='build')expect(opts?.reviewedDockerfile).toBeUndefined();
     if(args[0] === 'buildx' && args[1] === 'create') return args[args.indexOf('--name')+1];
     if(args[0] === 'buildx' && args[1] === 'rm') {if(options.cleanupFailure||options.cleanupAckLost)throw new Error('synthetic lost cleanup acknowledgment');return '';}
     if(args[0] === 'buildx' && args[1] === 'ls') {
@@ -44,7 +45,7 @@ async function candidate(options: { dirty?: boolean; wrongOrigin?: boolean; leak
     if(args[0] === 'image' && args[1] === 'ls')return imageRemoved?'':'sha256:'+'a'.repeat(64)+'\n';
     if(args[0] === 'buildx' && args[1] === 'build') {
       context = args.at(-1)!; secretFile = args[args.indexOf('--secret')+1].split(',src=')[1];
-      expect(opts?.dockerfileLineCount).toBe(readFileSync(path.join(context,'Dockerfile'),'utf8').split('\n').length);
+      expect(opts?.reviewedDockerfile).toEqual({path:path.join(context,'Dockerfile'),contents:readFileSync(path.join(context,'Dockerfile'),'utf8')});
       expect(args).toEqual(expect.arrayContaining(['build','--load','--platform','linux/amd64']));
       expect(readFileSync(secretFile,'utf8')).toBe(token); expect(statSync(secretFile).mode & 0o777).toBe(0o600);
       expect(secretFile.startsWith(context + path.sep)).toBe(false); expect(existsSync(path.join(context,'.env'))).toBe(false);

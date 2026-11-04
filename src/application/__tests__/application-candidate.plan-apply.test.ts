@@ -65,12 +65,13 @@ describe('reviewed private candidate publication through application and SQLite'
   });
   it('keeps cleanup unverified in plan while ignoring an arbitrary exception message',async()=>{
     const f=fixture(),error=new OperatorArtifactPreparationError({phase:'image-build',reason:'command-failed',cleanup:'unverified',recoveryDirectory:'hypervibe-candidate-Abc123',
-      commandFailure:{kind:'exit',exitCode:1,reported:['npm-E403'],dockerfileLine:5}});
+      commandFailure:{kind:'exit',exitCode:1,reported:['npm-E403','build-command-failed'],dockerfileLine:5,buildStep:'npm-install'}});
     error.message='private provider response';f.prepare.mockRejectedValue(error);
     const result=await f.plan();expect(result).toMatchObject({error:expect.stringContaining('cleanup is incomplete')});
     expect(result).toMatchObject({error:expect.stringContaining('hypervibe-candidate-Abc123/cleanup.json')});
     expect(result).toMatchObject({error:expect.stringContaining('phase=image-build')});
     expect(result).toMatchObject({error:expect.stringContaining('npm E403')});
+    expect(result).toMatchObject({error:expect.stringContaining('npm dependency-install instruction')});
     expect(result).toMatchObject({error:expect.stringContaining('not a verified cause')});
     expect(JSON.stringify(result)).not.toContain('private provider response');expect(f.native.writes).toEqual([]);
   });
