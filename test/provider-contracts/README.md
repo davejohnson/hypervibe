@@ -15,6 +15,12 @@ documents retained data, parent repository ownership and native concurrency limi
 Actual saved-plan/SQLite, serialized GCP tag/version and real AWS SDK tests run in ordinary
 `npm test`; no live deletion compatibility is claimed.
 
+Google/GitHub operator browser-retirement checks use actual saved plans, SQLite,
+restart and provider adapters. They validate exact handoffs and continued pending
+state, not native deletion. See [evidence and the completion gap](../../docs/operator-browser-retirement-proposal.md).
+These tests run in ordinary acceptance; owner-console deletion and authenticated
+completion evidence remain unverified.
+
 `storage-deletion-recovery.test.ts` covers all four registered storage adapters
 against the optional [GCS teardown and retained-evidence contract](../../docs/gcs-storage-teardown.md).
 Native serialized generation/retention tests, real SQLite ordinary/migration

@@ -5,12 +5,17 @@ import path from 'node:path';
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
 import { Crc32c } from '@aws-sdk/checksums/crc';
 import { SqliteAdapter } from '../../../db/sqlite.adapter.js';
+import '../../../../application/providers.js';
+import { CommandRegistry } from '../../../../application/commands.js';
+import { registerCoreTools } from '../../../../tools/core.tools.js';
+import { executePlanApply } from '../../../../application/apply-plan.js';
+import { inspectOperatorApplications } from '../../../../domain/services/operator-application.service.js';
 import { createCommandContext } from '../../../../application/context.js';
 import { canonicalJsonSha256 } from '../../../../lib/canonical-json.js';
 import { OperatorCredentialCustody } from '../../../../domain/services/operator-credential-custody.js';
 import { CloudScopePreparationRepository } from '../../../db/repositories/cloud-scope-preparation.repository.js';
-import { applyCloudInstallationV1, parseCloudInstallationRecordV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from '../../../../domain/services/cloud-installation-runtime.js';
-import { createGithubOperatorApplicationDriver } from '../github-operator-app.js';
+import { applyCloudInstallationV1, historicalInstallationEvidence, parseCloudInstallationRecordV1, planCloudInstallationV1, reconcileCloudInstallationV1 } from '../../../../domain/services/cloud-installation-runtime.js';
+import { createGithubOperatorApplicationCapability, createGithubOperatorApplicationDriver } from '../github-operator-app.js';
 import { closeOperatorAppCallbacks } from '../../../browser/operator-app-callback.js';
 import type { OperatorApplicationIntent } from '../../../../domain/ports/cloud-installation.port.js';
 import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
@@ -23,14 +28,24 @@ const permissions = { actions: 'read', administration: 'read', checks: 'read', c
 describe('GitHub operator manifest transport and custody', () => {
   let directory: string;
   beforeEach(() => { directory = mkdtempSync(path.join(tmpdir(), 'hv-github-operator-')); vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true'); SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate(); });
-  afterEach(async () => { await closeOperatorAppCallbacks(); vi.restoreAllMocks(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
-  async function fixture(options: { lost?: boolean; wrongOwner?: boolean; outputs?: boolean; conversionStatus?: number } = {}) {
-    const ctx = createCommandContext(), project = ctx.repos.projects.create({ name: 'operator', defaultPlatform: 'cloudrun' });
+  afterEach(async () => { await closeOperatorAppCallbacks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
+  async function fixture(options: { lost?: boolean; wrongOwner?: boolean; outputs?: boolean; conversionStatus?: number; command?: boolean; organization?: boolean } = {}) {
+    const ctx = createCommandContext(), project = ctx.repos.projects.create({ name: 'operator', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/acme/operator' });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'test', platformBindings: { provider: 'cloudrun' } });
     const intent: OperatorApplicationIntent = { schemaVersion: 1, installationId: randomUUID(), customerId: project.id, appId: project.id, environment: 'test',
       source: { kind: 'local-spec', repository: 'github.com/acme/operator', specRevision: 1, specDigest: 'a'.repeat(64) }, provider: 'github-app', applicationProvider: 'github-app',
       mode: 'connect', stage: 'scope-preparation', keys: [], execution: { kind: 'operator-application', authentication: 'local-operator' },
-      nativeScope: { name: 'github', origin: 'https://operator.example.test', ownerType: 'User', ownerLogin: 'operator-test', ownerId: '1234' } };
+      nativeScope: { name: 'github', origin: 'https://operator.example.test', ownerType: options.organization ? 'Organization' : 'User', ownerLogin: 'operator-test', ownerId: '1234' } };
+    const declaration = { provider: 'github-app', profile: 'hypercloud-connect-v1', originService: 'web', runtimeService: 'web',
+      nativeScope: { ownerType: options.organization ? 'organization' : 'user', ownerLogin: 'operator-test' },
+      outputs: { 'private-key': 'GITHUB_APP_PRIVATE_KEY_BASE64', 'client-secret': 'GITHUB_APP_CLIENT_SECRET', 'webhook-secret': 'GITHUB_APP_WEBHOOK_SECRET' } };
+    if (options.command) {
+      const spec: any = { version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+        environments: { test: { hosting: { provider: 'cloudrun' }, services: {}, operatorApplications: { github: declaration } } } };
+      const saved = new SpecStore().replace(project, spec);
+      intent.source = { ...intent.source, specRevision: saved.revision, specDigest: canonicalJsonSha256(saved.spec) };
+      intent.selection = { declarationDigest: canonicalJsonSha256(declaration) };
+    }
     const delivered = new Map<string, string>(); let privateReads = 0;
     if (options.outputs) {
       const pairs = [['private-key', 'GITHUB_APP_PRIVATE_KEY_BASE64'], ['client-secret', 'GITHUB_APP_CLIENT_SECRET'], ['webhook-secret', 'GITHUB_APP_WEBHOOK_SECRET']];
@@ -65,20 +80,21 @@ describe('GitHub operator manifest transport and custody', () => {
     let authority = true;
     const local = { projectId: project.id, environmentId: environment.id, installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent), authorizeCurrent: async () => authority };
     const custody = new OperatorCredentialCustody({ ...local, provider: 'github-app' });
-    let manifest: any, app: any, conversions = 0;
+    let manifest: any, app: any, conversions = 0, appStatus = 200;
     const request: typeof fetch = async (input, init) => {
       const url = new URL(String(input)); expect(url.origin).toBe('https://api.github.com');
       expect(new Headers(init?.headers).get('x-github-api-version')).toBe('2026-03-10');
-      if (url.pathname === '/users/operator-test') return Response.json({ id: 1234, login: 'operator-test', type: 'User' });
+      if (url.pathname === `/${options.organization ? 'orgs' : 'users'}/operator-test`) return Response.json({ id: 1234, login: 'operator-test', type: options.organization ? 'Organization' : 'User' });
       if (url.pathname === '/app-manifests/synthetic-code/conversions') {
         conversions++; expect(init?.method).toBe('POST'); expect(new Headers(init?.headers).has('authorization')).toBe(false);
         app = { id: 5678, slug: manifest.name.toLowerCase().replaceAll(' ', '-'), name: manifest.name, client_id: 'Iv1.synthetic',
-          owner: { id: options.wrongOwner ? 9999 : 1234, login: 'operator-test', type: 'User' }, external_url: intent.nativeScope.origin,
+          owner: { id: options.wrongOwner ? 9999 : 1234, login: 'operator-test', type: options.organization ? 'Organization' : 'User' }, external_url: intent.nativeScope.origin,
           html_url: `https://github.com/apps/${manifest.name.toLowerCase().replaceAll(' ', '-')}`, created_at: new Date().toISOString(), permissions, events: ['check_run', 'check_suite', 'workflow_run'] };
         if (options.lost) throw new Error('synthetic lost conversion response');
         return Response.json({ ...app, pem, client_secret: 'synthetic-client-secret', webhook_secret: 'synthetic-webhook-secret' }, { status: options.conversionStatus ?? 201 });
       }
       if (url.pathname === '/app') {
+        if (appStatus !== 200) return Response.json({ message: 'synthetic private resource access failure' }, { status: appStatus });
         const token = new Headers(init?.headers).get('authorization')!.replace(/^Bearer /, ''), [header, payload, signature] = token.split('.');
         expect(verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), createPublicKey(pem), Buffer.from(signature, 'base64url'))).toBe(true);
         const claims = JSON.parse(Buffer.from(payload, 'base64url').toString()); expect(claims.iss).toBe('Iv1.synthetic'); expect(claims.exp - claims.iat).toBeLessThanOrEqual(600);
@@ -105,9 +121,118 @@ describe('GitHub operator manifest transport and custody', () => {
       expect((await fetch(url, { redirect: 'manual' })).status).toBe(303);
       const inspected = await reconcileCloudInstallationV1(target); expect(conversions).toBe(0); return inspected;
     }
-    return { context, target, callback, custody, delivered, revoke: () => { authority = false; }, privateReads: () => privateReads,
+    return { ctx, project, environment, declaration, context, target, callback, custody, delivered, local, request, revoke: () => { authority = false; }, privateReads: () => privateReads,
+      setAppStatus: (status: number) => { appStatus = status; }, changeApp: (patch: Record<string, unknown>) => { Object.assign(app, patch); },
       changePermissions: () => { app.permissions = { ...permissions, contents: 'write' }; }, conversions: () => conversions };
   }
+  async function retirementFixture() {
+    const f = await fixture(); await f.callback();
+    const completed = await applyCloudInstallationV1(f.target);
+    const from = { installationId: completed.installationId, planDigest: completed.plan.digest };
+    const intent: OperatorApplicationIntent = { ...completed.intent, installationId: randomUUID(), mode: 'retire', predecessor: from,
+      retirement: { from, resources: 'delete-owned', data: 'retain', targets: [{ ...from, evidenceDigest: canonicalJsonSha256(historicalInstallationEvidence(completed)) }] } };
+    const local = { ...f.local, installationId: intent.installationId, intentDigest: canonicalJsonSha256(intent) };
+    const reads = vi.fn(f.request); vi.stubGlobal('fetch', reads);
+    const capability = createGithubOperatorApplicationCapability();
+    const connection = await capability.retirement!.create(intent.nativeScope, local, [completed]);
+    const store = new CloudScopePreparationRepository({ projectId: intent.appId, environmentId: local.environmentId, environmentName: intent.environment },
+      value => parseCloudInstallationRecordV1(value, connection.driver), { recordType: 'operator-applications:github' });
+    return { f, completed, intent, local, reads, capability, connection, store, context: { ...connection, store, authorize: async () => true } };
+  }
+  // Official GitHub registration deletion requires an owner/App manager browser
+  // action. Installation deletion and an inaccessible App are not registration proof.
+  // https://docs.github.com/en/apps/maintaining-github-apps/deleting-a-github-app
+  it('retirement handoff preserves completed setup and stays pending through SQLite restart without replay', async () => {
+    const { f, completed, intent, reads, connection, store, context } = await retirementFixture();
+    const original = JSON.stringify(completed), custody = f.custody.read();
+    const plan = await planCloudInstallationV1({ ...context, intent });
+    expect(plan.plan.actions).toHaveLength(1);
+    const action = plan.plan.actions[0]; expect(action).toMatchObject({ type: 'destroy', requiresConfirm: true, metadata: { execution: 'external' } });
+    const target = { ...context, installationId: plan.installationId, planDigest: plan.plan.digest };
+    const unconfirmed = await applyCloudInstallationV1({ ...target, confirmActions: [] });
+    expect(unconfirmed).toMatchObject({ status: 'blocked', reason: 'confirmation_required', attempts: [] });
+    const pending = await applyCloudInstallationV1({ ...target, confirmActions: [action.id] });
+    expect(pending.status).toBe('pending'); expect(pending.completed).toEqual({}); expect(pending.attempts).toHaveLength(1);
+    expect(pending.attempts[0]).toMatchObject({ status: 'pending', externalUrl: 'https://github.com/settings/apps' });
+    const handoff = await connection.driver.operatorApplication!.pendingBrowser!(pending);
+    expect(handoff?.url).toBe(pending.attempts[0].externalUrl); expect(handoff?.description).toContain('owner');
+    const count = reads.mock.calls.length;
+    SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
+    const recovered = await reconcileCloudInstallationV1(target);
+    expect(recovered.status).toBe('pending'); expect(recovered.attempts).toHaveLength(1); expect(reads).toHaveBeenCalledTimes(count);
+    expect(JSON.stringify(await store.read(completed.installationId))).toBe(original); expect(f.custody.read()).toEqual(custody);
+    expect(f.conversions()).toBe(1); expect(reads.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    const forged = structuredClone(pending); forged.status = 'retired'; forged.completed[action.id] = completed.completed[completed.plan.actions[1].id];
+    expect(() => parseCloudInstallationRecordV1(forged, connection.driver)).toThrow();
+  });
+  it.each([false, true])('retirement handoff is reachable through saved hv_plan/apply and status (organization=%s)', async organization => {
+    const f = await fixture({ command: true, organization }); await f.callback(); const original = await applyCloudInstallationV1(f.target);
+    const consoleUrl = organization ? 'https://github.com/organizations/operator-test/settings/apps' : 'https://github.com/settings/apps';
+    const commands = new CommandRegistry(); registerCoreTools(commands, f.ctx);
+    const source = new SpecStore().get(f.project)!, spec = structuredClone(source.spec) as any;
+    spec.environments.test.operatorApplications.github.retirement = { from: { installationId: original.installationId, planDigest: original.plan.digest }, resources: 'delete-owned', data: 'retain' };
+    expect((await commands.execute('hv_spec', { project: f.project.name, spec, replace: true })).ok).toBe(true);
+    const reads = vi.fn(f.request); vi.stubGlobal('fetch', reads);
+    const planned: any = await commands.execute('hv_plan', { project: f.project.name, env: 'test' });
+    expect(planned.ok, JSON.stringify(planned)).toBe(true); expect(planned.data.actions).toHaveLength(1);
+    expect(planned.data.actions[0]).toMatchObject({ type: 'destroy', requiresConfirm: true });
+    const current = new SpecStore().get(f.project)!;
+    const applied: any = await executePlanApply(f.ctx, { project: f.project, spec: current.spec, specRevision: current.revision,
+      planId: planned.data.planId, confirmActions: planned.data.actions.map((item: any) => item.id) });
+    expect(applied).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(applied.result.receipts.at(-1)).toMatchObject({ status: 'pending', data: { browserHandoff: { url: consoleUrl } } });
+    const before = reads.mock.calls.length;
+    const status = await inspectOperatorApplications(f.project, 'test', current.spec);
+    expect(status!.registrations[0]).toMatchObject({ status: 'pending', verified: false, browserHandoff: { url: consoleUrl } });
+    expect(status!.registrations[0].browserHandoff).not.toHaveProperty('expiresAt');
+    expect(reads).toHaveBeenCalledTimes(before); expect(f.conversions()).toBe(1);
+    expect(await f.context.store.read(original.installationId)).toEqual(original);
+    expect(JSON.stringify([planned, applied, status])).not.toMatch(/synthetic-client-secret|synthetic-webhook-secret|BEGIN RSA PRIVATE KEY/);
+  });
+  it.each([401, 403, 404])('retirement never falls back to public metadata when signed App inspection returns %s', async status => {
+    const { f, reads, context, intent, store } = await retirementFixture(); f.setAppStatus(status);
+    await expect(planCloudInstallationV1({ ...context, intent })).rejects.toThrow();
+    expect(await store.read(intent.installationId)).toBeNull();
+    expect(reads.mock.calls.some(([url]) => String(url).includes('/apps/'))).toBe(false);
+    expect(reads.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+  });
+  it.each([{ id: 9999 }, { created_at: '2020-01-01T00:00:00Z' }, { client_id: 'Iv1.foreign' }, { owner: { id: 9999, login: 'foreign', type: 'User' } }, { permissions: { ...permissions, contents: 'write' } }])('retirement blocks a changed native identity %j', async patch => {
+    const { f, context, intent } = await retirementFixture(); f.changeApp(patch);
+    await expect(planCloudInstallationV1({ ...context, intent })).rejects.toThrow();
+  });
+  it.each(['environment', 'repository', 'proof', 'target', 'data'] as const)('retirement rejects altered %s selection before handoff', async change => {
+    const { context, intent, reads } = await retirementFixture();
+    if (change === 'environment') intent.environment = 'other';
+    if (change === 'repository') intent.source.repository = 'github.com/acme/other';
+    if (change === 'proof') intent.retirement!.targets[0].evidenceDigest = 'f'.repeat(64);
+    if (change === 'target') intent.retirement!.targets[0].installationId = randomUUID();
+    if (change === 'data') intent.retirement!.data = 'delete-owned';
+    await expect(planCloudInstallationV1({ ...context, intent })).rejects.toThrow();
+    expect(reads).not.toHaveBeenCalled();
+  });
+  it('retirement pending is unchanged after access disappears and unsafe or cross-owner handoff links are rejected', async () => {
+    const { f, context, intent, reads, capability, connection } = await retirementFixture();
+    const plan = await planCloudInstallationV1({ ...context, intent }), action = plan.plan.actions[0];
+    const target = { ...context, installationId: plan.installationId, planDigest: plan.plan.digest, confirmActions: [action.id] };
+    const pending = await applyCloudInstallationV1(target), before = reads.mock.calls.length;
+    f.setAppStatus(404);
+    expect((await applyCloudInstallationV1(target)).status).toBe('pending');
+    expect((await reconcileCloudInstallationV1(target)).completed).toEqual({});
+    expect(reads).toHaveBeenCalledTimes(before);
+    expect(capability.parseRecord(pending)).toEqual(pending);
+    const unsafe = structuredClone(pending); unsafe.attempts[0].externalUrl = 'https://attacker.example/settings/apps';
+    expect(() => capability.parseRecord(unsafe)).toThrow();
+    const otherOwner = structuredClone(pending); otherOwner.attempts[0].externalUrl = 'https://github.com/organizations/foreign/settings/apps';
+    expect(() => capability.parseRecord(otherOwner)).toThrow();
+    await expect(connection.driver.operatorApplication!.pendingBrowser!(otherOwner)).rejects.toThrow();
+  });
+  it('retirement rejects uncorrelated successful creation evidence without touching native state', async () => {
+    const { completed, capability, local, intent, reads } = await retirementFixture();
+    const altered = structuredClone(completed), capture = altered.plan.actions[1].id;
+    altered.attempts.find(item => item.actionId === capture)!.id = randomUUID();
+    await expect(capability.retirement!.create(intent.nativeScope, local, [altered])).rejects.toThrow();
+    expect(reads).not.toHaveBeenCalled();
+  });
   it('keeps owner-approved code conversion separate from callback and stores complete credentials privately', async () => {
     const f = await fixture(); await f.callback();
     const completed = await applyCloudInstallationV1(f.target); expect(completed.status).toBe('scope-ready'); expect(f.conversions()).toBe(1);

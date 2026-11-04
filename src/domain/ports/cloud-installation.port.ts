@@ -253,7 +253,8 @@ export interface CloudInstallationDriver<I extends CloudInstallationExecutableIn
   readonly operatorApplication?: { providerName: OperatorApplicationProvider;
     /** Narrow provider-owned local browser handoff; hosted actors retain HTTPS-only URLs. */
     parseBrowserHandoff?(url: string, intent: OperatorApplicationIntent): string;
-    pendingBrowser?(record: CloudInstallationRecord<OperatorApplicationIntent>): Promise<{ url: string; expiresAt: string; description: string } | undefined>;
+    /** Provider-owned management pages need no invented expiry; local one-use forms retain their real expiry. */
+    pendingBrowser?(record: CloudInstallationRecord<OperatorApplicationIntent>): Promise<{ url: string; expiresAt?: string; description: string } | undefined>;
   };
   readonly provider: I['provider'];
   /** Explicit separate installation capability; collection support never implies deployment authority. */

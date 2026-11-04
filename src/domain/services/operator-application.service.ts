@@ -134,7 +134,9 @@ async function retirementSelection(project: Project, environment: Environment, n
     || parent.intent.selection?.declarationDigest !== canonicalJsonSha256(original)) throw retirementUnavailable();
   // The declaration retains its original public provider selection. Expanded
   // provider-derived origin/runtime facts come from accepted setup, not discovery.
-  if (Object.entries(declaration.nativeScope).some(([key, value]) => parent.intent.nativeScope[key] !== value)) throw retirementUnavailable();
+  const scopeMatches = capability.retirement.matchesScopeSelection?.(declaration.nativeScope, parent.intent.nativeScope)
+    ?? Object.entries(declaration.nativeScope).every(([key, value]) => parent.intent.nativeScope[key] === value);
+  if (!scopeMatches) throw retirementUnavailable();
   const ancestry = new Map<string, Registration>(); let cursor: Registration | undefined = parent;
   while (cursor) {
     if (ancestry.size >= CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT || ancestry.has(cursor.installationId)
@@ -493,7 +495,9 @@ export async function applyOperatorApplications(input: { project: Project; envir
     const historical = updated.intent.predecessor ? historicalRegistrations(updated, await store.findByScope()) : [];
     const retirement = retirementSummary(updated);
     return { success, ...(success ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
-      message: success ? updated.intent.mode === 'retire' ? 'Verified the exact operator retirement action; retained native data and history remain recorded.' : 'Verified the exact operator registration action; customer access and deployment remain separate.' : operatorApplicationUnavailable().message,
+      message: success ? updated.intent.mode === 'retire' ? 'Verified the exact operator retirement action; retained native data and history remain recorded.' : 'Verified the exact operator registration action; customer access and deployment remain separate.'
+        : browserHandoff && updated.intent.mode === 'retire' ? 'Open the saved browser link and follow the exact registration review. Deletion remains unverified; private values and history are preserved, and dependent cleanup stays blocked.'
+        : operatorApplicationUnavailable().message,
       data: { installationId: updated.installationId, status: updated.status, ...(updated.reason ? { reason: updated.reason } : {}),
         ...(retirement ? { retirement } : {}),
         ...(historical.length ? { historicalRegistrations: historical } : {}),

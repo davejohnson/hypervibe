@@ -24,36 +24,37 @@
     {
       "id": "google-oauth",
       "kind": "operator-application",
-      "implementation": "missing-completed-retirement",
+      "implementation": "implemented exact saved-plan owner-console handoff; remains pending; native deletion verification unavailable; offline checks only",
       "nativeMethod": "reviewed owner-authenticated Google Auth Platform Clients browser handoff",
       "identity": [
-        "projectNumber",
-        "clientId",
-        "reviewed owner/project",
-        "accepted registration digest"
+        "exact imported projectId and clientId",
+        "accepted configuration commitment and import attempt",
+        "original registration plan/evidence digest",
+        "same project/environment/repository; imported native ownership remains unverified"
       ],
       "retention": "Google documents deleted-client restoration for 30 days; no immediate-erasure claim",
       "unsupportedSubstitute": "IAM projects.locations.oauthClients belongs to Workforce Identity Federation/IAP, not the imported Google browser web client",
-      "recovery": "Retain browser attempt and exact client; reject token failure/public lookup as deletion proof; remain pending when exact owner-view verification is unavailable",
+      "recovery": "Preserve the same confirmed console link and pending attempt on restart with no native requests, re-import, or deletion replay. Retained private values and costs remain; output cleanup cannot proceed without independent provider deletion proof.",
       "sources": [
-        "https://support.google.com/cloud/answer/15549257?hl=en",
-        "https://docs.cloud.google.com/iam/docs/workforce-oauth-app"
+        "https://support.google.com/cloud/answer/15549257",
+        "https://developers.google.com/identity/protocols/oauth2/resources/best-practices",
+        "https://docs.cloud.google.com/iam/docs/workforce-manage-oauth-app"
       ]
     },
     {
       "id": "github-app",
       "kind": "operator-application",
-      "implementation": "missing-completed-retirement",
+      "implementation": "implemented exact saved-plan owner-settings handoff after signed original App inspection; remains pending; native deletion verification unavailable; offline checks only",
       "nativeMethod": "reviewed owner-settings registration deletion; API installation deletion is a different effect",
       "identity": [
-        "appId",
-        "ownerId",
-        "slug",
-        "createdAt",
-        "complete current installation IDs/account IDs"
+        "appId and clientId",
+        "ownerId/login/type",
+        "slug and createdAt",
+        "accepted permissions and original registration evidence digest",
+        "same project/environment/repository"
       ],
       "retention": "Registration deletion uninstalls from all accounts; unexpected consumers block narrow test cleanup",
-      "recovery": "No documented registration-delete endpoint found in the reviewed API surface; do not invent one. Auth failures/anonymous 404 do not prove deletion. Keep the older unfinished registration unresolved until separately evidenced.",
+      "recovery": "A confirmed handoff remains pending after restart or access loss. No registration-delete API is assumed; installation removal and auth failures/public 404 do not prove registration deletion. Encrypted custody, outputs and historical proof remain.",
       "sources": [
         "https://docs.github.com/en/apps/maintaining-github-apps/deleting-a-github-app",
         "https://docs.github.com/en/rest/apps/apps#delete-an-installation-for-the-authenticated-app"

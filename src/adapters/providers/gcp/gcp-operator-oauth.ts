@@ -9,9 +9,9 @@ import { credentialSourceSchema } from '../../../domain/spec/credential.schema.j
 import { resolveSecretValueRef } from '../../../domain/services/secret-value-ref.js';
 import { OperatorCredentialCustody, type OperatorCustodyState } from '../../../domain/services/operator-credential-custody.js';
 import { operatorOutputReceipts, withOperatorOutputDelivery } from '../../../domain/services/operator-output-delivery.js';
-import { parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
+import { historicalInstallationEvidence, parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
 import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationDriver, type CloudInstallationEvidence,
-  type CloudInstallationProviderContext, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
+  type CloudInstallationProviderContext, type CloudInstallationRecord, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
 import type { OperatorApplicationCapability, OperatorApplicationLocalContext } from '../../../domain/ports/operator-application.port.js';
 const projectId = z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/);
 const clientId = z.string().max(256).regex(/^[0-9]+(?:-[A-Za-z0-9_-]+)?\.apps\.googleusercontent\.com$/);
@@ -130,13 +130,99 @@ export function createGoogleOperatorOAuthDriver(local?: OperatorApplicationLocal
   };
   return withOperatorOutputDelivery(native, local, intent => [settings(intent).actionId]);
 }
+const retirementTargetSchema = z.object({ installationId: z.string().guid(), planDigest: commitment, evidenceDigest: commitment,
+  ownerScopeDigest: commitment, identity: evidenceSchema.shape.resources.element.shape.identity }).strict();
+type RetirementTarget = z.infer<typeof retirementTargetSchema>;
+function retirementUrl(intent: Intent) { return `https://console.cloud.google.com/auth/clients?project=${settings(intent).projectId}`; }
+function retirementAction(intent: Intent, target: RetirementTarget): CloudInstallationAction {
+  const n = settings(intent);
+  return { id: `google-oauth:${n.name}:retire-browser`, type: 'destroy', resource: { kind: 'project', provider: 'google-oauth', name: target.identity.clientId },
+    verified: true, requiresConfirm: true, dataBearing: true,
+    reason: 'Review this exact client in the Google console and delete it only if you own it and it is no longer used. Imported configuration does not prove native ownership; deletion remains unverified.',
+    metadata: { operation: 'retire-browser', category: 'identity', execution: 'external', native: { target } } };
+}
+/** Standard Web OAuth clients have an owner-console flow, not the Workforce
+ * OAuth API. A saved handoff is not native proof of deletion or erasure. */
+function createGoogleOperatorRetirementDriver(local?: OperatorApplicationLocalContext, targets?: CloudInstallationRecord<Intent>[]): CloudInstallationDriver<Intent> {
+  const setup = createGoogleOperatorOAuthDriver();
+  let retained: RetirementTarget | undefined;
+  if (targets) {
+    if (targets.length !== 1) fail();
+    const original = parseCloudInstallationRecordV1(targets[0], setup), proof = historicalInstallationEvidence(original);
+    if (original.intent.mode !== 'connect' || !proof) fail();
+    const imported = parseEvidence(proof[settings(original.intent).actionId], original.intent), identity = evidenceSchema.parse(imported).resources[0].identity;
+    const attempt = original.attempts.filter(item => item.actionId === settings(original.intent).actionId).at(-1);
+    if (!attempt || attempt.status !== 'succeeded' || attempt.id !== identity.attemptId || !isDeepStrictEqual(attempt.evidence, imported)) fail();
+    retained = retirementTargetSchema.parse({ installationId: original.installationId, planDigest: original.plan.digest,
+      evidenceDigest: canonicalJsonSha256(proof), ownerScopeDigest: canonicalJsonSha256([original.intent.customerId, original.intent.appId, original.intent.environment, original.intent.source.repository]), identity });
+  }
+  function targetFor(value: unknown, intent: Intent) {
+    const target = retirementTargetSchema.parse(value), n = settings(intent), reference = { installationId: target.installationId, planDigest: target.planDigest };
+    if (intent.mode !== 'retire' || intent.retirement?.resources !== 'delete-owned' || intent.retirement.data !== 'retain'
+      || intent.retirement.continueFrom || intent.retirement.outputTargets
+      || !isDeepStrictEqual(intent.retirement.from, reference) || !isDeepStrictEqual(intent.predecessor, reference)
+      || !isDeepStrictEqual(intent.retirement.targets, [{ ...reference, evidenceDigest: target.evidenceDigest }])
+      || target.identity.projectId !== n.projectId || target.identity.origin !== n.origin || target.identity.callback !== n.callback
+      || target.ownerScopeDigest !== canonicalJsonSha256([intent.customerId, intent.appId, intent.environment, intent.source.repository])
+      || retained && !isDeepStrictEqual(target, retained)) fail();
+    return target;
+  }
+  function actionFor(value: unknown, intent: Intent) {
+    const target = targetFor((value as CloudInstallationAction)?.metadata?.native?.target, intent), expected = retirementAction(intent, target);
+    if (!isDeepStrictEqual(value, expected)) fail(); return expected;
+  }
+  function inspect(context: Context & { action: CloudInstallationAction }) {
+    try {
+      const action = actionFor(context.action, context.intent), attempt = context.attempts?.filter(item => item.actionId === action.id).at(-1);
+      if (attempt) {
+        if (attempt.externalUrl && attempt.externalUrl !== retirementUrl(context.intent)) fail();
+        return { state: 'pending' as const, reason: 'not_converged' as const };
+      }
+      if (!local || !retained || local.projectId !== context.intent.appId || local.projectId !== context.intent.customerId
+        || local.installationId !== context.intent.installationId || local.intentDigest !== canonicalJsonSha256(context.intent)) fail();
+      const environment = new EnvironmentRepository().findById(local.environmentId);
+      if (!environment || environment.projectId !== context.intent.appId || environment.name !== context.intent.environment) fail();
+      return { state: 'action-required' as const };
+    } catch { return { state: 'unknown' as const, reason: 'identity_mismatch' as const }; }
+  }
+  return { provider: 'google-oauth', operatorRetirement: { schemaVersion: 1 }, parseScope: setup.parseScope, scopePreparation: setup.scopePreparation,
+    parseAction: (value, intent) => intent.mode === 'connect' ? setup.parseAction(value, intent) : actionFor(value, intent),
+    parseEvidence(value, intent) { if (intent.mode === 'connect') return setup.parseEvidence(value, intent); return fail(); },
+    operatorApplication: { providerName: 'google-oauth',
+      parseBrowserHandoff(value, intent) { if (intent.mode !== 'retire' || value !== retirementUrl(intent)) fail(); return value; },
+      async pendingBrowser(record) {
+        const action = actionFor(record.plan.actions[0], record.intent), target = targetFor(action.metadata.native.target, record.intent);
+        const attempt = record.attempts.filter(item => item.actionId === action.id).at(-1);
+        if (!attempt?.externalUrl) return undefined;
+        if (attempt.externalUrl !== retirementUrl(record.intent)) fail();
+        return { url: attempt.externalUrl, description: `In Google project ${target.identity.projectId}, verify that you own client ${target.identity.clientId} and that it is no longer used, then select it and click Delete. Deletion stops sign-in and Google access through this client. Google allows recovery for 30 days. Imported configuration does not prove ownership. Deletion remains unverified in Hypervibe; private values remain and any storage charges may continue until independent provider proof allows cleanup.` };
+      } },
+    async plan(context) {
+      if (!retained) fail(); const target = targetFor(retained, context.intent), action = retirementAction(context.intent, target), observed = inspect({ ...context, action });
+      if (observed.state !== 'action-required') fail('reason' in observed ? observed.reason : 'not_converged');
+      return { actions: [action], review: { resources: [{ kind: 'Google OAuth client', name: target.identity.clientId, scope: target.identity.projectId }], permissions: [], costs: [],
+        warnings: [`Open ${retirementUrl(context.intent)} and verify the exact client ID and ownership before deletion. The imported configuration is not native ownership proof.`,
+          'Deleting this shared operator client stops sign-in and Google access through it. Check that it is no longer used; preserve unrelated clients and the shared project.',
+          'Google allows recovery for 30 days after deletion. This handoff does not verify deletion or permanent erasure. Hypervibe keeps this retirement pending and preserves encrypted private values and history; storage charges may continue.',
+          'An operator manages this shared client. Customers connecting their own clouds do not create or delete operator clients.'] } };
+    },
+    async inspect(context) { return inspect(context); }, async recover(context) { return inspect(context); },
+    async mutate(context) {
+      const observed = inspect({ ...context, attempts: context.attempts?.filter(item => item.id !== context.attempt.id) });
+      if (observed.state !== 'action-required') return { state: 'rejected', reason: 'not_converged' };
+      await context.beforeMutation(); return { state: 'external', url: retirementUrl(context.intent) };
+    }, connections: () => [],
+  };
+}
 export function createGoogleOperatorOAuthCapability(): OperatorApplicationCapability {
   return { schemaVersion: 1, privateOutputRoles: ['client-secret'],
     parseDeclaration({ name, declaration, origin }) {
       if (declaration.provider !== 'google-oauth' || declaration.profile !== 'hypercloud-connect-v1') fail();
       return scopeSchema.parse({ ...declarationScope.parse(declaration.nativeScope), name, origin });
-    }, parseRecord: value => parseCloudInstallationRecordV1(value, createGoogleOperatorOAuthDriver()),
+    }, parseRecord: value => parseCloudInstallationRecordV1(value,
+      (value as { intent?: { mode?: unknown } })?.intent?.mode === 'retire' ? createGoogleOperatorRetirementDriver() : createGoogleOperatorOAuthDriver()),
     async create(scope, local) { scopeSchema.parse(scope); return { driver: createGoogleOperatorOAuthDriver(local), authentication: { kind: 'operator-application' } }; },
+    retirement: { async create(scope, local, targets) { scopeSchema.parse(scope); return { driver: createGoogleOperatorRetirementDriver(local, targets), authentication: { kind: 'operator-application' } }; } },
     receipts(record) {
       if (record.status !== 'scope-ready') fail('not_converged');
       const n = settings(record.intent), identity = parseEvidence(record.completed[n.actionId], record.intent).resources[0].identity;

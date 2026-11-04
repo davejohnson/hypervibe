@@ -4,9 +4,9 @@ import { z } from 'zod';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { CloudInstallationBoundaryError, type CloudInstallationAction, type CloudInstallationDriver, type CloudInstallationEvidence,
-  type CloudInstallationProviderContext, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
+  type CloudInstallationProviderContext, type CloudInstallationRecord, type OperatorApplicationIntent } from '../../../domain/ports/cloud-installation.port.js';
 import type { OperatorApplicationCapability, OperatorApplicationLocalContext } from '../../../domain/ports/operator-application.port.js';
-import { parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
+import { historicalInstallationEvidence, parseCloudInstallationRecordV1 } from '../../../domain/services/cloud-installation-runtime.js';
 import { OperatorCredentialCustody } from '../../../domain/services/operator-credential-custody.js';
 import { operatorOutputReceipts, readGithubOperatorSigningKey, withOperatorOutputDelivery } from '../../../domain/services/operator-output-delivery.js';
 import { openOperatorAppCallback } from '../../browser/operator-app-callback.js';
@@ -197,6 +197,102 @@ export function createGithubOperatorApplicationDriver(options: { fetch?: typeof 
   };
   return withOperatorOutputDelivery(native, options.local, intent => [settings(intent).captureAction]);
 }
+const retirementTargetSchema = z.object({ installationId: uuid, planDigest: hash, evidenceDigest: hash,
+  ownerScopeDigest: hash, scope: scopeSchema, identity: appIdentity }).strict();
+type RetirementTarget = z.infer<typeof retirementTargetSchema>;
+function retirementUrl(scope: z.infer<typeof scopeSchema>) {
+  return scope.ownerType === 'Organization' ? `https://github.com/organizations/${scope.ownerLogin}/settings/apps` : 'https://github.com/settings/apps';
+}
+function retirementAction(target: RetirementTarget): CloudInstallationAction {
+  return { id: `github-app:${target.scope.name}:retire-browser`, type: 'destroy',
+    resource: { kind: 'project', provider: 'github-app', name: target.identity.appId }, verified: true, requiresConfirm: true, dataBearing: true,
+    reason: 'Open GitHub settings for the owner to delete this exact App registration and all its installations. Deletion remains unverified until independent native proof is available.',
+    metadata: { operation: 'retire-browser', category: 'identity', execution: 'external', native: { target } } };
+}
+function createGithubOperatorRetirementDriver(options: { local?: OperatorApplicationLocalContext; targets?: CloudInstallationRecord<Intent>[] } = {}): CloudInstallationDriver<Intent> {
+  const setup = createGithubOperatorApplicationDriver();
+  let original: CloudInstallationRecord<Intent> | undefined, retained: RetirementTarget | undefined;
+  if (options.targets) {
+    if (options.targets.length !== 1) fail();
+    original = parseCloudInstallationRecordV1(options.targets[0], setup);
+    const proof = historicalInstallationEvidence(original), n = settings(original.intent);
+    if (original.intent.mode !== 'connect' || !proof) fail();
+    const capture = parseEvidence(proof[n.captureAction], original.intent), identity = appIdentity.parse(capture.resources[0].identity);
+    const attempt = original.attempts.filter(item => item.actionId === n.captureAction).at(-1);
+    if (!attempt || attempt.status !== 'succeeded' || attempt.id !== identity.captureAttemptId || !isDeepStrictEqual(attempt.evidence, capture)) fail();
+    retained = retirementTargetSchema.parse({ installationId: original.installationId, planDigest: original.plan.digest,
+      evidenceDigest: canonicalJsonSha256(proof), ownerScopeDigest: canonicalJsonSha256([original.intent.customerId, original.intent.appId, original.intent.environment, original.intent.source.repository]),
+      scope: original.intent.nativeScope, identity });
+  }
+  function targetFor(value: unknown, intent: Intent) {
+    const target = retirementTargetSchema.parse(value), reference = { installationId: target.installationId, planDigest: target.planDigest };
+    if (intent.mode !== 'retire' || intent.provider !== 'github-app' || intent.applicationProvider !== 'github-app'
+      || intent.retirement?.resources !== 'delete-owned' || intent.retirement.data !== 'retain' || intent.retirement.continueFrom || intent.retirement.outputTargets
+      || !isDeepStrictEqual(intent.retirement.from, reference) || !isDeepStrictEqual(intent.predecessor, reference)
+      || !isDeepStrictEqual(intent.retirement.targets, [{ ...reference, evidenceDigest: target.evidenceDigest }])
+      || !isDeepStrictEqual(intent.nativeScope, target.scope)
+      || target.ownerScopeDigest !== canonicalJsonSha256([intent.customerId, intent.appId, intent.environment, intent.source.repository])
+      || target.identity.appName !== settings({ ...intent, installationId: target.installationId }).appName
+      || retained && !isDeepStrictEqual(retained, target)) fail();
+    return target;
+  }
+  function actionFor(value: unknown, intent: Intent) {
+    const target = targetFor((value as CloudInstallationAction)?.metadata?.native?.target, intent), action = retirementAction(target);
+    if (!isDeepStrictEqual(value, action)) fail(); return action;
+  }
+  async function inspect(context: Context & { action: CloudInstallationAction }) {
+    try {
+      const action = actionFor(context.action, context.intent), target = targetFor(action.metadata.native.target, context.intent);
+      const attempt = context.attempts?.filter(item => item.actionId === action.id).at(-1);
+      if (attempt) {
+        if (attempt.externalUrl && attempt.externalUrl !== retirementUrl(target.scope)) fail();
+        return { state: 'pending' as const, reason: 'not_converged' as const };
+      }
+      if (!retained || !original || !options.local || options.local.projectId !== context.intent.appId
+        || options.local.installationId !== context.intent.installationId || options.local.intentDigest !== canonicalJsonSha256(context.intent)) fail();
+      const driver = createGithubOperatorApplicationDriver({ local: { ...options.local, installationId: original.installationId, intentDigest: canonicalJsonSha256(original.intent) } });
+      const capture = original.plan.actions.find(item => item.id === settings(original!.intent).captureAction)!;
+      const observation = await driver.inspect({ ...context, intent: original.intent, completed: historicalInstallationEvidence(original)!, attempts: original.attempts,
+        action: capture, beforeMutation: async () => fail() });
+      if (observation.state !== 'satisfied') return observation.state === 'action-required'
+        ? { state: 'unknown' as const, reason: 'not_converged' as const } : observation;
+      if (!isDeepStrictEqual(observation.evidence.resources[0].identity, target.identity)) fail();
+      return { state: 'action-required' as const };
+    } catch (error) { return { state: 'unknown' as const, reason: error instanceof CloudInstallationBoundaryError ? error.reason : 'provider_error' as const }; }
+  }
+  return { provider: 'github-app', operatorRetirement: { schemaVersion: 1 }, parseScope: setup.parseScope, scopePreparation: setup.scopePreparation,
+    parseAction: (value, intent) => intent.mode === 'connect' ? setup.parseAction(value, intent) : actionFor(value, intent),
+    parseEvidence(value, intent) { if (intent.mode === 'connect') return setup.parseEvidence(value, intent); return fail(); },
+    operatorApplication: { providerName: 'github-app',
+      parseBrowserHandoff(value, intent) {
+        // Ancestor creation records retain their real, expiring loopback handoff.
+        if (intent.mode === 'connect') return handoff(value);
+        if (intent.mode !== 'retire' || value !== retirementUrl(scopeSchema.parse(intent.nativeScope))) fail();
+        return value;
+      },
+      async pendingBrowser(record) {
+        if (record.intent.mode === 'connect') return undefined;
+        const action = actionFor(record.plan.actions[0], record.intent), target = targetFor(action.metadata.native.target, record.intent);
+        const attempt = record.attempts.filter(item => item.actionId === action.id).at(-1);
+        if (!attempt?.externalUrl) return undefined;
+        if (attempt.externalUrl !== retirementUrl(target.scope)) fail();
+        return { url: attempt.externalUrl, description: `The GitHub owner or App manager must select ${target.identity.appName} (App ID ${target.identity.appId}, client ID ${target.identity.clientId}) under ${target.scope.ownerLogin}, then Advanced → Delete GitHub App. GitHub verifies the person's permission. All installations are removed; remove any Marketplace listing first. Hypervibe cannot yet verify registration deletion, so this remains pending and private output cleanup stays blocked.` };
+      } },
+    async plan(context) {
+      if (!retained) fail(); const target = targetFor(retained, context.intent), action = retirementAction(target);
+      const observed = await inspect({ ...context, action }); if (observed.state !== 'action-required') fail('reason' in observed ? observed.reason : 'not_converged');
+      return { actions: [action], review: { resources: [{ kind: 'GitHub App registration', name: target.identity.appName,
+        scope: `${target.scope.ownerType}:${target.scope.ownerLogin}:${target.scope.ownerId}; App ${target.identity.appId}; client ${target.identity.clientId}; created ${target.identity.createdAt}` }], permissions: [], costs: [],
+        warnings: ['GitHub requires its owner or App manager to delete this registration in settings. The signed App read verifies its identity, not the current person’s deletion permission.',
+          'Deleting this App uninstalls it from every account and invalidates its credentials. Remove any Marketplace listing first. Shared accounts and repositories are preserved.',
+          'This review authorizes the exact browser handoff. Hypervibe cannot independently confirm registration deletion yet; lost access, an absent public page or a checkbox is not proof. Retirement stays pending and encrypted custody, original history and secret outputs are retained.'] } };
+    }, inspect, recover: inspect,
+    async mutate(context) {
+      const observed = await inspect({ ...context, attempts: context.attempts?.filter(item => item.id !== context.attempt.id) });
+      if (observed.state !== 'action-required') return { state: 'uncertain', reason: 'reason' in observed ? observed.reason : 'not_converged' };
+      await context.beforeMutation(); return { state: 'external', url: retirementUrl(targetFor(context.action.metadata.native.target, context.intent).scope) };
+    }, connections: () => [] };
+}
 export function createGithubOperatorApplicationCapability(): OperatorApplicationCapability {
   return { schemaVersion: 1, privateOutputRoles: ['private-key', 'client-secret', 'webhook-secret'],
     restart: {
@@ -224,7 +320,16 @@ export function createGithubOperatorApplicationCapability(): OperatorApplication
       const owner = await json(fetch, `/${type === 'Organization' ? 'orgs' : 'users'}/${selected.ownerLogin}`, AbortSignal.timeout(30_000));
       if (owner.type !== type || String(owner.login).toLowerCase() !== selected.ownerLogin.toLowerCase()) fail();
       return scopeSchema.parse({ name, origin, ownerType: type, ownerLogin: owner.login, ownerId: numeric(owner.id) });
-    }, parseRecord: value => parseCloudInstallationRecordV1(value, createGithubOperatorApplicationDriver()),
+    }, parseRecord: value => parseCloudInstallationRecordV1(value, (value as { intent?: { mode?: string } })?.intent?.mode === 'retire'
+      ? createGithubOperatorRetirementDriver() : createGithubOperatorApplicationDriver()),
+    retirement: {
+      matchesScopeSelection(declared, retained) {
+        const selected = z.object({ ownerType: z.enum(['user', 'organization']), ownerLogin: login }).strict().safeParse(declared);
+        const native = scopeSchema.safeParse(retained);
+        return selected.success && native.success && (selected.data.ownerType === 'organization' ? 'Organization' : 'User') === native.data.ownerType
+          && selected.data.ownerLogin.toLowerCase() === native.data.ownerLogin.toLowerCase();
+      },
+      async create(scope, local, targets) { scopeSchema.parse(scope); return { driver: createGithubOperatorRetirementDriver({ local, targets }), authentication: { kind: 'operator-application' } }; } },
     async create(scope, local) { scopeSchema.parse(scope); return { driver: createGithubOperatorApplicationDriver({ local }), authentication: { kind: 'operator-application' } }; },
     receipts(record) {
       const n = settings(record.intent); if (record.status !== 'scope-ready') fail('not_converged');

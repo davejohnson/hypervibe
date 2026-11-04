@@ -37,6 +37,9 @@ export interface OperatorApplicationCapability {
   /** Separate from setup/output custody. Targets are parsed, completed records
    * from this exact journal, selected by the explicit retirement declaration. */
   retirement?: {
+    /** Pure provider normalization of the unchanged original public selection.
+     * Defaults to exact subset equality; never supplies native ownership proof. */
+    matchesScopeSelection?(declared: Record<string, string>, retained: Record<string, string>): boolean;
     create(scope: Record<string, string>, context: OperatorApplicationLocalContext,
       targets: CloudInstallationRecord<OperatorApplicationIntent>[]): Promise<{
         driver: CloudInstallationDriver<OperatorApplicationIntent>; authentication: OperatorApplicationAuthentication;
