@@ -342,6 +342,8 @@ export interface ProviderOrchestrationMetadata {
     serviceCreatesBillable?: boolean;
     /** Some providers cannot observe web vs worker, only cron vs non-cron. */
     workloadKindObservation?: 'exact' | 'cron-only';
+    /** Deployment-only image inputs, in the same priority order used by deploy. */
+    deploymentImageEnvKeys?: (serviceName: string) => readonly string[];
     /**
      * Some providers report generated/reference env vars as resolved values.
      * Return true when Hypervibe should verify only that the key exists live.

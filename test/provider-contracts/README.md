@@ -147,6 +147,25 @@ PATCH, so the failed receipt alone does not authorize a retry. Read-only native
 operation/service evidence and a fresh reviewed plan are required to establish
 what remains; exact durable update-operation recovery is still a separate gap.
 
+`cloudrun-image-diff.contract.test.ts` exercises real Cloud Run observation and
+generic planning with reconstructed REST responses. An immutable native image
+is configuration evidence, not an invented `IMAGE_URI` runtime environment hash.
+Cloud Run's registered selector priority is shared with deployment and runtime
+input filtering; ambiguous/missing image or lifetime evidence cannot prove noop.
+The legacy `env:<selector>` plan field identifies the desired input and preserves
+saved action authority. Ordinary environment changes remain independently compared.
+
+The shared optional observation/diff contract was checked against every registered
+hosting provider: [Cloud Run Container.image](https://cloud.google.com/run/docs/reference/rest/v2/projects.locations.services#Container),
+[ECS ContainerDefinition.image](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html),
+[Azure Container.image](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps/create-or-update?view=rest-resource-manager-containerapps-2025-07-01#container),
+and [Railway source.image](https://docs.railway.com/integrations/api/manage-services).
+All distinguish image configuration from runtime variables. Only the Cloud Run
+ordinary adapter currently consumes these `IMAGE_URI` deployment selectors; the
+other three remain opted out and have regression coverage for unchanged variable
+semantics. This does not extend their native image reconciliation support or
+establish live compatibility.
+
 `cloud-deployment-provider-roster.test.ts` pins every hosting provider against the
 [keyless deployment contract](../../docs/connect-cloud-deployment-contract.md).
 The shared deployment/install/session suites distinguish provision, release and runtime

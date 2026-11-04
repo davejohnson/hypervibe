@@ -42,7 +42,7 @@ import * as pubsub from './pubsub.api.js';
 import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
 import { CloudRunRuntimeIdentities } from './cloudrun-runtime-identities.js';
 import { CloudRunInstalledRuntimeIdentities } from './cloudrun-installed-runtime.js';
-import { CloudRunPreparedHosting, gcpPreparedRuntimeEnvVars } from './cloudrun-prepared-hosting.js';
+import { CloudRunPreparedHosting, gcpDeploymentImageEnvKeys, gcpPreparedRuntimeEnvVars } from './cloudrun-prepared-hosting.js';
 import { CloudRunLocalPreparedRuntime } from './cloudrun-local-prepared-runtime.js';
 import { describePreparedHosting } from '../../../domain/services/hosting-prepared.service.js';
 import { preparedReleaseAttempts } from '../../../domain/services/prepared-direct-release.service.js';
@@ -3414,6 +3414,10 @@ export class CloudRunAdapter implements
 
       const container = this.primaryContainer(liveService);
       const readiness = this.cloudRunServiceReadiness(liveService);
+      const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
+      const observedImage = liveService.template?.containers?.length === 1 && typeof liveService.uid === 'string' && liveService.uid.trim()
+        && (!boundUid || liveService.uid === boundUid) && container?.image && this.isImmutableContainerImage(container.image)
+        ? container.image : undefined;
       const startCommand = this.containerStartCommand(container);
       const healthCheckPath = container?.startupProbe?.httpGet?.path ?? container?.livenessProbe?.httpGet?.path;
       const releaseCommandHash = liveService.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
@@ -3450,6 +3454,7 @@ export class CloudRunAdapter implements
           : {}),
         config: {
           ...(instanceBounds ? { instanceBounds } : {}),
+          ...(observedImage ? { imageUri: observedImage } : {}),
           ...(startCommand ? { startCommand } : {}),
           ...(releaseCommandHash ? { releaseCommandHash } : {}),
           ...(healthCheckPath ? { healthCheckPath } : {}),
@@ -3507,6 +3512,9 @@ export class CloudRunAdapter implements
       const startCommand = this.containerStartCommand(container);
       const pendingActivation = bindingKey ? serviceBindings[bindingKey]?.scheduleActivation : undefined;
       const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
+      const observedImage = liveJob.template?.template?.containers?.length === 1 && typeof liveJob.uid === 'string' && liveJob.uid.trim()
+        && (!boundUid || liveJob.uid === boundUid) && container?.image && this.isImmutableContainerImage(container.image)
+        ? container.image : undefined;
       if (boundUid && liveJob.uid !== boundUid) {
         serviceObservationKnown = false;
         warnings.push(`Scheduled workload ${externalId} has a different provider lifetime identity.`);
@@ -3528,6 +3536,7 @@ export class CloudRunAdapter implements
         workloadKind: 'cron',
         customDomains: [],
         config: {
+          ...(observedImage ? { imageUri: observedImage } : {}),
           ...(startCommand ? { startCommand } : {}),
           ...(schedulerJob?.schedule ? { cronSchedule: schedulerJob.schedule } : {}),
           ...(cacheNetwork ? { cacheNetwork } : {}),
@@ -7253,20 +7262,11 @@ export class CloudRunAdapter implements
   }
 
   private imageUriForService(service: Service, envVars: Record<string, string>): string | undefined {
-    return envVars[this.imageEnvKey(service)]?.trim() || envVars['IMAGE_URI']?.trim() || undefined;
+    return gcpDeploymentImageEnvKeys(service.name).map(key => envVars[key]?.trim()).find(value => Boolean(value));
   }
 
   private runtimeEnvVarsForService(service: Service, envVars: Record<string, string>): Record<string, string> {
     return gcpPreparedRuntimeEnvVars(envVars, service.name);
-  }
-
-  private imageEnvKey(service: Service): string {
-    const serviceKey = service.name
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '');
-    return `IMAGE_URI_${serviceKey}`;
   }
 
   private sanitizeName(name: string): string {
@@ -7344,6 +7344,7 @@ providerRegistry.register({
     orchestration: {
       diff: {
         workloadKindObservation: 'exact',
+        deploymentImageEnvKeys: gcpDeploymentImageEnvKeys,
       },
       logs: {
         runtime: true,

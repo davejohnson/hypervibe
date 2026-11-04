@@ -35,6 +35,8 @@ export interface ObservedService {
     }>;
   }>;
   config: {
+    /** Provider-observed immutable primary container image; not a runtime env value. */
+    imageUri?: string;
     /** Native automatic service bounds; zero max means no service-level limit. */
     instanceBounds?: { min: number; max: number };
     startCommand?: string;

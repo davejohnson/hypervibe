@@ -28,6 +28,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
 import { recordDelegatedSecretBindings } from '../../domain/services/delegated-secret.service.js';
+import type { PreparedHostingObservation } from '../../domain/ports/hosting-prepared.port.js';
 
 // Counterexample from the live operator: a completed AWS template publication
 // loses current readiness when its administrator session expires. Updating an
@@ -83,18 +84,102 @@ describe('existing immutable image update prerequisites', () => {
     const observed: ObservedState = { provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'operator-project', environmentId: 'us-central1',
       partial: false, warnings: [], databases: [], completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
       services: ['web', 'worker'].map(name => ({ name, externalId: `${name}-native`, workloadKind: name === 'worker' ? 'worker' : 'web',
-        config: { startCommand: `node ${name}.js`, public: false }, sourceState: 'disconnected', envVarKeys: ['AWS_TEMPLATE_URL'], envVarHashes: { AWS_TEMPLATE_URL: hashEnvValue(templateUrl) }, customDomains: [], status: 'running' })) };
+        config: { startCommand: `node ${name}.js`, public: false, imageUri: imageUri.replace(/@sha256:[a-f0-9]{64}$/, `@sha256:${'1'.repeat(64)}`) }, sourceState: 'disconnected', envVarKeys: ['AWS_TEMPLATE_URL'], envVarHashes: { AWS_TEMPLATE_URL: hashEnvValue(templateUrl) }, customDomains: [], status: 'running' })) };
     const observe = vi.fn(async () => observed), identity = vi.fn(async () => ({ state: 'ready' as const })), deploy = vi.fn();
-    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: { name: 'cloudrun', capabilities: { supportsObserve: true }, observe, deploy,
-      runtimeIdentities: { inspect: identity, apply: vi.fn() } } as never });
+    const adapter = { name: 'cloudrun', capabilities: { supportsObserve: true }, observe, deploy,
+      runtimeIdentities: { inspect: identity, apply: vi.fn() } };
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: adapter as never });
     awsCreate.mockClear(); gcpCreate.mockClear(); aws.requests.length = 0; gcp.requests.length = 0;
     const journalBefore = JSON.stringify(ctx.repos.runs.findById(templates.record.installationId)!.plan);
     const plan = (extra = {}) => registry.get('hv_plan')!.execute({ project: project.name, env: 'staging', services: ['web', 'worker'], includeEnvFile: false, ...extra });
     const change = (edit: (value: NonNullable<ReturnType<SpecStore['get']>>['spec']) => void) => {
       const next = structuredClone(store.get(project)!.spec); edit(next); store.replace(project, next);
     };
-    return { ctx, registry, project, environment, store, observed, observe, identity, deploy, aws, gcp, awsCreate, gcpCreate, templates, image, imageUri, journalBefore, plan, change };
+    return { ctx, registry, project, environment, store, observed, observe, identity, deploy, adapter, aws, gcp, awsCreate, gcpCreate, templates, image, imageUri, journalBefore, plan, change };
   }
+  // Reconstructed provider-port proof from the 2026-11-04 live counterexample:
+  // same native UIDs, web Ready on the approved image after the update timed out,
+  // worker on its old image, and no pending first release. Real SQLite/commands
+  // below exercise the planning/metadata boundary; this is not a native replay.
+  async function acknowledgedImageFixture() {
+    const f = await fixture(), previousImage = f.imageUri.replace(/@sha256:[a-f0-9]{64}$/, `@sha256:${'1'.repeat(64)}`);
+    const preparation = { schemaVersion: 1 as const, installationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      planDigest: 'a'.repeat(64), receiptDigest: 'b'.repeat(64), pendingFirstRelease: [] as string[] };
+    const services = Object.fromEntries(['web', 'worker'].map(name => [name, {
+      serviceId: `${name}-native`, resourceUid: `${name}-native-uid`, resourceType: 'service' as const,
+      workloadKind: name === 'web' ? 'web' as const : 'worker' as const, imageUri: previousImage,
+    }]));
+    const bindings = { provider: 'cloudrun', projectId: 'operator-project', environmentId: 'us-central1',
+      providerScope: { projectId: 'operator-project', region: 'us-central1' }, services };
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { ...bindings, preparedHosting: preparation });
+    const proof: PreparedHostingObservation = { state: 'verified', bindings: structuredClone(bindings), preparation };
+    proof.bindings.services.web.imageUri = f.imageUri;
+    f.observed.services.find(service => service.name === 'web')!.config.imageUri = f.imageUri;
+    const inspect = vi.fn(async () => structuredClone(proof));
+    Object.assign(f.adapter, { preparedHosting: { inspect } });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: f.adapter as never });
+    const failed = f.ctx.repos.runs.create({ projectId: f.project.id, environmentId: f.environment.id, type: 'deploy',
+      plan: { steps: [{ action: 'deploy', target: 'web' }] } });
+    f.ctx.repos.runs.updateStatus(failed.id, 'failed');
+    return { ...f, proof, inspect, failed, previousImage };
+  }
+  it('reviews the exact acknowledged image metadata after a failed existing-service update without redeploying', async () => {
+    const f = await acknowledgedImageFixture(), before = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    const planned = await f.plan();
+    expect(planned.ok, JSON.stringify(planned)).toBe(true);
+    expect(planned.data).toMatchObject({ scope: 'hosting-prepared-bindings', blocked: [], actions: [{
+      id: 'hosting-prepared:cloudrun:staging', type: 'update', verified: true, requiresConfirm: true,
+    }] });
+    const planId = (planned.data as { planId: string }).planId, current = f.store.get(f.project)!;
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(before);
+    const applied = await executePlanApply(f.ctx, { project: f.project, spec: current.spec, specRevision: current.revision,
+      planId, confirmActions: ['hosting-prepared:cloudrun:staging'] });
+    expect(applied).toMatchObject({ kind: 'executed', result: { success: true, receipts: [{ data: { providerMutations: 0 } }] } });
+    const after = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+    const expected = structuredClone(before) as typeof before & { services: Record<string, { imageUri: string }> };
+    expected.services.web.imageUri = f.imageUri;
+    expect(after).toEqual(expected); expect(f.ctx.repos.runs.findById(f.failed.id)!.status).toBe('failed');
+    expect(f.deploy).not.toHaveBeenCalled(); expect(f.adapter.runtimeIdentities.apply).not.toHaveBeenCalled();
+    expect(f.awsCreate).not.toHaveBeenCalled(); expect(f.aws.requests).toEqual([]);
+    expect(JSON.stringify(f.ctx.repos.runs.findById(f.templates.record.installationId)!.plan)).toBe(f.journalBefore);
+    const continued = await f.plan();
+    expect(continued.ok, JSON.stringify(continued)).toBe(true);
+    const continuedPlan = f.ctx.repos.runs.findById((continued.data as { planId: string }).planId)!.plan as { scope: string; actions: Array<{ id: string; type: string }> };
+    expect(continuedPlan.scope).toBe('full');
+    expect(continuedPlan.actions.filter(action => action.type !== 'noop').map(action => action.id)).toEqual(['service:worker']);
+    expect(continuedPlan.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'noop' });
+    expect(f.deploy).not.toHaveBeenCalled();
+  });
+  it.each(['unselected-service', 'unapproved-image', 'new-scope-field', 'changed-uid', 'pending-first-release', 'runtime-input'] as const)(
+    'does not widen image metadata recovery for %s', async variant => {
+      const f = await acknowledgedImageFixture();
+      if (variant === 'unapproved-image') f.proof.bindings.services.web.imageUri = f.imageUri.replace(/@sha256:[a-f0-9]{64}$/, `@sha256:${'2'.repeat(64)}`);
+      if (variant === 'new-scope-field') f.proof.bindings.providerScope.anotherCoordinate = 'unreviewed';
+      if (variant === 'changed-uid') f.proof.bindings.services.web.resourceUid = 'replacement-uid';
+      if (variant === 'pending-first-release') {
+        f.proof.preparation.pendingFirstRelease.push('web');
+        f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { preparedHosting: structuredClone(f.proof.preparation) });
+      }
+      const before = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings;
+      const result = await f.plan(variant === 'unselected-service' ? { services: ['worker'] }
+        : variant === 'runtime-input' ? { envVars: { NEW_INPUT: 'not-authorized-by-image-review' } } : {});
+      expect(result.ok, JSON.stringify(result)).toBe(false);
+      expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(before);
+      expect(f.deploy).not.toHaveBeenCalled(); expect(f.adapter.runtimeIdentities.apply).not.toHaveBeenCalled();
+    });
+  it.each(['not-confirmed', 'binding-drift', 'native-drift'] as const)('keeps metadata apply blocked after %s', async variant => {
+    const f = await acknowledgedImageFixture(), planned = await f.plan();
+    expect(planned.ok, JSON.stringify(planned)).toBe(true);
+    if (variant === 'binding-drift') f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { concurrentMetadata: 'preserve-me' });
+    if (variant === 'native-drift') f.proof.bindings.services.web.imageUri = f.previousImage;
+    const before = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings, current = f.store.get(f.project)!;
+    const outcome = await executePlanApply(f.ctx, { project: f.project, spec: current.spec, specRevision: current.revision,
+      planId: (planned.data as { planId: string }).planId,
+      confirmActions: variant === 'not-confirmed' ? [] : ['hosting-prepared:cloudrun:staging'] });
+    expect(outcome).not.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings).toEqual(before);
+    expect(f.deploy).not.toHaveBeenCalled(); expect(f.adapter.runtimeIdentities.apply).not.toHaveBeenCalled();
+  });
   it.each(['command', 'cli', 'mcp'])('reviews a GCP image update through %s without reading or repairing completed AWS publication state', async transport => {
     const f = await fixture(), args = { project: f.project.name, env: 'staging', services: ['web', 'worker'], includeEnvFile: false };
     let result: Awaited<ReturnType<typeof f.plan>>;

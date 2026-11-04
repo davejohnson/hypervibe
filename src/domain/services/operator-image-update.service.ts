@@ -4,6 +4,10 @@ import type { ProjectSpec } from '../spec/spec.schema.js';
 import { operatorArtifactJournalNames, operatorApplicationJournalNames } from '../../adapters/db/repositories/cloud-scope-preparation.repository.js';
 import { selectsOperatorImageTarget, verifyOperatorArtifactImages } from './operator-artifact.service.js';
 import { assertOperatorApplicationsComplete } from './operator-application.service.js';
+import type { PlanAction } from '../plan/plan.types.js';
+import { isPreparedHostingAction, preparedHostingActionMetadataSchema } from './hosting-prepared.service.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 
 const unavailable = () => new Error('The selected existing image update requires immutable verified images, unchanged runtime inputs and complete historical setup effects. Use the full plan to review other changes; no setup or deployment was authorized.');
 export async function operatorImageUpdateSelection(project: Project, environment: Environment | null, spec: ProjectSpec,
@@ -31,4 +35,31 @@ export async function operatorImageUpdateSelection(project: Project, environment
 export async function verifyOperatorImageUpdate(project: Project, environment: Environment, spec: ProjectSpec, images: string[]) {
   await assertOperatorApplicationsComplete(project, environment, spec);
   await verifyOperatorArtifactImages({ ...project, gitRemoteUrl: spec.gitRemoteUrl ?? project.gitRemoteUrl }, environment, images);
+}
+
+/** The caller must first validate the immutable operator image selection.
+ * An acknowledged existing rollout can leave only its local image binding stale.
+ * Permit that exact metadata frontier without reopening unrelated setup, while
+ * preserving the general prohibition on filtered prepared-resource adoption. */
+export function isOperatorImageBindingRefresh(environment: Environment, action: PlanAction,
+  selection: NonNullable<Awaited<ReturnType<typeof operatorImageUpdateSelection>>>): boolean {
+  try {
+    if (!isPreparedHostingAction(action) || action.resource.name !== environment.name
+      || preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting).pendingFirstRelease.length) return false;
+    const meta = preparedHostingActionMetadataSchema.parse(action.metadata);
+    const expected = structuredClone(environment.platformBindings);
+    const services = expected.services as Record<string, Record<string, unknown>>;
+    let changed = false;
+    for (const [index, name] of selection.services.entries()) {
+      const before = services[name], observed = meta.proof.bindings.services[name];
+      if (!before || !observed || typeof before.imageUri !== 'string' || !before.resourceUid
+        || before.serviceId !== observed.serviceId || before.resourceUid !== observed.resourceUid) return false;
+      if (before.imageUri === observed.imageUri) continue;
+      if (observed.imageUri !== selection.images[index]) return false;
+      before.imageUri = observed.imageUri;
+      changed = true;
+    }
+    return changed && meta.beforeBindingsFingerprint === canonicalJsonSha256(environment.platformBindings)
+      && meta.afterBindingsFingerprint === canonicalJsonSha256(expected);
+  } catch { return false; }
 }

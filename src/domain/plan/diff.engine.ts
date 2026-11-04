@@ -195,6 +195,7 @@ export function diffEnvironment(input: {
     requiresBranchDeployForCode?: boolean;
     serviceCreatesBillable?: boolean;
     workloadKindObservation?: 'exact' | 'cron-only';
+    deploymentImageEnvKeys?: (serviceName: string) => readonly string[];
     presenceOnlyManagedEnvVar?: (params: { key: string; value: string }) => boolean;
   };
   /** Provider-declared ownership boundary for the retained, abandoned host. */
@@ -535,8 +536,18 @@ export function diffEnvironment(input: {
         ...(managedQueueEnvVars ?? {}),
         ...spec.envVars,
       };
+      const deploymentImageKeys = providerBehavior.deploymentImageEnvKeys?.(name) ?? [];
+      const deploymentImageKey = deploymentImageKeys.find(key => desiredServiceEnvVars[key]?.trim());
+      if (deploymentImageKey && !live.config.imageUri) {
+        actions.push({ id, type: 'update', resource, verified: false,
+          reason: `Service "${name}" native container image could not be verified; refusing to infer deployment convergence from environment variables`,
+          metadata: { blockedReason: 'service_image_unknown' } });
+        continue;
+      }
       const diff = diffServiceConfig(serviceSpec, live, desiredServiceEnvVars, {
         presenceOnlyEnvVars: presenceOnlyManagedEnvVars,
+        deploymentImageKeys,
+        deploymentImageKey,
         cacheNetwork: spec.cache && local.bindings?.cacheNetwork
           ? local.bindings.cacheNetwork
           : undefined,
@@ -1746,6 +1757,8 @@ function diffServiceConfig(
   envVars: Record<string, string>,
   options: {
     presenceOnlyEnvVars?: Set<string>;
+    deploymentImageKeys?: readonly string[];
+    deploymentImageKey?: string;
     cacheNetwork?: NonNullable<NonNullable<LocalSnapshot['bindings']>['cacheNetwork']>;
   } = {}
 ): PlanFieldDiff[] {
@@ -1789,6 +1802,7 @@ function diffServiceConfig(
   }
 
   for (const [key, value] of Object.entries(envVars)) {
+    if (options.deploymentImageKeys?.includes(key)) continue;
     const liveHash = live.envVarHashes[key];
     if (liveHash === undefined) {
       diff.push({ field: `env:${key}` });
@@ -1797,6 +1811,12 @@ function diffServiceConfig(
     } else if (liveHash !== hashEnvValue(value)) {
       diff.push({ field: `env:${key}` });
     }
+  }
+
+  if (options.deploymentImageKey && envVars[options.deploymentImageKey]?.trim() !== live.config.imageUri) {
+    // Retain the exact desired input key for saved-plan authority; its evidence
+    // is native image configuration, never a fabricated runtime env hash.
+    diff.push({ field: `env:${options.deploymentImageKey}` });
   }
 
   if (options.cacheNetwork?.network && options.cacheNetwork.subnetwork && options.cacheNetwork.egress) {

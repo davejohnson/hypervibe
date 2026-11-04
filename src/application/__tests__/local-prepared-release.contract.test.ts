@@ -16,6 +16,11 @@ import { PlanService } from '../../domain/plan/plan.service.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
 import type { Service } from '../../domain/entities/service.entity.js';
 import { createHash } from 'node:crypto';
+import { candidateBoundary } from '../../adapters/providers/gcp/__tests__/gcp-application-candidate.fixture.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { CloudScopePreparationRepository } from '../../adapters/db/repositories/cloud-scope-preparation.repository.js';
+import { applyCloudInstallationV1, planCloudInstallationV1 } from '../../domain/services/cloud-installation-runtime.js';
+import type { CloudInstallationRecord, OperatorArtifactIntent } from '../../domain/ports/cloud-installation.port.js';
 
 // Real local ADC loader + actual SQLite publication/holding journals + native
 // provider clients. Only OAuth/Google transport is synthetic; no hosted grant
@@ -167,6 +172,7 @@ async function fixture(changeHolding?: (native: Record<string, any>) => void, fu
           const live = f.native.services.get(target.id)!; delete live.template.scaling; delete live.template.executionEnvironment;
         }
         state.patchRequests++; state.patches++;
+        if (state.loseAcknowledgment) { state.loseAcknowledgment = false; throw new Error('Synthetic lost existing update acknowledgment'); }
         return Response.json({ name: 'projects/operator-project/locations/us-central1/operations/second-application', done: true,
           response: { name: target.id, uid: target.lifetimeId } });
       }
@@ -236,6 +242,56 @@ async function acknowledgedLabelLoss() {
   return { ...f, web, nativeWeb: native, imagePlan: plan };
 }
 describe('local journal-backed prepared application release', () => {
+  it('reconciles an acknowledged existing image with real prepared proof, then updates only the worker without another migration', async () => {
+    const f = await fixture(undefined, false, true, true, true);
+    for (let phase = 0; phase < 7 && f.state.patches < 2; phase++) {
+      const first = await new PlanService().plan(f.project, 'staging');
+      if ('error' in first) throw new Error(first.error);
+      expect(await f.apply(first.planRunId, first.actions.filter(action => action.type !== 'noop').map(action => action.id)))
+        .toMatchObject({ result: { success: true } });
+    }
+    const publication = candidateBoundary(), capability = providerRegistry.getArtifactPublication('cloudrun')!;
+    Object.assign(publication.intent, { appId: f.project.id, customerId: f.project.id,
+      installationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' });
+    const store = new CloudScopePreparationRepository<CloudInstallationRecord<OperatorArtifactIntent>>({ projectId: f.project.id,
+      environmentId: f.environment.id, environmentName: 'staging' }, capability.parseRecord, { recordType: 'operator-artifacts:next-image' });
+    const context = { ...publication.context, store };
+    let published = await planCloudInstallationV1({ ...context, intent: publication.intent });
+    published = await applyCloudInstallationV1({ ...context, installationId: published.installationId, planDigest: published.plan.digest,
+      confirmActions: published.plan.actions.map(action => action.id) });
+    expect(published.status).toBe('scope-ready');
+    vi.spyOn(capability, 'create').mockResolvedValue(publication.context);
+    const image = capability.receipts(published)[0].image!;
+    const spec = f.store.get(f.project)!.spec;
+    f.state.nextImage = image;
+    f.store.replace(f.project, { ...spec, environments: { staging: { ...spec.environments.staging,
+      envVars: { ...spec.environments.staging.envVars, IMAGE_URI: image } } } });
+    const review = () => new PlanService().plan(f.project, 'staging', { serviceFilter: ['web', 'worker'], includeEnvFile: false });
+    const rollout = await review(); if ('error' in rollout) throw new Error(rollout.error);
+    const before = structuredClone(f.load().platformBindings);
+    f.state.loseAcknowledgment = true;
+    expect(await f.apply(rollout.planRunId, ['service:web', 'service:worker'])).toMatchObject({ result: { success: false } });
+    expect(f.load().platformBindings).toEqual(before);
+    const web = f.receipt.preparedResources.workloads.find(item => item.workload === 'web')!;
+    expect(f.native.services.get(web.id)!.template.containers[0].image).toBe(image);
+    const counts = structuredClone({ patches: f.state.patches, patchRequests: f.state.patchRequests,
+      envPatches: f.state.repeatEnvPatches, jobPatches: f.state.repeatJobPatches, ...f.taskState });
+    const reconcile = await review();
+    expect(reconcile).toHaveProperty('scope', 'hosting-prepared-bindings');
+    if ('error' in reconcile) throw new Error(reconcile.error);
+    expect(await f.apply(reconcile.planRunId, reconcile.actions.map(action => action.id))).toMatchObject({ result: { success: true } });
+    expect({ patches: f.state.patches, patchRequests: f.state.patchRequests, envPatches: f.state.repeatEnvPatches,
+      jobPatches: f.state.repeatJobPatches, ...f.taskState }).toEqual(counts);
+    const remaining = await review(); if ('error' in remaining) throw new Error(remaining.error);
+    expect(remaining.actions.filter(action => action.type !== 'noop').map(action => action.id)).toEqual(['service:worker']);
+    expect(remaining.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'noop' });
+    const nativeWeb = structuredClone(f.native.services.get(web.id));
+    expect(await f.apply(remaining.planRunId, ['service:worker'])).toMatchObject({ result: { success: true } });
+    expect(f.native.services.get(web.id)).toEqual(nativeWeb);
+    expect(f.taskState).toEqual({ creates: counts.creates, runs: counts.runs });
+    expect(f.state.repeatJobPatches).toBe(counts.jobPatches);
+    expect(f.state.patches).toBe(counts.patches + 1);
+  });
   it('reviews and repairs only missing ownership labels after an acknowledged update', async () => {
     const f = await acknowledgedLabelLoss();
     const planned = await new PlanService().plan(f.project, 'staging', { scope: 'runtime-access', serviceFilter: ['web'], includeEnvFile: false });

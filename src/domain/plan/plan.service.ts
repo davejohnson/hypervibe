@@ -18,7 +18,7 @@ import { planDatabaseCredentialAliases } from '../services/database-credential-a
 import { planSecretContainers } from '../services/secret-container-setup.js';
 import { operatorArtifactWorkRequired, operatorArtifactRetirementRequired, planOperatorArtifactRetirement, planOperatorArtifacts } from '../services/operator-artifact.service.js';
 import { operatorArtifactPreparationMessage } from '../ports/operator-artifact.port.js';
-import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../services/operator-image-update.service.js';
+import { isOperatorImageBindingRefresh, operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../services/operator-image-update.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
 import { localHoldingWorkRequired, planLocalHolding } from '../services/local-holding-preparation.service.js';
 import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
@@ -2696,7 +2696,8 @@ export class PlanService {
           hosting: hosting.adapter, project: projectForPlan, spec: specResult.spec, managedSecretValues, onObservation: proof => { preparedDirectEvidence = proof.directReleaseEvidence ?? []; } }) : null;
         if (prepared) {
           if (scope === 'backups') return { error: 'Run hv_plan with scope="full" to review the prepared hosting binding prerequisite before backup setup; backup-only review cannot authorize application bindings.' };
-          if (serviceFilter || envVarOverrides || envFileVars && Object.keys(envFileVars).length)
+          const imageBindingRefresh = operatorImageUpdate && isOperatorImageBindingRefresh(environment, prepared, operatorImageUpdate);
+          if (serviceFilter && !imageBindingRefresh || envVarOverrides || envFileVars && Object.keys(envFileVars).length)
             return { error: 'Prepared hosting binding is an isolated metadata stage; remove runtime inputs and service filters before reviewing it.' };
           const warnings = ['This step records verified hosting identities only. Pending first releases, runtime configuration and application rollout remain separate.'];
           const document: PlanRunDocument = { kind: 'hv_plan', scope: 'hosting-prepared-bindings', environmentName, specRevision: specResult.revision,

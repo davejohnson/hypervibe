@@ -172,9 +172,13 @@ export class CloudRunPreparedHosting implements IPreparedHosting {
 }
 
 /** Same transport-only keys excluded from first-release review and execution. */
-export function gcpPreparedRuntimeEnvVars(values: Record<string, string>, workload: string): Record<string, string> {
+export function gcpDeploymentImageEnvKeys(workload: string): readonly string[] {
   const suffix = workload.toUpperCase().replace(/[^A-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-  const internal = new Set(['IMAGE_URI', `IMAGE_URI_${suffix}`, 'HYPERVIBE_SOURCE_REPO_URL', 'HYPERVIBE_SOURCE_REVISION',
+  return [`IMAGE_URI_${suffix}`, 'IMAGE_URI'];
+}
+
+export function gcpPreparedRuntimeEnvVars(values: Record<string, string>, workload: string): Record<string, string> {
+  const internal = new Set([...gcpDeploymentImageEnvKeys(workload), 'HYPERVIBE_SOURCE_REPO_URL', 'HYPERVIBE_SOURCE_REVISION',
     'HYPERVIBE_ARTIFACT_REPOSITORY', 'HYPERVIBE_GITHUB_TOKEN', 'HYPERVIBE_CRON_TIME_ZONE']);
   return Object.fromEntries(Object.entries(values).filter(([key]) => !internal.has(key)));
 }
