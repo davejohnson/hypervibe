@@ -228,3 +228,35 @@ first deployment with immutable references, repeat update/recovery, then collect
 disconnection preserving the separately authorized deployment/runtime access. Legacy
 static connections remain usable only through their explicit existing path; new keyless
 connections never fall back to them.
+
+
+## Agent-owned approved setup continuation
+
+`hv_cloud_connections action="continue"` is available only for `connect-cloud`
+and `deployment-access`. It sends exactly `{}` to the saved connection's
+`setup-continuations` endpoint, without changing device, repository, environment,
+source, targets or consent. The hosted operation shares a cooperative 20-second abort budget across at
+most three existing stages. It may outlive that budget when an awaited operation
+does not cooperate; the client preserves its 30-second deadline and
+64 KiB response bound. A client timeout therefore remains uncertain, with the saved grant and binding
+preserved; there is no automatic HTTP retry or local polling loop.
+
+The strict v1 receipt exposes the compact connection and a closed correlated
+status/reason/nextAction, plus bounded observation/reservation counts (0–900).
+An optional strict diagnostic contains only the current setup stage and an
+existing closed CLOUD_INSTALLATION_REASONS value, so the agent can distinguish
+unverified hosted access from an administrator problem. It contains no
+administrator context, native journals, native identifiers or credentials. A ready
+summary is not a deployment permission receipt: existing read-only status must
+validate that separate evidence. GET behavior and legacy purposes are unchanged. Executable nextStep.input retains
+the validated origin, environment and purpose; final evidence or diagnosis uses
+the existing status action with the saved source branch. Human handoffs contain
+the exact browser URL instead of a fabricated command action.
+After transport uncertainty the agent reads status before an explicit supported
+continuation, without replaying unknown writes. The agent handles waiting and
+diagnosis; people handle only real identity, choice or consent requirements.
+
+Normal command/CLI/MCP regressions exercise serialized synthetic HC responses,
+local Git and SQLite authority, state/source/expiry changes during a request,
+closed receipts, response limits and lost acknowledgments. These are offline
+contract checks, not proof that a deployed hosted service supports the endpoint.

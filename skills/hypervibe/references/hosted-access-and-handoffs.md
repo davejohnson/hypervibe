@@ -15,6 +15,41 @@ context. Do not ask for a GitHub PAT, repository ID, or environment name when
 this pairing flow supplies them. Pairing grants only its stated hosted access;
 it does not authorize private secret retrieval, deployment access, or adoption.
 
+## Continue approved cloud setup
+
+For `hv_cloud_connections` purposes `connect-cloud` and `deployment-access`,
+after the owner has approved the saved setup, the coding agent calls
+`action="continue"` for that same environment. Do not add source, target,
+credential or confirmation overrides. This advances only the exact saved
+approval; it cannot create a pairing, approve a new scope or adopt resources.
+The legacy monitoring and local secret-setup purposes do not support it.
+
+Follow the closed `continuation` and `nextStep` receipt:
+
+- `progressed` or `waiting`: the agent waits at least 10 seconds before another
+  explicit continue. Increase the wait after repeated unchanged receipts and
+  investigate persistent lack of progress; do not keep sending requests rapidly.
+- `ready`: read `action="status"` to validate the final source or permission
+  receipt. Setup completion alone grants neither deployment nor secret collection.
+- `needs-sign-in` or `needs-review`: give the exact saved browser link for the
+  actual identity or owner decision. Resume the same setup after that handoff.
+- `blocked`: the agent reads status and diagnoses the reason. When present,
+  `continuation.diagnostic` supplies the current setup stage and a closed reason;
+  use it to investigate hosted access without blaming the person's account. Preserve uncertain
+  attempts; a rejected write requires its separate supported review, not replay.
+
+A failed or lost HTTP response is not permission to retry the POST. First read
+status, then use only the explicit continuation supported by the saved record.
+GET status is always read-only. Each continuation has a bounded server execution
+budget; it does not start an unattended client polling loop. Completion counts
+are newly recorded observations, and attempt counts are reservations that might
+not have dispatched a write. Neither count proves which writes this call made.
+
+Never make the person click “Check installation” or operate progress, reconcile
+or retry controls. The agent handles supported routine work and diagnosis;
+human handoffs are for sign-in, real choices and material new consent. Do not
+claim that work started or finished without a supporting receipt.
+
 ## Share verified local provider connections
 
 Use `hv_cloud_connections` for its separate browser approval. Start/check that

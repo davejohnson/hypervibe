@@ -64,7 +64,11 @@ For new AWS, Azure or GCP access, start `hv_cloud_connections` with
 `purpose="connect-cloud"` for the exact app and environment. Follow `nextStep`
 through device approval, browser provider selection and administrator installation.
 The developer may invite the cloud administrator; sign-in alone does not establish
-cloud authority. Review account/project/subscription, resources, permissions and
+cloud authority. Once the saved setup is approved, the coding agent uses
+`action="continue"`, waits or diagnoses according to its receipt, and reads
+`action="status"` for final evidence. Do not send the person to a Check installation
+button. A lost POST response requires a read-only status check before any further
+supported continuation. Review account/project/subscription, resources, permissions and
 cost before installation. No local cloud credentials or manually prepared writer
 identities are required. Report missing hosted prerequisites without substituting
 key uploads or key generation.

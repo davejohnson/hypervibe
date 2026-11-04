@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { CommandContext } from './context.js';
+import { parseSetupContinuation, setupContinuationResult } from './cloud-setup-continuation.js';
 import { HvError } from './results.js';
 import { CloudHttpError, cloudAccessRejected, createCloudJsonClient } from './cloud-http.js';
 import { createHypervibeCloudPairingClient, normalizeHypervibeCloudBaseUrl } from './cloud-pairing.js';
@@ -26,7 +27,7 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
   const store = { connections: context.repos.connections, secretStore: context.secretStore };
   return { async run(input: CloudDeploymentsInput) {
     const action = input.action ?? 'status';
-    if (!['start', 'status', 'preview', 'connect', 'propose-release', 'propose-source', 'revoke'].includes(action) || !input.env || input.provider || input.credentialsRef || input.credentialKind || input.connectionId || input.previewId
+    if (!['start', 'status', 'preview', 'connect', 'continue', 'propose-release', 'propose-source', 'revoke'].includes(action) || !input.env || input.provider || input.credentialsRef || input.credentialKind || input.connectionId || input.previewId
       || input.workflowPath && action !== 'propose-release') {
       throw new HvError('VALIDATION', 'Deployment access uses an exact environment and separate browser approval. Cloud keys and native identity overrides are not accepted.');
     }
@@ -114,7 +115,8 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
         return { ...current, hostingProvider: current.spec.environments[current.env].hosting.provider }; })();
     const assertCurrent = () => {
       const currentAccess = store.connections.findByProviderAndScope(DEPLOYMENT_ACCESS_PROVIDER, accessScope), currentBinding = store.connections.findByProviderAndScope(DEPLOYMENT_BINDING_PROVIDER, bindingScope);
-      if (currentAccess?.credentialsEncrypted !== accessRow?.credentialsEncrypted || currentAccess?.status !== accessRow?.status
+      if (action === 'continue' && (!grant || grant.status !== 'verified' || Date.parse(grant.expiresAt) <= Date.now())
+        || currentAccess?.credentialsEncrypted !== accessRow?.credentialsEncrypted || currentAccess?.status !== accessRow?.status
         || currentBinding?.credentialsEncrypted !== bindingRow?.credentialsEncrypted || currentBinding?.status !== bindingRow?.status
         || !isDeepStrictEqual(deploymentIdentity(identity.env), identity)
         || !historical && !isDeepStrictEqual(deploymentSource(local.env, local.repository, input.sourceBranch).source, local.source)) {
@@ -279,6 +281,20 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
     }
     if (!active || !grant?.token || !grant.project || grant.environment?.key !== local.env
       || !historical && action !== 'propose-source' && grant.sourceBranch !== local.source.branch) throw new HvError('VALIDATION', 'Start a separate deployment browser approval for this environment.');
+    if (action === 'continue') {
+      if (!binding || !isDeepStrictEqual(binding.source, local.source))
+        throw new HvError('VALIDATION', 'Continue requires the exact saved deployment connection and its unchanged source. Read status to inspect existing access.');
+      const raw = await request(`/api/v1/projects/${encodeURIComponent(binding.projectId)}/cloud-deployments/${binding.connectionId}/setup-continuations`, { body: {}, token: grant.token });
+      const receipt = parseSetupContinuation(raw, browser.strict(), grant.token);
+      const remote = receipt.connection;
+      if (remote.id !== binding.connectionId || remote.environment !== local.env || !isDeepStrictEqual(remote.source, binding.source)
+        || remote.connectUrl !== `${baseUrl}/apps/${encodeURIComponent(binding.projectId)}/cloud-connections/${binding.connectionId}`
+        || (remote.status === 'ready') !== (remote.deployment === 'provision-approved'))
+        throw new HvError('PROVIDER_ERROR', 'The setup continuation differs from the exact saved deployment connection.');
+      // Compact setup completion is not the final deployment permission receipt.
+      // The existing read-only status path validates that receipt separately.
+      return setupContinuationResult(receipt, { purpose: 'deployment-access', baseUrl, env: local.env, sourceBranch: binding.source.branch });
+    }
     if (action === 'propose-source') {
       const current = await view();
       if (binding?.status !== 'ready' || !binding.receipt || current.status !== 'ready') throw new HvError('VALIDATION', 'Finish the saved deployment installation before proposing a branch change.');

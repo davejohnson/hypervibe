@@ -80,7 +80,11 @@ requires explicit intent to adopt and the exact reviewed mapping.
   `purpose="connect-cloud"` for browser installation bound to the exact app and
   environment, or invite the cloud administrator. Local cloud credentials and
   manually prepared writer identities are not prerequisites. Perform supported
-  setup work; leave browser consent, MFA, payment details and ambiguous billing
+  setup work with `action="continue"` after the saved setup approval, and handle
+  waiting and diagnosis yourself. Never ask the person to click Check installation.
+  Read status before another continuation after an uncertain response, and for
+  final permission/source evidence; the compact ready summary grants no new access.
+  Leave browser consent, MFA, payment details and ambiguous billing
   choices to the user. Show account, resources, access and costs in one clear
   setup review. Keep setup, deployment and collection authority separate;
   routine permission grants within the approved task do not need more questions.

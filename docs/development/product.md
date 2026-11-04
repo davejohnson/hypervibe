@@ -40,6 +40,13 @@ values for authorized agents; do not present those contracts as the human interf
   choose safe defaults. Ask for facts only the person knows, browser sign-in, externally
   owned secrets, or meaningful consent. Do not turn internal setup steps,
   missing automation or recovery bookkeeping into a checklist of user chores.
+  The coding agent handles supported setup continuation, waits, progress checks
+  and diagnosis within the unchanged approved scope. Do not ask people to operate
+  “Check installation,” reconcile, or technical retry controls. Hand off only
+  real sign-in, an unresolved choice, or material new consent. An uncertain write
+  still requires read-only recovery before another explicitly supported continuation;
+  agent ownership never authorizes a blind retry. Describe work as started or
+  completed only when its receipt supports that claim.
 - **Use familiar, concrete words.** Prefer “ask someone for this app's API key”
   to “manage credential requests.” Name an API key or password when that is
   what is needed; explain “secret” as private app configuration when necessary.
@@ -76,7 +83,7 @@ action support them:
 | Internal framing | Customer-facing framing |
 | --- | --- |
 | “Manage credential requests?” | “Let your coding agent request secrets” followed by what it can ask for and from whom. |
-| “Installation needs attention. Check its recorded result.” | “Cloud setup hasn't finished” with the supported progress or recovery action beside it. |
+| “Installation needs attention. Check its recorded result.” | “Cloud setup hasn't finished” with the coding agent handling the supported next step; ask the person only for an actual sign-in, choice or approval. |
 | “Source required” | “Cloud setup is complete. Return to your coding agent to finish connecting this environment.” |
 | “Administrator invitation” | “Sam asked you to connect Google Cloud for Sequence's staging environment.” |
 

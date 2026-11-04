@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import type { CommandContext } from './context.js';
+import { parseSetupContinuation, setupContinuationResult } from './cloud-setup-continuation.js';
 import { HvError } from './results.js';
 import { CloudHttpError, cloudAccessRejected, createCloudJsonClient } from './cloud-http.js';
 import { createHypervibeCloudPairingClient, normalizeHypervibeCloudBaseUrl } from './cloud-pairing.js';
@@ -55,7 +56,7 @@ const stateSchema = z.object({
 }).strict();
 type State = z.infer<typeof stateSchema>;
 export interface CloudSecretSetupInput {
-  action?: 'discover' | 'start' | 'status' | 'preview' | 'prepare' | 'connect' | 'revoke' | 'accept-source';
+  action?: 'discover' | 'start' | 'status' | 'preview' | 'prepare' | 'connect' | 'revoke' | 'accept-source' | 'continue';
   browser?: boolean; keys?: string[]; mode?: 'connect' | 'connect-existing' | 'migrate';
   env?: string; sourceBranch?: string; baseUrl?: string; previewId?: string; confirm?: boolean; adminAuth?: 'default';
   provider?: string; credentialsRef?: string; credentialKind?: string; connectionId?: string;
@@ -144,9 +145,9 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
     if (input.credentialsRef || input.credentialKind || input.connectionId || input.provider)
       throw new HvError('VALIDATION', 'Secret-manager setup uses reviewed destinations and identity delegation, never deployment credential uploads.');
     const action = input.action ?? 'preview';
-    if (input.browser && !['start', 'status', 'preview', 'connect', 'accept-source', 'revoke'].includes(action))
+    if (input.browser && !['start', 'status', 'preview', 'connect', 'continue', 'accept-source', 'revoke'].includes(action))
       throw new HvError('VALIDATION', 'Connect Cloud uses browser installation. Start device access, then connect, inspect status, or accept the committed destination patch.');
-    if (!input.browser && (input.mode || input.keys || action === 'accept-source')) throw new HvError('VALIDATION', 'Use purpose="connect-cloud" for browser installation.');
+    if (!input.browser && (input.mode || input.keys || action === 'accept-source' || action === 'continue')) throw new HvError('VALIDATION', 'Use purpose="connect-cloud" for browser installation.');
     if (input.adminAuth && action !== 'prepare') throw new HvError('VALIDATION', 'Use adminAuth only for the reviewed writer preparation step.');
     if (action === 'revoke') return revoke(input);
     const local = checkout(input);
@@ -185,7 +186,11 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
     let expectedCipher = stored?.credentialsEncrypted;
     const assertCurrentState = () => {
       const latest = context.repos.connections.findByProviderAndScope(PROVIDER, scope);
-      if (latest?.credentialsEncrypted !== expectedCipher)
+      const current = action === 'continue' ? checkout(input) : undefined;
+      if (latest?.credentialsEncrypted !== expectedCipher
+        || action === 'continue' && (latest?.status !== stored?.status || !saved || saved.status !== 'verified' || Date.parse(saved.expiresAt) <= now().getTime()
+          || current?.repository !== local.repository || current?.env !== local.env
+          || canonical(current?.source) !== canonical(local.source)))
         throw new HvError('VALIDATION', 'This device’s setup access or preview changed during the request. Inspect the current setup before continuing.');
     };
     const saveCurrent = (value: State) => { assertCurrentState(); expectedCipher = save(scope, value); };
@@ -283,6 +288,16 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
     }
     if (!saved.token || !saved.project) throw new HvError('VALIDATION', 'Start a new secret-manager setup approval.');
     if (input.browser) {
+      if (action === 'continue') {
+        const installation = saved.installation;
+        if (!installation || canonical(installation.source) !== canonical(local.source))
+          throw new HvError('VALIDATION', 'Continue requires this exact saved cloud setup and its unchanged source. Read status to inspect the existing connection.');
+        const raw = await request(`/api/v1/projects/${encodeURIComponent(saved.project.id)}/cloud-connections/${installation.id}/setup-continuations`, { body: {}, token: saved.token });
+        const receipt = parseSetupContinuation(raw, browserConnection.omit({ destinations: true, acceptedSource: true, scopePreparation: true }).extend({ mode: browserMode }).strict(), saved.token);
+        // Reuse the existing exact app/environment/source/URL checks without a GET.
+        await browserView(saved, { connection: receipt.connection });
+        return setupContinuationResult(receipt, { purpose: 'connect-cloud', baseUrl, env: local.env, sourceBranch: installation.source.branch });
+      }
       if (action === 'status' || action === 'preview') return saved.installation ? browserView(saved) : summary(saved);
       if (action === 'accept-source') {
         const current = await browserView(saved);
