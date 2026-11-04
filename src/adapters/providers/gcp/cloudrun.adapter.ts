@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { cloudRunExecutionBelongsToJob } from './cloudrun-resource-identity.js';
 import { createGcpOperatorArtifactCapability } from './gcp-operator-artifacts.js';
 import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
@@ -3822,20 +3823,30 @@ export class CloudRunAdapter implements
       || target.providerScope.projectId !== this.credentials.projectId
       || target.providerScope.location !== this.credentials.region
       || !this.isArtifactRepositoryName(target.id)
+      || !z.string().datetime({ offset: true }).safeParse(target.providerScope.repositoryCreateTime).success
+      || !/^[a-f0-9]{64}$/.test(target.providerScope.repositoryOwnershipSha256 ?? '')
     ) {
       return {
         success: false,
         message: 'Artifact Registry deletion target is invalid',
-        error: 'The exact repository id, project, or location does not match the connected provider scope.',
+        error: 'The recorded repository lifetime, ownership marker, project or location is incomplete or does not match. No deletion was attempted.',
       };
     }
     try {
       const before = await this.getArtifactRepository(target.id);
       if (!before) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
-      if (before.name !== target.id) {
-        return { success: false, message: 'Artifact Registry returned a different repository identity', error: 'No deletion was attempted.' };
+      if (before.name !== target.id || !isDeepStrictEqual(this.artifactRepositoryCleanupScope(before), target.providerScope)) {
+        return { success: false, message: 'The repository changed since cleanup was reviewed', error: 'No deletion was attempted. Keep the original cleanup target and investigate the changed repository.' };
       }
       const token = await this.getAccessToken();
+      await this.assertArtifactRepositoryEmpty(target.id, token);
+      // The delete API has no generation/etag precondition. Recheck after child
+      // inventory, but do not claim this eliminates concurrent-provider races.
+      const immediate = await this.getArtifactRepository(target.id, token);
+      if (!immediate) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
+      if (!isDeepStrictEqual(this.artifactRepositoryCleanupScope(immediate), target.providerScope)) {
+        return { success: false, message: 'The repository changed during cleanup checks', error: 'No deletion was attempted. The original cleanup target was preserved.' };
+      }
       const response = await this.request(`https://artifactregistry.googleapis.com/v1/${target.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
@@ -4968,7 +4979,12 @@ export class CloudRunAdapter implements
       const body = await response.text();
       throw new Error(`Artifact Registry repository lookup failed: ${response.status} ${body}`);
     }
-    return await response.json() as ArtifactRepository;
+    const value: unknown = await response.json();
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || (value as Record<string, unknown>).name !== name) {
+      throw new Error('Artifact Registry returned an incomplete or different repository identity. Its presence is unknown.');
+    }
+    return value as ArtifactRepository;
   }
 
   private assertArtifactRepository(
@@ -4987,6 +5003,52 @@ export class CloudRunAdapter implements
     }
   }
 
+  /** Only a complete observed lifetime is eligible for this cleanup path. The
+   * marker comparison detects drift; it is not proof of original creation or
+   * authority to adopt a repository. Original local-scope retirement is separate. */
+  private artifactRepositoryCleanupScope(repository: ArtifactRepository): Record<string, string> | null {
+    if (!this.credentials) return null;
+    const identity = this.artifactRepositoryIdentity(repository.name);
+    if (!identity || repository.format !== 'DOCKER' || repository.mode !== 'STANDARD_REPOSITORY'
+      || !z.string().datetime({ offset: true }).safeParse(repository.createTime).success
+      || typeof repository.description !== 'string'
+      || !/^hypervibe:operator-registry:[a-f0-9]{64}:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(repository.description)) return null;
+    return { projectId: this.credentials.projectId, location: identity.location,
+      repositoryCreateTime: repository.createTime!,
+      repositoryOwnershipSha256: createHash('sha256').update(repository.description).digest('hex') };
+  }
+
+  private async assertArtifactRepositoryEmpty(name: string, token: string): Promise<void> {
+    // Repository DELETE cascades to every child. This path authorizes the empty
+    // parent only, never the incidental destruction of unreviewed data.
+    for (const collection of ['packages', 'files', 'attachments'] as const) {
+      let pageToken = '';
+      const seen = new Set<string>();
+      for (let page = 0; page < 100; page += 1) {
+        const query = new URLSearchParams({ pageSize: '1000', ...(pageToken ? { pageToken } : {}) });
+        const response = await this.request(`https://artifactregistry.googleapis.com/v1/${name}/${collection}?${query}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`Repository contents could not be checked (HTTP ${response.status}); no deletion was attempted.`);
+        const parsed: unknown = await response.json();
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Repository contents returned incomplete evidence; no deletion was attempted.');
+        const body = parsed as Record<string, unknown>;
+        // Protobuf repeated fields and an empty page token may be omitted.
+        if (Object.keys(body).some(key => key !== collection && key !== 'nextPageToken')
+          || (body[collection] !== undefined && !Array.isArray(body[collection]))
+          || (body.nextPageToken !== undefined && typeof body.nextPageToken !== 'string'))
+          throw new Error('Repository contents returned incomplete evidence; no deletion was attempted.');
+        if ((body[collection] as unknown[] | undefined)?.length)
+          throw new Error('The repository still contains artifacts. Retire its exact artifacts first; no parent deletion was attempted.');
+        pageToken = (body.nextPageToken as string | undefined) ?? '';
+        if (!pageToken) break;
+        if (pageToken.length > 4096 || seen.has(pageToken) || page === 99)
+          throw new Error('Repository contents could not be completely listed; no deletion was attempted.');
+        seen.add(pageToken);
+      }
+    }
+  }
+
   private inspectedArtifactRepository(repository: ArtifactRepository): Record<string, unknown> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const identity = this.artifactRepositoryIdentity(repository.name);
@@ -4994,7 +5056,7 @@ export class CloudRunAdapter implements
     return {
       id: repository.name,
       name: this.lastPathSegment(repository.name) ?? repository.name,
-      providerScope: {
+      providerScope: this.artifactRepositoryCleanupScope(repository) ?? {
         projectId: this.credentials.projectId,
         location: identity.location,
       },
@@ -5004,7 +5066,7 @@ export class CloudRunAdapter implements
       createTime: repository.createTime ?? null,
       updateTime: repository.updateTime ?? null,
       sizeBytes: repository.sizeBytes ?? null,
-      cleanupSupported: true,
+      cleanupSupported: this.artifactRepositoryCleanupScope(repository) !== null,
     };
   }
 
@@ -7262,7 +7324,7 @@ providerRegistry.register({
         optional: ['project', 'scope', 'id', 'name', 'region', 'limit'],
         mutuallyExclusive: [['id', 'name']],
         list: true,
-        scopeKeys: ['projectId', 'location'],
+        scopeKeys: ['projectId', 'location', 'repositoryCreateTime', 'repositoryOwnershipSha256'],
         collectionKey: 'artifacts',
       },
     },

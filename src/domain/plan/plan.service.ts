@@ -1593,6 +1593,9 @@ export class PlanService {
           }
           if (inspected.observation === 'present') {
             if (exact.length !== 1) throw new Error(`provider did not return exactly one retained id ${externalId}`);
+            if ((exact[0] as Record<string, unknown>).cleanupSupported === false) {
+              throw new Error('provider cannot safely delete this retained resource with the available identity evidence');
+            }
             const liveScope = exact[0] && typeof exact[0] === 'object' && !Array.isArray(exact[0])
               ? (exact[0] as Record<string, unknown>).providerScope
               : undefined;

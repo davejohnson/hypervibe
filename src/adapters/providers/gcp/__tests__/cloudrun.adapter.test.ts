@@ -196,13 +196,16 @@ describe('CloudRunAdapter', () => {
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
     let deleted = false;
+    const createTime = '2026-10-27T16:25:34.122685Z';
+    const description = 'hypervibe:operator-registry:' + 'a'.repeat(64) + ':11111111-1111-4111-8111-111111111111';
     const id = 'projects/gcp-project/locations/us-central1/repositories/infraprint';
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       if (url === `https://artifactregistry.googleapis.com/v1/${id}` && method === 'GET') {
-        return deleted ? new Response('missing', { status: 404 }) : Response.json({ name: id, format: 'DOCKER' });
+        return deleted ? new Response('missing', { status: 404 }) : Response.json({ name: id, format: 'DOCKER', mode: 'STANDARD_REPOSITORY', createTime, description });
       }
+      if (['packages', 'files', 'attachments'].some(kind => url === `https://artifactregistry.googleapis.com/v1/${id}/${kind}?pageSize=1000`) && method === 'GET') return Response.json({});
       if (url === `https://artifactregistry.googleapis.com/v1/${id}` && method === 'DELETE') {
         deleted = true;
         return Response.json({
@@ -214,10 +217,12 @@ describe('CloudRunAdapter', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
+    const inspected = await adapter.inspectArtifactResources({ resource: 'artifact', id, limit: 1 });
+    const providerScope = (inspected.artifacts as {providerScope: Record<string, string>}[])[0].providerScope;
     const receipt = await adapter.destroyRetainedArtifactRepository({
       resource: 'artifact',
       id,
-      providerScope: { projectId: 'gcp-project', location: 'us-central1' },
+      providerScope,
     });
 
     expect(receipt.success).toBe(true);
