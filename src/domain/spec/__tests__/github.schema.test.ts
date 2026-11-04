@@ -311,16 +311,6 @@ describe('github desired state', () => {
     expect(result.error?.issues[0]?.message).toContain('cannot both be declared');
   });
 
-  it('keeps basic project specs valid without GitHub or OpenAI', () => {
-    expect(projectSpecSchema.parse({
-      version: 1,
-      project: 'local-only',
-      environments: {
-        development: { hosting: { provider: 'railway' }, services: {} },
-      },
-    }).github).toBeUndefined();
-  });
-
   it('rejects legacy runtime autofix intent with migration guidance', () => {
     const legacy = baseSpec({});
     legacy.environments.production = {

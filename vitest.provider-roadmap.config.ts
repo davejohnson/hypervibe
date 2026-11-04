@@ -6,6 +6,7 @@ export default defineConfig({
     environment: 'node',
     setupFiles: ['src/test/setup.ts'],
     include: ['test/provider-conformance/**/*.roadmap.ts'],
+    reporters: process.env.GITHUB_ACTIONS === 'true' ? ['minimal', 'github-actions'] : ['minimal'],
     fileParallelism: false,
     testTimeout: 10000,
   },

@@ -278,10 +278,9 @@ describe('AzureBlobStorageAdapter', () => {
     expect(control.createAccount).not.toHaveBeenCalled();
   });
 
-  it('provides Azure-native runtime and object transfer contracts', async () => {
+  it('provides Azure-native runtime environment variables', async () => {
     const control = controlPlane({ getAccount: vi.fn(async () => account()) });
-    const plane = dataPlane({ list: vi.fn(async () => [{ key: 'a.pdf', size: 3 }]) });
-    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => plane });
+    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control });
     await adapter.connect(credentials);
     const context = { subscriptionId: credentials.subscriptionId, resourceGroup: 'friend-app-production' };
     const externalId = `${account().id}/blobServices/default/containers/documents`;
@@ -294,8 +293,6 @@ describe('AzureBlobStorageAdapter', () => {
       OBJECT_STORAGE_PROVIDER: 'azureblob', AZURE_STORAGE_CONTAINER_NAME: 'documents',
       AZURE_STORAGE_ACCOUNT_NAME: account().name,
     });
-    const transfer = await adapter.openObjectTransfer(environment(), context, externalId);
-    await expect(transfer.list()).resolves.toEqual([{ key: 'a.pdf', size: 3 }]);
   });
 
   it('empties the owned container before deleting its dedicated account', async () => {

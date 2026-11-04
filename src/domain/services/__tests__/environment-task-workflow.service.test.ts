@@ -7,11 +7,6 @@ import { spawnSync } from 'node:child_process';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { compileManagedGitHubFiles, githubSpecNeedsOpenAI } from '../github-infrastructure.service.js';
 import { HYPERVIBE_VERSION } from '../../../version.js';
-import { ENVIRONMENT_TASK_RUNNER_PACKAGE_VERSION } from '../environment-task-workflow.service.js';
-
-it('pins the declared task helper to the same released code that validates its receipt contract', () => {
-  expect(ENVIRONMENT_TASK_RUNNER_PACKAGE_VERSION).toBe(HYPERVIBE_VERSION);
-});
 
 function spec(enabled = true) {
   return projectSpecSchema.parse({

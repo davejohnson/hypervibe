@@ -80,6 +80,10 @@ check configuration before claiming CI coverage. Repository files do not prove
 live branch-protection enforcement. Execute generated operational programs where
 those programs are the boundary; source-string checks alone cannot prove effects.
 
+Test runs show a final summary and failure details, suppressing passing-test logs.
+For individual test results and all console output, run
+`npm test -- <test paths> --reporter=verbose --silent=false`.
+
 ## DG-135
 
 Use a direct path for small, reversible development tasks. A formal plan,
