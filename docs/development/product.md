@@ -6,12 +6,83 @@ These are normative maintainer rules, complementary to `ARCHITECTURE.md`,
 which remains the infrastructure model's source of truth. Load only the sections
 relevant to the task. Paths in code spans are relative to the repository root.
 
-Related contracts: [Product Model](../ARCHITECTURE.md#product-model), [Plan Honesty](../ARCHITECTURE.md#plan-honesty), and [Connections And Secrets](../ARCHITECTURE.md#connections-and-secrets).
+Related contracts: [Product Model](../../ARCHITECTURE.md#product-model), [Plan Honesty](../../ARCHITECTURE.md#plan-honesty), and [Connections And Secrets](../../ARCHITECTURE.md#connections-and-secrets).
 
 Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](development-guidance-migration.json). These files are
+[the migration audit](guidance-migration.json). These files are
 for developing Hypervibe; the distributed user workflow lives in
-[`skills/hypervibe`](../skills/hypervibe/SKILL.md).
+[`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
+
+## Who we build and write for
+
+Our primary customer is a **vibe coder**: someone building an app with a coding
+agent who knows the outcome they want, but may have no experience with cloud
+administration, deployment tools or security terminology. They should not need
+to understand IAM, service accounts, federation, credential requests or our
+internal states to connect and run their app. Write with respect for their
+judgment; make the task clear without patronizing them.
+
+The app builder, person paying for hosting, cloud administrator and person
+providing a secret may be different people. Address the person taking the
+current action. An administrator can inspect exact permissions without making
+every app owner learn those details.
+
+This applies to all customer-facing pages, local browser handoffs, emails,
+notifications, chat, CLI/MCP explanations, approvals and errors—not only
+onboarding. Keep stable machine contracts and useful diagnostics without secret
+values for authorized agents; do not present those contracts as the human interface.
+
+- **Lead with their goal and next action.** Name the app, environment and
+  destination where they affect the decision. Explain what the button does
+  now, who acts next and how the person knows they are done. A completion
+  message must name the next step, or say they are done and can close the page.
+- **Make the agent do the routine work.** Use supported Hypervibe workflows and
+  choose safe defaults. Ask for facts only the person knows, browser sign-in, externally
+  owned secrets, or meaningful consent. Do not turn internal setup steps,
+  missing automation or recovery bookkeeping into a checklist of user chores.
+- **Use familiar, concrete words.** Prefer “ask someone for this app's API key”
+  to “manage credential requests.” Name an API key or password when that is
+  what is needed; explain “secret” as private app configuration when necessary.
+  Avoid “principal,” “scope,” “provision,” “reconcile” and similar terms in
+  primary copy unless the person needs the term to make this decision.
+- **Design the choice, not a wall of explanation.** Give each step one clear
+  primary action. Present alternatives, such as signing in yourself or inviting
+  an administrator, as alternatives. Put exact IAM resources, internal IDs,
+  revisions and setup-step counts in optional details unless an identifier is
+  needed to distinguish the destination or verify consent. Keep material costs,
+  access, recipients and consequences visible beside the action.
+- **Explain errors from evidence.** Say what Hypervibe could not do, what
+  remains saved or incomplete, and the next supported action. Do not blame the
+  person's account for a failure in Hypervibe's hosted access. Do not turn an
+  unknown result into “permission denied,” “nothing happened” or “try again.”
+  A refresh, retry or administrator invitation must be safe and relevant to the
+  observed failure; internal reason codes alone are not useful instructions.
+- **Make handoffs self-contained.** Invitations say who is asking, which app
+  and environment need help, what is requested, and where to act. A person
+  opening an email or deep link should not need the coding conversation.
+  Never include secret values in this context.
+- **Simplify without changing the truth.** Keep real authorization boundaries,
+  cost implications and uncertainty. Use existing approval for unchanged
+  authorized work; do not ask again merely because an IAM step appears.
+  Plain language is not permission to widen access, hide spending, bypass a
+  required approval, or claim deployment from sign-in or successful setup.
+
+Examples of the intended direction, used only when the underlying state and
+action support them:
+
+| Internal framing | Customer-facing framing |
+| --- | --- |
+| “Manage credential requests?” | “Let your coding agent request secrets” followed by what it can ask for and from whom. |
+| “Installation needs attention. Check its recorded result.” | “Cloud setup hasn't finished” with the supported progress or recovery action beside it. |
+| “Source required” | “Cloud setup is complete. Return to your coding agent to finish connecting this environment.” |
+| “Administrator invitation” | “Sam asked you to connect Google Cloud for Sequence's staging environment.” |
+
+Before shipping, check whether a first-time person can tell what this is for,
+what they need to decide, what to do next and what that action changes. For a
+substantial flow, sketch the user's task, choices and next action before coding;
+apply the repository's product-design skill when available, inspect real mobile
+and desktop screens, and get a separate clarity review. Passing render tests or
+shortening sentences does not establish that the experience is understandable.
 
 ## DG-001
 
@@ -91,7 +162,7 @@ Token and permission guidance must include the exact credential type, official c
 
 ## DG-097
 
-For an application's SendGrid sending key, give the [exact runtime-key instructions](email-sender-readiness.md#application-sending-key-permissions): Restricted/Custom Access, Mail Send > Mail Send > Full Access (`mail.send`), and every other permission No Access. Use separate keys per project/environment. Keep Hypervibe management and diagnostic credentials separate from application runtime; request additional scopes only for the corresponding operation. Never widen a sending key just to satisfy connection setup or sender-readiness checks, and never describe a sending-only key as sufficient for a Hypervibe management connection.
+For an application's SendGrid sending key, give the [exact runtime-key instructions](../email-sender-readiness.md#application-sending-key-permissions): Restricted/Custom Access, Mail Send > Mail Send > Full Access (`mail.send`), and every other permission No Access. Use separate keys per project/environment. Keep Hypervibe management and diagnostic credentials separate from application runtime; request additional scopes only for the corresponding operation. Never widen a sending key just to satisfy connection setup or sender-readiness checks, and never describe a sending-only key as sufficient for a Hypervibe management connection.
 
 ## DG-132
 
