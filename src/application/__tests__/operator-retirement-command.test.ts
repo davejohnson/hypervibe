@@ -15,8 +15,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 
-// Real command/CLI/MCP + SQLite boundary. Unsupported provider retirement is
-// installed yet: a declaration must be retained but must never become setup.
+// Real command/CLI/MCP + SQLite boundary. A retirement declaration without
+// completed publication and consumer-removal evidence must never become setup.
 describe('operator retirement command admission', () => {
   let directory: string;
   beforeEach(() => { directory = mkdtempSync(path.join(tmpdir(), 'hv-retirement-command-')); vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');
@@ -29,7 +29,7 @@ describe('operator retirement command admission', () => {
     expect(matrix.cloudRoster.sort()).toEqual(['aws', 'azure', 'gcp']);
     expect(matrix.liveRetirementVerified).toBe(false);
   });
-  it.each(['command', 'cli', 'mcp'])('retains strict desired state through %s and blocks unsupported retirement before setup', async transport => {
+  it.each(['command', 'cli', 'mcp'])('retains strict desired state through %s and blocks unproven retirement before setup', async transport => {
     const ctx = createCommandContext(), registry = new CommandRegistry(); registerCoreTools(registry, ctx);
     const project = ctx.repos.projects.create({ name: 'retirement-boundary', defaultPlatform: 'cloudrun' });
     const retirement = { from: { installationId: '11111111-1111-4111-8111-111111111111', planDigest: 'a'.repeat(64) }, resources: 'delete-owned', data: 'retain' };
@@ -50,8 +50,9 @@ describe('operator retirement command admission', () => {
     };
     const written = await call('hv_spec', { project: project.name, spec, replace: true }); expect(written.ok, JSON.stringify(written)).toBe(true);
     const inspected = await call('hv_spec', { project: project.name }); expect(inspected.data.spec.environments.staging.operatorApplications.google.retirement).toEqual(retirement);
+    expect(inspected.data.spec.environments.staging.operatorArtifacts.image.retirement).toEqual(retirement);
     const planned = await call('hv_plan', { project: project.name, env: 'staging', includeEnvFile: false });
-    expect(planned).toMatchObject({ ok: false, error: { message: expect.stringMatching(/retirement.*not yet supported/i) } });
+    expect(planned).toMatchObject({ ok: false, error: { message: expect.stringMatching(/exact completed publication proof and removal of its consumers first/i) } });
     expect(native).not.toHaveBeenCalled(); expect(provider).not.toHaveBeenCalled();
     expect(ctx.repos.runs.findByProjectId(project.id)).toEqual([]);
   });
