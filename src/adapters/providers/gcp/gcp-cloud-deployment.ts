@@ -56,7 +56,7 @@ const evidenceSchema = z.object({ resources: z.array(z.object({ kind: z.enum(['p
     uid: z.string().guid().optional(), configurationDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     revision: z.string().max(2048).optional(), generation: z.string().regex(/^[1-9]\d*$/).optional() }).strict() }).strict()).max(6),
   native: z.object({ operation: z.enum(operations), installationId: z.string().guid(), owner: z.string().regex(/^[a-f0-9]{64}$/),
-    actionId: z.string().max(512), attemptId: z.string().guid().optional(), grant: z.object({ policyKind: z.enum(['project', 'account', 'secret', 'service', 'registry']),
+    actionId: z.string().max(512), attemptId: z.string().guid().optional(), operationName: z.string().max(2048).optional(), grant: z.object({ policyKind: z.enum(['project', 'account', 'secret', 'service', 'registry']),
       resource: z.string().max(2048), role: z.string().max(512), member: z.string().max(512), retained: z.boolean() }).strict().optional() }).strict(),
 }).strict();
 
@@ -160,6 +160,13 @@ function actions(intent: CloudInstallationIntent, project: z.infer<typeof proofS
 function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudInstallationEvidence {
   const parsed = evidenceSchema.parse(value), s = settings(intent);
   if (parsed.native.installationId !== s.installationId || parsed.native.owner !== s.owner) fail('ownership_mismatch');
+  if (parsed.native.operationName !== undefined) {
+    operationName(parsed.native.operationName, s);
+    const target = parsed.native.operation === 'create-registry' && parsed.native.actionId === 'gcp:deployment:registry' ? s.registry
+      : parsed.native.operation === 'create-service' ? Object.entries(s.services).find(([key]) => parsed.native.actionId === `gcp:deployment:service:${key}`)?.[1] : undefined;
+    if (!target || !parsed.native.attemptId || parsed.resources.length > 1 || parsed.resources.some(item => item.id !== target
+      || item.kind !== (parsed.native.operation === 'create-registry' ? 'registry' : 'service') || item.identity.attemptId !== parsed.native.attemptId)) fail('ownership_mismatch');
+  }
   const allowed: Record<string, string[]> = { project: [`projects/${s.projectNumber}`], api: apiNames.map(api => `projects/${s.projectNumber}/services/${api}`),
     role: Object.values(s.roles), account: Object.keys(s.accounts).map(s.account), registry: [s.registry], service: Object.values(s.services), secret: [...s.refs.keys()] };
   for (const item of parsed.resources) {
@@ -177,6 +184,12 @@ function parseEvidence(value: unknown, intent: CloudInstallationIntent): CloudIn
       && isDeepStrictEqual(item.metadata.native, parsed.native.grant))) fail('ownership_mismatch');
   }
   return parsed;
+}
+function operationName(value: unknown, s: ReturnType<typeof settings>): string {
+  const prefix = `projects/${s.projectId}/locations/${s.topology.region}/operations/`;
+  if (typeof value !== 'string' || !value.startsWith(prefix) || !/^[A-Za-z0-9._-]{1,512}$/.test(value.slice(prefix.length))
+    || ['.', '..'].includes(value.slice(prefix.length))) fail('identity_mismatch');
+  return value;
 }
 type NativeDeploymentProof = Omit<CloudDeploymentConnectionV1, 'planDigest'>;
 function receiptIntent(connection: NativeDeploymentProof): CloudInstallationIntent {
@@ -275,10 +288,12 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (value.name !== resource || value.uri !== image) fail();
     } catch (error) { void reader.cancel().catch(() => {}); throw error; } finally { reader.releaseLock(); }
   }
-  function evidence(context: ActionContext, resources: CloudInstallationEvidence['resources'], grant?: Record<string, unknown>) {
+  function evidence(context: ActionContext, resources: CloudInstallationEvidence['resources'], grant?: Record<string, unknown>, acknowledgment?: string) {
     const s = settings(context.intent);
+    const retainedOperation = acknowledgment ?? context.attempt?.evidence?.native.operationName;
     return parseEvidence({ resources, native: { operation: context.action.metadata.operation, installationId: s.installationId, owner: s.owner,
-      actionId: context.action.id, ...(context.attempt ? { attemptId: context.attempt.id } : {}), ...(grant ? { grant } : {}) } }, context.intent);
+      actionId: context.action.id, ...(context.attempt ? { attemptId: context.attempt.id } : {}),
+      ...(retainedOperation !== undefined ? { operationName: retainedOperation } : {}), ...(grant ? { grant } : {}) } }, context.intent);
   }
   function completed(context: Context, key: string) {
     const value = context.completed[`gcp:deployment:${key}`]; if (!value) fail('ownership_mismatch');
@@ -309,7 +324,7 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
     } else if (value.description !== description(s.owner, s.installationId) + (kind === 'account' ? '' : `:${nativeAttempt}`)) fail('ownership_mismatch');
     return { owner: s.owner, attemptId: String(nativeAttempt) };
   }
-  async function observeResource(client: GcpSecretWriterClient, context: ActionContext): Promise<CloudInstallationEvidence['resources'][number] | null> {
+  async function observeResource(client: GcpSecretWriterClient, context: ActionContext, supplied?: Record<string, unknown>): Promise<CloudInstallationEvidence['resources'][number] | null> {
     const s = settings(context.intent), op = context.action.metadata.operation, name = context.action.resource.name;
     const native = context.action.metadata.native;
     if (op === 'create-account') {
@@ -327,14 +342,14 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
       return { kind: 'role', id: name, identity: marker };
     }
     if (op === 'create-registry') {
-      const value = await read(client, `https://artifactregistry.googleapis.com/v1/${name}`); if (!value) return null;
+      const value = supplied ?? await read(client, `https://artifactregistry.googleapis.com/v1/${name}`); if (!value) return null;
       const marker = ownerAttempt(context, value, 'registry');
       if (value.name !== name || value.format !== 'DOCKER' || value.mode !== 'STANDARD_REPOSITORY' || !date.safeParse(value.createTime).success
         || value.remoteRepositoryConfig || value.virtualRepositoryConfig || value.kmsKeyName) fail();
       return { kind: 'registry', id: name, identity: { ...marker, createTime: String(value.createTime) } };
     }
     if (op === 'create-service') {
-      const value = await read(client, `https://run.googleapis.com/v2/${name}`); if (!value) return null;
+      const value = supplied ?? await read(client, `https://run.googleapis.com/v2/${name}`); if (!value) return null;
       const marker = ownerAttempt(context, value, 'service'), workload = s.topology.workloads.find(item => item.name === native.workload)!;
       const saved = context.completed[context.action.id]?.resources[0];
       if (saved && value.uid !== saved.identity.uid) fail();
@@ -523,7 +538,27 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
       service: { id: item.id, lifetimeId: item.lifetimeId }, registry: { id: native.registry.id, lifetimeId: native.registry.lifetimeId } }));
     if (!isDeepStrictEqual(parsed, expected)) fail(); return parsed;
   }
-  async function observe(client: GcpSecretWriterClient, context: ActionContext): Promise<Awaited<ReturnType<CloudInstallationDriver['inspect']>>> {
+  function checkedOperation(value: Record<string, unknown>, context: ActionContext, expected?: string) {
+    const name = operationName(value.name, settings(context.intent));
+    if (expected !== undefined && name !== expected || value.done !== undefined && typeof value.done !== 'boolean'
+      || value.response !== undefined && value.error !== undefined) fail();
+    if (value.metadata !== undefined && (!value.metadata || typeof value.metadata !== 'object' || Array.isArray(value.metadata))) fail();
+    const metadata = value.metadata as Record<string, unknown> | undefined;
+    if (metadata?.target !== undefined && metadata.target !== context.action.resource.name) fail();
+    if (value.response !== undefined && (!value.response || typeof value.response !== 'object' || Array.isArray(value.response)
+      || (value.response as Record<string, unknown>).name !== context.action.resource.name)) fail();
+    if (value.done !== true && (value.error !== undefined || value.response !== undefined)) fail();
+    if (value.done === true && value.error === undefined && value.response === undefined) fail();
+    return { name, done: value.done === true, error: value.error !== undefined, response: value.response as Record<string, unknown> | undefined };
+  }
+  async function operationAcknowledgment(client: GcpSecretWriterClient, context: ActionContext, raw: Record<string, unknown>) {
+    const operation = checkedOperation(raw, context);
+    // Full terminal resource proof can outlive the provider's operation record.
+    // An unfinished acknowledgment retains only its exact native operation.
+    const resource = operation.done && !operation.error ? await observeResource(client, context, operation.response) : null;
+    return { state: 'acknowledged' as const, evidence: evidence(context, resource ? [resource] : [], undefined, operation.name) };
+  }
+  async function observe(client: GcpSecretWriterClient, context: ActionContext, budget?: DestinationBudget): Promise<Awaited<ReturnType<CloudInstallationDriver['inspect']>>> {
     const op = context.action.metadata.operation, native = context.action.metadata.native;
     const currentProject = await project(client, context.intent);
     if (op === 'verify-scope') {
@@ -544,9 +579,25 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
         : context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };
     }
     if (op.startsWith('create-')) {
+      let operationResource: CloudInstallationEvidence['resources'][number] | undefined;
+      const acknowledgment = context.attempt?.evidence && parseEvidence(context.attempt.evidence, context.intent);
+      if (acknowledgment?.native.operationName !== undefined) {
+        if (acknowledgment.native.actionId !== context.action.id || acknowledgment.native.attemptId !== context.attempt?.id) fail('ownership_mismatch');
+        if (!acknowledgment.resources.length) {
+          const name = String(acknowledgment.native.operationName), host = op === 'create-registry' ? 'artifactregistry.googleapis.com/v1' : 'run.googleapis.com/v2';
+          for (let poll = 0; poll < 3; poll++) {
+            const operation = checkedOperation(await client.json(`https://${host}/${name}`), context, name);
+            if (operation.error) return { state: 'unknown', reason: 'provider_error' };
+            if (operation.done) { operationResource = (await observeResource(client, context, operation.response)) ?? undefined; break; }
+            if (poll === 2 || !budget) return { state: 'pending', reason: 'not_converged' };
+            await budget.wait(new Promise<void>(resolve => setTimeout(resolve, 250)));
+          }
+        }
+      }
       const resource = await observeResource(client, context);
       if (!resource) return context.attempt ? { state: 'pending', reason: 'not_converged' } : { state: 'action-required' };
-      const saved = context.completed[context.action.id]?.resources[0]; if (saved && !isDeepStrictEqual(resource, saved)) fail();
+      const saved = context.completed[context.action.id]?.resources[0] ?? acknowledgment?.resources[0] ?? operationResource;
+      if (saved && !isDeepStrictEqual(resource, saved)) fail();
       return { state: 'satisfied', evidence: evidence(context, [resource]) };
     }
     if (op === 'grant') {
@@ -637,8 +688,8 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
             ...Object.values(s.services).map(name => ({ kind: 'service', name, scope: s.topology.region }))] } };
       });
     },
-    async inspect(context) { try { return await withClient(context, client => observe(client, context)); } catch (error) { return { state: 'unknown', reason: reason(error) }; } },
-    async recover(context) { try { return await withClient(context, client => observe(client, context)); } catch (error) { return { state: 'unknown', reason: reason(error) }; } },
+    async inspect(context) { try { return await withClient(context, (client, budget) => observe(client, context, budget)); } catch (error) { return { state: 'unknown', reason: reason(error) }; } },
+    async recover(context) { try { return await withClient(context, (client, budget) => observe(client, context, budget)); } catch (error) { return { state: 'unknown', reason: reason(error) }; } },
     async mutate(context) {
       let retry = () => true;
       try { return await withClient(context, async (client, budget) => {
@@ -657,7 +708,7 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
         else if (op === 'create-registry') {
           const operation = await client.json(`https://artifactregistry.googleapis.com/v1/projects/${s.projectId}/locations/${s.topology.region}/repositories?repositoryId=${s.registry.split('/').at(-1)}`, {
             method: 'POST', body: JSON.stringify({ format: 'DOCKER', mode: 'STANDARD_REPOSITORY', description: `${description(s.owner, s.installationId)}:${context.attempt.id}` }) }, true);
-          if (typeof operation.name !== 'string' || !operation.name.startsWith(`projects/${s.projectId}/locations/${s.topology.region}/operations/`) || operation.error) fail('not_converged');
+          return operationAcknowledgment(client, context, operation);
         } else if (op === 'create-service') {
           await publicImage(s.topology.preparation!.image, budget);
           const key = String(native.workload), workload = s.topology.workloads.find(item => item.name === key)!;
@@ -666,7 +717,7 @@ export function createGcpCloudDeploymentDriver(options: { fetch?: typeof fetch; 
           const operation = await client.json(`https://run.googleapis.com/v2/projects/${s.projectId}/locations/${s.topology.region}/services?serviceId=${s.services[key].split('/').at(-1)}`, {
             method: 'POST', body: JSON.stringify({ ...gcpHoldingServiceConfiguration(s.topology.preparation!.image, s.email('holding'), workload.public!),
               annotations: { 'hypervibe.dev/owner': s.owner, 'hypervibe.dev/installation': s.installationId, 'hypervibe.dev/attempt': context.attempt.id } }) }, true);
-          if (typeof operation.name !== 'string' || !operation.name.startsWith(`projects/${s.projectId}/locations/${s.topology.region}/operations/`) || operation.error) fail('not_converged');
+          return operationAcknowledgment(client, context, operation);
         } else if (op === 'grant') {
           const resource = grantPolicyResource(context, native), policy = await client.policy(native.policyKind as WriterPolicyKind, resource), bindings = structuredClone(policy.bindings);
           // The etag must be obtained before the final lifetime proof: a

@@ -2,7 +2,15 @@ import cloudSqlClientRole from './fixtures/gcp-cloudsql-client-role.json' with {
 import { gcpAccountPolicyGetContractResponse } from '../../src/test/gcp-iam-policy-contract.js';
 import { gcpRoleGetContractResponse } from '../../src/test/gcp-iam-role-contract.js';
 import { serviceUsageResponse } from './helpers/gcp-service-usage.js';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { initializeDatabase, SqliteAdapter } from '../../src/adapters/db/sqlite.adapter.js';
+import { ProjectRepository } from '../../src/adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../src/adapters/db/repositories/environment.repository.js';
+import { CloudScopePreparationRepository } from '../../src/adapters/db/repositories/cloud-scope-preparation.repository.js';
+import { parseCloudInstallationRecordV1 } from '../../src/application/hosted/cloud-installation.js';
 import { createGcpCloudInstallationDriver } from '../../src/adapters/providers/gcp/gcp-cloud-installation.js';
 import { prepareCloudDeploymentIntentV1, issueCloudDeploymentSessionV1, verifyCloudDeploymentReleaseTargetsV1, prepareCloudDeploymentSourceAuthorizationV1 } from '../../src/application/hosted/cloud-deployment-session.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
@@ -493,5 +501,131 @@ describe('native Google prepared deployment installation', () => {
         authorize: async () => true, signal: AbortSignal.timeout(5000) })).rejects.toThrow();
       expect(t.f.state.issued).toBe(0);
     }
+  });
+});
+
+// Official create methods return an unfinished Operation; repository/service
+// visibility is separate. Reconstructed transport based on those contracts and
+// the recorded 2026-11-04 repository visibility lag, not a captured response body.
+describe('durable Google deployment create operations', () => {
+  it.each([{ kind: 'registry', lostAcknowledgment: false }, { kind: 'service', lostAcknowledgment: false },
+    { kind: 'registry', lostAcknowledgment: true }] as const)('retains $kind through SQLite restart (lost acknowledgment: $lostAcknowledgment) without repeating create', async ({ kind, lostAcknowledgment }) => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'hv-deployment-lro-'));
+    SqliteAdapter.resetInstance(); initializeDatabase(path.join(directory, 'state.db'));
+    try {
+      const project = new ProjectRepository().create({ name: 'deployment-lro' });
+      const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+      const scope = { projectId: project.id, environmentId: environment.id, environmentName: 'staging' };
+      const f = nativeFixture(), operationReads: string[] = [];
+      let delayed: { name: string; response: Record<string, any> } | undefined, ready = false;
+      const request: typeof fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname.includes('/operations/')) {
+          operationReads.push(url.pathname); expect(init.method ?? 'GET').toBe('GET'); expect(init.body).toBeUndefined();
+          expect(url.pathname).toBe('/v' + (kind === 'registry' ? '1' : '2') + '/' + delayed!.name);
+          expect((await shared.store.read(intent.installationId))?.attempts.at(-1)?.evidence?.native.operationName).toBe(delayed!.name);
+          return Response.json(ready ? { ...delayed, done: true } : { name: delayed!.name });
+        }
+        const response = await f.request(input, init);
+        if (!delayed && init.method === 'POST' && url.pathname.endsWith(kind === 'registry' ? '/repositories' : '/services')) {
+          delayed = await response.json();
+          if (lostAcknowledgment) throw Error('Synthetic lost creation acknowledgment');
+          f.resources.delete(delayed!.response.name);
+          return Response.json({ name: delayed!.name });
+        }
+        return response;
+      };
+      const driver = createGcpCloudInstallationDriver({ fetch: request, holdingImage: image });
+      const makeStore = () => new CloudScopePreparationRepository<CloudInstallationRecord>(scope, value => parseCloudInstallationRecordV1(value, driver));
+      const shared = { driver, store: makeStore(), authentication, authorize: async () => true };
+      const prepared = prepareCloudDeploymentIntentV1(spec, { ...intent, appId: project.id }, driver);
+      const plan = await planCloudInstallationV1({ ...shared, intent: prepared });
+      const pending = await applyCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest,
+        confirmActions: plan.plan.actions.map(action => action.id) });
+      const actionId = kind === 'registry' ? 'gcp:deployment:registry' : 'gcp:deployment:service:web';
+      const attempt = pending.attempts.find(item => item.actionId === actionId)!;
+      expect(attempt.status).toBe(lostAcknowledgment ? 'uncertain' : 'acknowledged');
+      expect(attempt.evidence?.native.operationName).toBe(lostAcknowledgment ? undefined : delayed!.name);
+      expect(attempt.evidence?.resources).toEqual(lostAcknowledgment ? undefined : []);
+      expect(pending.completed[actionId]).toBeUndefined();
+      const writes = f.calls.filter(call => call.method !== 'GET' && !call.url.includes(':getIamPolicy')).length;
+      SqliteAdapter.resetInstance(); initializeDatabase(path.join(directory, 'state.db'));
+      shared.store = makeStore();
+      expect((await shared.store.read(plan.installationId))?.attempts.find(item => item.id === attempt.id)?.evidence).toEqual(attempt.evidence);
+      ready = true; f.resources.set(delayed!.response.name, delayed!.response);
+      const observed = await reconcileCloudInstallationV1({ ...shared, installationId: plan.installationId, planDigest: plan.plan.digest });
+      expect(observed.completed[actionId]?.native.operationName).toBe(lostAcknowledgment ? undefined : delayed!.name);
+      expect(observed.attempts.find(item => item.id === attempt.id)?.status).toBe('succeeded');
+      if (lostAcknowledgment) expect(operationReads).toEqual([]); else expect(operationReads.length).toBeGreaterThan(0);
+      expect(f.calls.filter(call => call.method !== 'GET' && !call.url.includes(':getIamPolicy'))).toHaveLength(writes);
+      expect(observed.status).toBe('blocked'); expect(observed.reason).toBe('not_installed');
+    } finally { SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); }
+  });
+});
+
+describe('Google deployment operation read safety', () => {
+  let t: Awaited<ReturnType<typeof setupNative>>, ready: CloudInstallationRecord;
+  beforeAll(async () => { t = await setupNative(); ready = await t.apply(); expect(ready.status).toBe('ready'); });
+  it.each(['.', '..'])('rejects operation dot segment %s before any normalized operation request', async segment => {
+    const fresh = await setupNative(), original = fresh.f.request.getMockImplementation()!;
+    fresh.f.request.mockImplementation(async (input, init) => {
+      const response = await original(input, init);
+      if (init?.method === 'POST' && new URL(String(input)).pathname.endsWith('/repositories'))
+        return Response.json({ name: `projects/customer-project/locations/us-west1/operations/${segment}` });
+      return response;
+    });
+    const result = await fresh.apply();
+    const artifactReads = fresh.f.calls.filter(call => call.method === 'GET' && new URL(call.url).hostname === 'artifactregistry.googleapis.com'
+      && !new URL(call.url).pathname.includes('/dockerImages/'));
+    expect(artifactReads.every(call => new URL(call.url).pathname.includes('/repositories/'))).toBe(true);
+    expect(result.attempts.find(item => item.actionId === 'gcp:deployment:registry')?.evidence).toBeUndefined();
+    expect(fresh.f.calls.filter(call => call.method === 'POST' && new URL(call.url).pathname.endsWith('/repositories'))).toHaveLength(1);
+  });
+  async function observeOperation(change: (operation: Record<string, any>) => Response, fullProof = false) {
+    const action = ready.plan.actions.find(item => item.id === 'gcp:deployment:registry')!;
+    const attempt = structuredClone(ready.attempts.find(item => item.actionId === action.id)!);
+    if (!fullProof) { attempt.status = 'acknowledged'; attempt.evidence!.resources = []; }
+    const completed = { ...ready.completed }; delete completed[action.id];
+    const name = String(attempt.evidence!.native.operationName), native = structuredClone(t.f.resources.get(action.resource.name));
+    const original = t.f.request.getMockImplementation()!; const calls: string[] = [], beforeMutation = vi.fn(async () => { throw Error('Recovery may not mutate'); });
+    t.f.request.mockImplementation(async (input, init) => {
+      if (String(input).includes('/operations/')) { calls.push(String(input)); expect(init?.method ?? 'GET').toBe('GET'); expect(init?.body).toBeUndefined(); return change({ name, done: true, response: native }); }
+      return original(input, init);
+    });
+    const writes = t.f.calls.filter(call => call.method !== 'GET' && !call.url.includes(':getIamPolicy')).length;
+    try {
+      const result = await t.driver.recover({ ...t.shared, intent: ready.intent, action, attempt, attempts: ready.attempts,
+        completed, beforeMutation, signal: new AbortController().signal });
+      expect(beforeMutation).not.toHaveBeenCalled();
+      expect(t.f.calls.filter(call => call.method !== 'GET' && !call.url.includes(':getIamPolicy'))).toHaveLength(writes);
+      return { result, calls };
+    } finally { t.f.request.mockImplementation(original); }
+  }
+  it.each([
+    ['foreign project', (x: any) => Response.json({ ...x, name: x.name.replace('/customer-project/', '/foreign-project/') })],
+    ['foreign operation', (x: any) => Response.json({ ...x, name: x.name + '-other' })],
+    ['foreign target', (x: any) => Response.json({ ...x, response: { ...x.response, name: x.response.name + '-other' } })],
+    ['changed creation lifetime', (x: any) => Response.json({ ...x, response: { ...x.response, createTime: '2026-10-25T01:00:00Z' } })],
+    ['contradictory unfinished response', (x: any) => Response.json({ ...x, done: false })],
+    ['missing terminal response', (x: any) => Response.json({ name: x.name, done: true })],
+    ['malformed done', (x: any) => Response.json({ ...x, done: 'true' })],
+    ['operation not found', () => new Response(null, { status: 404 })],
+    ['operation permission denied', () => new Response(null, { status: 403 })],
+    ['terminal native error', (x: any) => Response.json({ name: x.name, done: true, error: { code: 7, message: 'Synthetic denied result' } })],
+  ] as const)('keeps %s unknown without authorizing another create', async (_label, response) => {
+    expect((await observeOperation(response)).result.state).toBe('unknown');
+  });
+  it('keeps a genuinely unfinished operation pending even when its resource is already visible', async () => {
+    const observed = await observeOperation(x => Response.json({ name: x.name }));
+    expect(observed.result).toEqual({ state: 'pending', reason: 'not_converged' }); expect(observed.calls).toHaveLength(3);
+  });
+  it('finishes a short asynchronous operation within its bounded read polling without another approval', async () => {
+    let polls = 0;
+    const observed = await observeOperation(x => Response.json(++polls === 1 ? { name: x.name } : x));
+    expect(observed.result.state).toBe('satisfied'); expect(observed.calls).toHaveLength(2);
+  });
+  it('uses retained full succeeded proof after operation expiry while still reading native ownership/lifetime', async () => {
+    const observed = await observeOperation(() => new Response(null, { status: 404 }), true);
+    expect(observed.result.state).toBe('satisfied'); expect(observed.calls).toEqual([]);
   });
 });
