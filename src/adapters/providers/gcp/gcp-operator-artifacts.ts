@@ -14,6 +14,7 @@ import { gcpLocalPublicArtifactProofShape } from './gcp-local-artifact-registry.
 import { gcpBillingPreparationScopeSchema } from './gcp-billing-installation.js';
 import { applicationCandidateDeclarationShape, applicationCandidatePreparedShape, inspectApplicationCandidate } from './application-candidate-build.js';
 import { inspectOperatorImage, isolatedDockerEnvironment, packageProvenance, prepareOperatorImages, runOperatorCommand, type OperatorCommand } from './operator-image-build.js';
+import { createGcpOperatorArtifactRetirementDriver } from './gcp-operator-artifact-retirement.js';
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/), imageId = z.string().regex(/^sha256:[a-f0-9]{64}$/), uuid = z.string().guid();
 const declarationSchema = z.object({ scopeKind: z.literal('gar-image-publication-v1'), projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/),
@@ -35,7 +36,7 @@ type ActionContext = Context & { action: CloudInstallationAction; attempt?: Clou
 const kinds = ['holding-v1', 'backup-runner-v1'];
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function fail(reason: ConstructorParameters<typeof CloudInstallationBoundaryError>[0] = 'identity_mismatch'): never { throw new CloudInstallationBoundaryError(reason); }
-function names(intent: Intent): Record<string,string> & {candidate:boolean} {
+export function gcpOperatorArtifactNames(intent: Intent): Record<string,string> & {candidate:boolean} {
   const n = gcpOperatorArtifactScopeSchema.parse(intent.nativeScope) as Record<string,string>;
   const candidate=n.scopeKind==='gar-private-candidate-publication-v1';
   if (intent.provider !== 'gcp' || intent.artifactProvider !== 'cloudrun' || intent.execution.authentication !== 'google-user-adc'
@@ -48,6 +49,7 @@ function names(intent: Intent): Record<string,string> & {candidate:boolean} {
     projectOwner:hash([intent.customerId,intent.appId,intent.environment,n.projectInstallationId]),
     registryOwner:hash([intent.customerId,intent.appId,intent.environment,n[prefix+'InstallationId']]),registryAttemptId:n[prefix+'AttemptId']} as unknown as Record<string,string> & {candidate:boolean};
 }
+const names = gcpOperatorArtifactNames;
 function artifact(intent: Intent, kind: string) {
   const n=names(intent);if(!intent.artifacts.includes(kind))fail();const name=n.candidate?n.imageName:kind;
   return {kind,name,imageId:n.candidate?n.candidateImageId:kind===kinds[0]?n.holdingImageId:n.backupImageId,package:`${n.repositoryName}/packages/${name}`,
@@ -75,13 +77,14 @@ const candidateIdentity = z.object({imageId,digest:imageId,candidateBuildId:uuid
 const evidenceSchema = z.object({resources:z.array(z.object({kind:z.literal('image'),id:z.string().max(2048),identity:z.union([publicIdentity,candidateIdentity])}).strict()).max(1),
   native:z.object({operation:z.enum(['holding-v1','backup-runner-v1','application-candidate-v1']),installationId:uuid,attemptId:uuid,
     tag:z.string().regex(/^hv-[a-f0-9-]{36}$/),repository:z.string(),repositoryCreateTime:z.string().datetime()}).strict()}).strict();
-function parseEvidence(value: unknown, intent: Intent): CloudInstallationEvidence {
+export function parseGcpOperatorArtifactEvidence(value: unknown, intent: Intent): CloudInstallationEvidence {
   const e = evidenceSchema.parse(value), n = names(intent), a = artifact(intent,e.native.operation);
   if (e.native.installationId !== intent.installationId || e.native.tag !== `hv-${e.native.attemptId}` || e.native.repository !== n.repositoryName
     || e.native.repositoryCreateTime !== n.repositoryCreateTime || e.resources.some(r => r.id !== `${a.image}@${r.identity.digest}`
       || r.identity.imageId !== a.imageId || Object.entries(contentIdentity(intent)).some(([key,value])=>(r.identity as Record<string,string>)[key]!==value))) fail();
   return e;
 }
+const parseEvidence = parseGcpOperatorArtifactEvidence;
 function proof(context: ActionContext, attemptId: string, resources: CloudInstallationEvidence['resources'] = []): CloudInstallationEvidence {
   const n = names(context.intent);
   return parseEvidence({ resources, native: { operation: context.action.metadata.operation, installationId: context.intent.installationId, attemptId,
@@ -214,10 +217,13 @@ export function createGcpOperatorArtifactCapability(): OperatorArtifactCapabilit
       const inherited=Object.fromEntries([...projectProofKeys,...Object.keys(gcpLocalPublicArtifactProofShape)].map(key=>[key,selected[key]]));
       return baseSchema.parse({...declaration,...provenance,...inherited});
     },
-    parseRecord:value=>parseCloudInstallationRecordV1(value,createGcpOperatorArtifactDriver()),
+    parseRecord:value=>parseCloudInstallationRecordV1(value,z.object({intent:z.object({mode:z.string()})}).parse(value).intent.mode==='retire'
+      ?createGcpOperatorArtifactRetirementDriver():createGcpOperatorArtifactDriver()),
     prepare:(scope,artifacts,source)=>prepareOperatorImages(scope.scopeKind==='gar-private-candidate-publication-v1'?{...scope,sourceRepository:source.repository}:scope,artifacts),
     async create(scope){const n=gcpOperatorArtifactScopeSchema.parse(scope),auth=new GcpLocalDefaultAuthentication(n.projectId);await auth.initialize();
       return {driver:createGcpOperatorArtifactDriver({fetch:auth.request.bind(auth)}),authentication:{kind:'operator-artifact-publisher',administrator:{getAccessToken:async()=>auth.token()}}};},
+    retirement:{async create(scope,_context,targets){const n=gcpOperatorArtifactScopeSchema.parse(scope),auth=new GcpLocalDefaultAuthentication(n.projectId);await auth.initialize();
+      return {driver:createGcpOperatorArtifactRetirementDriver(targets,{fetch:auth.request.bind(auth)}),authentication:{kind:'operator-artifact-publisher',administrator:{getAccessToken:async()=>auth.token()}}};}},
     nextScope:()=>null,
     refreshScope(record,declaration,artifacts){
       const n=names(record.intent),next=(n.candidate?candidateBaseSchema:baseSchema).parse(declaration);

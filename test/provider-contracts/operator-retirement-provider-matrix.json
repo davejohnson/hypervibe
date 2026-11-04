@@ -148,7 +148,7 @@
       "id": "gcp",
       "kind": "cloud-parent-and-artifacts",
       "registeredArtifactProvider": "cloudrun",
-      "implementation": "publication/project allocation exists; completed retirement missing",
+      "implementation": "GCP publication tag/version retirement implemented with offline saved-plan and serialized transport coverage; repository and parent-project retirement remain separate",
       "nativeMethod": "Artifact Registry exact versions/repositories; separate explicit CRM v3 parent-project deletion",
       "identity": [
         "projectNumber",
@@ -162,9 +162,25 @@
       "peerDesign": "/private/tmp/hv-artifact-retirement-contract-20261103",
       "sources": [
         "https://docs.cloud.google.com/resource-manager/reference/rest/v3/projects/delete",
-        "https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects"
+        "https://docs.cloud.google.com/resource-manager/docs/delete-restore-projects",
+        "https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories.packages.tags/delete",
+        "https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories.packages.versions/delete"
       ],
-      "repositoryOwnership": "Artifact Registry repository/grants use the original local-scope creation journal; publication records authorize only their exact published content."
+      "repositoryOwnership": "Artifact Registry repository/grants use the original local-scope creation journal; publication records authorize only their exact published content.",
+      "implementedPublicationScope": [
+        "private application-candidate-v1",
+        "public holding-v1",
+        "public backup-runner-v1"
+      ],
+      "publicationLimits": [
+        "shared repositories and IAM preserved",
+        "data=retain preserves immutable URLs/bytes/public access",
+        "shared digest across multiple publication attempts blocked",
+        "later retained-image deletion continuation unsupported",
+        "external tag-move race disclosed; version delete uses force=false",
+        "no live retirement verification"
+      ],
+      "implementationEvidence": "docs/operator-artifact-retirement.md"
     },
     {
       "id": "azure",

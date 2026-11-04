@@ -266,6 +266,15 @@ Preserve dependencies and stop after failed or unknown deletion. Report success
 only when terminal absence is verified; a submitted deletion request is not proof
 that data is gone.
 
+Completed operator publications need an explicit `operatorArtifacts` retirement
+declaration selecting the original installation ID and plan digest; omission
+does not delete them. GCP can retire the original publication tags and, when
+reviewed, their immutable image versions after workload, backup and automation
+consumers are removed. The shared repository and IAM remain. Retaining image
+data also retains its immutable URL and any existing public access. AWS template
+publication cleanup and parent repository removal remain unsupported in this
+slice; preserve their exact receipts and report the remaining work.
+
 Temporary test setup includes teardown of every resource created for that test.
 Track workloads, data, backups, images, identities, permissions and external app
 registrations, while preserving pre-existing shared resources. Collection

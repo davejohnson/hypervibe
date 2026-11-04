@@ -99,13 +99,16 @@ export function parseOperatorArtifactDeclarationV1(value: unknown) { return oper
 export const OPERATOR_ARTIFACT_OPERATION = 'operatorArtifactPublication';
 export const operatorArtifactPlanSchema = z.object({ schemaVersion: z.literal(1), name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
   installationId: z.string().guid(), planDigest: z.string().regex(/^[a-f0-9]{64}$/), provider: z.string().min(1).max(100),
-  mode: z.enum(['prepare', 'recover', 'verified']),
-}).strict();
+  mode: z.enum(['prepare', 'recover', 'verified', 'retire']),
+  bindingHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  retryActions: z.array(z.object({actionId:z.string().min(1),attemptId:z.string().guid()}).strict()).min(1).max(1).optional(),
+}).strict().refine(value => (value.mode === 'retire') === Boolean(value.bindingHash), 'A retirement review pins the current complete binding map.');
 export type OperatorArtifactPlan = z.infer<typeof operatorArtifactPlanSchema>;
-export const operatorArtifactActionMetadataSchema = operatorArtifactPlanSchema.extend({ operation: z.literal(OPERATOR_ARTIFACT_OPERATION), nativeActionId: z.string().min(1).max(200) }).strict();
+export const operatorArtifactActionMetadataSchema = operatorArtifactPlanSchema.safeExtend({ operation: z.literal(OPERATOR_ARTIFACT_OPERATION), nativeActionId: z.string().min(1).max(200) }).strict();
 export function isOperatorArtifactAction(action: PlanAction): boolean {
   const parsed = operatorArtifactActionMetadataSchema.safeParse(action.metadata);
   return parsed.success && action.id === parsed.data.nativeActionId && action.verified
     && (parsed.data.mode === 'prepare' ? ['create', 'update', 'noop'].includes(action.type) && (action.type === 'noop' || action.requiresConfirm === true)
+      : parsed.data.mode === 'retire' ? ['destroy', 'update', 'noop'].includes(action.type) && (action.type === 'noop' || action.requiresConfirm === true)
       : parsed.data.mode === 'recover' && action.type === 'update' && !action.requiresConfirm && !action.billable);
 }

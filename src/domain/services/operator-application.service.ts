@@ -25,8 +25,7 @@ import { preparedReleaseAttempts } from './prepared-direct-release.service.js';
 import { recoveryRuntimeBindings } from './runtime-evidence.js';
 import { manualBackupRecordsSchema } from './manual-backup.service.js';
 import { secretContainerBindings } from '../ports/secret-destination-lifecycle.port.js';
-import { operatorRetirementOutcomeSchema } from '../ports/operator-retirement.port.js';
-import { runtimeCoordinateSchema, runtimeCoordinatesSchema } from '../../lib/value-free-coordinates.js';
+import { projectOperatorRetirement } from '../ports/operator-retirement.port.js';
 type Registration = CloudInstallationRecord<OperatorApplicationIntent>;
 const route = z.object({ intent: z.object({ applicationProvider: z.string() }).passthrough() }).passthrough();
 export const operatorApplicationUnavailable = () => new Error('Operator application registration requires its verified native origin, exact owner/source and retained operation. Preserve uncertain attempts and inspect status for any supported, separately reviewed restart. No credential replay is authorized.');
@@ -281,21 +280,8 @@ async function context(project: Project, environment: Environment, name: string,
 /** Project recorded completion only. Never return the provider's raw native
  * payload or reinterpret provider retention as permanent erasure. */
 function retirementSummary(record: Registration) {
-  if (record.intent.mode !== 'retire') return undefined;
   try {
-    const resourcesSchema = z.array(z.object({ kind: runtimeCoordinateSchema, id: runtimeCoordinateSchema }).strict()).max(300);
-    const outcomes = record.plan.actions.flatMap(action => {
-      const evidence = record.completed[action.id];
-      if (!evidence) return [];
-      const outcome = operatorRetirementOutcomeSchema.parse(evidence.native.retirement);
-      const retained = outcome.retained.map(item => ({ ...item,
-        kind: runtimeCoordinateSchema.parse(item.kind), id: runtimeCoordinateSchema.parse(item.id),
-        identity: runtimeCoordinatesSchema.parse(item.identity) }));
-      return [{ actionId: runtimeCoordinateSchema.parse(action.id),
-        resources: resourcesSchema.parse(evidence.resources.map(({ kind, id }) => ({ kind, id }))),
-        outcome: outcome.outcome, retained }];
-    });
-    return { complete: record.status === 'retired', outcomes };
+    return projectOperatorRetirement(record);
   } catch { throw new OperatorRetirementSelectionError('Recorded retirement outcomes could not be safely verified. Preserve the existing record and inspect its supported recovery; no new deletion was authorized.'); }
 }
 export type OperatorRetirementSummary = NonNullable<ReturnType<typeof retirementSummary>>;

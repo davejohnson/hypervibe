@@ -3,8 +3,10 @@
 Shared declaration/journal foundation based on `2f029c9f9683a88320d05b16c27eb28d3d6edcc2`.
 The shared application plan projection and narrow Microsoft Entra, SendGrid and
 reCAPTCHA retirement drivers now have offline command/SQLite/transport coverage.
-Native retirement is untested. Browser registrations, artifact publication, parent
-scope retirement remain separate gaps. Explicit later GCP output-container retirement now has offline coverage; see [output cleanup](operator-output-retirement.md). See [implementation evidence](operator-application-retirement.md).
+Native retirement is untested. Browser registrations, AWS artifact publication,
+and parent scope retirement remain separate gaps. GCP publication tag/version
+retirement now has offline coverage; see [artifact cleanup](operator-artifact-retirement.md).
+Explicit later GCP output-container retirement now has offline coverage; see [output cleanup](operator-output-retirement.md). See [implementation evidence](operator-application-retirement.md).
 No provider writes, new browser sessions or remote changes were made.
 
 ## Outcome and boundary
@@ -212,11 +214,12 @@ ready setup scope or provide provisioning/image completion evidence; neither a
 journal write nor a new child can silently reopen it. Old non-retirement drivers
 reject these records instead of reconstructing an absent resource.
 
-The command surface deliberately stops full planning with an unsupported result
-before cloud preparation, origin setup, output containers or image builds. No
-production driver advertises the new capability yet. This is an explicit remaining
-implementation gap, not a successful deletion path. Narrow independent recovery
-scopes retain their existing authority and are not converted into retirement.
+Unsupported provider combinations still stop full planning before cloud
+preparation, origin setup, output containers or image builds. The separately
+documented application, GCP output and GCP publication adapters advertise only
+their implemented scopes; foundation tests alone do not establish a deletion
+path. Narrow independent recovery scopes retain their existing authority and
+are not converted into retirement.
 
 Observed RED before the runtime changes: three schema/kernel checks failed; three
 actual CLI/MCP/command checks reached the wrong setup interpretation; three

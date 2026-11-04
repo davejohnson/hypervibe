@@ -89,6 +89,14 @@ export interface OperatorArtifactCapability {
   /** Local-only preparation binds exact tested artifact bytes before cloud review. */
   prepare?(nativeScope: Record<string, string>, artifacts: string[], source: OperatorArtifactIntent['source']): Promise<Record<string, string>>;
   create(nativeScope: Record<string, string>, signal?: AbortSignal): Promise<{ driver: CloudInstallationDriver<OperatorArtifactIntent>; authentication: OperatorArtifactAuthentication }>;
+  /** Completed publications only; never invokes local preparation or upload.
+   * Targets are validated accepted records from this exact artifact journal. */
+  retirement?: {
+    create(nativeScope: Record<string, string>, context: { projectId: string; environmentId: string; environmentName: string;
+      authorizeCurrent(): Promise<boolean> }, targets: CloudInstallationRecord<OperatorArtifactIntent>[]): Promise<{
+        driver: CloudInstallationDriver<OperatorArtifactIntent>; authentication: OperatorArtifactAuthentication;
+      }>;
+  };
   nextScope(record: CloudInstallationRecord<OperatorArtifactIntent>): Record<string, string> | null;
   refreshScope?(record: CloudInstallationRecord<OperatorArtifactIntent>, declaration: Record<string, string>, artifacts: string[]): Record<string, string>;
   receipts(record: CloudInstallationRecord<OperatorArtifactIntent>): Array<Record<string, string>>;

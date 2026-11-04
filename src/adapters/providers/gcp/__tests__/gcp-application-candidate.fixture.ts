@@ -76,5 +76,5 @@ export function candidateBoundary(options: { lostAck?: boolean; replaced?: boole
       }
       saved = structuredClone(next); return true;
     } } };
-  return { intent, context, writes, commands, requests, options };
+  return { intent, context, writes, commands, requests, options, request };
 }

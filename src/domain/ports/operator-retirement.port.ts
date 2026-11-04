@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import type { CloudInstallationRecord, OperatorApplicationIntent, OperatorArtifactIntent } from './cloud-installation.port.js';
+import { runtimeCoordinateSchema, runtimeCoordinatesSchema } from '../../lib/value-free-coordinates.js';
 
 export const operatorRetirementReferenceSchema = z.object({ installationId: z.string().guid(),
   planDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
@@ -37,3 +39,22 @@ export const operatorRetirementOutcomeSchema = z.object({
     || value.outcome === 'retained-by-choice' && !value.retained.some(item => item.reason === 'data-retention'))
     context.addIssue({ code: 'custom', message: 'Retirement must distinguish provider retention from deliberately retained data.' });
 });
+
+/** Project recorded completion only. Never expose a raw native payload or
+ * reinterpret retained data as permanent erasure. No provider reads occur here. */
+export function projectOperatorRetirement(record: CloudInstallationRecord<OperatorApplicationIntent | OperatorArtifactIntent>) {
+  if (record.intent.mode !== 'retire') return undefined;
+  const resourcesSchema = z.array(z.object({ kind: runtimeCoordinateSchema, id: runtimeCoordinateSchema }).strict()).max(300);
+  const outcomes = record.plan.actions.flatMap(action => {
+    const evidence = record.completed[action.id];
+    if (!evidence) return [];
+    const outcome = operatorRetirementOutcomeSchema.parse(evidence.native.retirement);
+    const retained = outcome.retained.map(item => ({ ...item,
+      kind: runtimeCoordinateSchema.parse(item.kind), id: runtimeCoordinateSchema.parse(item.id),
+      identity: runtimeCoordinatesSchema.parse(item.identity) }));
+    return [{ actionId: runtimeCoordinateSchema.parse(action.id),
+      resources: resourcesSchema.parse(evidence.resources.map(({ kind, id }) => ({ kind, id }))),
+      outcome: outcome.outcome, retained }];
+  });
+  return { complete: record.status === 'retired', outcomes };
+}

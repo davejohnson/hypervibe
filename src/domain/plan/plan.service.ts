@@ -14,7 +14,7 @@ import { databaseConsumerReadiness, type DatabaseConsumerReadiness } from '../se
 import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/credential-lifecycle.service.js';
 import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
 import { planSecretContainers } from '../services/secret-container-setup.js';
-import { operatorArtifactWorkRequired, planOperatorArtifacts } from '../services/operator-artifact.service.js';
+import { operatorArtifactWorkRequired, operatorArtifactRetirementRequired, planOperatorArtifactRetirement, planOperatorArtifacts } from '../services/operator-artifact.service.js';
 import { operatorArtifactPreparationMessage } from '../ports/operator-artifact.port.js';
 import { operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../services/operator-image-update.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
@@ -1855,7 +1855,7 @@ export class PlanService {
     // Persist explicit intent without interpreting retirement as new setup.
     // Provider retirement drivers and their exact plan projections are separate
     // capabilities; until installed this path cannot prepare dependencies.
-    if (scope === 'full' && (Object.values(operatorDesired?.operatorArtifacts ?? {}).some(item => item.retirement)
+    if (scope === 'full' && (Object.values(operatorDesired?.operatorArtifacts ?? {}).some(item => item.retirement && !providerRegistry.getArtifactPublication(item.provider)?.retirement)
       || Object.values(operatorDesired?.operatorApplications ?? {}).some(item => item.retirement && !providerRegistry.getOperatorApplication(item.provider)?.retirement)))
       return { error: 'Operator retirement is not yet supported for these registrations or publications. The request is saved; no setup or deletion is authorized. Existing resources and history are preserved.' };
     if (scope === 'backups') {
@@ -1915,6 +1915,22 @@ export class PlanService {
         spec: specResult.spec, revision: specResult.revision, environmentName, options })
         ?? { error: 'The retained database initialization could not be reconciled.' };
     }
+    try {
+      if (scope === 'full' && await operatorArtifactRetirementRequired(project, environmentName, specResult)) {
+        const prepared = await planOperatorArtifactRetirement({ project, environmentName, specResult, options });
+        if (!prepared) return { error: 'The exact artifact retirement review is unavailable. Preserve the completed publication and removal history; no setup or deletion was authorized.' };
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-artifacts', environmentName,
+          specRevision: specResult.revision, observedFingerprint: null, actions: prepared.actions,
+          artifactPublication: prepared.artifactPublication, warnings: prepared.warnings };
+        planRunDocumentSchema.parse(document);
+        const run = this.runRepo.create({ projectId: project.id, environmentId: prepared.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return { planRunId: run.id, scope: 'operator-artifacts', specRevision: specResult.revision, environmentName,
+          verified: true, observed: null, actions: prepared.actions, cloudScopeReview: prepared.review,
+          ...(prepared.retirement ? { retirement: prepared.retirement } : {}),
+          unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
+      }
+    } catch { return { error: 'Artifact removal requires exact completed publication proof and removal of its consumers first. Preserve its native identity and any pending operation; no setup or repeated deletion was authorized.' }; }
     if (scope === 'full' && Object.values(operatorDesired?.operatorApplications ?? {}).some(item => item.retirement)) {
       try {
         const registration = await planOperatorApplicationRetirement({ project, environmentName, specResult, options });

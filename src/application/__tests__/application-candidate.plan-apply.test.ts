@@ -12,7 +12,10 @@ import { PlanService } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { prepareOperatorImages, runOperatorCommand } from '../../adapters/providers/gcp/operator-image-build.js';
-import { OperatorArtifactPreparationError } from '../../domain/ports/operator-artifact.port.js';
+import { OperatorArtifactPreparationError, isOperatorArtifactAction } from '../../domain/ports/operator-artifact.port.js';
+import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
+import { createGcpOperatorArtifactRetirementDriver } from '../../adapters/providers/gcp/gcp-operator-artifact-retirement.js';
+import { artifactRetirementBoundary } from '../../adapters/providers/gcp/__tests__/gcp-artifact-retirement.fixture.js';
 
 // SQLite, ordinary spec/plan/apply and provider driver are real. Only local
 // Docker/ADC preparation and serialized native responses are synthetic.
@@ -33,10 +36,25 @@ describe('reviewed private candidate publication through application and SQLite'
       expect(source.repository).toBe('github.com/acme/operator');expect(scope.sourceCommit).toBe(n.sourceCommit);return {...n,...scope,sourceRepository:source.repository};
     });
     vi.spyOn(capability,'create').mockResolvedValue({driver:native.context.driver,authentication:native.context.authentication});
+    const retirementNatives = new Map<string, ReturnType<typeof artifactRetirementBoundary>>();
+    vi.spyOn(capability.retirement!,'create').mockImplementation(async(_scope,_context,targets)=>{
+      let boundary=retirementNatives.get(targets[0].installationId);
+      if(!boundary){boundary=artifactRetirementBoundary(targets[0],native.request);retirementNatives.set(targets[0].installationId,boundary);}
+      return {driver:createGcpOperatorArtifactRetirementDriver(targets,{fetch:boundary.request}),authentication:native.context.authentication};
+    });
     const unrelated=vi.spyOn(adapterFactory,'getProviderAdapter').mockRejectedValue(new Error('Unexpected hosting access'));
     const plan=()=>new PlanService().plan(project,environment.name);
     const apply=(planId:string,confirmActions:string[])=>{const current=store.get(project)!;return executePlanApply(ctx,{project,spec:current.spec,specRevision:current.revision,planId,confirmActions});};
-    return {native,capability,ctx,project,environment,desired,store,prepare,unrelated,plan,apply};
+    return {native,capability,ctx,project,environment,desired,store,prepare,unrelated,plan,apply,retirementNatives};
+  }
+  async function retirementFixture(data: 'retain' | 'delete-owned' = 'delete-owned') {
+    const f=fixture(),published=await f.plan();if('error'in published)throw new Error(published.error);
+    expect(await f.apply(published.planRunId,published.actions.map(item=>item.id))).toMatchObject({kind:'executed',result:{success:true}});
+    const saved=f.ctx.repos.runs.findById(published.planRunId)!.plan as any;
+    const prior=f.ctx.repos.runs.findById(saved.artifactPublication.installationId)!.plan as any;
+    const desired=structuredClone(f.store.get(f.project)!.spec);desired.environments.staging.services={};
+    desired.environments.staging.operatorArtifacts!.candidate.retirement={from:{installationId:prior.installationId,planDigest:prior.plan.digest},resources:'delete-owned',data};
+    f.store.replace(f.project,desired);return {...f,prior,retirementDesired:desired};
   }
   it('requires exact publication confirmation and retains immutable content without changing repository or runtime permissions',async()=>{
     const f=fixture(),p=await f.plan();if('error'in p)throw new Error(p.error);
@@ -50,6 +68,103 @@ describe('reviewed private candidate publication through application and SQLite'
     expect(receipts).toHaveLength(1);expect(receipts[0]).toMatchObject({kind:'application-candidate-v1',authenticatedPull:'verified',sourceCommit:f.native.intent.nativeScope.sourceCommit});
     expect(JSON.stringify(receipts)).toContain('@sha256:');expect(JSON.stringify(journal)).not.toContain('synthetic-short-lived-token');
     expect(f.prepare).toHaveBeenCalledTimes(1);expect(f.unrelated).not.toHaveBeenCalled();
+  });
+  it('plans explicit completed publication retirement without preparing another image or deleting its shared repository',async()=>{
+    const f=fixture(),published=await f.plan();if('error'in published)throw new Error(published.error);
+    expect(await f.apply(published.planRunId,published.actions.map(item=>item.id))).toMatchObject({kind:'executed',result:{success:true}});
+    const saved=f.ctx.repos.runs.findById(published.planRunId)!.plan as any;
+    const prior=f.ctx.repos.runs.findById(saved.artifactPublication.installationId)!.plan as any;
+    const priorBytes=JSON.stringify(prior),writes=f.native.writes.length;
+    const desired=structuredClone(f.store.get(f.project)!.spec);
+    desired.environments.staging.services={};
+    desired.environments.staging.operatorArtifacts!.candidate.retirement={
+      from:{installationId:prior.installationId,planDigest:prior.plan.digest},resources:'delete-owned',data:'delete-owned',
+    };
+    f.store.replace(f.project,desired);
+    const removal=await f.plan();
+    expect(removal).toMatchObject({scope:'operator-artifacts'});
+    if('error'in removal)throw new Error(removal.error);
+    expect(removal.actions).toHaveLength(2);
+    expect(removal.actions.every(item=>item.type==='destroy'&&item.requiresConfirm===true)).toBe(true);
+    const malformed=structuredClone(f.ctx.repos.runs.findById(removal.planRunId)!.plan) as any;
+    delete malformed.artifactPublication.bindingHash;for(const action of malformed.actions)delete action.metadata.bindingHash;
+    expect(planRunDocumentSchema.safeParse(malformed).success).toBe(false);expect(malformed.actions.every((action:any)=>!isOperatorArtifactAction(action))).toBe(true);
+    expect(f.prepare).toHaveBeenCalledTimes(1);expect(f.unrelated).not.toHaveBeenCalled();
+    expect(f.native.writes).toHaveLength(writes);
+    expect(JSON.stringify(f.ctx.repos.runs.findById(prior.installationId)!.plan)).toBe(priorBytes);
+    const boundary=f.retirementNatives.get(prior.installationId)!;
+    expect(await f.apply(removal.planRunId,[])).toMatchObject({kind:'executed',result:{success:false}});expect(boundary.writes).toEqual([]);
+    expect(await f.apply(removal.planRunId,removal.actions.map(item=>item.id))).toMatchObject({kind:'executed',result:{success:true}});
+    expect(boundary.writes).toHaveLength(2);
+    const terminal=await f.plan();expect(terminal).toMatchObject({scope:'operator-artifacts'});
+    if('error'in terminal)throw new Error(terminal.error);expect(terminal.actions.every(item=>item.type==='noop')).toBe(true);
+    expect(f.prepare).toHaveBeenCalledTimes(1);expect(JSON.stringify(f.ctx.repos.runs.findById(prior.installationId)!.plan)).toBe(priorBytes);
+  });
+  it('reports deliberately retained image data in the saved-plan/apply and terminal inspection results',async()=>{
+    const f=await retirementFixture('retain'),planned=await f.plan();if('error'in planned)throw new Error(planned.error);
+    expect.soft(planned.retirement).toEqual({complete:false,outcomes:[]});
+    expect(planned.actions).toHaveLength(1);
+    const applied:any=await f.apply(planned.planRunId,planned.actions.map(item=>item.id));
+    expect(applied).toMatchObject({kind:'executed',result:{success:true}});
+    const summary={complete:true,outcomes:[{actionId:planned.actions[0].id,
+      resources:[{kind:'artifact-tag',id:planned.actions[0].resource.name}],outcome:'retained-by-choice',
+      retained:[{kind:'artifact-image',id:expect.stringMatching(/@sha256:[a-f0-9]{64}$/),
+        identity:{digest:expect.stringMatching(/^sha256:[a-f0-9]{64}$/),uploadTime:expect.any(String),repositoryCreateTime:expect.any(String)},reason:'data-retention'}]}]};
+    expect.soft(applied.result.receipts.at(-1).data.retirement).toEqual(summary);
+    expect(applied.result.receipts.at(-1).message).toMatch(/Image data.*remain by choice.*charges may continue/);
+    const terminal=await f.plan();if('error'in terminal)throw new Error(terminal.error);
+    expect.soft(terminal.retirement).toEqual(summary);
+    expect(terminal.actions.every(item=>item.type==='noop')).toBe(true);
+    expect(f.retirementNatives.get(f.prior.installationId)!.writes).toHaveLength(1);
+    expect(terminal.warnings.join(' ')).toMatch(/charges|cost/i);
+    expect(JSON.stringify([applied,terminal])).not.toContain('synthetic-short-lived-token');
+  });
+  it.each(['desired-service','native-service','runtime-identity','retained-backup-runtime','retained-ci','provider-change','foreign-source','missing-proof'] as const)('rejects retirement selection %s before provider reads or deletion',async variant=>{
+    const f=await retirementFixture(),desired=structuredClone(f.retirementDesired),bindings=structuredClone(f.environment.platformBindings);
+    if(variant==='desired-service')desired.environments.staging.services={web:{workloadKind:'web'}};
+    if(variant==='native-service')bindings.services={web:{serviceId:'native-service'}};
+    if(variant==='runtime-identity')bindings.runtimeIdentities={web:{provider:'cloudrun'}};
+    if(variant==='retained-backup-runtime')bindings.recoveryRuntime={provider:'cloudrun',evidence:{accountUniqueId:'123456789',sourceSnapshot:JSON.stringify({runnerImage:'example.test/helper@sha256:'+'a'.repeat(64)})}};
+    if(variant==='retained-ci')bindings.gcpGithubWorkloadIdentity={schemaVersion:1,projectId:f.native.intent.nativeScope.projectId,projectNumber:'123456789012',
+      workloadIdentityProvider:'projects/123456789012/locations/global/workloadIdentityPools/owned-pool/providers/github',serviceAccountEmail:'ci-deployer@operator-project.iam.gserviceaccount.com',
+      serviceAccountUniqueId:'123456789013',repository:'acme/operator',repositoryId:'1234',repositoryOwnerId:'123',branch:'main',environment:'staging',workflow:'.github/workflows/deploy.yml',backupWorkflow:'.github/workflows/hypervibe-backup-staging.yml'};
+    if(variant==='provider-change')bindings.provider='railway';
+    if(variant==='foreign-source')desired.gitRemoteUrl='https://github.com/other/operator.git';
+    if(variant==='missing-proof')desired.environments.staging.operatorArtifacts!.candidate.retirement!.from.planDigest='0'.repeat(64);
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id,bindings);f.store.replace(f.project,desired);
+    expect(await f.plan()).toHaveProperty('error');expect(f.capability.retirement!.create).not.toHaveBeenCalled();expect(f.prepare).toHaveBeenCalledTimes(1);
+  });
+  it('rejects a saved removal after complete binding drift without changing either journal',async()=>{
+    const f=await retirementFixture(),plan=await f.plan();if('error'in plan)throw new Error(plan.error);
+    const boundary=f.retirementNatives.get(f.prior.installationId)!,before=JSON.stringify(f.ctx.repos.runs.findById(f.prior.installationId)!.plan);
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id,{...f.environment.platformBindings,unrelated:{retained:'changed'}});
+    expect(await f.apply(plan.planRunId,plan.actions.map(item=>item.id))).toMatchObject({kind:'executed',result:{success:false}});
+    expect(boundary.writes).toEqual([]);expect(JSON.stringify(f.ctx.repos.runs.findById(f.prior.installationId)!.plan)).toBe(before);
+  });
+  it('recovers a retained uncertain removal after declaration omission with no preparation or DELETE replay',async()=>{
+    const f=await retirementFixture(),plan=await f.plan();if('error'in plan)throw new Error(plan.error);
+    const boundary=f.retirementNatives.get(f.prior.installationId)!;boundary.state.lostTagAck=true;
+    expect(await f.apply(plan.planRunId,plan.actions.map(item=>item.id))).toMatchObject({kind:'executed',result:{success:false}});expect(boundary.writes).toHaveLength(1);
+    const desired=structuredClone(f.retirementDesired);delete desired.environments.staging.operatorArtifacts;f.store.replace(f.project,desired);
+    const recovery=await f.plan();if('error'in recovery)throw new Error(recovery.error);
+    expect(recovery.scope).toBe('operator-artifacts');expect(recovery.actions.every(item=>item.type==='update'&&!item.requiresConfirm)).toBe(true);
+    expect(boundary.writes).toHaveLength(1);expect(f.prepare).toHaveBeenCalledTimes(1);
+  });
+  it('stops dependent version deletion when a concurrent binding change follows successful tag removal',async()=>{
+    const f=await retirementFixture(),plan=await f.plan();if('error'in plan)throw new Error(plan.error);
+    const boundary=f.retirementNatives.get(f.prior.installationId)!,request=boundary.request;
+    boundary.request=async(input,init)=>{const response=await request(input,init);if(init?.method==='DELETE')f.ctx.repos.environments.updatePlatformBindings(f.environment.id,
+      {...f.environment.platformBindings,unrelated:{retained:'concurrent'}});return response;};
+    expect(await f.apply(plan.planRunId,plan.actions.map(item=>item.id))).toMatchObject({kind:'executed',result:{success:false}});
+    expect(boundary.writes).toHaveLength(1);expect(boundary.state.image).toBe(true);
+    const recovery=await f.plan();if('error'in recovery)throw new Error(recovery.error);
+    expect(recovery.actions.every(item=>item.type!=='create')).toBe(true);expect(boundary.writes).toHaveLength(1);
+    expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.unrelated).toEqual({retained:'concurrent'});
+    const continuation=await f.plan();if('error'in continuation)throw new Error(continuation.error);
+    expect(continuation.actions.filter(item=>item.type!=='noop')).toEqual([expect.objectContaining({type:'destroy',requiresConfirm:true})]);
+    boundary.request=request;
+    expect(await f.apply(continuation.planRunId,continuation.actions.filter(item=>item.type!=='noop').map(item=>item.id))).toMatchObject({kind:'executed',result:{success:true}});
+    expect(boundary.writes).toHaveLength(2);expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.unrelated).toEqual({retained:'concurrent'});
   });
   it('carries a real local command failure through plan without exposing command output or creating a publication',async()=>{
     const f=fixture();let dispatched=false;

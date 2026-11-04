@@ -9,16 +9,16 @@ import type { CloudInstallationRecord, OperatorArtifactIntent } from '../../../.
 // boundaries. Synthetic credentials and content IDs; not a live compatibility claim.
 const digest = 'sha256:' + 'd'.repeat(64), imageId = 'sha256:' + 'a'.repeat(64);
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export function gcpOperatorArtifactBoundary(options: { lostAck?: boolean; replaced?: boolean; denied?: boolean; wrongImage?: boolean; publicRemoved?: boolean; absentAfterPush?: boolean; billingChanged?: boolean; billingDisabled?: boolean } = {}, identity?: { appId: string; environment: string }) {
+export function gcpOperatorArtifactBoundary(options: { lostAck?: boolean; replaced?: boolean; denied?: boolean; wrongImage?: boolean; publicRemoved?: boolean; absentAfterPush?: boolean; billingChanged?: boolean; billingDisabled?: boolean } = {}, identity?: { appId: string; environment: string }, kind: 'holding-v1' | 'backup-runner-v1' = 'holding-v1') {
   const intent: OperatorArtifactIntent = { schemaVersion: 1, installationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customerId: 'customer', appId: 'app', environment: 'staging',
     source: { kind: 'local-spec', repository: 'github.com/acme/operator', specRevision: 1, specDigest: 'c'.repeat(64) },
     provider: 'gcp', artifactProvider: 'cloudrun', execution: { kind: 'operator-artifact-publisher', authentication: 'google-user-adc' },
-    mode: 'connect', stage: 'scope-preparation', keys: [], artifacts: ['holding-v1'], nativeScope: {
+    mode: 'connect', stage: 'scope-preparation', keys: [], artifacts: [kind], nativeScope: {
       scopeKind: 'gar-image-publication-v1', projectId: 'operator-project', projectNumber: '123456789012', projectCreateTime: '2026-10-25T00:00:00Z', projectParent: 'none',
       projectInstallationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectAttemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', billingAccountName:'billingAccounts/000000-000000-000000',
       region: 'us-central1', publicArtifactRepository: 'operator-public', publicArtifactRepositoryName: 'projects/operator-project/locations/us-central1/repositories/operator-public',
       publicArtifactRepositoryCreateTime: '2026-10-25T01:00:00Z', publicArtifactInstallationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', publicArtifactAttemptId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-      packageVersion: '0.1.44', packageLockSha256: 'e'.repeat(64), packageArchiveSha256: 'f'.repeat(64), holdingImageId: imageId,
+      packageVersion: '0.1.44', packageLockSha256: 'e'.repeat(64), packageArchiveSha256: 'f'.repeat(64), ...(kind==='holding-v1'?{holdingImageId:imageId}:{backupImageId:imageId}),
     } };
   if (identity) { intent.appId = identity.appId; intent.customerId = identity.appId; intent.environment = identity.environment; }
   const scope = intent.nativeScope, repository = scope.publicArtifactRepositoryName;
@@ -37,9 +37,9 @@ export function gcpOperatorArtifactBoundary(options: { lostAck?: boolean; replac
     if (url.includes(':getIamPolicy')) return Response.json({ etag: 'policy-v1', version: 3, bindings: options.publicRemoved ? [] : [{ role: 'roles/artifactregistry.reader', members: ['allUsers'] }] });
     if (url.includes(':testIamPermissions')) return Response.json({ permissions: ['artifactregistry.repositories.uploadArtifacts', 'artifactregistry.repositories.downloadArtifacts'] });
     if (url.includes('/tags/')) return pushedTag && !options.absentAfterPush && url.endsWith('/tags/' + pushedTag)
-      ? Response.json({ name: `${repository}/packages/holding-v1/tags/${pushedTag}`, version: `${repository}/packages/holding-v1/versions/${digest}` }) : Response.json({}, { status: 404 });
-    if (url.includes('/dockerImages/')) return Response.json({ name: `${repository}/dockerImages/holding-v1@${digest}`,
-      uri: `us-central1-docker.pkg.dev/operator-project/operator-public/holding-v1@${digest}`, uploadTime: '2026-10-25T03:00:00Z', imageSizeBytes: '1234' });
+      ? Response.json({ name: `${repository}/packages/${kind}/tags/${pushedTag}`, version: `${repository}/packages/${kind}/versions/${digest}` }) : Response.json({}, { status: 404 });
+    if (url.includes('/dockerImages/')) return Response.json({ name: `${repository}/dockerImages/${kind}@${digest}`,
+      uri: `us-central1-docker.pkg.dev/operator-project/operator-public/${kind}@${digest}`, uploadTime: '2026-10-25T03:00:00Z', imageSizeBytes: '1234' });
     throw new Error('Unexpected GAR native request');
   };
   const command: OperatorCommand = async (program, args, commandOptions = {}) => {
@@ -53,7 +53,7 @@ export function gcpOperatorArtifactBoundary(options: { lostAck?: boolean; replac
       return 'Login Succeeded';
     }
     if (args[0] === 'image' && args[1] === 'inspect') return JSON.stringify([{ Id: options.wrongImage ? 'sha256:' + 'b'.repeat(64) : imageId,
-      Os: 'linux', Architecture: 'amd64', Config: { User: 'node', Labels: artifactImageLabels(scope,'holding-v1') } }]);
+      Os: 'linux', Architecture: 'amd64', Config: { User: kind==='backup-runner-v1'?'postgres':'node', Labels: artifactImageLabels(scope,kind) } }]);
     if (args[0] === 'tag') { expect(args[1]).toBe(imageId); return ''; }
     if (args[0] === 'push') {
       writes.push(args[1]); pushedTag = args[1].split(':').at(-1);
@@ -74,5 +74,5 @@ export function gcpOperatorArtifactBoundary(options: { lostAck?: boolean; replac
       }
       saved = structuredClone(next); return true;
     } } };
-  return { intent, context, writes, commands, requests, options };
+  return { intent, context, writes, commands, requests, options, request };
 }

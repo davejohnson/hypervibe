@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { CloudScopePreparationRepository, acceptedJournalLeaf, operatorArtifactJournalNames } from '../../adapters/db/repositories/cloud-scope-preparation.repository.js';
+import { CloudScopePreparationRepository, acceptedJournalLeaf, operatorArtifactJournalNames, CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT } from '../../adapters/db/repositories/cloud-scope-preparation.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { normalizeGitRemoteIdentity } from '../../lib/git-remote.js';
@@ -14,7 +14,11 @@ import type { PlanAction } from '../plan/plan.types.js';
 import { orderActions, type ActionResult } from '../plan/converge.executor.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
-import { applyCloudInstallationV1, historicalInstallationEvidence, planCloudInstallationV1, reconcileCloudInstallationV1 } from './cloud-installation-runtime.js';
+import { applyCloudInstallationV1, historicalInstallationEvidence, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
+import { preparedReleaseAttempts } from './prepared-direct-release.service.js';
+import { manualBackupRecordsSchema } from './manual-backup.service.js';
+import { projectOperatorRetirement } from '../ports/operator-retirement.port.js';
 type Record = CloudInstallationRecord<OperatorArtifactIntent>;
 const routing = z.object({ intent: z.object({ artifactProvider: z.string().min(1) }).passthrough() }).passthrough();
 const unavailable = () => new Error('Operator artifact publication could not be verified. Retain its exact plan, native operation and immutable receipts; no replacement or repeated upload is authorized.');
@@ -34,6 +38,63 @@ function source(project: Project, result: SpecResult): OperatorArtifactIntent['s
   if (!repository) throw unavailable();
   return { kind: 'local-spec', repository, specRevision: result.revision, specDigest: canonicalJsonSha256(result.spec) };
 }
+async function retirementSelection(project: Project, environment: Environment, name: string, result: SpecResult) {
+  const desired = result.spec.environments[environment.name], bindings = environment.platformBindings;
+  const declaration = desired?.operatorArtifacts?.[name], capability = declaration && providerRegistry.getArtifactPublication(declaration.provider);
+  if (!declaration?.retirement || !capability?.retirement || declaration.retirement.continueFrom || declaration.retirement.outputTargets) throw unavailable();
+  if (bindings.provider !== declaration.provider || desired.hosting.provider !== declaration.provider
+    || providerRegistry.getMetadata(declaration.provider)?.credentials?.automationAuthentication?.(environment)) throw unavailable();
+  const maps = ['services', 'runtimeIdentities'].map(key => z.record(z.string(), z.unknown()).parse(bindings[key] ?? {}));
+  const grants = z.record(z.string(), z.record(z.string(), z.unknown())).parse(bindings.storageRuntimeAccess ?? {});
+  if (Object.keys(desired.services).length || desired.backups?.mode === 'daily' || maps.some(map => Object.keys(map).length)
+    || Object.values(grants).some(map => Object.keys(map).length) || bindings.previousHosting !== undefined
+    || bindings.recoveryRuntime !== undefined
+    || bindings.preparedHosting !== undefined && preparedHostingMarkerSchema.parse(bindings.preparedHosting).pendingFirstRelease.length
+    || Object.values(preparedReleaseAttempts(environment)).some(attempt => attempt.status !== 'completed')
+    || Object.values(manualBackupRecordsSchema.parse(bindings.manualRecovery ?? {})).some(record => record.checkpoint?.phase !== 'complete')) throw unavailable();
+  const history = await journal(project, environment, name).findByScope(), selectedSource = source(project, result);
+  const reference = declaration.retirement.from;
+  const parent = history.find(record => record.installationId === reference.installationId && record.plan.digest === reference.planDigest);
+  if (!parent || parent.intent.mode !== 'connect' || parent.intent.artifactProvider !== declaration.provider
+    || parent.intent.customerId !== project.id || parent.intent.appId !== project.id || parent.intent.environment !== environment.name
+    || parent.intent.source.repository !== selectedSource.repository) throw unavailable();
+  const originalSpec = new SpecStore().getRevision(project.id, parent.intent.source.specRevision);
+  const original = originalSpec?.environments[environment.name]?.operatorArtifacts?.[name];
+  const { retirement: _retirement, ...selectionDeclaration } = declaration;
+  const { refreshFrom: _refreshFrom, ...originalSelection } = original ?? {};
+  if (!originalSpec || canonicalJsonSha256(originalSpec) !== parent.intent.source.specDigest || !original
+    || !isDeepStrictEqual(originalSelection, selectionDeclaration) || parent.intent.selection?.declarationDigest !== canonicalJsonSha256(original)
+    || Object.entries(declaration.nativeScope).some(([key, value]) => parent.intent.nativeScope[key] !== value)) throw unavailable();
+  const ancestry = new Map<string, Record>(); let cursor: Record | undefined = parent;
+  while (cursor) {
+    if (ancestry.size >= CLOUD_SCOPE_PREPARATION_LINEAGE_LIMIT || ancestry.has(cursor.installationId) || cursor.intent.mode !== 'connect'
+      || cursor.intent.artifactProvider !== declaration.provider || cursor.intent.customerId !== project.id || cursor.intent.appId !== project.id
+      || cursor.intent.environment !== environment.name || cursor.intent.source.repository !== selectedSource.repository) throw unavailable();
+    ancestry.set(cursor.installationId, cursor);
+    const previous: OperatorArtifactIntent['predecessor'] = cursor.intent.predecessor;
+    cursor = previous ? history.find(item => item.installationId === previous.installationId && item.plan.digest === previous.planDigest) : undefined;
+    if (previous && !cursor) throw unavailable();
+  }
+  const refs = declaration.retirement.targets ?? [reference];
+  if (new Set(refs.map(item => item.installationId)).size !== refs.length || !refs.some(item => isDeepStrictEqual(item, reference))) throw unavailable();
+  const targets = refs.map(item => {
+    const record = ancestry.get(item.installationId), evidence = record && historicalInstallationEvidence(record);
+    if (!record || record.plan.digest !== item.planDigest || !evidence) throw unavailable();
+    return { record, reference: { ...item, evidenceDigest: canonicalJsonSha256(evidence) } };
+  });
+  const leaf = acceptedJournalLeaf(history);
+  const retirement = { ...declaration.retirement, targets: targets.map(item => item.reference) };
+  const proof = { declarationDigest: canonicalJsonSha256(declaration), nativeScopeDigest: canonicalJsonSha256(parent.intent.nativeScope) };
+  if (!leaf || leaf.installationId !== reference.installationId && !(leaf.intent.mode === 'retire' && isDeepStrictEqual(leaf.intent.predecessor, reference)
+    && isDeepStrictEqual(leaf.intent.retirement, retirement) && isDeepStrictEqual(leaf.intent.selection, proof)
+    && isDeepStrictEqual(leaf.intent.nativeScope, parent.intent.nativeScope))) throw unavailable();
+  for (const other of retainedNames(project, environment).filter(item => item !== name)) {
+    const accepted = acceptedJournalLeaf(await journal(project, environment, other).findByScope());
+    if (accepted && !['scope-ready', 'retired'].includes(accepted.status)) throw unavailable();
+  }
+  return { declaration, capability, parent, targets: targets.map(item => structuredClone(item.record)), predecessor: reference,
+    retirement, nativeScope: parent.intent.nativeScope, source: selectedSource, proof };
+}
 function selection(project: Project, environment: Environment, name: string, result: SpecResult) {
   const declaration = result.spec.environments[environment.name]?.operatorArtifacts?.[name];
   if (!declaration) throw unavailable();
@@ -43,12 +104,12 @@ function selection(project: Project, environment: Environment, name: string, res
     proof: { declarationDigest: canonicalJsonSha256(declaration), nativeScopeDigest: canonicalJsonSha256(nativeScope),
       ...(declaration.refreshFrom ? { refreshFromDigest: canonicalJsonSha256(declaration.refreshFrom) } : {}) } };
 }
-function current(project: Project, environment: Environment, name: string, intent: OperatorArtifactIntent): boolean {
+async function current(project: Project, environment: Environment, name: string, intent: OperatorArtifactIntent): Promise<boolean> {
   try {
     const freshProject = new ProjectRepository().findById(project.id), freshEnvironment = new EnvironmentRepository().findById(environment.id);
     const result = freshProject && new SpecStore().getForInspection(freshProject);
     if (!freshProject || !freshEnvironment || freshEnvironment.projectId !== project.id || freshEnvironment.name !== intent.environment || !result) return false;
-    const selected = selection(freshProject, freshEnvironment, name, result);
+    const selected = intent.mode === 'retire' ? await retirementSelection(freshProject, freshEnvironment, name, result) : selection(freshProject, freshEnvironment, name, result);
     return selected.declaration.provider === intent.artifactProvider && selected.source.repository === intent.source.repository
       && isDeepStrictEqual(selected.proof, intent.selection) && isDeepStrictEqual(selected.declaration.artifacts, intent.artifacts)
       && (!selected.declaration.refreshFrom || isDeepStrictEqual(selected.declaration.refreshFrom, intent.predecessor));
@@ -58,11 +119,21 @@ async function context(project: Project, environment: Environment, name: string,
   authorize: () => boolean = () => true): Promise<CloudInstallationContext<OperatorArtifactIntent>> {
   const capability = providerRegistry.getArtifactPublication(intent.artifactProvider);
   if (!capability || intent.customerId !== project.id || intent.appId !== project.id || intent.environment !== environment.name) throw unavailable();
-  return { ...await capability.create(intent.nativeScope), store: journal(project, environment, name), timeoutMs: 600_000,
+  const history = intent.mode === 'retire' ? await journal(project, environment, name).findByScope() : [];
+  const targets = intent.mode === 'retire' ? intent.retirement!.targets.map(target => {
+    const record = history.find(item => item.installationId === target.installationId && item.plan.digest === target.planDigest);
+    const evidence = record && historicalInstallationEvidence(record);
+    if (!record || !evidence || canonicalJsonSha256(evidence) !== target.evidenceDigest) throw unavailable();
+    return structuredClone(record);
+  }) : undefined;
+  if (targets && !capability.retirement) throw unavailable();
+  const native = targets ? await capability.retirement!.create(intent.nativeScope, { projectId: project.id, environmentId: environment.id,
+    environmentName: environment.name, authorizeCurrent: () => current(project, environment, name, intent) }, targets) : await capability.create(intent.nativeScope);
+  return { ...native, store: journal(project, environment, name), timeoutMs: 600_000,
     authorize: async input => {
       const fresh = new EnvironmentRepository().findById(environment.id);
       if (!fresh || fresh.projectId !== project.id || fresh.name !== environment.name || !authorize() || !isDeepStrictEqual(input.intent, intent)
-        || readOnly && input.phase === 'mutate' || !readOnly && !current(project, environment, name, intent)) return false;
+        || readOnly && input.phase === 'mutate' || !readOnly && !await current(project, environment, name, intent)) return false;
       if (intent.predecessor) {
         const prior = await journal(project, environment, name).read(intent.predecessor.installationId);
         if (!prior || prior.plan.digest !== intent.predecessor.planDigest || prior.intent.artifactProvider !== intent.artifactProvider
@@ -70,15 +141,25 @@ async function context(project: Project, environment: Environment, name: string,
         // Provider drivers verify inherited target lifetimes before every native
         // operation. Historical immutable predecessor proof never implies fresh
         // permission, nor requires public grants to remain during future cleanup.
-        if (prior.status !== 'scope-ready') return false;
+        if (intent.mode !== 'retire' && prior.status !== 'scope-ready' || intent.mode === 'retire' && !historicalInstallationEvidence(prior)) return false;
       }
       return true;
     } };
 }
-function projection(record: Record, name: string, mode: OperatorArtifactPlan['mode']) {
+function projection(record: Record, name: string, mode: OperatorArtifactPlan['mode'], retryActions?: OperatorArtifactPlan['retryActions'], bindingHash?: string) {
+  if (mode === 'retire' && !bindingHash) throw unavailable();
   const artifactPublication: OperatorArtifactPlan = { schemaVersion: 1, name, installationId: record.installationId,
-    planDigest: record.plan.digest, provider: record.intent.artifactProvider, mode };
-  const originals = mode === 'recover' ? record.plan.actions.filter(action => record.attempts.some(attempt => attempt.actionId === action.id)) : record.plan.actions;
+    planDigest: record.plan.digest, provider: record.intent.artifactProvider, mode, ...(mode === 'retire' ? { bindingHash } : {}), ...(retryActions ? { retryActions } : {}) };
+  let originals = mode === 'recover' ? record.plan.actions.filter(action => record.attempts.some(attempt => attempt.actionId === action.id)) : record.plan.actions;
+  if (retryActions) {
+    if (mode !== 'retire') throw unavailable();
+    const included = new Set(retryActions.map(retry => retry.actionId));
+    for (const id of included) {
+      const action = record.plan.actions.find(action => action.id === id); if (!action) throw unavailable();
+      for (const dependency of action.dependsOn ?? []) { if (!record.completed[dependency]) throw unavailable(); included.add(dependency); }
+    }
+    originals = originals.filter(action => included.has(action.id));
+  }
   const actions: PlanAction[] = mode === 'verified' ? [] : originals.map(action => ({ ...action,
     ...(mode === 'recover' ? { type: 'update' as const, requiresConfirm: false, billable: false, dataBearing: false,
       reason: 'Read back the exact retained artifact operation and immutable content; never repeat an uncertain publication.' }
@@ -86,8 +167,10 @@ function projection(record: Record, name: string, mode: OperatorArtifactPlan['mo
     metadata: { ...artifactPublication, operation: OPERATOR_ARTIFACT_OPERATION, nativeActionId: action.id } }));
   return { artifactPublication, actions };
 }
-function projected(record: Record, name: string, mode: OperatorArtifactPlan['mode'], environment: Environment) {
-  return { ...projection(record, name, mode), environment, review: record.plan.review,
+function projected(record: Record, name: string, mode: OperatorArtifactPlan['mode'], environment: Environment, retryActions?: OperatorArtifactPlan['retryActions']) {
+  const retirement = projectOperatorRetirement(record);
+  return { ...projection(record, name, mode, retryActions, mode === 'retire' ? canonicalJsonSha256(environment.platformBindings) : undefined), environment, review: record.plan.review,
+    ...(retirement ? { retirement } : {}),
     warnings: [...record.plan.review.warnings, ...record.plan.review.costs.map(cost => cost.description),
       'Only these exact operator artifact actions are approved by this plan. Infrastructure, content publication and anonymous read access remain distinct.',
       ...(mode === 'recover' ? ['This retained operation is read-only. Removed or changed source declarations cannot authorize unstarted uploads, grants or replacement targets.'] : [])] };
@@ -117,6 +200,7 @@ export async function verifyOperatorArtifactImages(project: Project, environment
   for (const name of retainedNames(project, environment)) {
     const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
     if (!record) continue;
+    if (record.intent.mode === 'retire') continue;
     const historical = historicalInstallationEvidence(record);
     if (!historical || record.intent.source.repository !== repository) throw unavailable();
     const matches = Object.values(historical).flatMap(item => item.resources)
@@ -137,12 +221,59 @@ export async function operatorArtifactWorkRequired(project: Project, environment
   if (!environment) return false;
   for (const name of retainedNames(project, environment)) {
     const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
-    if (record && record.status !== 'scope-ready') return true;
+    if (record && record.status !== 'scope-ready' && record.status !== 'retired') return true;
   }
   return false;
 }
+export async function operatorArtifactRetirementRequired(project: Project, environmentName: string, result: SpecResult) {
+  const declarations = result.spec.environments[environmentName]?.operatorArtifacts ?? {};
+  if (Object.values(declarations).some(item => item.retirement)) return true;
+  const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+  if (!environment) return false;
+  for (const name of retainedNames(project, environment)) {
+    const leaf = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
+    if (leaf?.intent.mode === 'retire' && (leaf.status !== 'retired' || declarations[name])) return true;
+  }
+  return false;
+}
+export async function planOperatorArtifactRetirement(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object }) {
+  const declarations = input.specResult.spec.environments[input.environmentName]?.operatorArtifacts ?? {};
+  const environment = new EnvironmentRepository().findByProjectAndName(input.project.id, input.environmentName);
+  if (!environment || input.options && ['serviceFilter', 'envVarOverrides', 'envFile', 'secretRefs'].some(key => Object.hasOwn(input.options!, key))
+    || (input.options as { includeEnvFile?: boolean } | undefined)?.includeEnvFile === true) throw unavailable();
+  let terminal: { record: Record; name: string } | undefined;
+  for (const name of [...new Set([...retainedNames(input.project, environment), ...Object.keys(declarations)])].sort()) {
+    const history = await journal(input.project, environment, name).findByScope();
+    let leaf = acceptedJournalLeaf(history);
+    if (leaf?.intent.mode === 'retire' && leaf.status !== 'retired') {
+      leaf = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, leaf.intent, true),
+        installationId: leaf.installationId, planDigest: leaf.plan.digest });
+      if (!declarations[name]?.retirement) return projected(leaf, name, 'recover', environment);
+    }
+    if (!declarations[name]?.retirement) continue;
+    let selected: Awaited<ReturnType<typeof retirementSelection>>;
+    try { selected = await retirementSelection(input.project, environment, name, input.specResult); }
+    catch { if (leaf?.intent.mode === 'retire' && leaf.status !== 'retired') return projected(leaf, name, 'recover', environment); throw unavailable(); }
+    let record = history.find(item => item.intent.mode === 'retire' && isDeepStrictEqual(item.intent.selection, selected.proof)
+      && isDeepStrictEqual(item.intent.retirement, selected.retirement) && item.intent.source.repository === selected.source.repository);
+    if (leaf?.installationId === record?.installationId) record = leaf;
+    if (!record) {
+      const intent: OperatorArtifactIntent = { ...selected.parent.intent, installationId: randomUUID(), source: selected.source,
+        mode: 'retire', selection: selected.proof, predecessor: selected.predecessor, retirement: selected.retirement };
+      record = await planCloudInstallationV1({ ...await context(input.project, environment, name, intent, false), intent });
+    }
+    if (record.status === 'retired') { terminal = { record, name }; continue; }
+    if (record.plan.blockedReason) throw unavailable();
+    const pending = record.plan.actions.filter(action => !record!.completed[action.id]).map(action => record!.attempts.filter(attempt => attempt.actionId === action.id).at(-1)).filter(attempt => !!attempt);
+    const retry = pending.length && pending.every(attempt => attempt.status === 'rejected')
+      ? await reviewCloudInstallationRetryV1({ ...await context(input.project, environment, name, record.intent, false), installationId: record.installationId, planDigest: record.plan.digest }) : undefined;
+    return projected(record, name, pending.length && !retry ? 'recover' : 'retire', environment, retry?.retryActions);
+  }
+  return terminal ? projected(terminal.record, terminal.name, 'retire', environment) : undefined;
+}
 export async function planOperatorArtifacts(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object }) {
   const declaration = input.specResult.spec.environments[input.environmentName]?.operatorArtifacts ?? {};
+  if (Object.values(declaration).some(item => item.retirement)) return planOperatorArtifactRetirement(input);
   let environment = new EnvironmentRepository().findByProjectAndName(input.project.id, input.environmentName);
   if (!environment && !Object.keys(declaration).length) return undefined;
   environment ??= new EnvironmentRepository().create({ projectId: input.project.id, name: input.environmentName,
@@ -159,6 +290,8 @@ export async function planOperatorArtifacts(input: { project: Project; environme
   for (const name of names) {
     const history = histories.get(name)!;
     let record = acceptedJournalLeaf(history);
+    if (record?.status === 'retired') { if (declaration[name]) throw unavailable(); continue; }
+    if (record?.intent.mode === 'retire') return planOperatorArtifactRetirement(input);
     // Durable operations are admitted before parsing a possibly removed,
     // malformed or reassigned current declaration. Only readback is permitted.
     if (record) record = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, record.intent, true),
@@ -220,10 +353,17 @@ export async function applyOperatorArtifacts(input: { project: Project; environm
     const proof = operatorArtifactPlanSchema.parse(input.artifactPublication), store = journal(input.project, input.environment, proof.name);
     const record = await store.read(proof.installationId);
     if (!record || record.plan.digest !== proof.planDigest || record.intent.artifactProvider !== proof.provider) throw unavailable();
-    const expected = projection(record, proof.name, proof.mode);
+    const expected = projection(record, proof.name, proof.mode, proof.retryActions, proof.bindingHash);
     if (input.action ? !isOperatorArtifactAction(input.action) || !expected.actions.some(action => isDeepStrictEqual(action, input.action)) : proof.mode !== 'verified') throw unavailable();
-    const readOnly = proof.mode !== 'prepare' || record.attempts.some(attempt => attempt.actionId === input.action?.id);
-    const execution = await context(input.project, input.environment, proof.name, record.intent, readOnly, input.authorize);
+    const attempt = record.attempts.filter(item => item.actionId === input.action?.id).at(-1);
+    const retry = proof.retryActions?.find(item => item.actionId === input.action?.id && item.attemptId === attempt?.id && attempt.status === 'rejected');
+    const readOnly = !['prepare', 'retire'].includes(proof.mode) || !!attempt && !retry || input.action?.type === 'noop';
+    const authorize = () => {
+      if (!input.authorize()) return false;
+      const fresh = new EnvironmentRepository().findById(input.environment.id);
+      return !!fresh && (proof.mode !== 'retire' || canonicalJsonSha256(fresh.platformBindings) === proof.bindingHash);
+    };
+    const execution = await context(input.project, input.environment, proof.name, record.intent, readOnly, authorize);
     // The outer executor skips noops. Re-observe inherited artifact evidence
     // before its dependent action; never synthesize completion or replay a write.
     if (!readOnly) for (const noop of orderActions(record.plan.actions).filter(action => action.type === 'noop' && !record.completed[action.id])) {
@@ -232,12 +372,18 @@ export async function applyOperatorArtifacts(input: { project: Project; environm
       if (!verified.completed[noop.id] || verified.reason) throw unavailable();
     }
     const target = { ...execution, installationId: record.installationId, planDigest: record.plan.digest, ...(input.action ? { onlyActionId: input.action.id } : {}) };
-    const updated = readOnly ? await reconcileCloudInstallationV1(target) : await applyCloudInstallationV1({ ...target, confirmActions: [input.action!.id] });
-    const success = updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && Boolean(input.action && updated.completed[input.action.id]);
+    if (proof.retryActions && !isDeepStrictEqual((await reviewCloudInstallationRetryV1(target)).retryActions, proof.retryActions)) throw unavailable();
+    const updated = readOnly ? await reconcileCloudInstallationV1(target) : await applyCloudInstallationV1({ ...target, confirmActions: [input.action!.id], ...(proof.retryActions ? { retryActions: proof.retryActions } : {}) });
+    const success = updated.status === 'retired' || updated.status === 'scope-ready' || updated.status === 'pending' && !updated.reason && Boolean(input.action && updated.completed[input.action.id]);
     const capability = providerRegistry.getArtifactPublication(proof.provider)!;
+    const retirement = projectOperatorRetirement(updated);
+    const retainedData = retirement?.outcomes.some(outcome => outcome.retained.some(item => item.reason === 'data-retention'));
     return { success, ...(success ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
-      message: success ? 'Verified this exact operator artifact action; retained only immutable publication references and nonsecret proof.' : unavailable().message,
+      message: success ? updated.intent.mode === 'retire' ? 'Verified this exact artifact removal action; retained its original publication and removal evidence.'
+        + (retainedData ? ' Image data and immutable URLs remain by choice; storage and traffic charges may continue.' : '')
+        : 'Verified this exact operator artifact action; retained only immutable publication references and nonsecret proof.' : unavailable().message,
       data: { installationId: updated.installationId, status: updated.status,
+        ...(retirement ? { retirement } : {}),
         ...(updated.status === 'scope-ready' ? { receipts: capability.receipts(updated) } : {}), ...(updated.reason ? { reason: updated.reason } : {}) } };
   } catch { return { success: false, status: 'blocked', message: unavailable().message }; }
 }
