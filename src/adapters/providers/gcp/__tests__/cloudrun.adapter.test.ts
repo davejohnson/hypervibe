@@ -211,6 +211,9 @@ describe('CloudRunAdapter', () => {
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/operations/delete-repo',
           done: true,
+          // Repository DELETE completes with google.protobuf.Empty.
+          // https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories/delete
+          response: { '@type': 'type.googleapis.com/google.protobuf.Empty' },
         });
       }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
