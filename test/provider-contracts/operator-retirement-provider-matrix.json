@@ -126,7 +126,7 @@
       "id": "aws",
       "kind": "cloud-parent-and-artifacts",
       "registeredArtifactProvider": "s3",
-      "implementation": "publication exists; completed retirement missing",
+      "implementation": "owned operator template stack/public-version-policy/object-version/bucket retirement implemented with offline saved-plan and real SDK transport coverage; no live deletion verified",
       "nativeMethod": "exact CloudFormation stack/resource and S3 version-aware retirement; never account closure",
       "identity": [
         "accountId",
@@ -137,11 +137,24 @@
         "object key/versionId"
       ],
       "retention": "DELETE_COMPLETE may retain bucket, objects or snapshots according to reviewed policy; retained items remain obligations",
-      "recovery": "Exact stack operation and retained resource inventory; no inference that parent deletion erased children",
+      "recovery": "Exact full stack ARN and durable request token; unknown acknowledgment uses reads only; complete owning-account bucket inventory establishes absence; expired stack history remains unknown",
       "peerDesign": "/private/tmp/hv-artifact-retirement-contract-20261103",
       "sources": [
         "https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html",
-        "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-delete-stack.html"
+        "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-delete-stack.html",
+        "https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DeleteStack.html",
+        "https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html",
+        "https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html",
+        "https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html"
+      ],
+      "implementationEvidence": "docs/operator-artifact-retirement.md",
+      "publicationLimits": [
+        "CloudFormation Retain leaves data until explicit version and bucket actions finish",
+        "foreign versions, delete markers, multipart uploads, protected versions and unrelated policy grants block whole-bucket deletion",
+        "data=retain reports bucket and exact versions with continuing costs; later retain-to-delete continuation unsupported",
+        "policy update and bucket deletion have no atomic lifetime/policy CAS",
+        "customer stacks, downloaded copies, shared account and unrelated buckets preserved",
+        "no live retirement verification"
       ]
     },
     {

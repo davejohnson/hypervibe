@@ -104,6 +104,6 @@ export function awsOperatorArtifactBoundary(options: { lost?: 'stack' | 'object'
       }
       records.set(id, structuredClone(next)); return true;
     } } };
-  return { intent, input, setCaller: (value: Caller) => { caller = value; }, setReadsDenied: (value: boolean) => { readsDenied = value; }, writes, objects, requests, capability, policy: () => policy, setPolicy: (value: any) => { policy = value; }, stack: () => stack };
+  return { intent, input, handler, setCaller: (value: Caller) => { caller = value; }, setReadsDenied: (value: boolean) => { readsDenied = value; }, writes, objects, requests, capability, policy: () => policy, setPolicy: (value: any) => { policy = value; }, stack: () => stack };
 }
 

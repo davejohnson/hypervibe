@@ -272,8 +272,12 @@ does not delete them. GCP can retire the original publication tags and, when
 reviewed, their immutable image versions after workload, backup and automation
 consumers are removed. The shared repository and IAM remain. Retaining image
 data also retains its immutable URL and any existing public access. AWS template
-publication cleanup and parent repository removal remain unsupported in this
-slice; preserve their exact receipts and report the remaining work.
+retirement separately reviews the owned public-version statements and original
+stack; its Retain policy leaves the bucket and versions until explicit
+delete-owned steps finish. Unrelated data or grants, unknown reads and uncertain
+deletions stop dependent work. Retained data still incurs costs; a later
+retain-to-delete continuation and GCP parent repository removal remain
+unsupported. Preserve exact receipts and report remaining work.
 
 Temporary test setup includes teardown of every resource created for that test.
 Track workloads, data, backups, images, identities, permissions and external app

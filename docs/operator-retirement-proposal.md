@@ -149,9 +149,12 @@ Deleting a customer's resources or data needs an explicit retirement review.
 | Azure publications | No registered operator-artifact publication capability today | Declare unsupported for this facet; do not invent ACR publication support to claim three-provider parity. Existing ACA/ACR or storage lifecycle uses its own exact bindings. |
 | GCS backups | Existing storage teardown and exact task-produced generation receipts | Not an operator artifact registration. Versioned and soft-deleted objects need independent retained outcomes even when ordinary GET returns 404 or bucket deletion succeeds. |
 
-Provider APIs and limits above are design evidence. Only the three application
-paths identified above are implemented/offline verified; none is live-tested. The linked machine matrix records evidence for all named
-providers; shared roster tests must fail when a new registered provider is omitted.
+Provider APIs and limits above are design evidence. The three application paths
+identified above and the bounded GCP/AWS paths in the
+[publication retirement contract](operator-artifact-retirement.md) have offline
+implementation evidence; none is live-tested. The linked machine matrix records
+evidence for all named providers; shared roster tests must fail when a new
+registered provider is omitted.
 
 ## Dedicated parent test scope
 

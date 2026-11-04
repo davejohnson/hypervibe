@@ -42,8 +42,8 @@ async function retirementSelection(project: Project, environment: Environment, n
   const desired = result.spec.environments[environment.name], bindings = environment.platformBindings;
   const declaration = desired?.operatorArtifacts?.[name], capability = declaration && providerRegistry.getArtifactPublication(declaration.provider);
   if (!declaration?.retirement || !capability?.retirement || declaration.retirement.continueFrom || declaration.retirement.outputTargets) throw unavailable();
-  if (bindings.provider !== declaration.provider || desired.hosting.provider !== declaration.provider
-    || providerRegistry.getMetadata(declaration.provider)?.credentials?.automationAuthentication?.(environment)) throw unavailable();
+  if (bindings.provider !== desired.hosting.provider
+    || providerRegistry.getMetadata(desired.hosting.provider)?.credentials?.automationAuthentication?.(environment)) throw unavailable();
   const maps = ['services', 'runtimeIdentities'].map(key => z.record(z.string(), z.unknown()).parse(bindings[key] ?? {}));
   const grants = z.record(z.string(), z.record(z.string(), z.unknown())).parse(bindings.storageRuntimeAccess ?? {});
   if (Object.keys(desired.services).length || desired.backups?.mode === 'daily' || maps.some(map => Object.keys(map).length)
@@ -63,6 +63,7 @@ async function retirementSelection(project: Project, environment: Environment, n
   const { retirement: _retirement, ...selectionDeclaration } = declaration;
   const { refreshFrom: _refreshFrom, ...originalSelection } = original ?? {};
   if (!originalSpec || canonicalJsonSha256(originalSpec) !== parent.intent.source.specDigest || !original
+    || originalSpec.environments[environment.name]?.hosting.provider !== desired.hosting.provider
     || !isDeepStrictEqual(originalSelection, selectionDeclaration) || parent.intent.selection?.declarationDigest !== canonicalJsonSha256(original)
     || Object.entries(declaration.nativeScope).some(([key, value]) => parent.intent.nativeScope[key] !== value)) throw unavailable();
   const ancestry = new Map<string, Record>(); let cursor: Record | undefined = parent;
@@ -380,7 +381,7 @@ export async function applyOperatorArtifacts(input: { project: Project; environm
     const retainedData = retirement?.outcomes.some(outcome => outcome.retained.some(item => item.reason === 'data-retention'));
     return { success, ...(success ? {} : { status: updated.status === 'pending' ? 'pending' as const : 'blocked' as const }),
       message: success ? updated.intent.mode === 'retire' ? 'Verified this exact artifact removal action; retained its original publication and removal evidence.'
-        + (retainedData ? ' Image data and immutable URLs remain by choice; storage and traffic charges may continue.' : '')
+        + (retainedData ? ' Artifact data and its published references remain by choice; storage and traffic charges may continue.' : '')
         : 'Verified this exact operator artifact action; retained only immutable publication references and nonsecret proof.' : unavailable().message,
       data: { installationId: updated.installationId, status: updated.status,
         ...(retirement ? { retirement } : {}),

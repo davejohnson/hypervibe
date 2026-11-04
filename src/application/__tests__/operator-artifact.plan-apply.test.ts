@@ -15,6 +15,8 @@ import { CommandRegistry } from '../commands.js';
 import { registerCoreTools } from '../../tools/core.tools.js';
 import { planCloudInstallationV1, applyCloudInstallationV1 } from '../hosted/cloud-installation.js';
 import type { CloudInstallationContext, OperatorArtifactIntent } from '../../domain/ports/cloud-installation.port.js';
+import { createAwsOperatorArtifactRetirementDriver } from '../../adapters/providers/aws/aws-operator-artifact-retirement.js';
+import { awsArtifactRetirementBoundary } from '../../adapters/providers/aws/__tests__/aws-artifact-retirement.fixture.js';
 
 // Requirement evidence: exact saved actions authorize publication; removing or
 // changing desired state cannot erase an uncertain non-idempotent native write.
@@ -39,6 +41,10 @@ describe('operator artifact publication through application and SQLite', () => {
     vi.spyOn(providerRegistry.getArtifactPublication('s3')!, 'create').mockResolvedValue({
       driver: native.input.driver, authentication: native.input.authentication,
     });
+    const retirementNative=awsArtifactRetirementBoundary(native);
+    vi.spyOn(providerRegistry.getArtifactPublication('s3')!.retirement!,'create').mockImplementation(async(_scope,_context,targets)=>({
+      driver:createAwsOperatorArtifactRetirementDriver(targets,{requestHandler:retirementNative.handler}),authentication:native.input.authentication,
+    }));
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'operator-templates', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/acme/operator.git' });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging', platformBindings: { provider: 'cloudrun' } });
@@ -56,8 +62,81 @@ describe('operator artifact publication through application and SQLite', () => {
       return executePlanApply(ctx, { project, spec: current.spec, specRevision: current.revision, planId, confirmActions });
     };
     const registry = new CommandRegistry(); registerCoreTools(registry, ctx);
-    return { native, ctx, project, environment, store, desired, ordinary, plan, apply, registry };
+    return { native, retirementNative, ctx, project, environment, store, desired, ordinary, plan, apply, registry };
   }
+
+  it('plans AWS template retirement independently of the unchanged Cloud Run hosting provider', async () => {
+    const f = fixture(), publication = await f.plan(); if ('error' in publication) throw new Error(publication.error);
+    expect(await f.apply(publication.planRunId, publication.actions.map(action => action.id))).toMatchObject({ kind: 'executed', result: { success: true } });
+    const saved = f.ctx.repos.runs.findById(publication.planRunId)!.plan as any;
+    const original = f.ctx.repos.runs.findById(saved.artifactPublication.installationId)!.plan as any;
+    const before = JSON.stringify(original), desired: any = structuredClone(f.store.get(f.project)!.spec);
+    desired.environments.staging.services = {};
+    desired.environments.staging.operatorArtifacts.templates.retirement = { from: { installationId: original.installationId, planDigest: original.plan.digest }, resources: 'delete-owned', data: 'delete-owned' };
+    f.store.replace(f.project, desired);
+    const removal = await f.plan();
+    expect(removal).toMatchObject({ scope: 'operator-artifacts', actions: expect.any(Array) });
+    if ('error' in removal) throw new Error(removal.error);
+    expect(removal.actions).toHaveLength(5);
+    expect(removal.actions.every(action => action.requiresConfirm)).toBe(true);
+    expect(f.ordinary).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.ctx.repos.runs.findById(original.installationId)!.plan)).toBe(before);
+    expect(f.native.writes).toEqual(['stack', 'object', 'object', 'policy']);
+    expect(await f.apply(removal.planRunId,[])).toMatchObject({kind:'executed',result:{success:false}});expect(f.retirementNative.writes).toEqual([]);
+    expect(await f.apply(removal.planRunId,removal.actions.map(action=>action.id))).toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.retirementNative.writes).toHaveLength(5);expect(f.retirementNative.state.bucket).toBe(false);
+    const terminal=await f.plan();expect(terminal).toMatchObject({scope:'operator-artifacts',retirement:{complete:true}});
+    if('error'in terminal)throw new Error(terminal.error);expect(terminal.actions.every(action=>action.type==='noop')).toBe(true);
+    expect(JSON.stringify(f.ctx.repos.runs.findById(original.installationId)!.plan)).toBe(before);
+  });
+
+  async function retirementFixture() {
+    const f=fixture(),publication=await f.plan();if('error'in publication)throw new Error(publication.error);
+    expect(await f.apply(publication.planRunId,publication.actions.map(action=>action.id))).toMatchObject({kind:'executed',result:{success:true}});
+    const saved=f.ctx.repos.runs.findById(publication.planRunId)!.plan as any,original=f.ctx.repos.runs.findById(saved.artifactPublication.installationId)!.plan as any;
+    const desired:any=structuredClone(f.store.get(f.project)!.spec);desired.environments.staging.services={};
+    desired.environments.staging.operatorArtifacts.templates.retirement={from:{installationId:original.installationId,planDigest:original.plan.digest},resources:'delete-owned',data:'delete-owned'};
+    return{...f,retirementDesired:desired,original};
+  }
+  it.each(['desired-host','bound-host','both-host','active-consumer'] as const)('rejects changed %s before constructing an AWS retirement driver',async change=>{
+    const f=await retirementFixture(),desired=f.retirementDesired;
+    if(change==='desired-host'||change==='both-host')desired.environments.staging.hosting.provider='railway';
+    if(change==='bound-host'||change==='both-host')f.ctx.repos.environments.updatePlatformBindings(f.environment.id,{provider:'railway'});
+    if(change==='active-consumer')desired.environments.staging.services={web:{}};
+    f.store.replace(f.project,desired);expect(await f.plan()).toHaveProperty('error');
+    expect(providerRegistry.getArtifactPublication('s3')!.retirement!.create).not.toHaveBeenCalled();expect(f.retirementNative.writes).toEqual([]);
+  });
+  it('continues a retained AWS stack deletion after SQLite restart without another stack request',async()=>{
+    const f=await retirementFixture();f.store.replace(f.project,f.retirementDesired);const plan=await f.plan();if('error'in plan)throw new Error(plan.error);
+    f.retirementNative.state.lost='stack';const first=await f.apply(plan.planRunId,plan.actions.map(action=>action.id));expect(first).toMatchObject({kind:'executed',result:{success:false}});
+    expect(f.retirementNative.writes).toEqual(['DELETE:/:policy','DeleteStack']);
+    SqliteAdapter.resetInstance();SqliteAdapter.getInstance(path.join(directory,'test.db')).migrate();
+    const resumed=await f.plan();if('error'in resumed)throw new Error(resumed.error);expect(f.retirementNative.writes).toEqual(['DELETE:/:policy','DeleteStack']);
+    const done=await f.apply(resumed.planRunId,resumed.actions.filter(action=>action.type!=='noop').map(action=>action.id));
+    expect(done).toMatchObject({kind:'executed',result:{success:true}});expect(f.retirementNative.writes.filter(item=>item==='DeleteStack')).toHaveLength(1);
+    expect(f.retirementNative.state.bucket).toBe(false);expect(f.ctx.repos.runs.findById(f.original.installationId)!.plan).toEqual(f.original);
+  });
+  it('blocks retained Cloud Run automation authority while the selected artifact provider is s3',async()=>{
+    const f=await retirementFixture();f.store.replace(f.project,f.retirementDesired);
+    const bindings={provider:'cloudrun',projectId:'operator-project',gcpGithubWorkloadIdentity:{schemaVersion:1,projectId:'operator-project',projectNumber:'123456789012',
+      workloadIdentityProvider:'projects/123456789012/locations/global/workloadIdentityPools/owned-pool/providers/github',serviceAccountEmail:'ci-deployer@operator-project.iam.gserviceaccount.com',serviceAccountUniqueId:'123456789013',
+      repository:'acme/operator',repositoryId:'1234',repositoryOwnerId:'123',branch:'main',environment:'staging',workflow:'.github/workflows/deploy.yml',backupWorkflow:'.github/workflows/hypervibe-backup-staging.yml'}};
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id,bindings);
+    const fresh=f.ctx.repos.environments.findById(f.environment.id)!;
+    expect(providerRegistry.getMetadata('cloudrun')!.credentials!.automationAuthentication!(fresh)).toMatchObject({oidc:true});
+    expect(providerRegistry.getMetadata('s3')!.credentials?.automationAuthentication).toBeUndefined();
+    expect(await f.plan()).toHaveProperty('error');expect(providerRegistry.getArtifactPublication('s3')!.retirement!.create).not.toHaveBeenCalled();expect(f.retirementNative.writes).toEqual([]);
+  });
+  it('prepares a fresh confirmed AWS retry after a definite rejection without replay during planning',async()=>{
+    const f=await retirementFixture();f.store.replace(f.project,f.retirementDesired);const plan=await f.plan();if('error'in plan)throw new Error(plan.error);
+    f.retirementNative.state.denyWrites=true;expect(await f.apply(plan.planRunId,plan.actions.map(a=>a.id))).toMatchObject({kind:'executed',result:{success:false}});
+    expect(f.retirementNative.writes).toEqual(['DELETE:/:policy']);f.retirementNative.state.denyWrites=false;
+    const retry=await f.plan();if('error'in retry)throw new Error(retry.error);expect(retry.actions).toHaveLength(1);expect(retry.actions[0].requiresConfirm).toBe(true);expect(f.retirementNative.writes).toEqual(['DELETE:/:policy']);
+    expect(await f.apply(retry.planRunId,[retry.actions[0].id])).toMatchObject({kind:'executed',result:{success:true}});
+    const remaining=await f.plan();if('error'in remaining)throw new Error(remaining.error);
+    expect(await f.apply(remaining.planRunId,remaining.actions.filter(a=>a.type!=='noop').map(a=>a.id))).toMatchObject({kind:'executed',result:{success:true}});
+    expect(f.retirementNative.state.bucket).toBe(false);expect(f.retirementNative.writes.filter(item=>item==='DELETE:/:policy')).toHaveLength(2);
+  });
 
   it.each(['removed', 'different-provider', 'invalid-scope'] as const)('retains %s uncertain declarations as read-only recovery instead of falling through to hosting', async change => {
     const f = fixture({ lost: 'stack' }); const planned = await f.plan();

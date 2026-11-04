@@ -7,16 +7,17 @@ Use the ordinary `hv_spec` → `hv_plan` → exact-action `hv_apply` workflow. T
 retirement review is isolated from image preparation and deployment. Removing
 the declaration alone never deletes anything.
 
-This slice implements GCP publication **content** removal, not complete cloud
-teardown. The original project/repository creation journals own those parents;
-publication receipts do not grant authority to delete them. No live removal has
-been performed to validate this implementation.
+The supported paths remove GCP publication **content** and an AWS template
+publication's owned stack, versions and bucket. They do not implement complete
+cloud teardown. The original GCP project/repository creation journals own those
+parents; publication receipts do not authorize deleting them. No live removal
+has been performed to validate these implementations.
 
 | Provider / object | Implemented scope | Remaining boundary |
 | --- | --- | --- |
 | Cloud Run private application candidate | Original attempt tag, then its exact immutable image version when `data=delete-owned` | Shared Artifact Registry repository, IAM and project remain |
 | GCP public holding / backup helper images | Same tag/version path; `data=retain` removes the selected tag and retains the immutable image URL and bytes | Public repository access remains; retained images can still incur charges |
-| AWS `s3` operator templates | Desired retirement is stored but planning remains explicitly unsupported | Exact public version statements, CloudFormation stack, object versions/delete markers and retained bucket need the separate reviewed adapter |
+| AWS `s3` operator templates | Exact public version statements, original CloudFormation stack and optionally selected immutable versions followed by the empty owned bucket | Account, customer stacks and downloaded copies remain; foreign versions/markers/uploads block cleanup; retain-to-delete continuation unsupported |
 | Azure | No operator-artifact publication capability is registered | Existing application/storage cleanup is a different lifecycle |
 
 Desired and bound services, runtime identities/read grants, previous hosting,
@@ -32,6 +33,10 @@ saved outer plan. Every write rechecks that selection; unrelated concurrent
 binding changes stop the next effect without overwriting them. A fresh plan can
 finish readback and separately review remaining actions against the new binding
 snapshot, without rewriting the original native intent or replaying deletion.
+A publication provider need not be the hosting provider: AWS `s3` templates can
+belong to an operator hosted on Cloud Run. Current desired and bound hosting must
+still match the original saved hosting provider, and retained automation
+authority is checked through that hosting provider's registered capability.
 A refresh marker is consumed historical
 context, so retirement replaces that marker with the exact accepted receipt.
 
@@ -103,11 +108,64 @@ Official contracts:
 - [DockerImages.get](https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories.dockerImages/get): exact digest metadata and upload time used with retained publication evidence.
 - [Repositories.delete](https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories/delete): deletes the repository and its contents; deliberately outside this content-only review.
 
-AWS follow-up must preserve its native differences: the existing template uses
-CloudFormation `Retain`; stack deletion alone leaves the bucket/data. Historical
-versions require exact `Bucket + Key + VersionId`, not a versionless delete.
-S3 conditional-delete ETag evaluation applies to the **current** version and is
-not a historical-version CAS. Bucket deletion and policy changes lack a native
-lifetime/policy CAS. `HeadBucket` errors are ambiguous; complete authenticated
-owning-account inventory is required for absence. These constraints are recorded
-in the provider matrix; this slice advertises no AWS cleanup implementation.
+## AWS template publication cleanup
+
+The AWS adapter compiles targets from selected accepted publication records,
+including inherited immutable versions. It verifies each final publication
+attempt and completion proof, exact account, original stack ARN/create time,
+original template, sole bucket resource, ownership tags and creation event.
+Retirement uses the existing temporary AWS connection without issuing
+publication setup actions or requiring public access to remain enabled.
+
+The saved plan has separate confirmed actions: remove the exact owned public
+version statements; delete the original stack by full ARN with `STANDARD` and
+the durable attempt token; for `data=delete-owned`, permanently delete each
+reviewed `Bucket + Key + VersionId`; then delete the empty owned bucket. The
+stack's `Retain` policy deliberately leaves bucket data until those explicit
+steps finish. No force deletion, versionless object deletion, governance bypass
+or multipart cancellation is authorized.
+
+Full version/delete-marker inventories are paginated using both markers. Each
+present selected version is checked using metadata, checksum and immutable
+version ID without reading its contents. Foreign versions, delete markers,
+incomplete pages, changed identity, protected versions, MFA Delete and multipart
+uploads stop removal. Unrelated bucket-policy statements are preserved for
+`data=retain`; their presence blocks whole-bucket deletion. A fresh complete
+owning-account bucket inventory, authenticated by matching STS identity, proves
+bucket absence. `HeadBucket` 403/404 is never used as absence evidence.
+
+Unknown acknowledgments only permit readback. A still-present uncertain target
+is not sent another delete. A definitely rejected request requires the existing
+fresh exact retry review. Stack deletion is observed by the original ARN and
+the matching attempt token in its events; missing/expired stack history remains
+unknown, not permission to recreate or repeat deletion. Retained data is included
+in typed plan/apply outcomes with continuing cost information. A later change
+from completed `retain` to `delete-owned` is not implemented.
+
+There is no atomic policy or bucket lifetime CAS in these APIs. Concurrent
+same-account policy changes or same-name bucket replacement after the final
+read cannot be excluded and are disclosed in every native retirement review.
+Historical versions are identified by `Bucket + Key + VersionId`; S3's ETag
+conditional-delete evaluation concerns the current version, so no historical
+version ETag CAS is claimed. Customer stacks created from these templates and
+downloaded copies are outside this cleanup.
+
+The ordinary test path exercises the real AWS SDK serialization and actual
+SQLite saved-plan/apply/restart boundary. Initial RED proved the missing AWS
+plan path. Further RED cases caught inconsistent account-owner metadata across
+bucket inventory pages and the complete removal of an owned-only policy's
+optional document ID. Fixtures reconstruct official responses; they do not establish
+live retirement compatibility.
+
+Official AWS contracts:
+
+- [CloudFormation Retain](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
+- [DeleteStack](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DeleteStack.html)
+- [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html)
+- [DeleteObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html)
+- [Conditional delete limits](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html)
+- [PutBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketPolicy.html)
+- [DeleteBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketPolicy.html)
+- [DeleteBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucket.html)
+- [HeadBucket ambiguity](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html)
+- [ListBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html)

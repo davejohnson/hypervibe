@@ -111,7 +111,7 @@ describe('reviewed private candidate publication through application and SQLite'
       retained:[{kind:'artifact-image',id:expect.stringMatching(/@sha256:[a-f0-9]{64}$/),
         identity:{digest:expect.stringMatching(/^sha256:[a-f0-9]{64}$/),uploadTime:expect.any(String),repositoryCreateTime:expect.any(String)},reason:'data-retention'}]}]};
     expect.soft(applied.result.receipts.at(-1).data.retirement).toEqual(summary);
-    expect(applied.result.receipts.at(-1).message).toMatch(/Image data.*remain by choice.*charges may continue/);
+    expect(applied.result.receipts.at(-1).message).toMatch(/Artifact data.*remain by choice.*charges may continue/);
     const terminal=await f.plan();if('error'in terminal)throw new Error(terminal.error);
     expect.soft(terminal.retirement).toEqual(summary);
     expect(terminal.actions.every(item=>item.type==='noop')).toBe(true);

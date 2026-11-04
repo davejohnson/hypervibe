@@ -8,11 +8,11 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
-`operator-artifact-retirement-roster.test.ts` keeps the GCP-only publication
-content retirement claim distinct from unsupported AWS template retirement and
+`operator-artifact-retirement-roster.test.ts` keeps GCP publication content and
+owned AWS template retirement distinct from
 unregistered Azure publication. The [artifact retirement contract](../../docs/operator-artifact-retirement.md)
 documents retained data, parent repository ownership and native concurrency limits.
-Actual saved-plan/SQLite and serialized GCP tag/version tests run in ordinary
+Actual saved-plan/SQLite, serialized GCP tag/version and real AWS SDK tests run in ordinary
 `npm test`; no live deletion compatibility is claimed.
 
 `storage-deletion-recovery.test.ts` covers all four registered storage adapters

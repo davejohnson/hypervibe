@@ -15,6 +15,7 @@ import { boundAwsSdkResponses } from './aws-secret-destination.js';
 import { createAwsCloudInstallationTemplateV1 } from './aws-cloud-installation.js';
 import { createAwsCloudDeploymentTemplateV1 } from './aws-cloud-deployment.js';
 import { verifyAwsCloudFormationPublication } from './aws-cloudformation-publication.js';
+import { createAwsOperatorArtifactRetirementDriver } from './aws-operator-artifact-retirement.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/), uuid = z.string().guid();
 const kinds = ['aws-collection-template-v1', 'aws-deployment-template-v1'] as const;
@@ -349,6 +350,15 @@ function receipts(record:RecordV1):Array<Record<string,string>> {
     accountId:n.accountId,region:n.region,bucket:n.bucket,key:object.identity.key,versionId:object.identity.versionId,sha256:object.identity.sha256,
     url:url(record.intent,object),stackId:value.resources[0].id,policyConcurrency:'no-native-cas'}));
 }
+function authentication(scope:Record<string,string>,signal?:AbortSignal) {
+  const {region}=awsOperatorArtifactScopeSchema.parse(scope);if(signal?.aborted)fail('cancelled');const read=defaultProvider();
+  return {kind:'operator-artifact-publisher' as const,awsSession:{async getCredentials(signal:AbortSignal){
+    const budget=new DestinationBudget({signal,deadlineMs:15000});try{const credentials=await budget.wait(read({callerClientConfig:{region:async()=>region}}));
+      if(!credentials.sessionToken||!(credentials.expiration instanceof Date)||credentials.expiration.getTime()<=Date.now()+30000)fail('authorization_expired');
+      return{accessKeyId:credentials.accessKeyId,secretAccessKey:credentials.secretAccessKey,sessionToken:credentials.sessionToken,expiration:credentials.expiration};
+    }catch{fail('authorization_expired');}finally{budget.close();}
+  }}};
+}
 export function createAwsOperatorArtifactCapability():OperatorArtifactCapability {
   return {schemaVersion:1,
     parseDeclaration(value,artifacts) {
@@ -357,16 +367,12 @@ export function createAwsOperatorArtifactCapability():OperatorArtifactCapability
       return awsOperatorArtifactScopeSchema.parse({...scope,...(artifacts.includes(kinds[0])?{collectionTemplateSha256:template(kinds[0]).sha256}:{}),
         ...(artifacts.includes(kinds[1])?{deploymentTemplateSha256:template(kinds[1]).sha256}:{})});
     },
-    parseRecord:value=>parseCloudInstallationRecordV1(value,createAwsOperatorArtifactDriver()),
+    parseRecord:value=>parseCloudInstallationRecordV1(value,(value as RecordV1)?.intent?.mode === 'retire' ? createAwsOperatorArtifactRetirementDriver() : createAwsOperatorArtifactDriver()),
+    retirement: { async create(scope, _context, targets) {
+      return { driver: createAwsOperatorArtifactRetirementDriver(targets), authentication: authentication(scope) };
+    } },
     async create(scope,signal) {
-      const { region } = awsOperatorArtifactScopeSchema.parse(scope);if(signal?.aborted)fail('cancelled');
-      const read=defaultProvider();
-      return {driver:createAwsOperatorArtifactDriver(),authentication:{kind:'operator-artifact-publisher',awsSession:{async getCredentials(signal){
-        const budget=new DestinationBudget({signal,deadlineMs:15000});try{const credentials=await budget.wait(read({callerClientConfig:{region:async()=>region}}));
-          if(!credentials.sessionToken||!(credentials.expiration instanceof Date)||credentials.expiration.getTime()<=Date.now()+30000)fail('authorization_expired');
-          return {accessKeyId:credentials.accessKeyId,secretAccessKey:credentials.secretAccessKey,sessionToken:credentials.sessionToken,expiration:credentials.expiration};
-        }catch{fail('authorization_expired');}finally{budget.close();}
-      }}}};
+      return {driver:createAwsOperatorArtifactDriver(),authentication:authentication(scope,signal)};
     },
     nextScope:record=>{receipts(record);return null;},receipts,
     refreshScope(record,declaration,artifacts) {
@@ -384,3 +390,5 @@ export function createAwsOperatorArtifactCapability():OperatorArtifactCapability
     },
   };
 }
+
+export { names as awsOperatorArtifactNames, targetTemplate as awsOperatorArtifactTargetTemplate, parseEvidence as parseAwsOperatorArtifactEvidence };
