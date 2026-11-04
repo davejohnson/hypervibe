@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { retainedDeleteRecoverySchema, retainedDeleteTargetHash, type RetainedDeleteRecovery } from '../domain/ports/retained-cleanup.port.js';
+import { canonicalJsonSha256 as retainedRecoveryHash } from '../lib/canonical-json.js';
 import { applyManualBackup } from './manual-backup.js';
 import { manualBackupFingerprint, planManualBackup } from '../domain/services/manual-backup.service.js';
 import { applyOperatorApplications, operatorApplicationUnavailable } from '../domain/services/operator-application.service.js';
@@ -1268,7 +1271,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   ]).filter((provider): provider is string => Boolean(provider));
   const cleanupProviders = loaded.document.actions
     .filter((action) =>
-      action.type === 'destroy'
+      (action.type === 'destroy' || action.metadata?.operation === 'retainedResourceRecover')
       && (
         action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
         || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
@@ -1276,6 +1279,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         || action.metadata?.operation === 'retainedDatabaseDestroy'
         || action.metadata?.operation === 'retainedCacheDestroy'
         || action.metadata?.operation === 'retainedResourceDestroy'
+        || action.metadata?.operation === 'retainedResourceRecover'
       )
     )
     .map((action) => action.resource.provider);
@@ -2415,7 +2419,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (capability === 'database.retained.destroy') {
       return destroyRetainedDatabase(ctx, applyProject, envName, action);
     }
-    if (capability === 'provider-resource.retained.destroy') {
+    if (capability === 'provider-resource.retained.destroy' || capability === 'provider-resource.retained.recover') {
       return destroyRetainedResource(ctx, applyProject, envName, action);
     }
     if (capability === 'hosting.task-service.destroy') {
@@ -4450,6 +4454,34 @@ async function destroyRetainedResource(
       error: 'The provider registration no longer exposes matching inspection and deletion capabilities. No deletion was attempted.',
     };
   }
+  const target = { resource, id: externalId, name, providerScope: providerScope as Record<string, string> };
+  const targetHash = retainedDeleteTargetHash({ provider: provider!, resource, externalId, name, providerScope: target.providerScope });
+  let checkpoint: RetainedDeleteRecovery | undefined;
+  if (retained?.deleteRecovery !== undefined) {
+    const parsed = retainedDeleteRecoverySchema.safeParse(retained.deleteRecovery);
+    if (!parsed.success || parsed.data.targetHash !== targetHash || !registration.retainedCleanup.durableDelete)
+      return { success: false, status: 'blocked', message: 'Retained deletion recovery is invalid; preserve the original local state.' };
+    checkpoint = parsed.data;
+  }
+  const recovering = action.metadata?.operation === 'retainedResourceRecover';
+  if (recovering !== !!checkpoint || recovering && metadata?.recoveryHash !== retainedRecoveryHash(checkpoint))
+    return { success: false, status: 'blocked', message: 'Retained deletion progress changed; prepare a fresh read-only plan.' };
+  let expectedBindings = environment.platformBindings;
+  const saveBindings = (next: Record<string, unknown>): void => {
+    const saved = ctx.repos.environments.compareAndSwapPlatformBindings(environment.id, expectedBindings, next);
+    if (!saved) throw new Error('Local bindings changed; no further deletion or binding removal is allowed.');
+    expectedBindings = saved.platformBindings;
+  };
+  const persist = async (next: RetainedDeleteRecovery): Promise<RetainedDeleteRecovery> => {
+    const parsed = retainedDeleteRecoverySchema.parse(next);
+    if (parsed.targetHash !== targetHash || !checkpoint && parsed.state !== 'attempted'
+      || checkpoint && (parsed.attemptId !== checkpoint.attemptId
+      || checkpoint.state !== 'attempted' || parsed.state !== 'acknowledged'))
+      throw new Error('Retained deletion progress cannot be replaced or replayed.');
+    saveBindings({ ...expectedBindings, previousResource: { ...retained, deleteRecovery: parsed } });
+    checkpoint = parsed;
+    return parsed;
+  };
   const collectionKey = contract.collectionKey;
   const adapterResult = await adapterFactory.getProviderAdapter(provider!, project, undefined, envName);
   if (!adapterResult.success || !adapterResult.adapter) {
@@ -4492,20 +4524,25 @@ async function destroyRetainedResource(
     return item;
   };
   const clearBinding = (): void => {
-    const nextBindings = { ...environment.platformBindings };
+    const nextBindings = { ...expectedBindings };
     delete nextBindings.previousResource;
-    ctx.repos.environments.update(environment.id, { platformBindings: nextBindings });
+    saveBindings(nextBindings);
   };
 
   try {
     const before = await inspectExact();
     if (before) {
-      const destroyed = await registration.retainedCleanup.destroy(adapterResult.adapter, {
-        resource,
-        id: externalId,
-        name,
-        providerScope: providerScope as Record<string, string>,
-      });
+      const destroyed = checkpoint
+        ? await registration.retainedCleanup.durableDelete!.recover(adapterResult.adapter, target, checkpoint)
+        : registration.retainedCleanup.durableDelete
+          ? await registration.retainedCleanup.durableDelete.destroy(adapterResult.adapter, target, {
+            persist,
+            begin: async () => {
+              if (checkpoint) throw new Error('Deletion was already attempted.');
+              return persist({ version: 1, attemptId: randomUUID(), targetHash, state: 'attempted' });
+            },
+          })
+          : await registration.retainedCleanup.destroy(adapterResult.adapter, target);
       if (!destroyed.success) {
         return { success: false, message: destroyed.message, error: destroyed.error, data: destroyed.data };
       }

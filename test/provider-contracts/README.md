@@ -8,6 +8,13 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The actual SQLite/saved-plan/serialized adapter tests in
+`src/application/__tests__/gcp-parent-repository-lifetime.plan-apply.test.ts`
+cover [retained parent deletion recovery](../../docs/retained-parent-deletion-recovery.md),
+including lost acknowledgment without replay, exact operation/lifetime checks,
+local binding races, old repository exports and the optional provider roster.
+These ordinary acceptance tests do not claim live parent deletion support.
+
 `operator-artifact-retirement-roster.test.ts` keeps GCP publication content and
 owned AWS template retirement distinct from
 unregistered Azure publication. The [artifact retirement contract](../../docs/operator-artifact-retirement.md)

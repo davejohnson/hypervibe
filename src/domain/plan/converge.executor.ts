@@ -635,8 +635,9 @@ export const planRunDocumentSchema = z.object({
   if (document.scope !== 'retained-cleanup') return;
 
   const invalidAction = document.actions.find((action) =>
-    action.type !== 'destroy'
-    || !['previousHostingDestroy', 'retainedDatabaseDestroy', 'retainedCacheDestroy', 'retainedResourceDestroy'].includes(String(action.metadata?.operation ?? ''))
+    !((action.type === 'destroy'
+      && ['previousHostingDestroy', 'retainedDatabaseDestroy', 'retainedCacheDestroy', 'retainedResourceDestroy'].includes(String(action.metadata?.operation ?? '')))
+      || resolvePlanActionAuthority(action)?.capability === 'provider-resource.retained.recover')
   );
   if (invalidAction) {
     ctx.addIssue({

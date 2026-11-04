@@ -81,6 +81,7 @@ describe('historical migration reconciliation', () => {
 
     expect(adapter.migrate().map(({ version, name }) => ({ version, name }))).toEqual([
       { version: 13, name: 'reconcile_historical_apply_serialization' },
+      { version: 14, name: 'retain_native_delete_attempts' },
     ]);
     expect(db.prepare('SELECT * FROM schema_migrations WHERE version <= 12 ORDER BY version').all()).toEqual(history);
     expect(db.prepare(`SELECT * FROM ${table}`).all()).toEqual(historicalRows);

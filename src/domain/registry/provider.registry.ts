@@ -1,3 +1,4 @@
+import type { RetainedDeleteLifecycle, RetainedDeleteRecovery } from '../ports/retained-cleanup.port.js';
 import { z } from 'zod';
 import { isNonSecretConnectionField } from '../../lib/value-free-coordinates.js';
 import { unwrapCredentialSchema } from '../services/connection-guidance.js';
@@ -110,6 +111,11 @@ export interface ProviderRetainedCleanupCapability {
   /** Extra provider-owned resource classes eligible for exact, confirmation-gated cleanup. */
   resources: readonly string[];
   destroy(adapter: unknown, target: ProviderRetainedResourceTarget): Promise<Receipt>;
+  /** Opt-in write-ahead deletion. Recovery must perform provider reads only. */
+  durableDelete?: {
+    destroy(adapter: unknown, target: ProviderRetainedResourceTarget, lifecycle: RetainedDeleteLifecycle): Promise<Receipt>;
+    recover(adapter: unknown, target: ProviderRetainedResourceTarget, state: RetainedDeleteRecovery): Promise<Receipt>;
+  };
 }
 
 export interface DatabaseRuntimeProjection {

@@ -1,3 +1,4 @@
+import { retainedDeleteRecoverySchema, type RetainedDeleteLifecycle, type RetainedDeleteRecovery } from '../../../domain/ports/retained-cleanup.port.js';
 import { createHash } from 'node:crypto';
 import { cloudRunExecutionBelongsToJob } from './cloudrun-resource-identity.js';
 import { createGcpOperatorArtifactCapability } from './gcp-operator-artifacts.js';
@@ -3813,7 +3814,7 @@ export class CloudRunAdapter implements
     resource: string;
     id: string;
     providerScope: Record<string, string>;
-  }): Promise<Receipt> {
+  }, lifecycle?: RetainedDeleteLifecycle): Promise<Receipt> {
     if (!this.credentials) return { success: false, message: 'Not connected' };
     const location = target.providerScope.location;
     if (location) this.configureTarget({ region: location });
@@ -3846,16 +3847,21 @@ export class CloudRunAdapter implements
       if (!isDeepStrictEqual(this.artifactRepositoryCleanupScope(immediate), target.providerScope)) {
         return { success: false, message: 'The repository changed during cleanup checks', error: 'No deletion was attempted. The original cleanup target was preserved.' };
       }
+      // The persisted attempt must precede the native write, including a lost response.
+      const checkpoint = lifecycle ? await lifecycle.begin() : undefined;
       const response = await this.request(`https://artifactregistry.googleapis.com/v1/${target.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (response.status === 404) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
       if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Artifact Registry repository delete failed: ${response.status} ${body}`);
+        throw new Error('Artifact Registry repository deletion was not confirmed.');
       }
-      const operation = await response.json() as CloudRunOperation;
+      const operation = this.retainedRepositoryOperation(await response.json(), token);
+      if (lifecycle && checkpoint) {
+        const acknowledged = await lifecycle.persist({ ...checkpoint, state: 'acknowledged', operation: operation.name! });
+        return this.recoverRetainedArtifactRepository(target, acknowledged);
+      }
       await this.waitForArtifactRegistryOperation(token, operation, 'repository delete');
       const attempts = Math.max(1, Number(process.env.HYPERVIBE_ARTIFACT_DELETE_ATTEMPTS ?? 60));
       const delayMs = Math.max(0, Number(process.env.HYPERVIBE_ARTIFACT_DELETE_DELAY_MS ?? 1000));
@@ -3876,8 +3882,57 @@ export class CloudRunAdapter implements
       return {
         success: false,
         message: 'Failed to delete Artifact Registry repository',
-        error: error instanceof Error ? error.message : String(error),
+        error: lifecycle ? 'Deletion is unconfirmed. Preserve the saved attempt and use a fresh read-only cleanup plan.'
+          : error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  private retainedRepositoryOperation(value: unknown, token: string, expected?: string): CloudRunOperation {
+    const parsed = z.object({ name: z.string(), done: z.boolean().optional(),
+      error: z.object({ code: z.number().int(), message: z.string().optional() }).passthrough().optional(),
+      response: z.object({ '@type': z.literal('type.googleapis.com/google.protobuf.Empty').optional() }).strict().optional(),
+    }).passthrough().parse(value);
+    const prefix = `projects/${this.credentials!.projectId}/locations/${this.credentials!.region}/operations/`;
+    if (token && parsed.name.includes(token)
+      || !parsed.name.startsWith(prefix) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(parsed.name.slice(prefix.length))
+      || expected && parsed.name !== expected || !parsed.done && (parsed.error || parsed.response)
+      || parsed.error && parsed.response || parsed.done && !parsed.error && !parsed.response) throw new Error('Invalid retained repository operation.');
+    return parsed as CloudRunOperation;
+  }
+
+  /** Retained unknown DELETEs never enter the mutation path again. */
+  async recoverRetainedArtifactRepository(target: { resource: string; id: string; providerScope: Record<string, string> },
+    checkpoint: RetainedDeleteRecovery): Promise<Receipt> {
+    try {
+      retainedDeleteRecoverySchema.parse(checkpoint);
+      if (!this.credentials || target.resource !== 'artifact' || target.providerScope.projectId !== this.credentials.projectId)
+        throw new Error('Retained repository scope is invalid.');
+      this.configureTarget({ region: target.providerScope.location });
+      if (!this.isArtifactRepositoryName(target.id)) throw new Error('Retained repository identity is invalid.');
+      const before = await this.getArtifactRepository(target.id);
+      if (!before) return { success: true, message: 'The retained repository is absent.' };
+      if (!isDeepStrictEqual(this.artifactRepositoryCleanupScope(before), target.providerScope))
+        throw new Error('Retained repository lifetime changed.');
+      if (checkpoint.operation) {
+        const token = await this.getAccessToken();
+        this.retainedRepositoryOperation({ name: checkpoint.operation }, token, checkpoint.operation);
+        const response = await this.request(`https://artifactregistry.googleapis.com/v1/${checkpoint.operation}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error('Retained operation could not be read.');
+        const operation = this.retainedRepositoryOperation(await response.json(), token, checkpoint.operation);
+        if (!operation.done || operation.error) throw new Error('Retained deletion is not complete.');
+        const after = await this.getArtifactRepository(target.id);
+        if (!after) return { success: true, message: 'The retained repository is absent.' };
+        if (!isDeepStrictEqual(this.artifactRepositoryCleanupScope(after), target.providerScope))
+          throw new Error('Retained repository lifetime changed.');
+      }
+      return { success: false, message: 'Deletion is unconfirmed; the retained repository is still present.',
+        error: 'No deletion request was repeated. Check this same saved attempt again later.' };
+    } catch {
+      return { success: false, message: 'Deletion could not be confirmed.',
+        error: 'The original resource and deletion attempt are preserved. No deletion request was repeated.' };
     }
   }
 
@@ -7332,5 +7387,9 @@ providerRegistry.register({
   retainedCleanup: {
     resources: ['artifact'],
     destroy: (adapter, target) => (adapter as CloudRunAdapter).destroyRetainedArtifactRepository(target),
+    durableDelete: {
+      destroy: (adapter, target, lifecycle) => (adapter as CloudRunAdapter).destroyRetainedArtifactRepository(target, lifecycle),
+      recover: (adapter, target, checkpoint) => (adapter as CloudRunAdapter).recoverRetainedArtifactRepository(target, checkpoint),
+    },
   },
 });

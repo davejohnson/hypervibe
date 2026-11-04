@@ -96,6 +96,7 @@ export interface LocalSnapshot {
       externalId?: string;
       name?: string;
       providerScope?: Record<string, string>;
+      deleteRecovery?: import('../ports/retained-cleanup.port.js').RetainedDeleteRecovery;
     };
     storage?: Record<string, { provider?: string; externalId?: string; region?: string }>;
     /** Runtime network selected by the active cache, consumed by hosting. */

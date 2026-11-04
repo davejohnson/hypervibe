@@ -1,3 +1,5 @@
+import { retainedDeleteRecoverySchema, retainedDeleteTargetHash } from '../ports/retained-cleanup.port.js';
+import { canonicalJsonSha256 as retainedRecoveryHash } from '../../lib/canonical-json.js';
 import { manualBackupFingerprint, planManualBackup } from '../services/manual-backup.service.js';
 import { operatorApplicationWorkRequired, operatorRetirementPlanFailure, planOperatorApplicationRetirement, planOperatorApplications, operatorApplicationUnavailable, operatorOutputPrerequisiteKeys, type OperatorRetirementSummary } from '../services/operator-application.service.js';
 import { CloudInstallationError } from '../services/cloud-installation-runtime.js';
@@ -1555,6 +1557,12 @@ export class PlanService {
           error: `The retained ${previousResourceProvider} provider-resource binding is incomplete or no longer supported. Re-import one exact resource id and provider scope before planning deletion.`,
         };
       }
+      const checkpoint = previousResource?.deleteRecovery;
+      if (checkpoint !== undefined && (!registration.retainedCleanup.durableDelete
+        || !retainedDeleteRecoverySchema.safeParse(checkpoint).success
+        || checkpoint.targetHash !== retainedDeleteTargetHash({ provider: previousResourceProvider, resource, externalId, name, providerScope }))) {
+        return { error: 'Retained resource deletion recovery is invalid. Preserve the original local state; no deletion can be planned.' };
+      }
       let blockedReason: string | undefined;
       const adapterResult = await adapterFactory.getProviderAdapter(previousResourceProvider, projectForPlan, undefined, environmentName);
       if (!adapterResult.success || !adapterResult.adapter) {
@@ -1615,15 +1623,17 @@ export class PlanService {
         }
       }
       actions.push({
-        id: `retained-resource:${previousResourceProvider}:${resource}:destroy`,
-        type: 'destroy',
+        id: `retained-resource:${previousResourceProvider}:${resource}:${checkpoint ? 'recover' : 'destroy'}`,
+        type: checkpoint ? 'update' : 'destroy',
         resource: { kind: 'retained-resource', name: resource, provider: previousResourceProvider },
         verified: retainedResourceVerified,
-        reason: `Delete exact retained ${previousResourceProvider} ${resource} ${externalId} in its recorded provider scope`,
-        dataBearing: true,
-        requiresConfirm: true,
+        reason: checkpoint ? `Check the previous deletion of ${resource}; no deletion request will be sent`
+          : `Delete exact retained ${previousResourceProvider} ${resource} ${externalId} in its recorded provider scope`,
+        dataBearing: !checkpoint,
+        requiresConfirm: !checkpoint,
         metadata: {
-          operation: 'retainedResourceDestroy',
+          operation: checkpoint ? 'retainedResourceRecover' : 'retainedResourceDestroy',
+          ...(checkpoint ? { recoveryHash: retainedRecoveryHash(checkpoint) } : {}),
           resource,
           externalId,
           name,
@@ -1637,6 +1647,7 @@ export class PlanService {
         action.metadata?.operation === 'retainedDatabaseDestroy'
         || action.metadata?.operation === CACHE_OPERATIONS.retainedDestroy
         || action.metadata?.operation === 'retainedResourceDestroy'
+        || action.metadata?.operation === 'retainedResourceRecover'
       ))
       .map((action) => action.id);
     if (retainedDependentCleanupIds.length > 0) {
@@ -3572,7 +3583,7 @@ export class PlanService {
 
     const plannedCleanupProviders = actions
       .filter((action) =>
-        action.type === 'destroy'
+        (action.type === 'destroy' || action.metadata?.operation === 'retainedResourceRecover')
         && (
           action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
           || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
@@ -3580,6 +3591,7 @@ export class PlanService {
           || action.metadata?.operation === 'retainedDatabaseDestroy'
           || action.metadata?.operation === CACHE_OPERATIONS.retainedDestroy
           || action.metadata?.operation === 'retainedResourceDestroy'
+        || action.metadata?.operation === 'retainedResourceRecover'
         )
       )
       .map((action) => action.resource.provider);

@@ -58,6 +58,7 @@ it('opens and reopens historical schema 12 without changing encrypted sessions, 
     expect(rows(adapter.getDb())).toEqual(before);
     expect(adapter.getDb().prepare('SELECT version, name FROM schema_migrations WHERE version > 12').all()).toEqual([
       { version: 13, name: 'reconcile_historical_apply_serialization' },
+      { version: 14, name: 'retain_native_delete_attempts' },
     ]);
     expect(new ConnectionRepository().findById(connection.id)?.credentialsEncrypted).toBe(credentialsEncrypted);
     expect(new RunRepository().findById(recovery.id)?.plan).toEqual(recovery.plan);
@@ -65,12 +66,13 @@ it('opens and reopens historical schema 12 without changing encrypted sessions, 
   }
 });
 
-it('bridges canonical schema 11 to 13 without fabricating historical login state or changing records', () => {
+it('bridges canonical schema 11 through the current recovery format without fabricating historical login state or changing records', () => {
   const db = SqliteAdapter.getInstance().getDb();
   db.exec('DROP TABLE IF EXISTS provider_login_sessions; DELETE FROM schema_migrations WHERE version >= 12;');
   const before = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
   expect(SqliteAdapter.getInstance().migrate().map(({ version, name }) => ({ version, name }))).toEqual([
     { version: 13, name: 'reconcile_historical_apply_serialization' },
+      { version: 14, name: 'retain_native_delete_attempts' },
   ]);
   expect(db.prepare('SELECT * FROM schema_migrations WHERE version < 12 ORDER BY version').all()).toEqual(before);
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%provider_login%'").all()).toEqual([]);

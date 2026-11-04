@@ -150,6 +150,7 @@ export type PlanMutationCapability =
   | 'database.destroy'
   | 'database.retained.destroy'
   | 'provider-resource.retained.destroy'
+  | 'provider-resource.retained.recover'
   | 'database.migrate'
   | 'storage.migrate'
   | 'database.migration-target.destroy'
@@ -539,6 +540,18 @@ export function resolvePlanActionAuthority(
       || (item.target.kind === 'database' ? item.target.componentId !== item.resource.componentId
         : item.target.name !== item.resource.name)) return null;
     return authority(action, 'backup-policy.configure');
+  }
+
+  if (exactResource(action, 'retained-resource') && action.type === 'update'
+    && action.metadata?.operation === 'retainedResourceRecover'
+    && action.id === `retained-resource:${action.resource.provider}:${action.resource.name}:recover`
+    && metadataString(action, 'resource') === action.resource.name
+    && metadataString(action, 'externalId') && metadataString(action, 'name')
+    && metadataStringRecord(action, 'providerScope')
+    && /^[a-f0-9]{64}$/.test(metadataString(action, 'recoveryHash') ?? '')
+    && action.dataBearing === false && action.requiresConfirm === false
+    && providerRegistry.get(action.resource.provider)?.retainedCleanup?.durableDelete) {
+    return authority(action, 'provider-resource.retained.recover');
   }
 
   if (

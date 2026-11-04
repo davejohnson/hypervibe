@@ -1,3 +1,4 @@
+import { retainedDeleteRecoverySchema } from '../ports/retained-cleanup.port.js';
 import { mergeRecoveryRuntimeBindings, recoveryRuntimeBindings } from '../services/runtime-evidence.js';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
@@ -121,6 +122,16 @@ export function mergeRepoPlatformBindings(
   if (Object.hasOwn(repoBindings, 'recoveryRuntimeSecretInputs')) throw new Error('Private recovery inputs are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'serviceInstanceCreateHistory')) throw new Error('Service instance attempt history is private local evidence and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'storageDeletionReceipts')) throw new Error('Storage deletion receipts are local native evidence and cannot be imported.');
+  const localRetained = asRecord(existing.previousResource);
+  const incomingRetained = asRecord(repoBindings.previousResource);
+  if (incomingRetained?.deleteRecovery !== undefined)
+    throw new Error('Retained deletion recovery is local only and cannot be imported.');
+  if (localRetained?.deleteRecovery !== undefined) {
+    retainedDeleteRecoverySchema.parse(localRetained.deleteRecovery);
+    const { deleteRecovery: _checkpoint, ...original } = localRetained;
+    if (Object.hasOwn(repoBindings, 'previousResource') && !isDeepStrictEqual(incomingRetained, original))
+      throw new Error('Repository bindings cannot replace a retained deletion attempt.');
+  }
   const localStorageRecovery = storageRecoveryMapSchema.parse(existing.storageCreateRecovery ?? {});
   if (repoBindings.storageCreateRecovery !== undefined && !parseStorageCreateRecoveryMap(repoBindings.storageCreateRecovery)) {
     throw new Error('Storage deletion recovery is local only; repository recovery must contain valid create records.');
@@ -142,6 +153,7 @@ export function mergeRepoPlatformBindings(
     throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
   }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings, ...mergeRuntimeAccessBindings(existing, repoBindings) };
+  if (localRetained?.deleteRecovery !== undefined) merged.previousResource = localRetained;
   if (Object.keys(deletionRecovery).length) merged.storageCreateRecovery = {
     ...(asRecord(merged.storageCreateRecovery) ?? {}), ...deletionRecovery,
   };
@@ -189,6 +201,7 @@ export function mergeRepoPlatformBindings(
     );
   }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'previousResource' && localRetained?.deleteRecovery !== undefined) continue;
     if (key === 'serviceInstanceCreates') continue;
     if (key === 'storageCreateRecovery' && Object.keys(deletionRecovery).length) continue;
     if (key === 'localPreparedHosting') {
@@ -333,6 +346,11 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  const retained = asRecord(raw.previousResource);
+  if (retained?.deleteRecovery !== undefined) {
+    retainedDeleteRecoverySchema.parse(retained.deleteRecovery);
+    delete sanitized.previousResource;
+  }
   if (raw.storageCreateRecovery !== undefined) {
     const recoveries = storageRecoveryMapSchema.parse(raw.storageCreateRecovery);
     const portable = { ...(asRecord(sanitized.storageCreateRecovery) ?? {}) };

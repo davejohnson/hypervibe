@@ -401,6 +401,12 @@ const migrations: Migration[] = [
     run: installApplySerialization,
   },
 
+  {
+    version: 14,
+    name: 'retain_native_delete_attempts',
+    // Format barrier: older runtimes must not ignore local write-ahead evidence.
+    up: '-- Retained parent deletion checkpoints require a runtime that understands read-only recovery.',
+  },
 ];
 
 export class SqliteAdapter {

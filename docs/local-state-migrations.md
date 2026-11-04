@@ -1,5 +1,10 @@
 # Local SQLite history reconciliation
 
+Migration 14 is a data-preserving minimum-reader barrier for
+[retained parent deletion recovery](retained-parent-deletion-recovery.md).
+It prevents older runtimes from silently ignoring a saved native DELETE attempt.
+It has no supported downgrade and must not be removed from migration history.
+
 Local SQLite migration versions are unrelated to PostgreSQL database schemas.
 Invoice Perfect's `public` and `invoice_perfect_workflow` schemas are intentional
 application namespaces. This reconciliation neither opens nor changes those
