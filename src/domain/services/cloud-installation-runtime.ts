@@ -74,7 +74,7 @@ function retirementIntent(intent: CloudInstallationExecutableIntent): intent is 
 }
 const actionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_.\/-]{0,255}$/).refine(value => !['constructor', 'prototype', '__proto__'].includes(value)), type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({ kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain',
-    'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']), name: text, provider: z.enum([...CLOUD_INSTALLATION_PROVIDERS, ...OPERATOR_APPLICATION_PROVIDERS]) }).strict(),
+    'email', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']), name: text, provider: z.enum([...CLOUD_INSTALLATION_PROVIDERS, ...OPERATOR_APPLICATION_PROVIDERS]) }).strict(),
   verified: z.boolean(), reason: text, diff: z.array(z.object({ field: text, from: z.string().max(2048).optional(), to: z.string().max(2048).optional() }).strict()).max(100).optional(),
   dataBearing: z.boolean().optional(), billable: z.boolean().optional(), requiresConfirm: z.boolean().optional(), dependsOn: z.array(text).max(300).optional(),
   metadata: z.object({ operation: text, category: z.enum(['scope', 'identity', 'trust', 'secret-container', 'verification']),

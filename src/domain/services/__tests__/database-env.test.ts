@@ -28,12 +28,8 @@ describe('database runtime projection registry', () => {
     expect(providers).toEqual([
       'azure-postgres',
       'cloudsql',
-      'digitalocean',
-      'fly',
-      'neon',
       'railway',
       'rds',
-      'supabase',
     ]);
     for (const provider of providers) {
       const env = buildDatabaseEnvVarsFromComponent(component(provider, {

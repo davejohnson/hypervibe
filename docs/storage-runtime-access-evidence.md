@@ -13,9 +13,8 @@ until retained permissions have been reconciled.
 | Azure Blob | Azure Container Apps | Exact container RBAC assignment to an observed system identity or retained user-assigned identity. User-assigned identity lifetime, attachment and Main/All availability must match. |
 | Railway Buckets | None through this IAM port | Existing bucket credentials and native references remain separate. Railway does not expose this workload IAM lifecycle. |
 
-The hosting roster also explicitly includes Fly, DigitalOcean and Vercel; none
-has a native grant implementation in these storage adapters. Cross-cloud runtime
-identity grants are unsupported. Existing explicitly selected standalone runtime
+The hosting roster contains Railway, Cloud Run, ECS and Azure Container Apps,
+matching the supported provider scope. Cross-cloud runtime identity grants are unsupported. Existing explicitly selected standalone runtime
 storage credentials remain separate from management aliases.
 
 ## Independent contracts and counterexamples

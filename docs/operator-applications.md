@@ -344,11 +344,11 @@ this operator bootstrap does not assume Hypercloud runs inside customer clouds.
 | Cloud Run | GCP Secret Manager; prepared owned container and transient local operator authority. |
 | ECS | Not implemented for local operator bootstrap; AWS delivery uses its distinct stable ClientRequestToken contract. |
 | Azure Container Apps | Not implemented for local operator bootstrap; Key Vault SET creates a value and requires its own vault/name contract. |
-| Railway, Fly, Vercel, DigitalOcean | Not implemented; no reviewed immutable native secret-manager output lifecycle in this operator path. |
+| Railway | Not implemented; no reviewed immutable native secret-manager output lifecycle in this operator path. |
 
 The provider differences and official native sources are recorded in
 [secret destination delivery](secret-destination-delivery.md). Normal CI checks
-the complete seven-provider registry against the explicit capability selection.
+the complete four-provider registry against the explicit capability selection.
 GCP addVersion has neither a request token nor an empty-container compare-and-set.
 Observed existing versions block first delivery, but simultaneous authorized
 writers cannot be atomically excluded. A lost acknowledgement remains uncertain

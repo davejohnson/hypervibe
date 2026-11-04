@@ -24,10 +24,7 @@ schema alone never proves cloud ownership.
 | GCP Cloud Run | Exact project number/create time/observed parent; registry create time; service UID, original holding revision/generation, reconciliation state and terminal condition. Resource name alone is reusable. Holding creation and IAM are separately reviewed installation actions. | Shared and native installation/session/handoff/first-release contracts implemented with offline evidence; see [native evidence and prerequisites](connect-cloud-gcp-deployment-evidence.md). Live walkthrough and operator holding-image publication remain gates. Initial billing uses a separate reviewed reserved-project assignment; unsupported ancestry and cron remain explicit. |
 | AWS ECS | Exact account/region/cluster/service ARN plus creation evidence and deployment state; IAM RoleID separately pins runtime identities. Service-list failures cannot establish absence. The installer does not pre-create workloads. Ordinary hosted apply creates a secret-free bootstrap; the exact-image CI release attaches the reviewed application references and task role. | Optional receipt absent preserves the existing path. Prepared handoff explicitly undeclared. |
 | Azure Container Apps | Exact subscription/resource group/ARM resource ID plus native creation metadata and terminal deployment provenance; reusable ARM names are insufficient. PUT is create-or-update, requiring explicit reviewed namespace authority rather than an atomic-create claim. Original holding revision and container-inaccessible managed identities constrain first release. | Native installation, prepared handoff, final configuration and read-only release-target enrollment have offline coverage; see [Azure evidence](connect-cloud-azure-evidence.md). An approved disposable-account walkthrough remains outstanding. |
-| DigitalOcean App Platform | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
-| Fly | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
 | Railway | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
-| Vercel | Existing adapter only; no installer-prepared lifetime/holding contract reviewed. | Undeclared. |
 
 The independent native references are the [Cloud Run Service resource](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services),
 [ECS DescribeServices](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeServices.html),
@@ -137,8 +134,7 @@ revision-2 fingerprints remain in compatibility tests, while AWS/Azure legacy
 program bytes remain unchanged. This does not silently update accepted workflows.
 The named hosted installers for AWS, Azure and GCP still explicitly reject
 migration-bearing source placement. This local operator fix does not extend those
-hosted grants or claim native compatibility for another cloud. DigitalOcean, Fly,
-Railway and Vercel have no declared prepared direct-release capability.
+hosted grants or claim native compatibility for another cloud. Railway has no declared prepared direct-release capability.
 
 The pending-clear action reuses the existing scheduled-release provenance boundary:
 the exact managed workflow files, current source commit, successful native GitHub run,
@@ -226,7 +222,7 @@ against the ready job before any execution. Lost create replies remain unresolve
 For historical intent-only records, the existing `hosting-prepared-bindings` plan
 can offer **explicit adoption**, not inferred creation acknowledgment. This is
 implemented only for local GCP holding preparations; AWS ECS, Azure Container Apps,
-DigitalOcean, Fly, Railway and Vercel do not declare this optional migration-job
+Railway does not declare this optional migration-job
 recovery. Their existing release paths are unchanged. The reviewed metadata action
 names the prior attempt, exact native job name, UID and etag. Native reads must
 verify the candidate image, command hash, runtime account, original generation,
@@ -418,7 +414,7 @@ only from independently read task-definition references.
 
 The named hosting matrix above remains exhaustive: installed ECS uses this
 mode; Cloud Run and Azure retain their separately verified prepared/direct
-release mechanisms; DigitalOcean, Fly, Railway and Vercel do not declare it.
+release mechanisms; Railway does not declare it.
 Existing local-key ECS behavior is unchanged. Shared planning uses this native
 observation contract without branching on a provider name.
 
@@ -795,7 +791,7 @@ Stop other release producers before cleanup; the exact action discloses the
 remaining external-administrator race rather than promising zero cancellation.
 
 Provider review: Cloud Run alone implements this completed migration-job
-frontier. Azure Container Apps, ECS, DigitalOcean, Fly, Railway and Vercel keep
+frontier. Azure Container Apps, ECS and Railway keep
 their existing native teardown behavior; no auxiliary-job cleanup support is
 inferred for them. The shared selected runtime scope only reaches an already
 registered provider capability and its own destroy-mode contract.

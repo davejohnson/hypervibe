@@ -50,11 +50,7 @@ describe('released agent packages', () => {
     const cache = mkdtempSync(path.join(tmpdir(), 'hypervibe-pack-cache-'));
     directories.push(cache);
     const result = spawnSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', cache], {
-      cwd: root, encoding: 'utf8', timeout: 20_000,
-      // A built archive plus bundled credential dependencies exceeds Node's
-      // default 1 MiB capture limit. Keep a bounded allowance for its file list.
-      // https://nodejs.org/api/child_process.html#child_processspawnsynccommand-args-options
-      maxBuffer: 16 * 1024 * 1024,
+      cwd: root, encoding: 'utf8', timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, npm_config_cache: cache },
     });
     expect(result.error).toBeUndefined();

@@ -95,8 +95,8 @@ function workloadSpec(provider: string, workloadKind: 'web' | 'worker' | 'cron')
 describe('validateProjectSpecProviders', () => {
   it('distinguishes native mount limitations from missing Hypervibe implementations across every host', () => {
     const expected = {
-      railway: 'implemented', cloudrun: 'implemented', fly: 'implemented', ecs: 'implemented',
-      'azure-container-apps': 'implemented', digitalocean: 'unsupported', vercel: 'unsupported',
+      railway: 'implemented', cloudrun: 'implemented', ecs: 'implemented',
+      'azure-container-apps': 'implemented',
     };
     expect(providerRegistry.namesFor('hosting').sort()).toEqual(Object.keys(expected).sort());
     for (const [provider, state] of Object.entries(expected)) {
@@ -134,11 +134,8 @@ describe('validateProjectSpecProviders', () => {
     const expectedKinds = new Map<string, Array<'web' | 'worker' | 'cron'>>([
       ['railway', ['web', 'worker', 'cron']],
       ['cloudrun', ['web', 'worker', 'cron']],
-      ['digitalocean', ['web', 'worker', 'cron']],
-      ['fly', ['web', 'worker']],
       ['ecs', ['web']],
       ['azure-container-apps', ['web']],
-      ['vercel', ['web']],
     ]);
 
     for (const [provider, supportedKinds] of expectedKinds) {
@@ -195,7 +192,7 @@ describe('validateProjectSpecProviders', () => {
       }),
     ]);
     expect(issues[0].available).toContain('railway');
-    expect(issues[1].available).toContain('supabase');
+    expect(issues[1].available).toContain('cloudsql');
     expect(issues[2].available).toContain('railway');
   });
 
@@ -220,16 +217,6 @@ describe('validateProjectSpecProviders', () => {
       })
     );
     expect(validateProjectSpecProviders(spec('railway', undefined, 'railway'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', 'fly'))).toContainEqual(
-      expect.objectContaining({
-        field: 'database.provider',
-        provider: 'fly',
-        capability: 'database',
-        incompatibleHostingProvider: 'railway',
-        available: ['fly'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('fly', 'fly'))).toEqual([]);
     expect(validateProjectSpecProviders(spec('railway', 'cloudsql'))).toContainEqual(
       expect.objectContaining({
         field: 'database.provider',
@@ -296,8 +283,8 @@ describe('validateProjectSpecProviders', () => {
   it('validates queue lifecycle through hosting-provider metadata', () => {
     expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'cloudrun', queues: true }))).toEqual([]);
     expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'railway', queues: true }))).toEqual([]);
-    expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'fly', queues: true }))).toContainEqual(
-      expect.objectContaining({ field: 'queues', provider: 'fly', capability: 'queue' })
+    expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'ecs', queues: true }))).toContainEqual(
+      expect.objectContaining({ field: 'queues', provider: 'ecs', capability: 'queue' })
     );
   });
 
@@ -371,40 +358,5 @@ describe('validateProjectSpecProviders', () => {
     }));
   });
 
-  it('validates open DevOps provider ids and code-host compatibility through the separate registry', () => {
-    const base = {
-      version: 1 as const,
-      project: 'devops-provider-contract',
-      gitRemoteUrl: 'https://gitlab.com/acme/app.git',
-      environments: {
-        staging: {
-          hosting: { provider: 'railway' },
-          services: {},
-          deploy: { strategy: 'branch' as const, trigger: 'ci' as const },
-        },
-      },
-    };
-    const gitlab = projectSpecSchema.parse({
-      ...base,
-      devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/app' },
-        ci: { provider: 'gitlab-ci' },
-      },
-    });
-    expect(validateProjectSpecProviders(gitlab)).toEqual([]);
-
-    const incompatible = projectSpecSchema.parse({
-      ...base,
-      devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/app' },
-        ci: { provider: 'github-actions' },
-      },
-    });
-    expect(validateProjectSpecProviders(incompatible)).toContainEqual(expect.objectContaining({
-      field: 'devops.ci.provider',
-      provider: 'github-actions',
-      capability: 'ci',
-    }));
-  });
 
 });

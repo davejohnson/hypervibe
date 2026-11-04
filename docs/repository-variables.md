@@ -34,9 +34,7 @@ repository Variables permission is read for observation and read/write for
 creation or update; repository metadata must also be readable. These operations
 do not need Actions workflow dispatch, workflow-file write, environment write or
 repository administration permissions. An existing broader connection does not
-authorize any additional operation in this plan. GitLab CI is explicitly
-unsupported by this facet because its project variables have separate scope,
-type, masking and protection semantics.
+authorize any additional operation in this plan.
 
 Run `hv_plan project="review-policy" env="repository"` and inspect its exact
 variable actions before applying that persisted plan. Names are case-insensitive
@@ -102,7 +100,7 @@ appropriate scheduled execution and its evidence separately.
 
 ## Verification evidence
 
-The official pinned provider contract and named GitHub/GitLab comparison are in
+The official pinned provider contract and named GitHub comparison are in
 [the contract fixture](../test/provider-contracts/github/repository-variables/README.md).
 The existing client assumed a successful create returned JSON; its real request
 serializer failed on the documented empty 201 response before the narrow fix.

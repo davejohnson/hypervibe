@@ -6,7 +6,7 @@ import { providerRegistry } from '../../src/domain/registry/provider.registry.js
 // explicit live gates. Registry admission alone never establishes live support.
 describe('hosted deployment provider contract roster', () => {
   it('requires a new review when a hosting provider is added', () => {
-    expect(providerRegistry.namesFor('hosting').sort()).toEqual(['azure-container-apps', 'cloudrun', 'digitalocean', 'ecs', 'fly', 'railway', 'vercel']);
+    expect(providerRegistry.namesFor('hosting').sort()).toEqual(['azure-container-apps', 'cloudrun', 'ecs', 'railway']);
   });
   it.each([['ecs', 'aws'], ['cloudrun', 'gcp'], ['azure-container-apps', 'azure']])('%s declares transient callbacks and the reviewed CI identity contract', (name, provider) => {
     const registered = providerRegistry.get(name)!;

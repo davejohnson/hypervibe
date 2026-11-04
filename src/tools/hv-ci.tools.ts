@@ -303,7 +303,7 @@ function ciStatusOptionWarnings(
 export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_ci_status',
-    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls. The same connection and audit boundary applies to GitLab. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. GitHub Pages and branch protection remain feature-scoped GitHub observations.',
+    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. GitHub Pages and branch protection remain feature-scoped GitHub observations.',
     {
       project: projectField,
       repo: repoField,
@@ -578,14 +578,14 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_ci_trigger',
-    'The only supported dispatch path for the project\'s reviewed primary CI definition. Use this for managed-CI deploy and promotion requests; never dispatch with gh, a code-host connector/app, or a direct CI/provider API. The provider must support dispatch; GitLab requires an exact reviewed SHA and verifies it before and after dispatch.',
+    'The only supported dispatch path for the project\'s reviewed primary CI definition. Use this for managed-CI deploy and promotion requests; never dispatch with gh, a code-host connector/app, or a direct CI/provider API. The provider must support dispatch.',
     {
       project: projectField,
       repo: repoField,
       definition: z.string().optional().describe('Provider-native definition id or path. Prefer this portable field; do not pass a different workflow alias.'),
       workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility. Omit when definition is supplied.'),
       ref: z.string().optional().describe('Git ref to run on (default: the observed repository default branch).'),
-      sha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Exact reviewed commit SHA. Required by GitLab and supported only by canonical devops bindings; legacy GitHub workflow dispatch is ref-only.'),
+      sha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Exact reviewed commit SHA. Supported only by canonical devops bindings; legacy GitHub workflow dispatch is ref-only.'),
       inputs: z.record(z.string(), z.string()).optional().describe('Typed, non-secret CI inputs as key-value pairs. Values are not written to audit output.'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, definition, workflow, ref, sha, inputs }) => {

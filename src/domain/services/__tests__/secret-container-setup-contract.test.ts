@@ -19,7 +19,7 @@ const ready = { ...attempted, state: 'ready' as const, resource: 'projects/12345
 afterEach(() => vi.unstubAllEnvs());
 describe('secret container setup capability and durable nonsecret binding contract', () => {
   it('accounts for every hosting provider and distinguishes setup from runtime reference support', () => {
-    expect(providerRegistry.namesFor('hosting').sort()).toEqual(['azure-container-apps', 'cloudrun', 'digitalocean', 'ecs', 'fly', 'railway', 'vercel']);
+    expect(providerRegistry.namesFor('hosting').sort()).toEqual(['azure-container-apps', 'cloudrun', 'ecs', 'railway']);
     for (const provider of providerRegistry.namesFor('hosting')) {
       expect(providerRegistry.getMetadata(provider)?.secretDestinationSetupProviders ?? [], provider).toEqual(provider === 'cloudrun' ? ['gcp-secret-manager'] : []);
       const action = { id: 'secret-destination:API_TOKEN', type: 'create' as const, verified: true, billable: true, requiresConfirm: true,

@@ -1,5 +1,9 @@
 # September 2026 provider regression audit
 
+> Historical record from September 2026. Fly.io, Vercel, DigitalOcean, GitLab,
+> Neon, Supabase, Twilio and the OpenAI connector named below were removed on
+> 2026-11-03; see the Provider Scope section of ARCHITECTURE.md.
+
 Initial audit: `7c63032`, Hypervibe `0.1.24`. Hardening integrated onto
 `1e928df` after PRs #189, #191, and #192 merged. Review window: September 2–9
 (local time). This is an offline code and contract audit, not live certification.
@@ -171,11 +175,6 @@ latest-upstream Railway check without rewriting managed workflow files.
 - Real GraphQL client tests exposed unbound web-service name adoption and
   redeployment. Deploy now blocks with explicit import guidance; verified
   bound-service updates remain covered.
-- Neon's project creation sent organization scope in an undocumented query
-  parameter. It now sends `project.org_id` in the documented request body.
-- Supabase project creation omitted required `organization_slug`. It now uses
-  the slug returned for the selected legacy organization id, refuses creation
-  if that slug is unavailable, and retains existing binding identity semantics.
 - Positive service-deletion fixtures now use scoped tombstones rather than
   impossible successful nulls on a non-null GraphQL field. Synthetic error
   classification inputs are explicitly distinguished from observed errors.

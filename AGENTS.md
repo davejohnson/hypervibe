@@ -9,34 +9,40 @@ Consumers must receive guidance through their installed skill, MCP instructions,
 tool descriptions, and contextual results; they do not inherit this file.
 
 For every user-facing page, email, prompt, tool result, approval and error, read
-[Who we build and write for](docs/development-guidance-product.md#who-we-build-and-write-for).
+[Who we build and write for](docs/development/product.md#who-we-build-and-write-for).
 Our customer can describe the app they want; they should not need to learn cloud
 administration or our internal terminology to use Hypervibe.
 
 ## Working method
 
-- Keep changes scoped to the requested outcome. Prefer extending or deleting an
-  existing path over new layers, speculative configuration, or compatibility
-  branches. Preserve unrelated edits and explicit user choices.
-- Establish concrete success criteria. State material assumptions and uncertainty;
-  resolve routine choices from evidence and ask only when missing information or
-  consequential ambiguity prevents a sound decision.
-- Existing code, comments, types, mocks, and prior agent conclusions are hypotheses.
-  Before a bug fix, identify the affected behavior, the assumption being challenged,
-  independent evidence for expected behavior, and a counterexample. Write a boundary
-  regression and observe it fail before changing runtime code.
-- For provider-facing work, read the [provider evidence rules](docs/development-guidance-provider-evidence.md)
-  and [pinned-contract guide](test/provider-contracts/README.md). Review the shared
-  contract against every named provider in the affected category before implementing
-  an adapter. Use official source or redacted observations; label reconstructed and
-  synthetic evidence. Test real clients and serialized transport where applicable.
-- Inspect every affected interpretation across spec, plan, apply, observation,
-  retries, generated CI, import, and teardown. Fix contradictions within scope and
-  reuse existing logic. Preserve accepted identities, bindings, and recovery state.
-- At completion, report the challenged assumption, independent evidence,
-  counterexample, observed failing/passing checks, and remaining gaps. A reproduced
-  bug is not necessarily the cause of a customer incident. Keep this record in the
-  PR when applicable; passing offline contracts do not establish live support.
+- Handle small, reversible development tasks directly; add a formal plan,
+  delegation or a long report only when complexity or risk warrants it. Delegate
+  substantial independent work only when useful; retain required independent review.
+- Keep changes scoped and preserve unrelated edits. Resolve routine reversible
+  choices from context; ask only for materially consequential missing decisions
+  and reuse authorization within scope.
+- Read relevant sections and search likely files first; batch independent reads.
+  Keep verbose command logs in a file and show relevant results or failures.
+- Consult the relevant runtime/setup guidance before checks. Do not repeat the
+  same environment failure without a changed condition. Finish once the requested
+  outcome and proportional verification are complete; expand scope only for a
+  concrete defect or unmet requirement.
+- For behavior changes and bug fixes, follow the
+  [evidence and verification method](docs/development/workflow.md#dg-135).
+  These development shortcuts do not bypass the product's lifecycle, approval,
+  provider-contract or security boundaries below.
+
+## Merge handoff
+
+- Accept the user's report that a PR merged without independently checking it.
+- After a successful authorized merge, report the result and link, then stop.
+  Do not fetch or pull, compare main, repeat merge checks, run tests, monitor CI or
+  deployment, or perform browser smoke checks unless verification was explicitly
+  requested.
+- If the operation's outcome is ambiguous, make at most one bounded status lookup.
+  Queued auto-merge remains queued; do not wait for it to complete.
+- Preserve required pre-merge checks, release validation for authorized deployment
+  tasks, and independently scheduled reviewers.
 
 ## Non-negotiable boundaries
 
@@ -65,7 +71,7 @@ administration or our internal terminology to use Hypervibe.
 - Use Hypervibe for infrastructure operations. Direct provider APIs/CLIs and other
   connectors must not bypass its plans, state, or blockers. MCP agents use available
   `hv_*` tools directly; the Hypervibe CLI shares the same state and reconciliation.
-  The narrow [operator-managed Railway private SSH exception](docs/development-guidance-connections.md#dg-034)
+  The narrow [operator-managed Railway private SSH exception](docs/development/connections.md#dg-034)
   requires explicit user authorization and does not permit infrastructure changes.
 - Honor each result's stage and continuation contract. Failed, blocked, pending, or
   confirmation-required work stops dependent work unless an explicit bounded
@@ -81,28 +87,29 @@ is unnecessary for every task. The topic rules are normative.
 
 | Work being changed | Required guidance |
 | --- | --- |
-| Onboarding, defaults, setup links, product communication | [Product rules](docs/development-guidance-product.md); architecture [Product Model](ARCHITECTURE.md#product-model), [Plan Honesty](ARCHITECTURE.md#plan-honesty) |
-| Provider capabilities, API semantics, contract evidence | [Provider evidence](docs/development-guidance-provider-evidence.md); architecture [Provider Boundary](ARCHITECTURE.md#provider-boundary); [contract sources](test/provider-contracts/README.md) |
-| Spec/plan/apply, naming, identity, observations, import, teardown, runtime configuration | [Lifecycle rules](docs/development-guidance-lifecycle.md); architecture [State Ownership](ARCHITECTURE.md#state-ownership), [Platform Bindings](ARCHITECTURE.md#platform-bindings), [Reconciliation Safety Invariants](ARCHITECTURE.md#reconciliation-safety-invariants) |
-| Connections, authentication, secrets, IAM, runtime credentials | [Connection rules](docs/development-guidance-connections.md); architecture [Connections And Secrets](ARCHITECTURE.md#connections-and-secrets), [Runtime Secrets](ARCHITECTURE.md#runtime-secrets) |
-| CI, deployment, promotion, tasks, release evidence, iOS | [CI rules](docs/development-guidance-ci.md); architecture [CI And Push Deploys](ARCHITECTURE.md#ci-and-push-deploys), [iOS Release Desired State](ARCHITECTURE.md#ios-release-desired-state) |
-| Backups, persistent storage, restore, recovery | [Recovery rules](docs/development-guidance-recovery.md); architecture [Database Resilience](ARCHITECTURE.md#database-resilience) |
-| Command interfaces, repository workflow, publishing, macOS | [Development workflow](docs/development-guidance-workflow.md); architecture [Interface Boundary](ARCHITECTURE.md#interface-boundary), [Tool And CLI Policy](ARCHITECTURE.md#tool-and-cli-policy) |
+| Onboarding, defaults, setup links, product communication | [Product rules](docs/development/product.md); architecture [Product Model](ARCHITECTURE.md#product-model), [Plan Honesty](ARCHITECTURE.md#plan-honesty) |
+| Provider capabilities, API semantics, contract evidence | [Provider evidence](docs/development/provider-evidence.md); architecture [Provider Boundary](ARCHITECTURE.md#provider-boundary); [contract sources](test/provider-contracts/README.md) |
+| Spec/plan/apply, naming, identity, observations, import, teardown, runtime configuration | [Lifecycle rules](docs/development/lifecycle.md); architecture [State Ownership](ARCHITECTURE.md#state-ownership), [Platform Bindings](ARCHITECTURE.md#platform-bindings), [Reconciliation Safety Invariants](ARCHITECTURE.md#reconciliation-safety-invariants) |
+| Connections, authentication, secrets, IAM, runtime credentials | [Connection rules](docs/development/connections.md); architecture [Connections And Secrets](ARCHITECTURE.md#connections-and-secrets), [Runtime Secrets](ARCHITECTURE.md#runtime-secrets) |
+| CI, deployment, promotion, tasks, release evidence, iOS | [CI rules](docs/development/ci.md); architecture [CI And Push Deploys](ARCHITECTURE.md#ci-and-push-deploys), [iOS Release Desired State](ARCHITECTURE.md#ios-release-desired-state) |
+| Backups, persistent storage, restore, recovery | [Recovery rules](docs/development/recovery.md); architecture [Database Resilience](ARCHITECTURE.md#database-resilience) |
+| Command interfaces, repository workflow, publishing, macOS | [Development workflow](docs/development/workflow.md); architecture [Interface Boundary](ARCHITECTURE.md#interface-boundary), [Tool And CLI Policy](ARCHITECTURE.md#tool-and-cli-policy) |
 
 ## Verification and delivery
 
-Run focused `npm test -- <test paths>` checks for the changed behavior and
-`npm run typecheck` for TypeScript changes. Regression checks must remain in the
-ordinary `npm test` acceptance path; verify both committed CI and desired required
-check configuration before claiming CI coverage. Repository files do not prove
-live branch-protection enforcement. Execute generated operational programs where
-those programs are the boundary; source-string checks alone cannot prove effects.
+Match verification to the affected behavior. Documentation-only and editorial
+changes need content and link review, not automated tests. For behavior changes,
+use the smallest relevant tests or evaluations; reserve broad suites for broad
+changes or unresolved uncertainty. Preserve bug regression coverage and required
+CI checks, and do not repeat completed checks without a concrete reason.
+When testing applies, read the relevant
+[verification guidance](docs/development/workflow.md#dg-134).
 
 Do not run the full release gate, bump versions, or publish for every small change.
 Follow the detailed workflow rules for an authorized build/release, including the
 local MCP runtime, separately deployed helpers, and macOS checks. Never restart or
 kill the user's MCP/client processes to activate a build; explain any needed restart.
 
-[The migration audit](docs/development-guidance-migration.json) maps each original
+[The migration audit](docs/development/guidance-migration.json) maps each original
 AGENTS rule to retained text and records stale CLAUDE guidance corrections. Preserve
 these obligations; make deliberate policy changes explicit in the rule and audit.

@@ -27,15 +27,15 @@ afterEach(() => {
 function seedConnection(): void {
   const repo = new ConnectionRepository();
   const connection = repo.create({
-    provider: 'doppler',
-    credentialsEncrypted: getSecretStore().encryptObject({ token: 'dp.st.test-token' }),
+    provider: 'aws-secrets',
+    credentialsEncrypted: getSecretStore().encryptObject({ region: 'us-east-1', accessKeyId: 'AKIAEXAMPLE', secretAccessKey: 'secret' }),
   });
   repo.updateStatus(connection.id, 'verified');
 }
 
 function fakeAdapter(): ISecretManagerAdapter {
   return {
-    name: 'doppler',
+    name: 'aws-secrets',
     async connect() {},
     async verify() { return { success: true }; },
     async getSecret(path, key) {
@@ -56,19 +56,19 @@ describe('SecretResolver', () => {
     vi.spyOn(secretManagerRegistry, 'createAdapter').mockReturnValue(adapter);
 
     const result = await new SecretResolver().resolveSecret(
-      'doppler://backend/prod#API_KEY',
+      'aws-secrets://backend/prod#API_KEY',
       { projectId: project.id, environmentName: 'production' }
     );
 
     expect(result).toEqual({ value: 'super-secret-value', version: '7' });
-    expect(connect).toHaveBeenCalledWith({ token: 'dp.st.test-token' });
+    expect(connect).toHaveBeenCalledWith({ region: 'us-east-1', accessKeyId: 'AKIAEXAMPLE', secretAccessKey: 'secret' });
   });
 
   it('returns missing-connection guidance without touching an adapter', async () => {
     const createAdapter = vi.spyOn(secretManagerRegistry, 'createAdapter');
-    const result = await new SecretResolver().resolveSecret('doppler://backend/prod#API_KEY');
+    const result = await new SecretResolver().resolveSecret('aws-secrets://backend/prod#API_KEY');
 
-    expect(result).toEqual({ error: expect.stringContaining("No connection found for secret manager 'doppler'") });
+    expect(result).toEqual({ error: expect.stringContaining("No connection found for secret manager 'aws-secrets'") });
     expect(createAdapter).not.toHaveBeenCalled();
   });
 

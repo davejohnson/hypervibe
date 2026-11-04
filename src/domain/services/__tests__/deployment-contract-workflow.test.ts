@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import { parse } from 'yaml';
-import { formatFlyOrganizationBinding, formatFlyServiceBinding } from '../../../adapters/providers/fly/fly.binding.js';
 import '../../../application/providers.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import os from 'node:os';
@@ -9,7 +8,6 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
-import { buildGitLabDeploymentContractRuntime } from '../../../adapters/providers/gitlab/gitlab-ci.lifecycle.js';
 import type {
   BranchDeployEnvironmentKind,
   BranchDeployProvider,
@@ -79,13 +77,6 @@ function target(
     programFingerprint: 'a'.repeat(64),
     deploymentContractFingerprint: environmentDeploymentContractHash(SPEC, environmentName),
   };
-  if (provider === 'fly') {
-    branchTarget.providerProjectId = formatFlyOrganizationBinding('test-org');
-    branchTarget.providerServiceIds = [formatFlyServiceBinding({organizationSlug: 'test-org', appId: 'test-app', appName: 'test-app', machineId: 'test-machine'})];
-  } else if (provider === 'vercel') {
-    branchTarget.providerProjectId = 'team:team_1234567890';
-    branchTarget.providerServiceIds = ['team:team_1234567890:prj_1234567890'];
-  }
   branchTarget.releaseTarget = managedCiReleaseTarget({
     provider,
     environmentName,
@@ -300,61 +291,6 @@ describe('generated deployment-contract safety gate', () => {
           extractGitHubScript(generated.content, GATE_STEP_NAME)
         )).not.toThrow();
       }
-    }
-  });
-});
-
-describe('generated GitLab deployment-contract safety gate', () => {
-  it('executes the emitted runtime against the raw spec before build or provider mutation', () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-gitlab-contract-gate-'));
-    const runtimePath = path.join(directory, 'verify-deployment-contract.cjs');
-    fs.mkdirSync(path.join(directory, '.hypervibe'));
-    fs.writeFileSync(path.join(directory, '.hypervibe/spec.json'), JSON.stringify(SPEC));
-    fs.writeFileSync(runtimePath, buildGitLabDeploymentContractRuntime());
-    const baseEnv = {
-      ...process.env,
-      HYPERVIBE_ENVIRONMENT: 'staging',
-      HYPERVIBE_ROLLBACK: 'false',
-    };
-    try {
-      const appliedHash = environmentDeploymentContractHash(SPEC, 'staging');
-      const accepted = spawnSync(process.execPath, [runtimePath], {
-        cwd: directory,
-        encoding: 'utf8',
-        env: { ...baseEnv, HYPERVIBE_APPLIED_SPEC_HASH: appliedHash },
-      });
-      expect(accepted.status, accepted.stderr).toBe(0);
-      expect(fs.readFileSync(
-        path.join(directory, '.hypervibe-deployment-contract-fingerprint'),
-        'utf8'
-      )).toBe(`${appliedHash}\n`);
-
-      const rejected = spawnSync(process.execPath, [runtimePath], {
-        cwd: directory,
-        encoding: 'utf8',
-        env: { ...baseEnv, HYPERVIBE_APPLIED_SPEC_HASH: 'f'.repeat(64) },
-      });
-      expect(rejected.status).not.toBe(0);
-      expect(rejected.stderr).toContain('desired and applied contract hashes differ');
-
-      fs.rmSync(path.join(directory, '.hypervibe/spec.json'));
-      const rollbackHash = 'e'.repeat(64);
-      const rollback = spawnSync(process.execPath, [runtimePath], {
-        cwd: directory,
-        encoding: 'utf8',
-        env: {
-          ...baseEnv,
-          HYPERVIBE_APPLIED_SPEC_HASH: rollbackHash,
-          HYPERVIBE_ROLLBACK: 'true',
-        },
-      });
-      expect(rollback.status, rollback.stderr).toBe(0);
-      expect(fs.readFileSync(
-        path.join(directory, '.hypervibe-deployment-contract-fingerprint'),
-        'utf8'
-      )).toBe(`${rollbackHash}\n`);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 });

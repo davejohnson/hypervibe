@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as crypto from 'node:crypto';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
-import { buildCloudRunPortableRuntime } from '../cloudrun-ci.recipe.js';
 import { buildCloudRunReleaseRuntime } from '../cloudrun-ci.release-runtime.js';
 import { extractGitHubScript } from '../../../../domain/services/__tests__/managed-ci-workflow.test-utils.js';
 
@@ -24,11 +23,10 @@ it('changes the frozen legacy programs only through the reviewed native executio
   const target = { environmentName: 'staging', kind: 'staging' as const, branch: 'main', autoDeployOnPush: true,
     serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: 'legacy-project', region: 'us-central1' }, providerRegion: 'us-central1' };
   expect(sha(JSON.stringify(buildCloudRunGitHubActionsSteps(target)))).not.toBe('7b6b96ab1b1312a06bf2e597e7666ce3fc956d17808b5ecb767a3b87b5dc1973');
-  expect(sha(buildCloudRunPortableRuntime())).not.toBe('275ef86ff71e47d43fdc36ac06fb8eba5c3f7f186d2ca793d7446e37246d1a56');
   expect(sha(buildCloudRunReleaseRuntime())).not.toBe('3e0729e6d5f0034943d7f3bbfe509352d4fc333f1e7b397d7d185e359dff7ab7');
 });
 
-function fixture(kind: 'github' | 'portable', fault?: string, rollback = false, noVolumes = false, bounds = false) {
+function fixture(_kind: 'github', fault?: string, rollback = false, noVolumes = false, bounds = false) {
   const original: any = { name: resourceName, uid: 'stable-uid', etag: 'version-1', generation: '1', observedGeneration: '1', terminalCondition: { state: 'CONDITION_SUCCEEDED' }, template: {
     containers: [{ name: 'web', image: 'old-image', volumeMounts: [{ name: 'data', mountPath: '/data' }] }],
     volumes: [{ name: 'data', nfs: { server: '10.0.0.2', path: '/data', readOnly: false } }],
@@ -72,12 +70,12 @@ function fixture(kind: 'github' | 'portable', fault?: string, rollback = false, 
   const runtimeResources = [{ logicalName: 'web', workloadKind: 'web' as const, providerResourceType: 'service' as const,
     providerResourceId: name, startCommand: null, healthCheckPath: null, ...(bounds ? { instanceBounds: { min: 0, max: 1 } } : {}) }];
   env.CLOUDRUN_RUNTIME_RESOURCES_B64 = encoded(runtimeResources);
-  const script = kind === 'portable' ? buildCloudRunPortableRuntime({ instanceBounds: bounds }).replace(/^import .*;\n/gm, '') : extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + buildCloudRunGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: project, region }, providerRegion: region, runtimeResources }).steps, 'Deploy image to Cloud Run');
+  const script = extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + buildCloudRunGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web'], providerScope: { projectId: project, region }, providerRegion: region, runtimeResources }).steps, 'Deploy image to Cloud Run');
   const run = () => new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'core', 'createSign', 'execFileSync', 'readFile', 'writeFile', script)(() => crypto, { env, stdout: { write: vi.fn() } }, fetchImpl, Buffer, { info: vi.fn(), setOutput: vi.fn() }, crypto.createSign, (_file: string, args: string[]) => args[0] === 'push' ? 'digest: sha256:' + 'b'.repeat(64) : '', async (file: string) => file === '.hypervibe-deploy-sha' ? 'a'.repeat(40) : 'registry.example.test/source:tag', vi.fn());
   return { run, patches, original };
 }
 
-describe.each(['github', 'portable'] as const)('%s Cloud Run filesystem release', (kind) => {
+describe.each(['github'] as const)('%s Cloud Run filesystem release', (kind) => {
   it('releases with reviewed service bounds, preserving their separately applied configuration', async () => {
     const f = fixture(kind, undefined, false, true, true);
     await f.run();

@@ -583,14 +583,14 @@ describe('hosting service destroy apply identity', () => {
   });
 
   it('blocks aggregate-absent project-scoped task cleanup before adapter resolution', async () => {
-    const projectId = 'vercel-project';
-    const action = taskDestroyAction({ provider: 'vercel', projectId, deleteScope: 'project' });
+    const projectId = '/subscriptions/sub/resourceGroups/hv-app';
+    const action = taskDestroyAction({ provider: 'azure-container-apps', projectId, deleteScope: 'project' });
     ctx.repos.environments.updatePlatformBindings(environment.id, {
-      provider: 'vercel',
+      provider: 'azure-container-apps',
       projectId,
     });
     freshObservation = observedState({
-      provider: 'vercel',
+      provider: 'azure-container-apps',
       projectId,
       environmentId: undefined,
       services: [],
@@ -614,7 +614,7 @@ describe('hosting service destroy apply identity', () => {
   });
 
   it.each([
-    ['provider', { provider: 'vercel' }],
+    ['provider', { provider: 'cloudrun' }],
     ['project', { projectId: 'rail-project-rebound' }],
     ['environment', { environmentId: 'rail-environment-rebound' }],
     ['service id', { services: { [target.serviceName]: { serviceId: 'rail-service-rebound' } } }],

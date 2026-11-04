@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '../../../adapters/providers/railway/railway.adapter.js';
-import '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import {
   buildBranchDeployWorkflow,
@@ -392,21 +391,6 @@ describe('generated managed-CI promotion evidence gate', () => {
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it('rejects promotion through a provider without verifiable immutable artifacts', () => {
-    const target = productionTarget();
-    target.providerProjectId = 'do-app';
-    target.providerEnvironmentId = undefined;
-    target.providerServiceIds = ['do-app:services:web', 'do-app:jobs:nightly'];
-
-    expect(() => buildBranchDeployWorkflow(
-      'digitalocean',
-      target,
-      { includeStep: false }
-    )).toThrow(
-      'Promotion to production is unavailable because provider "digitalocean" does not expose a verifiable immutable artifact.'
-    );
   });
 
   it('requires a reviewed source branch before rendering promotion', () => {

@@ -6,7 +6,7 @@ import { providerRegistry } from '../../src/domain/registry/provider.registry.js
 // native lifetime/creation differences and the separate live acceptance gate.
 describe('installer-prepared hosting provider roster', () => {
   it('requires explicit review when any hosting provider is added', () => {
-    expect(providerRegistry.namesFor('hosting').sort()).toEqual(['azure-container-apps', 'cloudrun', 'digitalocean', 'ecs', 'fly', 'railway', 'vercel']);
+    expect(providerRegistry.namesFor('hosting').sort()).toEqual(['azure-container-apps', 'cloudrun', 'ecs', 'railway']);
   });
   it('requires a native prepared-receipt parser for every declared capability', () => {
     for (const name of providerRegistry.namesFor('hosting')) {

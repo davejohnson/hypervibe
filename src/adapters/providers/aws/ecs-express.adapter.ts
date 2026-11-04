@@ -121,7 +121,6 @@ import {
   buildEcsExpressGitHubActionsSteps,
   ECS_EXPRESS_CI_REQUIRED_SECRETS,
 } from './ecs-express-ci.workflow.js';
-import { buildEcsExpressPortableRecipe } from './ecs-express-ci.recipe.js';
 import {
   AWS_WORKLOAD_NETWORK_BINDING,
   type AwsWorkloadNetwork,
@@ -2336,8 +2335,6 @@ providerRegistry.register({
           AWS_SECRET_ACCESS_KEY: 'secretAccessKey',
         },
         buildGitHubActionsSteps: buildEcsExpressGitHubActionsSteps,
-        buildPortableRecipe: buildEcsExpressPortableRecipe,
-        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
     },
     lifecycle: {

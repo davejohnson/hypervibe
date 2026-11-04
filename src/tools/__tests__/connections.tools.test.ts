@@ -24,7 +24,6 @@ import { S3StorageAdapter } from '../../adapters/providers/aws/s3.adapter.js';
 import '../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../adapters/providers/gcp/gcs.adapter.js';
-import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
 import { StripeProjectsAdapter } from '../../adapters/providers/secretmanagers/stripe-projects.adapter.js';
 
 vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
@@ -1204,19 +1203,7 @@ describe('hv_connections', () => {
       })
     );
     expect(result.data.availableProviders.secrets).toContainEqual(
-      expect.objectContaining({
-        name: '1password',
-        defaultScalarKey: 'serviceAccountToken',
-        credentialFields: [
-          {
-            name: 'serviceAccountToken',
-            label: 'Service Account Token',
-            required: true,
-            sensitive: true,
-            inputKind: 'secret',
-          },
-        ],
-      })
+      expect.objectContaining({ name: 'aws-secrets' })
     );
     expect(result.data.availableProviders.dns).toContainEqual(
       expect.objectContaining({

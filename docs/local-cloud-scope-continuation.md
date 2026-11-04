@@ -45,9 +45,6 @@ for the preceding billing stage, whose authorization contract is unchanged.
 | ECS | Unsupported in this local allocation capability | Account creation differs; hosted CloudFormation installation remains separate |
 | Azure Container Apps | Unsupported in this local allocation capability | Subscription/resource-group installation differs; hosted Entra installation remains separate |
 | Railway | Unsupported | No corresponding allocation capability |
-| Fly | Unsupported | No corresponding allocation capability |
-| DigitalOcean | Unsupported | No corresponding allocation capability |
-| Vercel | Unsupported | No corresponding allocation capability |
 
 This matrix covers this local operator bootstrap, not the separate three-provider
 customer Connect Cloud flow. No provider inherits support from another adapter.
@@ -338,7 +335,7 @@ connections and the original 14-service receipts remain independent.
 
 This provider-owned extension has the same named registry matrix above: Cloud
 Run local operator preparation is the implemented target; ECS, Azure Container
-Apps, Railway, Fly, DigitalOcean and Vercel do not implement this GCP-specific
+Apps and Railway do not implement this GCP-specific
 quota stage. It changes no hosted customer authentication contract and does not
 establish equivalent AWS or Azure live onboarding evidence.
 

@@ -7,6 +7,7 @@ import { secretDestinationSchema, runtimeSecretReferenceSchema, secretDestinatio
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
+import { withDefaultDatabaseProvider } from './database-defaults.js';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -794,7 +795,7 @@ const devopsScopeSchema = z.string().trim().min(1).max(2_048).superRefine((scope
 export const devopsSpecSchema = z.object({
   code: z.object({
     provider: providerIdSchema,
-    /** Provider-owned canonical repository scope (URL for GitLab, owner/repo for GitHub). */
+    /** Provider-owned canonical repository scope (owner/repo for GitHub). */
     scope: devopsScopeSchema,
     /**
      * Repository lifecycle is explicit. The default preserves the existing
@@ -802,8 +803,9 @@ export const devopsSpecSchema = z.object({
      * from a missing project or from repository file writes.
      */
     repository: z.object({
-      state: z.enum(['present', 'absent']).default('present'),
-      management: z.enum(['external', 'managed']).default('external'),
+      state: z.literal('present').default('present'),
+      /** Hypervibe never creates or deletes code repositories. */
+      management: z.literal('external').default('external'),
       visibility: z.enum(['private', 'internal', 'public']).default('private'),
       defaultBranch: z.string().min(1).max(255).superRefine((branch, ctx) => {
         const components = branch.split('/');
@@ -832,22 +834,9 @@ export const devopsSpecSchema = z.object({
       value: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 48 * 1024, 'Variable exceeds 48 KiB'),
       adoptExisting: z.boolean().default(false),
     }).strict()).refine(values => Object.keys(values).length <= 500, 'Too many repository variables').optional(),
-    runner: z.discriminatedUnion('mode', [
-      z.object({
-        mode: z.literal('provider-hosted'),
-      }).strict(),
-      z.object({
-        mode: z.literal('self-managed'),
-        /** Exact GitLab runner id; never select a runner by tag alone. */
-        runnerId: z.string().regex(/^[1-9]\d*$/, 'runnerId must be a positive numeric provider id'),
-        /** Exact manager machine identity observed through the provider API. */
-        managerSystemId: z.string().min(1).max(255),
-        /** Dedicated tag that no other runner assigned to the project may claim. */
-        tag: z.string().regex(/^[A-Za-z0-9_.-]{1,255}$/, 'runner tag contains unsupported characters'),
-        /** Operator-owned, provider-observed execution-capability attestation. */
-        capabilities: z.array(z.enum(['linux-amd64', 'docker-privileged'])).min(1),
-      }).strict(),
-    ]).default({ mode: 'provider-hosted' }),
+    runner: z.object({
+      mode: z.literal('provider-hosted'),
+    }).strict().default({ mode: 'provider-hosted' }),
   }).strict().optional(),
   /** Environment that owns project-level DevOps lifecycle actions. */
   canonicalEnvironment: z.string().min(1).optional(),
@@ -1582,41 +1571,23 @@ export const EMAIL_MANAGED_ENV_KEYS = [
   'SENDGRID_INBOUND_ALIASES',
 ] as const;
 
-const messagingWebhookTargetSchema = z.object({
+/**
+ * A webhook another service sends to one of this app's public web services.
+ * Hypervibe never calls the sending service; it reports the exact callback URL
+ * to register in that service's dashboard and whether the signing secret is
+ * wired to the receiving service. Declare API keys and signing secrets under
+ * project `secrets`.
+ */
+export const environmentWebhookSchema = z.object({
+  /** Service that sends the webhook, for display only (for example "twilio" or "slack"). */
+  vendor: z.string().trim().min(1).max(64),
+  /** Public web service that receives the webhook. */
   service: z.string().min(1),
   path: z.string()
-    .regex(/^\/(?!\/)[^?#\s]*$/, 'messaging webhook paths must begin with one slash and cannot contain a query or fragment'),
+    .regex(/^\/(?!\/)[^?#\s]*$/, 'webhook paths must begin with one slash and cannot contain a query or fragment'),
+  /** Environment variable on the receiving service that holds the signing secret or token. */
+  signingSecretEnvVar: environmentVariableNameSchema.optional(),
 }).strict();
-
-export const twilioMessagingSpecSchema = z.object({
-  provider: z.literal('twilio').default('twilio'),
-  /** Application services that receive the Twilio runtime contract. */
-  services: z.array(z.string().min(1)).min(1),
-  service: z.object({
-    name: z.string().trim().min(1).max(64),
-    inbound: messagingWebhookTargetSchema.extend({
-      path: messagingWebhookTargetSchema.shape.path.default('/webhooks/twilio/messages'),
-    }).optional(),
-    deliveryStatus: messagingWebhookTargetSchema.extend({
-      path: messagingWebhookTargetSchema.shape.path.default('/webhooks/twilio/status'),
-    }).optional(),
-  }).strict(),
-  /** Existing Twilio phone number to attach. Hypervibe never purchases numbers. */
-  sender: z.object({
-    phoneNumberSid: z.string()
-      .regex(/^PN[0-9a-fA-F]{32}$/, 'Twilio phone number SID must start with PN and contain 32 hexadecimal characters')
-      .describe('Existing SMS-capable Phone Number SID (PN...) from Twilio Console -> Numbers & Senders -> Phone Numbers; use the SID, not the +E.164 number'),
-  }).strict().optional(),
-}).strict();
-
-export const MESSAGING_MANAGED_ENV_KEYS = [
-  'TWILIO_ACCOUNT_SID',
-  'TWILIO_API_KEY_SID',
-  'TWILIO_API_KEY_SECRET',
-  'TWILIO_AUTH_TOKEN',
-  'TWILIO_MESSAGING_SERVICE_SID',
-  'TWILIO_PHONE_NUMBER_SID',
-] as const;
 
 export const secretDestinationBindingSchema = z.object({
   destination: secretDestinationSchema,
@@ -1628,7 +1599,7 @@ export const secretDestinationBindingSchema = z.object({
   }
 });
 
-export const environmentSpecSchema = z.object({
+export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z.object({
   /** Operator release assets; target, content and public-read changes are separately reviewed. */
   operatorArtifacts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorArtifactDeclarationSchema).optional(),
   operatorApplications: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorApplicationDeclarationSchema).optional(),
@@ -1674,7 +1645,12 @@ export const environmentSpecSchema = z.object({
   loadBalancer: loadBalancerSpecSchema.optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: emailSpecSchema.default({ enabled: false }),
-  messaging: twilioMessagingSpecSchema.optional(),
+  /** Removed Twilio messaging desired state; kept only to explain the replacement. */
+  messaging: z.unknown().optional(),
+  webhooks: z.record(
+    z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'webhook names must be lowercase letters, digits and hyphens'),
+    environmentWebhookSchema
+  ).optional(),
   envVars: z.record(applicationEnvVarNameSchema, z.string()).default({}),
   /** Reviewed native destinations and immutable references, never secret values. */
   secretDestinations: z.record(applicationEnvVarNameSchema, secretDestinationBindingSchema).optional(),
@@ -1862,91 +1838,27 @@ export const environmentSpecSchema = z.object({
       }
     }
   }
-  if (environment.messaging) {
-    const messaging = environment.messaging;
-    const runtimeServices = new Set<string>();
-    for (const [index, serviceName] of messaging.services.entries()) {
-      if (runtimeServices.has(serviceName)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio runtime service "${serviceName}" is listed more than once`,
-          path: ['messaging', 'services', index],
-        });
-      }
-      runtimeServices.add(serviceName);
-      if (!environment.services[serviceName]) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio runtime targets unknown service "${serviceName}"`,
-          path: ['messaging', 'services', index],
-        });
-      }
-    }
-    for (const [name, target] of [
-      ['inbound', messaging.service.inbound],
-      ['deliveryStatus', messaging.service.deliveryStatus],
-    ] as const) {
-      if (!target) continue;
-      const service = environment.services[target.service];
-      if (!service) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio ${name} webhook targets unknown service "${target.service}"`,
-          path: ['messaging', 'service', name, 'service'],
-        });
-      } else if (service.workloadKind !== 'web' || service.public === false) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio ${name} webhook service "${target.service}" must be a public web service`,
-          path: ['messaging', 'service', name, 'service'],
-        });
-      }
-      if (!runtimeServices.has(target.service)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio ${name} webhook service "${target.service}" must also be listed in messaging.services for signature validation`,
-          path: ['messaging', 'service', name, 'service'],
-        });
-      }
-    }
-    const databaseAliasKeys = new Set(Object.values(environment.services)
-      .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})));
-    for (const key of MESSAGING_MANAGED_ENV_KEYS) {
-      if (databaseAliasKeys.has(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be a managed database alias`,
-          path: ['messaging'],
-        });
-      }
-      if (key in environment.envVars) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be declared in envVars`,
-          path: ['envVars', key],
-        });
-      }
-      if (environment.envVarExceptions?.includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be an environment variable exception`,
-          path: ['envVarExceptions'],
-        });
-      }
-      if (environment.envFile?.include.includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be selected through envFile.include`,
-          path: ['envFile', 'include'],
-        });
-      }
-      if (environment.removeEnvVars?.includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be retired`,
-          path: ['removeEnvVars'],
-        });
-      }
+  if (environment.messaging !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'messaging (Twilio desired state) is no longer managed by Hypervibe. Declare the Twilio keys under project secrets and the callback URLs under webhooks, for example webhooks.twilio-inbound = { vendor: "twilio", service: "web", path: "/webhooks/twilio/messages", signingSecretEnvVar: "TWILIO_AUTH_TOKEN" }.',
+      path: ['messaging'],
+    });
+  }
+  for (const [name, webhook] of Object.entries(environment.webhooks ?? {})) {
+    const target = environment.services[webhook.service];
+    if (!target) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `webhook "${name}" targets unknown service "${webhook.service}"`,
+        path: ['webhooks', name, 'service'],
+      });
+    } else if ((target.workloadKind && target.workloadKind !== 'web') || target.public === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `webhook "${name}" service "${webhook.service}" must be a public web service`,
+        path: ['webhooks', name, 'service'],
+      });
     }
   }
   if (environment.loadBalancer) {
@@ -2269,7 +2181,7 @@ export const environmentSpecSchema = z.object({
       }
     }
   }
-});
+}));
 
 export const projectSpecSchema = z.object({
   version: z.literal(1),
@@ -2507,31 +2419,6 @@ export const projectSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: 'deploy.trigger="ci" requires devops.ci.provider',
           path: ['environments', environmentName, 'deploy', 'trigger'],
-        });
-      }
-    }
-  }
-  if (spec.devops?.code.repository.state === 'absent') {
-    if (spec.devops.code.repository.management !== 'managed') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'devops.code.repository.state="absent" requires management="managed"; Hypervibe never deletes an externally managed repository',
-        path: ['devops', 'code', 'repository', 'management'],
-      });
-    }
-    if (spec.devops.ci) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'devops.ci must be removed before the managed code repository can be declared absent',
-        path: ['devops', 'ci'],
-      });
-    }
-    for (const [environmentName, environment] of Object.entries(spec.environments)) {
-      if (environment.deploy?.strategy === 'branch') {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'branch deploys must be removed before the managed code repository can be declared absent',
-          path: ['environments', environmentName, 'deploy', 'strategy'],
         });
       }
     }
@@ -2787,13 +2674,6 @@ export const projectSpecSchema = z.object({
           path: ['secrets', key],
         });
       }
-      if (environment.messaging && (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${secretKind} "${key}" cannot also be managed by messaging desired state in "${environmentName}"`,
-          path: ['secrets', key],
-        });
-      }
     }
   }
 });
@@ -2819,7 +2699,7 @@ export type EmailInboundSpec = z.infer<typeof emailInboundSpecSchema>;
 export type EmailDeliveryEventsSpec = z.infer<typeof emailDeliveryEventsSpecSchema>;
 export type EmailForwardingSpec = z.infer<typeof emailForwardingSpecSchema>;
 export type EmailSpec = z.infer<typeof emailSpecSchema>;
-export type TwilioMessagingSpec = z.infer<typeof twilioMessagingSpecSchema>;
+export type EnvironmentWebhookSpec = z.infer<typeof environmentWebhookSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;

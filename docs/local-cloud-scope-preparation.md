@@ -25,9 +25,6 @@ The shared contract is capability-driven. The named hosting-provider review is:
 | AWS ECS | Unavailable here. Its hosted CloudFormation/federation installation remains a distinct contract. |
 | Azure Container Apps | Unavailable here. Its hosted resource/identity/RBAC installation remains a distinct contract. |
 | Railway | Unavailable; no emulated cloud project allocation. |
-| Fly | Unavailable; no emulated cloud project allocation. |
-| DigitalOcean App Platform | Unavailable; no emulated cloud project allocation. |
-| Vercel | Unavailable; no emulated cloud project allocation. |
 
 This matrix is an implementation boundary, not a claim that other providers lack
 native provisioning APIs. Their broader contracts and live gaps remain in

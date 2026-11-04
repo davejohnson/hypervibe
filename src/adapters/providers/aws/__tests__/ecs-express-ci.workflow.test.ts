@@ -1,3 +1,4 @@
+import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { createRequire } from 'node:module';
@@ -13,7 +14,7 @@ import {
 } from '../ecs-express-ci.workflow.js';
 
 describe('ECS Express managed CI workflow', () => {
-  it('renders release-only broker callbacks without copied AWS keys and makes portable unsupported explicit', async () => {
+  it('renders release-only broker callbacks without copied AWS keys and does not register a removed portable CI path', async () => {
     const target = brokerTarget(), result = buildEcsExpressGitHubActionsSteps(target);
     expect(result.requiredSecrets).toEqual([]); expect(result.permissions).toContain('id-token: write');
     expect(result.steps).not.toMatch(/secrets\.AWS_|configure-aws-credentials/);
@@ -45,8 +46,7 @@ describe('ECS Express managed CI workflow', () => {
       const cleanup = steps.find((step: any) => step.name === 'Remove temporary registry access');
       await new AsyncFunction('require', 'process', cleanup.with.script)(require, { env });
     } finally { rmSync(runner, { recursive: true, force: true }); }
-    const { buildEcsExpressPortableRecipe } = await import('../ecs-express-ci.recipe.js');
-    expect(() => buildEcsExpressPortableRecipe(target)).toThrow(/GitHub/);
+    expect(providerRegistry.getMetadata('ecs')?.orchestration?.ci).not.toHaveProperty('buildPortableRecipe');
   });
   it('uses only the connection credentials and already-bound resource ARNs', () => {
     const result = buildEcsExpressGitHubActionsSteps({

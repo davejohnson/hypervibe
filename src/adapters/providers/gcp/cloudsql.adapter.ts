@@ -1,4 +1,5 @@
 import { gcpGithubRecoveryAuthentication } from './gcp-github-automation.js';
+import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { createCloudSqlProvisioningRecovery } from './cloudsql-provisioning-recovery.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
@@ -2043,7 +2044,7 @@ providerRegistry.register({
     },
     lifecycle: {
       databaseEngines: ['postgres'],
-      databaseConnectivity: { compatibleHostingProviders: ['cloudrun'] },
+      databaseConnectivity: nativeDatabaseConnectivity.cloudsql,
       dailyBackups: { database: true },
       databaseResilience: {
         availabilityModes: ['zonal', 'regional'],

@@ -2,7 +2,6 @@ import * as crypto from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { extractGitHubScript } from '../../../../domain/services/__tests__/managed-ci-workflow.test-utils.js';
 import { azureRegistryName, buildAzureContainerAppsGitHubActionsSteps } from '../azure-container-apps-ci.workflow.js';
-import { buildAzureContainerAppsPortableRuntime } from '../azure-container-apps-ci.recipe.js';
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const group = '/subscriptions/22222222-2222-4222-8222-222222222222/resourceGroups/staging';
@@ -41,16 +40,11 @@ async function execute(kind: 'github' | 'portable', loseMount: boolean, changeId
     const output = buildAzureContainerAppsGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerProjectId: group, providerServiceIds: [appId] });
     const script = extractGitHubScript(`jobs:\n  deploy:\n    steps:\n${output.steps}`, 'Release exact digest to bound Azure Container Apps');
     await new AsyncFunction('fetch', 'process', 'require', 'core', script)(fetch, process, () => crypto, { setOutput: (name: string, value: string) => { if (name === 'credential_deployments') expect(JSON.parse(value)).toEqual([{ serviceId: appId, deploymentIds: [app.properties.latestReadyRevisionName] }]); } });
-  } else {
-    const script = buildAzureContainerAppsPortableRuntime().replace(/^import .*;\n/gm, '');
-    await new AsyncFunction('fetch', 'process', 'createHash', 'readFile', 'writeFile', 'execFileSync', script)(fetch, process, crypto.createHash,
-      async (path: string) => path === '.hypervibe-deploy-sha' ? sha : 'registry.example.test/team/app:' + sha,
-      async () => {}, () => `digest: ${digest}`);
   }
   return mutations;
 }
 
-it.each(['github', 'portable'] as const)('forces a fresh but retry-stable Azure revision for same-commit credential activation (%s)', async kind => {
+it.each(['github'] as const)('forces a fresh but retry-stable Azure revision for same-commit credential activation (%s)', async kind => {
   const first = await execute(kind, false, undefined, 'accepted-operation-a');
   const retry = await execute(kind, false, undefined, 'accepted-operation-a');
   const next = await execute(kind, false, undefined, 'accepted-operation-b');
@@ -60,7 +54,7 @@ it.each(['github', 'portable'] as const)('forces a fresh but retry-stable Azure 
   expect(next[0].properties.template.revisionSuffix).not.toBe(suffix);
 });
 
-describe.each(['github', 'portable'] as const)('Azure Files %s deployment preservation', (kind) => {
+describe.each(['github'] as const)('Azure Files %s deployment preservation', (kind) => {
   it('preserves existing filesystem mounts during exact-image release and rollback', async () => {
     expect(await execute(kind, false)).toHaveLength(1);
   });

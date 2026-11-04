@@ -11,11 +11,7 @@ const sources: RecoverySourceIdentity[] = [
   { provider: 'railway', primaryExternalId: 'service', providerScope: { projectId: 'project', environmentId: 'production' }, resourceIdentity: { volumeId: 'volume', volumeInstanceId: 'instance' } },
   { provider: 'cloudsql', primaryExternalId: 'instance', providerScope: { projectId: 'project', region: 'us-central1' }, resourceIdentity: {} },
   { provider: 'rds', primaryExternalId: 'arn:aws:rds:us-east-1:123456789012:db:primary', providerScope: { accountId: '123456789012', region: 'us-east-1' }, resourceIdentity: {} },
-  { provider: 'supabase', primaryExternalId: 'project-ref', providerScope: { organizationId: 'organization', projectRef: 'project-ref' }, resourceIdentity: {} },
   { provider: 'azure-postgres', primaryExternalId: '/subscriptions/sub/resourceGroups/group/providers/Microsoft.DBforPostgreSQL/flexibleServers/primary', providerScope: { subscriptionId: 'sub', resourceGroup: 'group' }, resourceIdentity: {} },
-  { provider: 'neon', primaryExternalId: 'project', providerScope: { organizationId: 'organization', projectId: 'project' }, resourceIdentity: { branchId: 'br-parent' } },
-  { provider: 'fly', primaryExternalId: 'cluster', providerScope: { organizationId: 'organization' }, resourceIdentity: { clusterId: 'cluster' } },
-  { provider: 'digitalocean', primaryExternalId: 'cluster-uuid', providerScope: { teamId: 'team' }, resourceIdentity: { clusterId: 'cluster-uuid' } },
 ];
 
 describe('shared recovery identity and point contract', () => {
@@ -45,22 +41,11 @@ describe('shared recovery identity and point contract', () => {
     expect(first).not.toHaveProperty('dataTime');
   });
 
-  it.each([
-    { kind: 'timestamp', value: '2026-09-30T00:00:00Z' },
-    { kind: 'lsn', value: '0/16B6C50' },
-  ])('represents a Neon $kind recovery point without a snapshot or workflow ID', selector => {
-    // https://api-docs.neon.tech/reference/createprojectbranch
-    const point = { kind: 'point-in-time', source: sources[5], selector };
-    expect(recoveryPointSchema.parse(point)).toEqual(point);
-    expect(point).not.toHaveProperty('id');
-    expect(point).not.toHaveProperty('available');
-  });
-
   it('rejects secret-bearing coordinates and ambiguous point selectors', () => {
     expect(() => recoverySourceIdentitySchema.parse({ ...sources[1], providerScope: { projectId: 'project', password: 'private' } })).toThrow();
     expect(() => recoverySourceIdentitySchema.parse({ ...sources[1], resourceIdentity: { connectionString: 'private' } })).toThrow();
-    expect(() => recoveryPointSchema.parse({ kind: 'point-in-time', source: sources[5],
+    expect(() => recoveryPointSchema.parse({ kind: 'point-in-time', source: sources[1],
       selector: { kind: 'timestamp', value: '2026-09-30T00:00:00Z', lsn: '0/16B6C50' } })).toThrow();
-    expect(() => recoveryPointSchema.parse({ kind: 'point-in-time', source: sources[5], selector: { kind: 'lsn', value: 'not-an-lsn' } })).toThrow();
+    expect(() => recoveryPointSchema.parse({ kind: 'point-in-time', source: sources[1], selector: { kind: 'lsn', value: 'not-an-lsn' } })).toThrow();
   });
 });

@@ -323,7 +323,6 @@ describe('ConvergeExecutor staleness', () => {
 
   it.each([
     { label: 'GitHub Actions', provider: 'github' as const },
-    { label: 'GitLab CI', provider: 'gitlab-ci' as const },
   ])('accepts an exact $label publication action', async ({ provider }) => {
     const handler = vi.fn().mockResolvedValue({ success: true, message: 'published' });
     const planId = storePlan([publicationAction(provider)], { scope: 'managed-ci-publication' });

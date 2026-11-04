@@ -47,7 +47,6 @@ import {
   azureRegistryName,
   buildAzureContainerAppsGitHubActionsSteps,
 } from './azure-container-apps-ci.workflow.js';
-import { buildAzureContainerAppsPortableRecipe } from './azure-container-apps-ci.recipe.js';
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
 import { AzureServiceVolumes } from './azure-service-volumes.js';
 import { azureVolumeFingerprint } from './azure-volume-runtime.js';
@@ -1740,8 +1739,6 @@ providerRegistry.register({
           AZURE_CLIENT_SECRET: 'clientSecret',
         },
         buildGitHubActionsSteps: buildAzureContainerAppsGitHubActionsSteps,
-        buildPortableRecipe: buildAzureContainerAppsPortableRecipe,
-        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
     },
     lifecycle: {

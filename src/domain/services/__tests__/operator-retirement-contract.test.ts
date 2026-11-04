@@ -184,3 +184,14 @@ describe('explicit completed operator retirement contract', () => {
     await expect(planCloudInstallationV1({ ...f.context, intent: f.next })).rejects.toThrow(); expect(spy).not.toHaveBeenCalled(); expect(f.deletes()).toBe(0);
   });
 });
+
+// Main's supported plan resource kinds exclude the removed messaging lifecycle.
+it('rejects a removed messaging action through the actual local installation planner', async () => {
+  const f = await fixture();
+  const plan = f.driver.plan;
+  f.driver.plan = async (context: any) => {
+    const result = await plan(context);
+    return { ...result, actions: result.actions.map((action: any) => ({ ...action, resource: { ...action.resource, kind: 'messaging' } })) };
+  };
+  await expect(planCloudInstallationV1({ ...f.context, intent: f.next })).rejects.toThrow();
+});

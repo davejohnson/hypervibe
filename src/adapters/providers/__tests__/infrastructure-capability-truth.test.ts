@@ -15,7 +15,6 @@ import { createRailwayStorageAdapter } from '../railway/railway-storage.factory.
 import { createRailwayCacheAdapter } from '../railway/railway-cache.factory.js';
 import { ElastiCacheAdapter } from '../aws/elasticache.adapter.js';
 import { AzureManagedRedisAdapter } from '../azure/azure-managed-redis.adapter.js';
-import { DigitalOceanCacheAdapter } from '../digitalocean/digitalocean-cache.adapter.js';
 import { MemorystoreAdapter } from '../gcp/memorystore.adapter.js';
 
 describe('production infrastructure capability truth', () => {
@@ -72,7 +71,6 @@ describe('production infrastructure capability truth', () => {
       ['memorystore', new MemorystoreAdapter()],
       ['elasticache', new ElastiCacheAdapter()],
       ['azure-managed-redis', new AzureManagedRedisAdapter()],
-      ['digitalocean', new DigitalOceanCacheAdapter()],
     ]);
 
     expect([...adapters.keys()].sort()).toEqual(providerRegistry.namesFor('cache').sort());
@@ -89,7 +87,6 @@ describe('production infrastructure capability truth', () => {
       ['memorystore', ['cloudrun']],
       ['elasticache', ['ecs']],
       ['azure-managed-redis', ['azure-container-apps']],
-      ['digitalocean', undefined],
     ]);
 
     expect([...expected.keys()].sort()).toEqual(providerRegistry.namesFor('cache').sort());

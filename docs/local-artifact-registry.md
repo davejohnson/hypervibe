@@ -15,9 +15,6 @@ must prepare and bind it before handing hosting to normal plan/apply.
 | ecs | Reviewed CloudFormation creates ECR with the customer installation | No new local allocation claim |
 | azure-container-apps | Reviewed ARM deployment creates ACR with the customer installation | No new local allocation claim |
 | railway | Provider source-build pipeline owns its image store | No separate managed registry claim |
-| fly | Existing release/registry path belongs to the app | No new registry lifecycle claim |
-| digitalocean | Existing App Platform source/image path | No new registry lifecycle claim |
-| vercel | Managed deployment artifacts, not this container repository model | Not applicable |
 
 Native sources reviewed before implementation:
 [repository create](https://docs.cloud.google.com/artifact-registry/docs/reference/rest/v1/projects.locations.repositories/create),

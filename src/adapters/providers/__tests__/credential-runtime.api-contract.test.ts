@@ -4,11 +4,7 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { CloudRunAdapter } from '../gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../azure/azure-container-apps.adapter.js';
-import { FlyAdapter } from '../fly/fly.adapter.js';
-import { DigitalOceanAdapter } from '../digitalocean/digitalocean.adapter.js';
-import { VercelAdapter } from '../vercel/vercel.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
-import { formatFlyEnvironmentBinding, formatFlyServiceBinding } from '../fly/fly.binding.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 
@@ -20,7 +16,7 @@ const environment = (platformBindings: Record<string, unknown>): Environment => 
 const options = { requireCredentialUpdate: true, deferDeployment: true };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
-it.each([RailwayAdapter, CloudRunAdapter, EcsExpressAdapter, AzureContainerAppsAdapter, FlyAdapter, DigitalOceanAdapter, VercelAdapter])('declares selected credential effects separately from ordinary deployment (%s)', Adapter => {
+it.each([RailwayAdapter, CloudRunAdapter, EcsExpressAdapter, AzureContainerAppsAdapter])('declares selected credential effects separately from ordinary deployment (%s)', Adapter => {
   const adapter = new Adapter();
   expect(['deferred', 'provider-rollout']).toContain((adapter.capabilities as any).credentialUpdateActivation);
   expect(['readback', 'acknowledgement']).toContain((adapter.capabilities as any).credentialValueEvidence);
@@ -127,77 +123,6 @@ it('Azure credential update preserves existing secret references, image, identit
   expect(app.properties.configuration).toMatchObject({ activeRevisionsMode: 'Multiple', registries: [{ server: 'registry', identity: 'system' }] });
   expect(secrets).toContainEqual({ name: 'key-vault', keyVaultUrl: 'https://vault.vault.azure.net/secrets/key', identity: 'system' });
   expect(await (adapter as any).readProviderEnvironmentVariables({ environment: environment({ provider: 'azure-container-apps', projectId: group, environmentId: managed, services: { web: { serviceId: appId } } }), service })).toEqual({ success: true, variables: { API_KEY: 'replacement' }, unresolvedKeys: ['REFERENCE'] });
-  expect(writes).toHaveLength(1);
-  expect(JSON.stringify(receipt)).not.toContain('replacement');
-});
-
-it('Fly stages the exact app secret without modifying or restarting its Machine', async () => {
-  const app = { id: 'app-id', name: 'bound-app', organization: { slug: 'test-org' }, status: 'deployed' };
-  const envId = formatFlyEnvironmentBinding({ organizationSlug: 'test-org', projectName: 'existing-project', environmentName: 'production' });
-  const machine = { id: 'machine-id', instance_id: 'instance-old', state: 'started', config: { image: 'registry/image:unchanged', metadata: { hypervibe_managed: 'true', hypervibe_project_id: 'existing-project', hypervibe_environment_id: envId, hypervibe_service_name: 'web', hypervibe_workload_kind: 'web' } } };
-  const writes: string[] = []; let secretReads = 0;
-  vi.stubGlobal('fetch', vi.fn(async (input, init) => {
-    const url = new URL(String(input));
-    if (init?.method === 'POST') {
-      writes.push(url.pathname);
-      expect(url.pathname).toBe('/v1/apps/bound-app/secrets');
-      expect(JSON.parse(String(init.body))).toEqual({ values: { API_KEY: 'replacement' } });
-      return Response.json({ version: 9 });
-    }
-    if (url.pathname === '/v1/apps/bound-app') return Response.json(app);
-    if (url.pathname.endsWith('/machines')) return Response.json([machine]);
-    if (url.pathname.endsWith('/secrets')) {
-      if (secretReads++ === 0) expect(url.searchParams.get('min_version')).toBe('9');
-      return Response.json({ secrets: [{ name: 'API_KEY', digest: 'opaque-native-digest' }] });
-    }
-    throw new Error('Unexpected Fly request');
-  }));
-  const adapter = new FlyAdapter(); await adapter.connect({ apiToken: 'flyv1-synthetic-token', organizationSlug: 'test-org' });
-  const receipt = await adapter.setEnvVars(environment({ provider: 'fly', projectId: 'flyorg:test-org', environmentId: envId, services: { web: { serviceId: formatFlyServiceBinding({ organizationSlug: 'test-org', appId: app.id, appName: app.name, machineId: machine.id }) } } }), service, { API_KEY: 'replacement' }, options);
-  expect(receipt, JSON.stringify(receipt)).toMatchObject({ success: true, data: { credentialValueEvidence: 'acknowledgement', credentialUpdateActivation: 'deferred', configurationVersion: 9 } });
-  expect(writes).toEqual(['/v1/apps/bound-app/secrets']);
-  expect(await (adapter as any).readProviderEnvironmentVariables({ environment: environment({ provider: 'fly', projectId: 'flyorg:test-org', environmentId: envId, services: { web: { serviceId: formatFlyServiceBinding({ organizationSlug: 'test-org', appId: app.id, appName: app.name, machineId: machine.id }) } } }), service })).toEqual({ success: true, variables: {}, unresolvedKeys: ['API_KEY'] });
-  expect(writes).toEqual(['/v1/apps/bound-app/secrets']);
-  expect(JSON.stringify(receipt)).not.toContain('replacement');
-});
-
-it('Vercel changes only selected native production keys without deleting unrelated internal markers', async () => {
-  const team = 'team_1234567890'; const project = 'prj_1234567890';
-  const mutations: any[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input, init) => {
-    const url = new URL(String(input));
-    if (url.pathname === '/v2/user') return Response.json({ id: 'user_1234567890', username: 'owner', email: 'owner@example.invalid' });
-    if (url.pathname === `/v2/teams/${team}`) return Response.json({ id: team, slug: 'existing-team', name: 'Existing team' });
-    if (url.pathname === `/v9/projects/${project}`) return Response.json({ id: project, accountId: team, name: 'bound-project' });
-    if (url.pathname.endsWith('/env') && (init?.method ?? 'GET') === 'GET') return Response.json({ envs: [{ id: 'env-marker', key: 'HYPERVIBE_HEALTH_CHECK_PATH', value: '/existing', type: 'sensitive', target: ['production'], comment: 'Managed by Hypervibe' }, { id: 'env-other', key: 'API_KEY', value: 'masked', type: 'sensitive', target: ['preview'] }], pagination: { next: null } });
-    if (url.pathname.endsWith('/env') && init?.method === 'POST') { mutations.push(JSON.parse(String(init.body))); return Response.json({}); }
-    if (url.pathname === '/v7/deployments') return Response.json({ deployments: [], pagination: { next: null } });
-    throw new Error('Unexpected Vercel request');
-  }));
-  const adapter = new VercelAdapter(); await adapter.connect({ accessToken: 'synthetic-token', teamId: team });
-  const receipt = await adapter.setEnvVars(environment({ provider: 'vercel', projectId: `team:${team}`, services: { web: { serviceId: `team:${team}:${project}` } } }), service, { API_KEY: 'replacement' }, options);
-  expect(receipt, JSON.stringify(receipt)).toMatchObject({ success: true, data: { credentialValueEvidence: 'acknowledgement' } });
-  expect(mutations).toHaveLength(1);
-  expect(mutations[0]).toEqual([{ key: 'API_KEY', value: 'replacement', type: 'sensitive', target: ['production'], comment: expect.any(String) }]);
-  expect(await (adapter as any).readProviderEnvironmentVariables({ environment: environment({ provider: 'vercel', projectId: `team:${team}`, services: { web: { serviceId: `team:${team}:${project}` } } }), service })).toEqual({ success: true, variables: {}, unresolvedKeys: ['HYPERVIBE_HEALTH_CHECK_PATH'] });
-  expect(JSON.stringify(receipt)).not.toContain('replacement');
-});
-
-it('DigitalOcean updates one exact component using encrypted values and preserves other components and references', async () => {
-  let spec: any = { name: 'bound-app', envs: [{ key: 'GLOBAL', value: '${database.DATABASE_URL}', scope: 'RUN_TIME' }], services: [{ name: 'bound-web', image: { registry_type: 'DOCR', registry: 'old-registry', repository: 'web', tag: 'immutable' }, instance_count: 3, envs: [{ key: 'API_KEY', value: 'old', type: 'SECRET', scope: 'RUN_AND_BUILD_TIME' }, { key: 'KEEP', value: '${database.DATABASE_URL}', scope: 'RUN_TIME', type: 'GENERAL' }] }], workers: [{ name: 'worker', image: { registry_type: 'DOCR', registry: 'old-registry', repository: 'worker', tag: 'old' }, envs: [{ key: 'WORKER', value: 'keep' }] }] };
-  const original = structuredClone(spec); const writes: any[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input, init) => {
-    expect(new URL(String(input)).pathname).toBe('/v2/apps/bound-app');
-    if (init?.method === 'PUT') { spec = JSON.parse(String(init.body)).spec; writes.push(spec); }
-    return Response.json({ app: { id: 'bound-app', spec, active_deployment: { id: writes.length ? 'deployment-new' : 'deployment-old', phase: 'ACTIVE' } } });
-  }));
-  const adapter = new DigitalOceanAdapter(); await adapter.connect({ apiToken: 'dop_v1_synthetic-token' });
-  const receipt = await adapter.setEnvVars(environment({ provider: 'digitalocean', projectId: 'bound-app', services: { web: { serviceId: 'bound-app:services:bound-web' } } }), service, { API_KEY: 'replacement' }, options);
-  expect(receipt, JSON.stringify(receipt)).toMatchObject({ success: true, data: { credentialValueEvidence: 'acknowledgement' } });
-  expect(writes).toHaveLength(1);
-  original.services[0].envs[0].value = 'replacement';
-  expect(spec).toEqual(original);
-  expect(await (adapter as any).readProviderEnvironmentVariables({ environment: environment({ provider: 'digitalocean', projectId: 'bound-app', services: { web: { serviceId: 'bound-app:services:bound-web' } } }), service })).toEqual({ success: true, variables: { GLOBAL: '${database.DATABASE_URL}', KEEP: '${database.DATABASE_URL}' }, unresolvedKeys: ['API_KEY'] });
   expect(writes).toHaveLength(1);
   expect(JSON.stringify(receipt)).not.toContain('replacement');
 });

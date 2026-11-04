@@ -1,3 +1,4 @@
+import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { createRequire } from 'node:module';
@@ -6,7 +7,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gcpBrokerTarget } from '../../../../domain/services/__tests__/cloud-deployment-ci.fixture.js';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
-import { buildCloudRunPortableRecipe } from '../cloudrun-ci.recipe.js';
 import '../cloudrun.adapter.js';
 
 describe('Cloud Run reviewed broker CI', () => {
@@ -38,6 +38,6 @@ describe('Cloud Run reviewed broker CI', () => {
     const steps = parse('steps:\n' + result.steps).steps, AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     for (const step of steps) if (step.with?.script) expect(() => new AsyncFunction('require', 'core', 'github', 'context', 'fetch', 'process', step.with.script)).not.toThrow();
     expect(steps.some((step: any) => step.name === 'Remove temporary registry access' && step.if === 'always()')).toBe(true);
-    expect(() => buildCloudRunPortableRecipe(target)).toThrow(/GitHub/);
+    expect(providerRegistry.getMetadata('cloudrun')?.orchestration?.ci).not.toHaveProperty('buildPortableRecipe');
   });
 });

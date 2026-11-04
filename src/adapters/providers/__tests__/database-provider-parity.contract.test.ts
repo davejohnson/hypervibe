@@ -10,10 +10,8 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { ObservedState } from '../../../domain/ports/observe.port.js';
 import { RdsAdapter } from '../aws/rds.adapter.js';
 import { CloudSqlAdapter } from '../gcp/cloudsql.adapter.js';
-import { FlyDatabaseAdapter } from '../fly/fly-database.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../railway/railway-database.factory.js';
-import { SupabaseAdapter } from '../supabase/supabase.adapter.js';
 import {
   runDatabaseProviderParityContract,
   type DatabaseLifecycleParityFixture,
@@ -66,133 +64,6 @@ function fetchMetrics(fetchMock: ReturnType<typeof vi.fn>): Pick<
       .filter((call) => ['GET', 'HEAD'].includes((call[1] as RequestInit | undefined)?.method ?? 'GET'))
       .length,
   };
-}
-
-async function setupSupabase(
-  scenario: DatabaseLifecycleParityScenario
-): Promise<DatabaseLifecycleParityFixture> {
-  let itemReads = 0;
-  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? 'GET';
-
-    if (method === 'GET' && url.pathname === '/v1/organizations') {
-      return Response.json([{ id: 'org-1', slug: 'primary-org', name: 'Primary' }]);
-    }
-
-    if (method === 'GET' && url.pathname === '/v1/projects') {
-      if (scenario === 'observation_unknown') {
-        return Response.json({ message: 'observation unavailable' }, { status: 503 });
-      }
-      if (scenario === 'identity_conflict') {
-        return Response.json(EXTERNAL_IDS.map((id) => ({
-          id,
-          name: RESOURCE_NAME,
-          organization_id: 'org-1',
-          region: 'us-east-1',
-          status: 'ACTIVE_HEALTHY',
-        })));
-      }
-    }
-
-    if (url.pathname === `/v1/projects/${EXTERNAL_IDS[0]}` && method === 'GET') {
-      itemReads += 1;
-      if (scenario === 'already_absent') {
-        return Response.json({ message: 'not found' }, { status: 404 });
-      }
-      if (scenario === 'delete_observation_unknown') {
-        return Response.json({ message: 'observation unavailable' }, { status: 503 });
-      }
-      if (scenario === 'delete_retry' && itemReads >= 3) {
-        return Response.json({ message: 'not found' }, { status: 404 });
-      }
-      return Response.json({
-        id: EXTERNAL_IDS[0],
-        name: RESOURCE_NAME,
-        organization_id: 'org-1',
-        region: 'us-east-1',
-        status: itemReads > 1 ? 'GOING_DOWN' : 'ACTIVE_HEALTHY',
-      });
-    }
-
-    if (url.pathname === `/v1/projects/${EXTERNAL_IDS[0]}` && method === 'DELETE') {
-      return new Response(null, { status: 204 });
-    }
-
-    throw new Error(`Unexpected Supabase request: ${method} ${url}`);
-  });
-  vi.stubGlobal('fetch', fetchMock);
-  vi.stubEnv('HYPERVIBE_SUPABASE_DELETE_ATTEMPTS', '4');
-  vi.stubEnv('HYPERVIBE_SUPABASE_DELETE_DELAY_MS', '0');
-  const adapter = new SupabaseAdapter();
-  await adapter.connect({ accessToken: 'token', organizationId: 'org-1' });
-  return { adapter, ...fetchMetrics(fetchMock) };
-}
-
-async function setupFly(
-  scenario: DatabaseLifecycleParityScenario
-): Promise<DatabaseLifecycleParityFixture> {
-  let itemReads = 0;
-  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? 'GET';
-
-    if (method === 'GET' && url.pathname === '/v1/postgres') {
-      if (scenario === 'observation_unknown') {
-        return Response.json({ error: 'observation unavailable' }, { status: 503 });
-      }
-      if (scenario === 'identity_conflict') {
-        return Response.json({
-          data: EXTERNAL_IDS.map((id) => ({
-            id,
-            name: RESOURCE_NAME,
-            organization: { slug: 'hypervibe-test' },
-            region: 'iad',
-            plan: 'basic',
-            status: 'ready',
-          })),
-        });
-      }
-    }
-
-    if (url.pathname === `/v1/postgres/${EXTERNAL_IDS[0]}` && method === 'GET') {
-      itemReads += 1;
-      if (scenario === 'already_absent') {
-        return Response.json({ error: 'not found' }, { status: 404 });
-      }
-      if (scenario === 'delete_observation_unknown') {
-        return Response.json({ error: 'observation unavailable' }, { status: 503 });
-      }
-      if (scenario === 'delete_retry' && itemReads >= 3) {
-        return Response.json({ error: 'not found' }, { status: 404 });
-      }
-      return Response.json({
-        data: {
-          id: EXTERNAL_IDS[0],
-          name: RESOURCE_NAME,
-          organization: { slug: 'hypervibe-test' },
-          region: 'iad',
-          plan: 'basic',
-          status: itemReads > 1 ? 'deleting' : 'ready',
-        },
-      });
-    }
-
-    if (url.pathname === `/v1/postgres/${EXTERNAL_IDS[0]}` && method === 'DELETE') {
-      return new Response(null, { status: 202 });
-    }
-
-    throw new Error(`Unexpected Fly.io request: ${method} ${url}`);
-  });
-  vi.stubGlobal('fetch', fetchMock);
-  vi.stubEnv('HYPERVIBE_FLY_DATABASE_DELETE_ATTEMPTS', '4');
-  vi.stubEnv('HYPERVIBE_FLY_DATABASE_DELETE_DELAY_MS', '0');
-  const adapter = new FlyDatabaseAdapter();
-  await adapter.connect({
-    apiToken: 'flyv1-test-token',
-    organizationSlug: 'hypervibe-test',
-  });
-  return { adapter, ...fetchMetrics(fetchMock) };
 }
 
 async function setupCloudSql(
@@ -455,14 +326,6 @@ const providers: Array<{
     },
   },
   {
-    displayName: 'Supabase',
-    provider: 'supabase',
-    setup: setupSupabase,
-    componentBindings: {
-      providerScope: { organizationId: 'org-1', region: 'us-east-1' },
-    },
-  },
-  {
     displayName: 'Cloud SQL',
     provider: 'cloudsql',
     setup: setupCloudSql,
@@ -483,12 +346,6 @@ const providers: Array<{
     componentBindings: {
       providerScope: { accountId: '123456789012', region: 'us-west-2' },
     },
-  },
-  {
-    displayName: 'Fly Managed Postgres',
-    provider: 'fly',
-    setup: setupFly,
-    componentBindings: { organizationSlug: 'hypervibe-test' },
   },
 ];
 

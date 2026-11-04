@@ -1,3 +1,4 @@
+import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import { describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { createRequire } from 'node:module';
@@ -9,7 +10,6 @@ import { CloudSqlCredentialsSchema } from '../cloudsql.adapter.js';
 import { GcsStorageCredentialsSchema } from '../gcs.adapter.js';
 import { buildGcpGithubTokenRuntime, createGcpGithubTokenProvider, parseGcpGithubWorkloadIdentity, GcpGithubWorkloadAuthentication } from '../gcp-github-workload-identity.js';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
-import { buildCloudRunPortableRecipe } from '../cloudrun-ci.recipe.js';
 
 export const githubWorkloadIdentityFixture = {
   schemaVersion: 1 as const, projectId: 'synthetic-project', projectNumber: '123456789012',
@@ -193,7 +193,7 @@ describe('Google GitHub OIDC exchange contract', () => {
       const program = buildCloudRunGitHubActionsSteps(target);
       expect(program.requiredSecrets).toEqual([]); expect(program.permissions).toContain('id-token: write');
       expect(program.steps).not.toMatch(/GCP_SERVICE_ACCOUNT_JSON|secrets\.GCP_PROJECT_ID|outputs\.access_token/);
-      expect(() => buildCloudRunPortableRecipe(target)).toThrow(/GitHub/);
+      expect(providerRegistry.getMetadata('cloudrun')?.orchestration?.ci).not.toHaveProperty('buildPortableRecipe');
       const steps = parseYaml('steps:\n' + program.steps).steps;
       const script = steps.find((step: any) => step.name === 'Verify GCP Artifact Registry').with.script;
       const env: Record<string, string> = { RUNNER_TEMP: runner, GCP_PROJECT_ID: config.projectId, GCP_BOUND_PROJECT_ID: config.projectId,

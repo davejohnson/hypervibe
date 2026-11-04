@@ -68,7 +68,7 @@ prior registration, delivery and retirement receipts remain unchanged.
 | Cloud Run / GCP Secret Manager | Implemented offline; ready for native testing | Entire owned container, exact current recorded versions; ETag and readback; no value access. Changed replication, delayed destruction and extra versions block. |
 | ECS / AWS Secrets Manager | Unsupported: no registered operator-output ownership/setup capability | DeleteSecret schedules whole-secret recovery (7–30 days); replicas differ; individual version deletion is not the same operation. No force-delete implementation. |
 | Azure Container Apps / Key Vault | Unsupported: no registered operator-output ownership/setup capability | Whole-secret deletion enters soft-delete retention; purge is separate and can be prohibited by purge protection. |
-| DigitalOcean, Fly, Railway, Vercel | Unsupported: no registered operator-output capability | No inherited deletion authority from hosting or customer secret delivery. |
+| Railway | Unsupported: no registered operator-output capability | No inherited deletion authority from hosting or customer secret delivery. |
 
 AWS and Azure customer secret delivery does not establish operator-container
 ownership or authorize cleanup. Google OAuth/GitHub registrations without native

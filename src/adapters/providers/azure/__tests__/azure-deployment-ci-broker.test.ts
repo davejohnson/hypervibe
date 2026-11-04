@@ -1,3 +1,4 @@
+import { providerRegistry } from '../../../../domain/registry/provider.registry.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -6,7 +7,6 @@ import path from 'node:path';
 import { brokerTarget } from '../../../../domain/services/__tests__/cloud-deployment-ci.fixture.js';
 import { extractGitHubScript } from '../../../../domain/services/__tests__/managed-ci-workflow.test-utils.js';
 import { buildAzureContainerAppsGitHubActionsSteps } from '../azure-container-apps-ci.workflow.js';
-import { buildAzureContainerAppsPortableRecipe } from '../azure-container-apps-ci.recipe.js';
 import '../azure-container-apps.adapter.js';
 
 // Reconstructed ARM registry/ACR exchange responses from Microsoft's contracts:
@@ -108,9 +108,9 @@ describe('Azure emitted broker authentication', () => {
     await expect(login('replaced')).rejects.toThrow(/Azure.*verif/i);
     await expect(login('echo')).rejects.toThrow(/Azure.*verif/i);
   });
-  it('requires native lifetime bindings and refuses unsupported portable broker auth before using legacy keys', () => {
+  it('requires native lifetime bindings and does not register a removed portable CI path before using legacy keys', () => {
     const incomplete = target(); delete incomplete.providerScope!.registryCreatedAt;
     expect(() => buildAzureContainerAppsGitHubActionsSteps(incomplete)).toThrow();
-    expect(() => buildAzureContainerAppsPortableRecipe(target())).toThrow(/broker|federat|unsupported/i);
+    expect(providerRegistry.getMetadata('azure-container-apps')?.orchestration?.ci).not.toHaveProperty('buildPortableRecipe');
   });
 });

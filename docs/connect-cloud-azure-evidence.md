@@ -76,9 +76,6 @@ foundation explicitly; the original working tree remains untouched.
 | ecs | Before workload: prepare the exact environment-owned execution-role secret reader policy. The separate application task role and S3 grants still follow the holding workload. Existing workloads preserve their observed execution role. | [ECS secret injection](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html) |
 | azure-container-apps | Before workload: bind administrator-installed UAMIs and exact reader grants. New prepared web installation and emitted first rollout have [offline evidence](connect-cloud-azure-prepared.md); live acceptance remains outstanding. Ordinary local first-create remains disabled. | [Container Apps identities](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity), [secret references](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets) |
 | railway | This new native cloud identity frontier is not implemented; existing Railway connection/secret behavior is preserved. | [Railway variables](https://docs.railway.com/integrations/api/manage-variables) |
-| fly | This new native cloud identity frontier is not implemented. | [Fly secrets](https://docs.fly.io/apps/secrets) |
-| digitalocean | This new native cloud identity frontier is not implemented. | [App Platform environment](https://docs.digitalocean.com/products/app-platform/how-to/use-environment-variables/) |
-| vercel | This new native cloud identity frontier is not implemented. | [Vercel environment variables](https://vercel.com/docs/environment-variables) |
 
 Azure reader grants are explicitly vault-wide, matching the vault-per-app/environment
 model. Each identity creation or grant is a separate reviewed action. Lost acknowledgments

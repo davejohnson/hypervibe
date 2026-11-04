@@ -52,9 +52,6 @@ Because the documented global source operation does not establish empty-environm
 | Cloud Run | Capability absent; existing service creation path unchanged |
 | ECS | Capability absent; existing service creation path unchanged |
 | Azure Container Apps | Capability absent; existing service creation path unchanged |
-| DigitalOcean | Capability absent; existing service creation path unchanged |
-| Vercel | Capability absent; existing service creation path unchanged |
-| Fly.io | Capability absent; existing service creation path unchanged |
 
 The optional port is not a claim that these other providers share Railway's parent/instance model. No provider-name branch or automatic name adoption is added to generic orchestration.
 

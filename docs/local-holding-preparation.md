@@ -19,9 +19,6 @@ Nonsecret evidence uses the existing SQLite run journal in a distinct namespace.
 | ECS | Explicitly unsupported | Separate CloudFormation installation |
 | Azure Container Apps | Explicitly unsupported | Separate ARM installation |
 | Railway | Explicitly unsupported | No shared prepared receipt |
-| Fly.io | Explicitly unsupported | No shared prepared receipt |
-| DigitalOcean App Platform | Explicitly unsupported | No shared prepared receipt |
-| Vercel | Explicitly unsupported | No shared prepared receipt |
 
 The local receipt never becomes a hosted deployment connection. Shared prepared
 resource inspection and first-release transitions accept independently validated
@@ -183,7 +180,7 @@ Runtime access is ready only after every required grant converges. Local
 disconnection retains these independently authorized runtime grants.
 
 The six-suite runtime regression group passes 102 checks, including existing AWS
-ECS secret access, Azure identity and the seven-provider runtime capability
+ECS secret access, Azure identity and the four-provider runtime capability
 roster; typechecking passes. The subsequent local fixture restart correction
 preserves all 14 local checks. This changes the GCP local prepared path only:
 AWS role policies, Azure vault permissions and the other providers retain their

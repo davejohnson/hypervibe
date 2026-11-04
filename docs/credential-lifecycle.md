@@ -148,7 +148,7 @@ Deployment evidence retains the exact pre-update baseline where available,
 including overlapping old deployments. Native rollout receipts bind the reviewed
 configuration to their returned deployment IDs. Deferred updates use verified
 managed release artifacts containing the accepted operation and exact native
-deployment IDs. GitHub and GitLab verify the producer program, repository,
+deployment IDs. GitHub verifies the producer program, repository,
 source commit, run and target scope before accepting this evidence. Old active
 deployments keep rollout pending. Provider traffic coverage proves routing; only
 instance coverage can establish retirement of old processes. Application
@@ -183,8 +183,7 @@ Live branch-protection enforcement has not been verified.
 ## Provider boundary review
 
 The credential lifecycle has registered selected-key writers for Railway,
-Cloud Run, ECS Express, Azure Container Apps, Fly.io, DigitalOcean App Platform
-and Vercel. It supports both staged updates and providers that start a revision
+Cloud Run, ECS Express and Azure Container Apps. It supports both staged updates and providers that start a revision
 as part of a configuration write. The plan discloses that activation effect.
 The older `scope=secrets` deferred-only contract remains distinct; see
 [runtime credential providers](runtime-credential-providers.md) for the native
@@ -194,7 +193,7 @@ updates remain separate evidence types.
 The separate container-pull contract inspects an exact bound workload, freezes
 its native scope, instance and image, and changes only its registry credential.
 It neither creates a service nor changes its source/image. The plan discloses
-native activation effects: DigitalOcean starts an app deployment; Azure
+native activation effects: Azure
 versionless Key Vault references can refresh active revisions automatically.
 Acknowledgement records synchronization, not proof of a current write-only value.
 Uncertain writes use native readback or idempotency to reconcile the frozen
@@ -206,9 +205,6 @@ input where available. Write-only destinations remain pending for review.
 | Cloud Run | [Remote upstream authentication](https://docs.cloud.google.com/artifact-registry/docs/repositories/configure-remote-authentication); exact Artifact Registry repository and existing Secret Manager reference. | Ready for live validation; update the existing remote repository's credential version, retaining workload identity, image and upstream. Standard repositories use native workload identity. |
 | ECS Express | [Repository credentials](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ExpressGatewayRepositoryCredentials.html), [idempotent secret versions](https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_PutSecretValue.html); exact existing Secrets Manager ARN. | Ready for live validation; update existing JSON username/password, preserving other fields and task definitions. Native ECR access remains workload identity. |
 | Azure Container Apps | [Registry references](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity-image-pull), [secret and Key Vault references](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets); exact app passwordSecretRef. | Ready for live validation; preserve direct app secrets or exact Key Vault identity/reference mode while updating the selected backing secret. |
-| Fly.io | [Private Fly registry images](https://fly.io/docs/blueprints/using-the-fly-docker-registry/); organization-scoped native registry access. | Native registry/build input; external package-read credentials synchronize to reviewed managed CI/build consumers, with no runtime password copy. |
-| DigitalOcean App Platform | [App image spec](https://docs.digitalocean.com/products/app-platform/reference/app-spec/); GHCR/Docker Hub registry_credentials and full app-spec update. | Ready for live validation; preserve unrelated encrypted values, image and app configuration. Native update deploys; acknowledgement does not reveal current plaintext. |
-| Vercel | [Docker on Vercel](https://vercel.com/kb/guide/docker), [scoped build variables](https://vercel.com/docs/environment-variables); native Vercel container registry or source builds. | Native registry/build input; package credentials belong to exact reviewed build/CI destinations. |
 
 Provider validation uses fixed official GET endpoints, never an application
 operation or a billable request. Reconstructed synthetic observations cover the

@@ -21,7 +21,7 @@ ADC callbacks. It has no hosted identity and cannot enter hosted factories.
 | Cloud Run / Artifact Registry | Packaged public holding/backup helpers, or an explicitly selected private application candidate in the already prepared `hypervibe` repository | Exact project/repository lifetime; transient user ADC; immutable registry digest verified against the reviewed local configuration; anonymous reads only for public helpers |
 | Azure Container Apps / ACR | Unsupported publisher here | Consumes the reviewed public operator image; no implicit ACR setup |
 | ECS / ECR | Unsupported publisher here | Uses S3 templates; no implicit ECR setup |
-| Railway, Fly, DigitalOcean, Vercel | Unsupported publisher here | No emulation or inherited publication capability |
+| Railway | Unsupported publisher here | No emulation or inherited publication capability |
 
 The two packaged AWS templates and holding/backup helpers retain their existing
 publication contract. The optional private candidate extension below publishes
@@ -314,7 +314,7 @@ repository lifetime and original installation/attempt ownership, and both projec
 and repository IAM reads. Public principals or unknown policy reads block
 publication. Organization/folder ancestors are explicitly unsupported here until
 their inherited authority can be verified. All other named hosting publishers
-(ECS/ECR, Azure Container Apps/ACR, Railway, Fly, DigitalOcean and Vercel) reject
+(ECS/ECR, Azure Container Apps/ACR and Railway) reject
 this candidate kind; existing deployment and public helper capabilities are
 unchanged. Historical bindings without the private repository ownership proof
 must complete a separately reviewed binding repair from their retained journals.

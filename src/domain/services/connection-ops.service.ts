@@ -90,7 +90,7 @@ export async function saveConnection(
   }
 
   // Validate credentials using the provider's schema. Secret managers
-  // (vault, doppler, 1password, bitwarden, ...) live in their own registry.
+  // (aws-secrets, stripe-projects) live in their own registry.
   const isSecretManager = !providerRegistry.get(provider) && secretManagerRegistry.has(provider);
   const validation = isSecretManager
     ? secretManagerRegistry.validateCredentials(provider, credentials)
