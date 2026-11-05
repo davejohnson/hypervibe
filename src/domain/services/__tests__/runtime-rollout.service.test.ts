@@ -369,6 +369,71 @@ describe('runtime rollout state', () => {
     expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: next })).toHaveLength(1);
   });
 
+  // Normalized evidence reconstructed from the November 5 GCP customer status:
+  // exact application revision/reference reads succeeded after managed CI, while
+  // regional inventory remained unknown. Exact GET/UID normalization is covered
+  // in cloudrun-prepared-release.contract.test.ts; this is its rollout consumer.
+  function exactGcpObservation(deploymentId: string): ObservedState {
+    const state = observed(deploymentId);
+    state.provider = 'cloudrun'; state.projectId = 'customer-project'; state.environmentId = 'us-central1';
+    state.partial = true;
+    state.completeness = { services: 'unknown', serviceConfigurations: { web: 'installed-web' } };
+    Object.assign(state.services[0], { name: 'web', externalId: 'installed-web', workloadKind: 'web',
+      runtimeSecretReferenceActivation: 'application-release' });
+    return state;
+  }
+
+  function exactGcpRequirement(baseline?: ObservedState, receiptBaseline: 'present' | 'unknown' | null = 'present') {
+    const scoped = new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      provider: 'cloudrun', projectId: 'customer-project', environmentId: 'us-central1',
+      services: { web: { serviceId: 'installed-web' } },
+    })!;
+    const reviewed: PlanAction = { ...serviceAction, id: 'service:web', resource: { kind: 'service', provider: 'cloudrun', name: 'web' } };
+    return recordRuntimeRolloutRequirements({ environment: scoped, provider: 'cloudrun', observed: baseline ?? null,
+      actions: [reviewed], applyRunId: 'verified-customer-apply', receipts: [{ actionId: reviewed.id, status: 'succeeded', data: {
+        runtimeRolloutRequired: true,
+        ...(receiptBaseline ? { rolloutBaseline: { state: receiptBaseline, ...(receiptBaseline === 'present' ? { deploymentId: 'holding-revision' } : {}) } } : {}),
+      } }] });
+  }
+
+  it('clears the GCP restart warning from an exact later application revision despite unknown inventory', () => {
+    const updated = exactGcpRequirement();
+    expect(runtimeRolloutRequirements({ environment: updated, provider: 'cloudrun', observed: exactGcpObservation('application-revision') })).toEqual([]);
+  });
+
+  it('retains an exact pre-update deployment baseline despite unknown regional inventory', () => {
+    const updated = exactGcpRequirement(exactGcpObservation('previous-application-revision'), null);
+    expect(parseRuntimeRolloutBindings(updated)[0].baselineDeployment).toEqual({ state: 'present', id: 'previous-application-revision' });
+  });
+
+  it.each(['unknown', 'wrong-coverage', 'missing-id', 'replacement', 'absent', 'holding', 'same-revision', 'unknown-baseline', 'old-active', 'duplicate', 'wrong-project', 'wrong-region', 'wrong-provider'] as const)(
+    'keeps exact GCP %s rollout evidence pending', kind => {
+      const updated = exactGcpRequirement(undefined, kind === 'unknown-baseline' ? 'unknown' : 'present');
+      const next = exactGcpObservation(kind === 'same-revision' ? 'holding-revision' : 'application-revision');
+      if (kind === 'unknown') delete next.completeness!.serviceConfigurations;
+      if (kind === 'wrong-coverage') next.completeness!.serviceConfigurations!.web = 'different-service';
+      if (kind === 'missing-id') delete (updated.platformBindings.runtimeRollouts as Array<Record<string, unknown>>)[0].serviceExternalId;
+      if (kind === 'replacement') { next.services[0].externalId = 'replacement'; next.completeness!.serviceConfigurations!.web = 'replacement'; }
+      if (kind === 'absent') next.services = [];
+      if (kind === 'holding') next.services[0].status = 'empty';
+      if (kind === 'old-active') next.services[0].deployment!.activeDeploymentIds = ['holding-revision', 'application-revision'];
+      if (kind === 'duplicate') next.services.push({ ...next.services[0] });
+      if (kind === 'wrong-project') next.projectId = 'another-project';
+      if (kind === 'wrong-region') next.environmentId = 'another-region';
+      if (kind === 'wrong-provider') next.provider = 'another-provider';
+      expect(runtimeRolloutRequirements({ environment: updated, provider: 'cloudrun', observed: next })).toHaveLength(1);
+    });
+
+  it('keeps strict deployed-value verification after exact configuration coverage succeeds', () => {
+    const updated = strictRequirement(environment);
+    const next = deployed('new', { ...intendedHashes, DATABASE_URL: hashEnvValue('old-deployed-value') });
+    next.partial = true;
+    next.completeness = { services: 'unknown', serviceConfigurations: { worker: 'rail-worker' } };
+    expect(runtimeRolloutRequirements({ environment: updated, provider: 'railway', observed: next })).toEqual([
+      expect.objectContaining({ reason: 'The deployed consumer has not activated the intended configuration.' }),
+    ]);
+  });
+
   it('waits for every observed pre-rotation deployment, including older overlapping instances', () => {
     const before = observed('old-latest');
     before.services[0].deployment!.activeDeploymentIds = ['old-earlier', 'old-latest'];

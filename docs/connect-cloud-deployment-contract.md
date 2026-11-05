@@ -142,6 +142,23 @@ without incrementing every legacy provider's renderer revision. Legacy emitter r
 are pinned against committed `7fcb852`, including whitespace. Existing AWS/Azure input
 hashes and GCP revision 2 remain unchanged.
 
+## Native GCP walkthrough — 2026-11-05
+
+The disposable customer fixture completed setup, email-verified secret submission,
+workflow registration, owner release approval and managed deployment. GitHub run
+[42096975041](https://github.com/davejohnson/hypervibe-railway-roundtrip/actions/runs/42096975041)
+deployed exact source `6b51cf958898588f9d291a3aa0acd9a67a58bb9b`.
+The native configuration check verified the submitted secret's immutable version 1;
+`/health` returned HTTP 200 and `/verify` returned HTTP 200 with
+`{"secretAvailable":true,"provider":"cloudrun"}`. The agent received no secret value.
+Customer CLI runs disabled local cloud credential chains and used hosted temporary
+access. Hypercloud consumed the actual packaged Hypervibe library in its tested image.
+
+This proves that GCP fixture path, not complete three-cloud acceptance. Collection
+trust removal with continued runtime reading, equivalent AWS/Azure walkthroughs,
+independent multi-person usability evidence and scoped cleanup remain outstanding.
+The test resources remain active; both feature PRs remain drafts.
+
 ## Regression evidence and remaining gates
 
 The AWS publication audit disproved the initial suspicion that arbitrary HTTPS hosts

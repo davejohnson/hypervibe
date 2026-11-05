@@ -2,7 +2,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import type { Environment } from '../entities/environment.entity.js';
 import type { ActionReceipt } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { ObservedService, ObservedState } from '../ports/observe.port.js';
+import { hasCompleteServiceConfiguration, type ObservedService, type ObservedState } from '../ports/observe.port.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { isDeepStrictEqual } from 'node:util';
 import { providerRegistry } from '../registry/provider.registry.js';
@@ -175,13 +175,23 @@ function rolloutServices(action: PlanAction, receipt: ActionReceipt): string[] {
   return [...services].sort();
 }
 
+function exactConfigurationObserved(observed: ObservedState | null, environment: Pick<Environment, 'platformBindings'> | null | undefined,
+  provider: string, service: string, externalId: string | undefined): boolean {
+  return Boolean(observed && externalId && observed.provider === provider && observed.projectId
+    && observed.projectId === environment?.platformBindings.projectId
+    && observed.environmentId === environment?.platformBindings.environmentId
+    && hasCompleteServiceConfiguration(observed, service, externalId));
+}
+
 function baselineDeployment(
   observed: ObservedState | null,
-  service: ObservedService | undefined
+  service: ObservedService | undefined,
+  exactConfiguration = false
 ): RuntimeRolloutBinding['baselineDeployment'] {
   if (
     !observed
-    || observed.completeness?.serviceIdentities !== 'complete' && (observed.partial || observed.completeness?.services === 'unknown')
+    || !exactConfiguration && observed.completeness?.serviceIdentities !== 'complete'
+      && (observed.partial || observed.completeness?.services === 'unknown')
   ) {
     return { state: 'unknown' };
   }
@@ -292,7 +302,8 @@ export function recordRuntimeRolloutRequirements(params: {
       const baseline = sameOperation ? current!.baselineDeployment : exactReceiptBaseline
         ?? (current?.applyRunId === params.applyRunId
           ? current.baselineDeployment
-          : baselineDeployment(params.observed, observedService));
+          : baselineDeployment(params.observed, observedService,
+            exactConfigurationObserved(params.observed, params.environment, params.provider, serviceName, declaredServiceId)));
       const activeDeploymentIds = [...new Set([
         ...(baseline.activeDeploymentIds ?? []),
         ...(!sameOperation ? (observedService?.deployment?.activeDeploymentIds ?? []).filter(id => !receiptDeploymentIds?.includes(id)) : []),
@@ -433,17 +444,19 @@ export function runtimeRolloutRequirements(params: {
   const observedServices = new Map(
     (params.observed?.services ?? []).map((service) => [service.name, service])
   );
-  const observationIncomplete = !params.observed
-    || params.observed.completeness?.serviceIdentities !== 'complete' && (params.observed.partial || params.observed.completeness?.services === 'unknown');
+  const observationIncomplete = (binding: RuntimeRolloutBinding) => !params.observed
+    || params.observed.completeness?.serviceIdentities !== 'complete'
+      && (params.observed.partial || params.observed.completeness?.services === 'unknown')
+      && !exactConfigurationObserved(params.observed, params.environment, binding.provider, binding.service, binding.serviceExternalId);
 
   return parseRuntimeRolloutBindings(params.environment)
     .filter((binding) => binding.provider === params.provider)
     .filter((binding) => (
-      observationIncomplete || !rolloutCompleted(binding, observedServices.get(binding.service), params.observed)
+      observationIncomplete(binding) || !rolloutCompleted(binding, observedServices.get(binding.service), params.observed)
     ))
     .map((binding) => {
       const service = observedServices.get(binding.service);
-      const reason = observationIncomplete
+      const reason = observationIncomplete(binding)
         ? 'A post-configuration deployment could not be verified because service observation is incomplete.'
         : !service
           ? 'The affected service is not currently observable.'
