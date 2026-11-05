@@ -14,6 +14,8 @@ import type { CloudDeploymentAdapterInputV1 } from '../../domain/ports/cloud-dep
 import { githubActionsWorkflowInputHash } from '../../domain/services/github-ops.service.js';
 import { resolveReviewedBranchDeployTargets } from '../../domain/services/managed-ci-targets.js';
 import { readRepoSpecFile } from '../../domain/spec/repo-spec-file.js';
+import { PlanService } from '../../domain/plan/plan.service.js';
+import { selectedDeploymentAccess } from '../../adapters/cloud/deployment-access.client.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { runCli } from '../../interfaces/cli/run.js';
 import { registerCommandRegistry } from '../../interfaces/mcp/adapter.js';
@@ -125,6 +127,41 @@ function fixture() {
     rewriteAuthorization: (fn: typeof rewriteAuthorization) => { rewriteAuthorization = fn; } };
 }
 describe('device deployment authority through the ordinary command and adapter boundaries', () => {
+  // Cloud deployment approval is not GitHub repository authority. This exercises
+  // real registered providers, encrypted SQLite records and both selection paths.
+  it.each([true, false])('keeps GitHub authorization independent of hosted deployment approval (connected=%s)', async connected => {
+    const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+    if (connected) f.context.repos.connections.upsertVerifiedBatch([{ provider: 'github', scope: 'studio/app',
+      credentialsEncrypted: f.context.secretStore.encryptObject({ apiToken: 'synthetic-github-contract-token' }) }]);
+    const plan = new PlanService(), spec = readRepoSpecFile(root)!.spec;
+    const environment = { ...spec.environments.staging, deploy: { strategy: 'branch' as const, trigger: 'ci' as const, branch: 'main' } };
+    const results = await runWithWorkspaceDirectories([root], async () => [
+      plan.providerPreflight(['github'], f.project, 'staging'),
+      plan.preflight(environment, 'staging', spec, f.project),
+    ]);
+    for (const blocked of results) {
+      if (connected) expect.soft(blocked).toEqual([]);
+      else expect.soft(blocked).toEqual([expect.objectContaining({ provider: 'github', reason: expect.stringContaining('No verified github') })]);
+    }
+    const resolved = await runWithWorkspaceDirectories([root], () => f.context.adapterFactory.getProviderAdapter('github', f.project, undefined, 'staging'));
+    if (connected) expect(resolved).toMatchObject({ success: true, adapter: { name: 'github' }, connectionProvider: 'github' });
+    else expect(resolved).toMatchObject({ success: false, error: expect.stringContaining('No connection found for github') });
+    expect(await f.adapter('staging')).toMatchObject({ success: true, connectionProvider: 'hypervibe-deployment-binding' });
+  });
+  it('keeps unknown and mismatched hosting providers blocked with a selected hosted binding', async () => {
+    const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+    const plan = new PlanService();
+    for (const provider of ['cloudrun', 'ecs', 'azure-container-apps', 'railway']) {
+      f.context.repos.connections.upsertVerifiedBatch([{ provider, scope: 'studio/app',
+        credentialsEncrypted: f.context.secretStore.encryptObject({ authMode: 'default' }) }]);
+      expect(await runWithWorkspaceDirectories([root], async () => plan.providerPreflight([provider], f.project, 'staging')))
+        .toEqual([expect.objectContaining({ provider, reason: expect.stringContaining('exact environment deployment approval') })]);
+      expect(await runWithWorkspaceDirectories([root], () => f.context.adapterFactory.getProviderAdapter(provider, f.project, undefined, 'staging')))
+        .toMatchObject({ success: false, error: expect.stringContaining('Exact environment deployment access') });
+    }
+    expect(() => selectedDeploymentAccess({ providerName: 'unknown-provider', scopeHints: ['github.com/studio/app'], environment: 'staging',
+      store: { connections: f.context.repos.connections, secretStore: f.context.secretStore } })).toThrow();
+  });
   it('finishes hosted session verification beyond fifteen seconds with the saved device and source', async () => {
     const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
     const selected = await f.adapter('staging'); expect(selected.success).toBe(true);

@@ -1294,7 +1294,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const selectedCi = resolveDevOpsSelection(spec)?.ci;
   const credentialConnectionProvider = selectedCi
     ? devOpsProviderRegistry.ciProvider(selectedCi.provider)?.connectionProvider : undefined;
-  const blocked = secretsOnly
+  const blocked = planScope === 'runtime-access'
+    ? planService.providerPreflight([envSpec.hosting.provider, ...loaded.document.actions.map(action => action.resource.provider)], projectForPreflight, envName)
+    : secretsOnly
     ? planService.providerPreflight([envSpec.hosting.provider], projectForPreflight, envName)
     : retainedCleanupOnly
     ? planService.providerPreflight([

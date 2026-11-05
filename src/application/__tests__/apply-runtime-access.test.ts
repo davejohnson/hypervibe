@@ -96,6 +96,38 @@ function fixture(managedCi = false) {
 }
 
 describe('runtime access through saved plans and SQLite', () => {
+  it('applies the environment runtime stage without unrelated GitHub authority, while full deployment still requires it', async () => {
+    const f = fixture(true); f.createEnvironment('staging');
+    for (const connection of f.ctx.repos.connections.findAllByProvider('github')) f.ctx.repos.connections.delete(connection.id);
+    vi.mocked(PlanService.prototype.providerPreflight).mockRestore();
+    vi.mocked(PlanService.prototype.projectPreflight).mockRestore();
+    vi.mocked(PlanService.prototype.preflight).mockRestore();
+    f.ctx.repos.connections.upsertVerifiedBatch([{ provider: 'ecs', scope: 'example/runtime-access-app',
+      credentialsEncrypted: getSecretStore().encryptObject({ authMode: 'default' }) }]);
+    const planned = await f.plan();
+    expect(planned).toMatchObject({ scope: 'runtime-access', blocked: [] });
+    const saved = planRunDocumentSchema.parse(f.ctx.repos.runs.findById(planned.planRunId)!.plan);
+    expect(saved.overrides?.services).toBeUndefined();
+    const applied = await f.apply(planned.planRunId, planned.actions.map(action => action.id));
+    expect(applied, JSON.stringify(applied)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(f.writes).toEqual(['grant:staging']); expect(f.deploy).not.toHaveBeenCalled();
+    const stored = new SpecStore().get(f.project)!;
+    expect(new PlanService().preflight(stored.spec.environments.staging, 'staging', stored.spec, f.project))
+      .toEqual([expect.objectContaining({ provider: 'github', reason: expect.stringContaining('No verified github') })]);
+  });
+  it('still requires the cloud authority named by an environment runtime stage', async () => {
+    const f = fixture(true); f.createEnvironment('staging');
+    vi.mocked(PlanService.prototype.providerPreflight).mockRestore();
+    vi.mocked(PlanService.prototype.projectPreflight).mockRestore();
+    vi.mocked(PlanService.prototype.preflight).mockRestore();
+    const planned = await f.plan();
+    expect(planned.scope).toBe('runtime-access');
+    const applied = await f.apply(planned.planRunId, planned.actions.map(action => action.id));
+    expect(applied).toMatchObject({ kind: 'blocked', applyBlocked: expect.arrayContaining([
+      expect.objectContaining({ provider: 'ecs', reason: expect.stringContaining('No verified ecs') }),
+    ]) });
+    expect(f.writes).toEqual([]); expect(f.deploy).not.toHaveBeenCalled();
+  });
   it('directs a partial deployment to the selected runtime scope without broadening its services', async () => {
     const f = fixture(); f.createEnvironment('staging');
     const result = await new PlanService().plan(f.project, 'staging', { serviceFilter: ['web'], includeEnvFile: false });
