@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import type { CommandContext } from './context.js';
-import { parseSetupContinuation, setupContinuationResult } from './cloud-setup-continuation.js';
+import { parseSetupContinuation, setupContinuationResult, SETUP_CONTINUATION_TIMEOUT_MS } from './cloud-setup-continuation.js';
 import { HvError } from './results.js';
 import { CloudHttpError, cloudAccessRejected, createCloudJsonClient } from './cloud-http.js';
 import { createHypervibeCloudPairingClient, normalizeHypervibeCloudBaseUrl } from './cloud-pairing.js';
@@ -216,7 +216,7 @@ export function createCloudSecretSetups({ context, fetchImpl = fetch, directory 
       }
       catch { /* Unreadable or replaced state must not be erased. */ }
     }
-    const rawRequest = createCloudJsonClient(baseUrl, fetchImpl, 30_000);
+    const rawRequest = createCloudJsonClient(baseUrl, fetchImpl, input.action === 'continue' ? SETUP_CONTINUATION_TIMEOUT_MS : 30_000);
     const request: typeof rawRequest = async (pathname, options = {}) => {
       try { assertCurrentState(); const result = await rawRequest(pathname, options); assertCurrentState(); return result; }
       catch (error) { if (options.token && cloudAccessRejected(error)) forget('token', options.token); throw error; }

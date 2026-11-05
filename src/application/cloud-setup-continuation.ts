@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { CLOUD_INSTALLATION_REASONS } from '../domain/ports/cloud-installation.port.js';
 import { HvError } from './results.js';
 
-// HC setup-continuations v1: one request (cooperative server budget 20s, client deadline 30s).
+// HC setup-continuations v1: one request (cooperative server budget 180s, client deadline 240s).
 // The server may outlive its cooperative budget; a client timeout is uncertain.
 // Reservations are not proof of dispatch; completion counts are observations.
+export const SETUP_CONTINUATION_TIMEOUT_MS = 240_000;
 const continuation = z.object({
   schemaVersion: z.literal(1),
   status: z.enum(['ready', 'progressed', 'waiting', 'needs-sign-in', 'needs-review', 'blocked']),

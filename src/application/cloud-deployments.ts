@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { CommandContext } from './context.js';
-import { parseSetupContinuation, setupContinuationResult } from './cloud-setup-continuation.js';
+import { parseSetupContinuation, setupContinuationResult, SETUP_CONTINUATION_TIMEOUT_MS } from './cloud-setup-continuation.js';
 import { HvError } from './results.js';
 import { CloudHttpError, cloudAccessRejected, createCloudJsonClient } from './cloud-http.js';
 import { createHypervibeCloudPairingClient, normalizeHypervibeCloudBaseUrl } from './cloud-pairing.js';
@@ -134,7 +134,7 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
       ...(value.pendingPairing || value.status === 'pending' ? { verificationUrl: value.pendingPairing?.verificationUrl ?? value.verificationUrl, userCode: value.pendingPairing?.userCode ?? value.userCode } : {}) });
     const sourceSummary = () => binding?.sourceProposal ? { id: binding.sourceProposal.id, status: binding.sourceProposal.status,
       ...(binding.sourceProposal.digest ? { digest: binding.sourceProposal.digest } : {}), sourceBranch: binding.sourceProposal.source.branch } : undefined;
-    const raw = createCloudJsonClient(baseUrl, fetchImpl, 30_000);
+    const raw = createCloudJsonClient(baseUrl, fetchImpl, input.action === 'continue' ? SETUP_CONTINUATION_TIMEOUT_MS : 30_000);
     const request: typeof raw = async (pathname, options = {}) => {
       assertCurrent();
       try { const result = await raw(pathname, options); assertCurrent(); return result; }

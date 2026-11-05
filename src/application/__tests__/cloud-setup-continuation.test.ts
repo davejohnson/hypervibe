@@ -63,6 +63,15 @@ function fixture(purpose: 'connect-cloud' | 'deployment-access', baseUrl = 'http
 }
 
 describe.each(['connect-cloud', 'deployment-access'] as const)('%s agent continuation', purpose => {
+  it('keeps a valid multi-read setup response after forty-five seconds without resubmitting', async () => {
+    const f = fixture(purpose); await f.connect();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    f.during(() => new Promise<void>(resolve => setTimeout(resolve, 45_000)));
+    const pending = f.run({ action: 'continue' });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(await pending).toMatchObject({ ok: true, data: { continuation: { status: 'waiting' } } });
+    expect(f.calls.filter(call => call.url.endsWith('/setup-continuations'))).toHaveLength(1);
+  });
   it('posts only an empty body to the existing exact connection and keeps waiting agent-owned', async () => {
     const f = fixture(purpose); await f.connect(); const before = f.calls.length;
     const result = await f.run({ action: 'continue' });
@@ -185,7 +194,11 @@ describe.each(['connect-cloud', 'deployment-access'] as const)('%s agent continu
     f.during(() => new Promise<void>(() => {}));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const pending = f.run({ action: 'continue' });
-    await vi.advanceTimersByTimeAsync(30_001);
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(195_001);
     expect(await pending).toMatchObject({ ok: false, agentInstruction: { action: 'continue' } });
     expect(['hypervibe-secret-destinations', 'hypervibe-deployment-access', 'hypervibe-deployment-binding'].flatMap(provider => f.context.repos.connections.findAllByProvider(provider))).toEqual(before);
     expect(f.calls.filter(call => call.url.endsWith('/setup-continuations'))).toHaveLength(1);
