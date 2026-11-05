@@ -6,6 +6,8 @@ export default defineConfig({
     environment: 'node',
     setupFiles: ['src/test/setup.ts'],
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
+    // Keep passing tests quiet while retaining failures, logs, and CI annotations.
+    reporters: process.env.GITHUB_ACTIONS === 'true' ? ['minimal', 'github-actions'] : ['minimal'],
     // Run tests sequentially to avoid state bleeding
     fileParallelism: false,
     coverage: {

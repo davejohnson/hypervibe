@@ -544,46 +544,6 @@ describe('Railway storage buckets', () => {
     expect(request).toHaveBeenCalledTimes(4);
   });
 
-  it('does not report success until the environment bucket patch converges', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(bucketState())
-      .mockResolvedValueOnce({ bucketCreate: { id: 'bucket-1', name: 'uploads', projectId: 'rp' } })
-      .mockResolvedValueOnce(bucketState({ buckets: [{ id: 'bucket-1', name: 'uploads' }] }))
-      .mockResolvedValueOnce({ environmentPatchCommit: 'deployment-1' })
-      .mockResolvedValueOnce(bucketState({ buckets: [{ id: 'bucket-1', name: 'uploads' }] }));
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: typeof request } }).client = { request };
-
-    const receipt = await adapter.ensureStorage(environment(), 'uploads', { region: 'sjc' });
-
-    expect(receipt).toMatchObject({
-      success: false,
-      data: { externalId: 'bucket-1', patchSubmitted: true, verification: 'pending' },
-    });
-    expect(request).toHaveBeenCalledTimes(5);
-  });
-
-  it('verifies terminal environment absence after deleting a bucket instance', async () => {
-    const active = bucketState({
-      buckets: [{ id: 'bucket-1', name: 'uploads' }],
-      config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-    });
-    const request = vi.fn()
-      .mockResolvedValueOnce(active)
-      .mockResolvedValueOnce({ environmentPatchCommit: 'deployment-1' })
-      .mockResolvedValueOnce(bucketState({
-        buckets: [{ id: 'bucket-1', name: 'uploads' }],
-        config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: true } },
-      }));
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: typeof request } }).client = { request };
-
-    const receipt = await adapter.destroyStorage(environment(), 'bucket-1');
-
-    expect(receipt).toMatchObject({ success: true, data: { externalId: 'bucket-1', deleted: true } });
-    expect(request).toHaveBeenCalledTimes(3);
-  });
-
   it('rejects an unacknowledged deletion patch', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(bucketState({

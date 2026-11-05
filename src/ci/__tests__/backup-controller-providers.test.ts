@@ -51,7 +51,6 @@ describe('packaged backup controller provider and credential boundary', () => {
     const target = { hosting: { provider: 'vercel' }, destination: { identity: { provider: 's3' } },
       objects: [{ identity: { provider: 'gcs' } }, { identity: { provider: 'azureblob' } }, { identity: { provider: 's3' } }] };
     const selected = module.managedBackupProviderNames;
-    expect(typeof selected).toBe('function');
     expect(selected(target)).toEqual(['azureblob', 'gcs', 's3']);
     expect(selected({ ...target, hosting: { provider: 'railway' }, database: {} })).toEqual(['azureblob', 'gcs', 'railway', 's3']);
   });

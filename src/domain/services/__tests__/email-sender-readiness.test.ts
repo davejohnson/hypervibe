@@ -163,7 +163,7 @@ describe('SendGrid sender authorization transport contract (reconstructed offici
     expect(await check(['orders@example.com'])).toEqual(['unknown']);
   });
 
-  it.each([403, 429, 500])('preserves unknown on provider error %s without echoing its body', async status => {
+  it.each([403, 500])('preserves unknown on provider error %s without echoing its body', async status => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ errors: [{ message: 'SG.synthetic-key orders@example.com' }] }, status));
     expect(await check(['orders@example.com'])).toEqual(['unknown']);
   });

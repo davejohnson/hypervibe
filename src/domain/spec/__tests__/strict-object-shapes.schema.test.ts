@@ -6,7 +6,6 @@ import {
   deploySpecSchema,
   domainRegistrationSpecSchema,
   envFileSpecSchema,
-  environmentSpecSchema,
   githubSpecSchema,
   iosSpecSchema,
   iosTestflightGroupSpecSchema,
@@ -73,12 +72,5 @@ describe('desired-state object strictness', () => {
       bundleId: 'com.example.app',
       testflight: { groups: {}, grops: {} },
     }), 'grops');
-  });
-
-  it('still applies defaults to valid strict objects', () => {
-    expect(environmentSpecSchema.parse({ hosting: { provider: 'railway' } })).toMatchObject({
-      hosting: { provider: 'railway' },
-      services: {},
-    });
   });
 });

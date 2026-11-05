@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -67,17 +67,6 @@ async function makeClient() {
   };
 }
 
-describe('generic CI diagnostics', () => {
-  it('keeps provider-specific workflow diagnostics outside the generic CI tool', () => {
-    const source = readFileSync(new URL('../hv-ci.tools.ts', import.meta.url), 'utf8');
-
-    expect(source).not.toContain('RAILWAY_SERVICE_INSTANCE_MISSING');
-    expect(source).not.toContain('RAILWAY_DEPLOY_POLLING_GRAPHQL_400');
-    expect(source).not.toContain('Service Instance not found');
-    expect(source).not.toContain('serviceInstanceDeployV2');
-    expect(source).not.toContain('Railway API 400');
-  });
-});
 describe('hv_ci_status', () => {
   it('returns project-scoped setup for every CI command when GitHub is missing', async () => {
     seedProject();

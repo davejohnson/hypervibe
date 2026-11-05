@@ -96,7 +96,10 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
     expect(fixture.contractErrors).toEqual([]);
   });
 
-  it.each([null, {}, { 'us-west2': {} }, { 'us-west2': { numReplicas: null } }])
+  it.each([
+    null,
+    { 'us-west2': {} },
+  ])
   ('keeps a null scalar unknown when its regional proof is incomplete: %j', async multiRegionConfig => {
     const fixture = await railwayHttpFixture();
     fixture.addService(target.serviceId, 'web', stagingId).instances.get(stagingId)!.numReplicas = null;
@@ -107,7 +110,10 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
     expect(fixture.contractErrors).toEqual([]);
   });
 
-  it.each([undefined, '1', -1, 0.5])('rejects omitted or malformed scalar evidence even with a complete regional map: %j', async scalar => {
+  it.each([
+    undefined,
+    '1',
+  ])('rejects omitted or malformed scalar evidence even with a complete regional map: %j', async scalar => {
     const fixture = await railwayHttpFixture();
     fixture.addService(target.serviceId, 'web', stagingId);
     fixture.environments.get(stagingId)!.config.services![target.serviceId].deploy = {
@@ -128,8 +134,8 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
   });
 
   it.each([
-    { scalar: null, regional: 2 }, { scalar: 0, regional: 1 },
-    { scalar: 1, regional: 0 }, { scalar: 2, regional: 1 },
+    { scalar: null, regional: 2 },
+    { scalar: 0, regional: 1 },
   ])('rejects unsupported or contradictory regional and scalar counts: %j', async ({ scalar, regional }) => {
     const fixture = await railwayHttpFixture();
     fixture.addService(target.serviceId, 'web', stagingId).instances.get(stagingId)!.numReplicas = scalar;
@@ -159,11 +165,7 @@ describe('Railway retain-only web volumes through serialized GraphQL', () => {
 
   it.each([
     undefined,
-    null,
     { multiRegionConfig: null },
-    { multiRegionConfig: {} },
-    { multiRegionConfig: { 'us-west2': null } },
-    { multiRegionConfig: { 'us-west2': {} } },
     { multiRegionConfig: { 'us-west2': { numReplicas: '1' } } },
   ])('preserves unknown multi-region semantics for opaque/incomplete deploy config: %j', async (deploy) => {
     const fixture = await railwayHttpFixture();

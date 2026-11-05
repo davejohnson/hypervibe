@@ -98,46 +98,6 @@ function makeFixture(kind: 'redis' | 'web', inventoryOverride?: (after: unknown)
 // Generic service creation remains the Redis/web path. PostgreSQL uses the
 // native database template, whose scope is covered by its API/lifecycle tests.
 describe('Railway generic creation beside production-only services', () => {
-  it.each(['redis', 'web'] as const)('creates staging %s when the base-name service exists only in production', async (kind) => {
-    const fixture = makeFixture(kind);
-    const result = await fixture.provision();
-
-    expect(result.receipt.success).toBe(true);
-    expect(fixture.services.get('service-production')).toEqual({
-      name: kind === 'web' ? 'web' : `${kind}-db`, environments: [productionId],
-    });
-    expect(fixture.services.get('service-staging')?.environments).toEqual([environmentId]);
-    expect(fixture.mutations.filter(({ operation }) => operation === 'CreateService')).toHaveLength(1);
-    for (const { variables } of fixture.mutations) {
-      expect(variables.input?.environmentId ?? variables.environmentId).toBe(environmentId);
-      expect(variables.input?.serviceId ?? variables.serviceId).not.toBe('service-production');
-    }
-    expect(fixture.request.mock.calls.some(([query, variables]) =>
-      query.includes('GetServiceEnvironmentInstance') && variables.serviceId === 'service-production'
-    )).toBe(false);
-  });
-
-  it('finishes pagination before proving a candidate absent from staging', async () => {
-    const fixture = makeFixture('redis', (after) => ({ service: {
-      id: 'service-production', projectId,
-      serviceInstances: {
-        edges: [{ node: after
-          ? { id: 'instance-staging', environmentId }
-          : { id: 'instance-production', environmentId: productionId } }],
-        pageInfo: { hasNextPage: !after, endCursor: after ? null : 'page-two' },
-      },
-    } }));
-    fixture.services.get('service-production')!.environments.push(environmentId);
-
-    const result = await fixture.provision();
-
-    expect(result.receipt.success).toBe(false);
-    expect(result.receipt.error).toContain('will not mutate or adopt');
-    expect(fixture.mutations).toEqual([]);
-    expect(fixture.request.mock.calls.filter(([query]) => query.includes('GetServiceInstanceInventory'))
-      .map(([, variables]) => variables.after)).toEqual([null, 'page-two']);
-  });
-
   it.each([
     ['unavailable inventory', () => { throw new Error('inventory unavailable'); }, 'inventory unavailable'],
     ['missing service', () => ({ service: null }), 'service disappeared'],

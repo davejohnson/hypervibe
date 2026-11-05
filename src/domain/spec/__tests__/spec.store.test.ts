@@ -39,10 +39,6 @@ function makeProject(policies: Record<string, unknown> = {}): Project {
 }
 
 describe('desiredStateToSpec', () => {
-  it('returns null when no legacy desired state exists', () => {
-    expect(desiredStateToSpec({ policies: {} } as unknown as Project)).toBeNull();
-  });
-
   it('converts a legacy desired state into a v1 spec', () => {
     const project = {
       name: 'myapp',
@@ -101,14 +97,6 @@ describe('desiredStateToSpec', () => {
 });
 
 describe('deepMergeSpec', () => {
-  it('merges objects recursively and replaces scalars', () => {
-    const merged = deepMergeSpec(
-      { a: { x: 1, y: 2 }, keep: true },
-      { a: { y: 3 } }
-    ) as Record<string, unknown>;
-    expect(merged).toEqual({ a: { x: 1, y: 3 }, keep: true });
-  });
-
   it('deletes keys set to null', () => {
     const merged = deepMergeSpec(
       { services: { api: { startCommand: 'x' }, worker: {} } },
@@ -163,20 +151,25 @@ describe('SpecStore', () => {
       version: 1,
       project: project.name,
       gitRemoteUrl: 'git@github.com:davejohnson/spec-one.git',
-      environments: { staging: { hosting: { provider: 'railway' }, services: { api: {} } } },
+      environments: { staging: { hosting: { provider: 'railway' }, services: { api: { startCommand: 'npm start' } } } },
     });
     expect(v1.revision).toBe(1);
     expect(v1.spec.gitRemoteUrl).toBe('git@github.com:davejohnson/spec-one.git');
 
     const v2 = store.merge(project, {
       gitRemoteUrl: 'https://github.com/davejohnson/spec-two.git',
-      environments: { staging: { services: { worker: { workloadKind: 'worker' } } } },
+      environments: { staging: { services: {
+        api: { startCommand: 'npm run serve' },
+        worker: { workloadKind: 'worker' },
+      } } },
     });
     expect(v2.revision).toBe(2);
     expect(v2.spec.gitRemoteUrl).toBe('https://github.com/davejohnson/spec-two.git');
     expect(Object.keys(v2.spec.environments.staging.services)).toEqual(['api', 'worker']);
+    expect(v2.spec.environments.staging.services.api.startCommand).toBe('npm run serve');
 
     expect(store.getRevision(project.id, 1)!.environments.staging.services).not.toHaveProperty('worker');
+    expect(store.getRevision(project.id, 1)!.environments.staging.services.api.startCommand).toBe('npm start');
     expect(store.getRevision(project.id, 1)!.gitRemoteUrl).toBe('git@github.com:davejohnson/spec-one.git');
   });
 

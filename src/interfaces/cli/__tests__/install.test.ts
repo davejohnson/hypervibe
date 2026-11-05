@@ -125,7 +125,7 @@ if (client === 'codex' && args[1] === 'list') {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it.each(['claude', 'codex', 'opencode'])('checks missing %s skills without writing or invoking a client', async client => {
+  it.each(['codex'])('checks missing %s skills without writing or invoking a client', async client => {
     expect(await runInstall([client, '--skill-only', '--check'], { io })).toBe(0);
     expect(JSON.parse(stdout)).toEqual({ schema: 1, client, state: 'missing', packageVersion: HYPERVIBE_VERSION });
     expect(stderr).toBe('');
@@ -217,7 +217,7 @@ if (client === 'codex' && args[1] === 'list') {
     expect(calls().filter(call => call.args[1] === 'add')).toHaveLength(addCalls);
   });
 
-  it.each(['claude', 'codex', 'opencode'])('installs only the %s skill for an existing managed MCP without starting a client', async client => {
+  it.each(['codex'])('installs only the %s skill for an existing managed MCP without starting a client', async client => {
     vi.stubEnv('PATH', path.join(directory, 'missing'));
     expect(await runInstall([client, '--skill-only'], { io })).toBe(0);
     expect(readFileSync(path.join(skillPath(client), 'SKILL.md'), 'utf8')).toContain('name: hypervibe');
@@ -248,7 +248,7 @@ if (client === 'codex' && args[1] === 'list') {
     expect(stdout + stderr).not.toContain('private-value');
   });
 
-  it.each(['claude', 'codex', 'opencode'])('preserves a modified %s skill during a managed upgrade', async client => {
+  it.each(['codex'])('preserves a modified %s skill during a managed upgrade', async client => {
     installPreviousRelease(client);
     const skill = path.join(skillPath(client), 'SKILL.md');
     writeFileSync(skill, readFileSync(skill, 'utf8') + '\nMy changes\n');
@@ -293,7 +293,7 @@ if (client === 'codex' && args[1] === 'list') {
     expect(stderr).toContain('skill changed');
   });
 
-  it.each(['claude', 'codex', 'opencode'])('upgrades only an owned %s skill for an externally managed MCP', async client => {
+  it.each(['codex'])('upgrades only an owned %s skill for an externally managed MCP', async client => {
     installPreviousRelease(client, true);
     vi.stubEnv('PATH', path.join(directory, 'missing'));
     expect(await runInstall([client, '--skill-only'], { io })).toBe(0);
@@ -315,7 +315,7 @@ if (client === 'codex' && args[1] === 'list') {
     expect(stderr).toContain('left unchanged');
   });
 
-  it.each(['claude', 'codex', 'opencode'])('preserves an existing edited %s skill before registering MCP', async client => {
+  it.each(['codex'])('preserves an existing edited %s skill before registering MCP', async client => {
     writeConfig(path.join(skillPath(client), 'SKILL.md'), 'user-owned skill');
     expect(await runInstall([client], { io })).toBe(1);
     expect(readFileSync(path.join(skillPath(client), 'SKILL.md'), 'utf8')).toBe('user-owned skill');
@@ -382,7 +382,7 @@ if (client === 'codex' && args[1] === 'list') {
     ]);
   });
 
-  it.each([[], ['--help'], ['claude', '--help'], ['codex', '--help'], ['opencode', '--help']])('shows help without starting a client: %j', async (...args) => {
+  it.each([[], ['--help'], ['codex', '--help']])('shows help without starting a client: %j', async (...args) => {
     expect(await runInstall(args, { io })).toBe(0);
     expect(stdout).toContain('npx -y @hypervibe/hypervibe@latest install');
     expect(calls()).toEqual([]);

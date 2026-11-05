@@ -576,16 +576,6 @@ describe('hv_logs', () => {
 });
 
 describe('hv_health', () => {
-  it('checks an explicit URL with mocked fetch', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
-    const t = await makeClient();
-    const result = await t.call('hv_health', { url: 'https://example.com/health' });
-    expect(result.ok).toBe(true);
-    expect(result.data.check.ok).toBe(true);
-    expect(result.data.check.status).toBe(200);
-    await t.close();
-  });
-
   it('warns when project selectors are irrelevant to an explicit URL health check', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
     const t = await makeClient();

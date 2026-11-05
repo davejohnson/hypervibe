@@ -49,13 +49,17 @@ describe('Railway TCP proxy terminal removal contract', () => {
     expect(f.counts().deletes).toBe(1);
   });
 
-  it('waits through DELETING until the exact proxy reaches DELETED', async () => {
+  it.each<[string, string[]]>([
+    ['immediate absence', ['ACTIVE', 'ABSENT']],
+    ['delayed absence', ['ACTIVE', 'DELETING', 'ABSENT']],
+    ['terminal deletion', ['ACTIVE', 'DELETING', 'DELETED']],
+  ])('verifies exact proxy removal after %s', async (_label, states) => {
     vi.useFakeTimers();
-    const f = await fixture({ states: ['ACTIVE', 'DELETING', 'DELETED'] });
+    const f = await fixture({ states });
     const check = f.adapter.deleteTcpProxy('environment-production', 'service-postgres', 'owned-proxy');
     await vi.runAllTimersAsync();
     await check;
-    expect(f.counts()).toEqual({ reads: 3, deletes: 1, creates: 0 });
+    expect(f.counts()).toEqual({ reads: states.length, deletes: 1, creates: 0 });
   });
 
   it('resumes a pending deletion without sending a second mutation', async () => {
