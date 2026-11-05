@@ -282,6 +282,9 @@ export interface ObservedState {
     services?: 'complete' | 'unknown';
     /** Exact workload identities can be complete while write-only values remain unknown. */
     serviceIdentities?: 'complete' | 'unknown';
+    /** Positive configuration evidence for exact present workloads: logical name
+     * to native id. Does not cover inventory, absence, or custom domains. */
+    serviceConfigurations?: Record<string, string>;
     databases?: 'complete' | 'unknown';
     caches?: 'complete' | 'unknown';
     storage?: 'complete' | 'unknown';
@@ -309,6 +312,19 @@ export interface IObservableHosting {
 export function hasCompleteServiceObservation(observed: ObservedState | null | undefined): observed is ObservedState {
   return !!observed && (observed.completeness?.services === 'complete'
     || observed.completeness?.services === undefined && !observed.partial);
+}
+
+/** Exact configuration can be read without permission to enumerate siblings.
+ * Never use this predicate to establish absence or authorize an unbound create. */
+export function hasCompleteServiceConfiguration(observed: ObservedState | null | undefined, name: string,
+  externalId?: string): boolean {
+  if (!observed) return false;
+  const candidates = observed.services.filter(service => service.name === name);
+  if (candidates.length !== 1 || !candidates[0].externalId
+    || externalId !== undefined && candidates[0].externalId !== externalId
+    || observed.services.filter(service => service.externalId === candidates[0].externalId).length !== 1) return false;
+  return observed.completeness?.serviceConfigurations?.[name] === candidates[0].externalId
+    || hasCompleteServiceObservation(observed);
 }
 
 /** Value-free declared consumer names; these do not prove live configuration. */

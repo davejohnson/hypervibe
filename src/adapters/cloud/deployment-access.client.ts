@@ -39,7 +39,7 @@ export const deploymentBindingSchema = z.object({ version: z.literal(1), baseUrl
     status: z.enum(['pending', 'review-required', 'approved', 'superseded', 'revoked', 'unavailable']), digest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     receipt: z.custom<CloudDeploymentSourceAuthorizationV1>().optional() }).strict().optional(),
   releasePolicy: z.object({ id: z.string().guid(), source, workflowPath: z.string().optional(),
-    status: z.enum(['pending', 'review-required', 'approved', 'superseded', 'revoked', 'unavailable']), digest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().optional() }).strict();
+    status: z.enum(['pending', 'review-required', 'approved', 'superseded', 'revoked', 'unavailable', 'cancelled']), digest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().optional() }).strict();
 export type DeploymentGrant = z.infer<typeof deploymentGrantSchema>;
 export type DeploymentBinding = z.infer<typeof deploymentBindingSchema>;
 export type DeploymentPersistence = { connections: ConnectionRepository; secretStore: ReturnType<typeof getSecretStore> };

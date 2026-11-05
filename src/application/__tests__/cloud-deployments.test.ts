@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
+const nativeFetch = globalThis.fetch;
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -59,7 +61,7 @@ beforeEach(() => {
   git('add', '.hypervibe/spec.json'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'reviewed source');
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(root, { recursive: true, force: true }); });
-function fixture() {
+function fixture(baseUrl = 'https://hypervibe.dev', realTransport = false) {
   const source = { branch: git('branch', '--show-current'), revision: git('rev-parse', 'HEAD'), digest: createHash('sha256').update(readFileSync(path.join(root, '.hypervibe/spec.json'))).digest('hex') };
   const nativePrincipal = (name: string, uid: string) => ({ kind: 'gcp-service-account', projectId: 'native-project', projectNumber: '123456789', serviceAccountEmail: `${name}@native-project.iam.gserviceaccount.com`, serviceAccountUniqueId: uid });
   const provision = nativePrincipal('provision', '111111111111111111111');
@@ -74,7 +76,7 @@ function fixture() {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined, method = init?.method ?? 'GET';
     calls.push({ url: String(url), method, body });
     if (String(url).endsWith('/pairings')) return Response.json({ deviceCode: 'B'.repeat(43), expiresAt: new Date(Date.now() + 600_000).toISOString(), intervalSeconds: 2,
-      repository: 'studio/app', userCode: '2345-6789', purpose: 'deployment-access', environment: 'staging', verificationUrl: 'https://hypervibe.dev/pair?code=2345-6789' });
+      repository: 'studio/app', userCode: '2345-6789', purpose: 'deployment-access', environment: 'staging', verificationUrl: `${baseUrl}/pair?code=2345-6789` });
     if (String(url).endsWith('/pairing-exchanges')) {
       exchanges++; if (loseExchange) throw new Error('Consuming exchange acknowledgment lost');
       return Response.json({ status: 'completed', purpose: 'deployment-access', environment: 'staging', applied: 1, skipped: 0,
@@ -102,7 +104,7 @@ function fixture() {
     if (denied && method === 'GET') return Response.json({ error: deviceToken }, { status: 403 });
     if (method === 'POST') {
       browser = { id: body.connectionId, purpose: 'deployment', mode: 'connect', status: 'choose-provider', provider: null, keys: [], environment: 'staging', source,
-        expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `https://hypervibe.dev/apps/app-id/cloud-connections/${body.connectionId}`, deployment: 'not-authorized' };
+        expiresAt: new Date(Date.now() + 86400_000).toISOString(), connectUrl: `${baseUrl}/apps/app-id/cloud-connections/${body.connectionId}`, deployment: 'not-authorized' };
       if (lost) throw new Error('lost response');
       return Response.json({ applied: 1, skipped: 0, connection: browser });
     }
@@ -115,16 +117,31 @@ function fixture() {
     receipt = deploymentConnection;
     return Response.json({ connection: { ...browser, ...(ready ? { status: 'ready', provider: 'gcp', deployment: 'provision-approved' } : {}) }, ...(ready ? { deploymentConnection: rewrite(deploymentConnection), releasePolicies: policy ? [policy] : [], ...(sourceAuthorization ? { sourceAuthorization } : {}) } : {}) });
   });
-  vi.stubGlobal('fetch', request);
+  vi.stubGlobal('fetch', realTransport ? nativeFetch : request);
   const context = createCommandContext(); const project = context.repos.projects.create({ name: 'app', gitRemoteUrl: 'https://github.com/studio/app.git', defaultPlatform: 'deployment-fixture' });
   const commands = createCommandRegistry(context);
-  const run = (input: Record<string, unknown>) => runWithWorkspaceDirectories([root], () => commands.execute('hv_cloud_connections', { purpose: 'deployment-access', env: 'staging', ...input }));
+  const run = (input: Record<string, unknown>) => runWithWorkspaceDirectories([root], () => commands.execute('hv_cloud_connections', { purpose: 'deployment-access', env: 'staging', baseUrl, ...input }));
   const command = (name: string, input: Record<string, unknown>) => runWithWorkspaceDirectories([root], () => commands.execute(name, input));
   const pair = async () => { expect(await run({ action: 'start' })).toMatchObject({ ok: true, data: { status: 'pending' } }); expect(await run({ action: 'status' })).toMatchObject({ ok: true, data: { status: 'verified' } }); };
   const adapter = (env?: string) => runWithWorkspaceDirectories([root], () => context.adapterFactory.getProviderAdapter('deployment-fixture', project, undefined, env));
   return { context, commands, project, calls, run, command, pair, adapter, source, request, setReady: () => { ready = true; }, lose: () => { lost = true; }, deny: () => { denied = true; }, rewrite: (fn: typeof rewrite) => { rewrite = fn; }, duringSession: (fn: typeof duringSession) => { duringSession = fn; }, losePolicy: () => { losePolicy = true; },
     loseSource: () => { loseSource = true; }, approveSource: () => { sourceProposal.status = 'approved'; sourceAuthorization = sourceProposal.receipt; }, loseExchange: () => { loseExchange = true; },
     rewriteAuthorization: (fn: typeof rewriteAuthorization) => { rewriteAuthorization = fn; } };
+}
+async function httpFixture() {
+  let f: ReturnType<typeof fixture>;
+  const server = createServer(async (req, res) => {
+    try {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const response = await f.request(new URL(req.url!, origin), { method: req.method, headers: req.headers as Record<string, string>,
+        ...(chunks.length ? { body: Buffer.concat(chunks).toString() } : {}) });
+      res.writeHead(response.status, Object.fromEntries(response.headers)); res.end(await response.text());
+    } catch { res.destroy(); }
+  });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  f = fixture(origin, true);
+  return { ...f, close: async () => { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }
 describe('device deployment authority through the ordinary command and adapter boundaries', () => {
   // Cloud deployment approval is not GitHub repository authority. This exercises
@@ -395,6 +412,91 @@ describe('device deployment authority through the ordinary command and adapter b
     expect.soft(JSON.stringify(first)).not.toContain('first-value');
     const hash = (target: typeof first) => githubActionsWorkflowInputHash({ provider: 'deployment-fixture', target, migration: { includeStep: false } });
     expect(hash(first)).toBe(hash(second));
+  });
+  it('reconciles an absent pending release over HTTP and retains cancellation before proposing current source', async () => {
+    const f = await httpFixture();
+    try {
+      await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+      const transport = f.request.getMockImplementation()!; let pending: any, cancellation: any, reject = true;
+      f.request.mockImplementation(async (url, init) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        if (String(url).endsWith('/release-policies') && reject) { pending = body; return Response.json({}, { status: 500 }); }
+        if (String(url).endsWith('/reconciliations')) {
+          cancellation = { schemaVersion: 1, projectId: 'app-id', connectionId: String(url).split('/cloud-deployments/')[1].split('/')[0],
+            repository: 'github.com/studio/app', environment: 'staging', request: { id: pending.policyId, ...body },
+            outcome: 'cancelled', cancelledAt: new Date().toISOString() };
+          return Response.json({ applied: 1, skipped: 0, reconciliation: cancellation });
+        }
+        return transport(url, init);
+      });
+      expect((await f.run({ action: 'propose-release', workflowPath: '.github/workflows/deploy.yml' })).ok).toBe(false);
+      expect(await f.run({ action: 'status' })).toMatchObject({ ok: true, data: { releasePolicy: { id: pending.policyId, status: 'pending' } } });
+      git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'current source');
+      expect(await f.run({ action: 'reconcile-release' })).toMatchObject({ ok: true, data: { releasePolicy: { id: pending.policyId, status: 'cancelled' } } });
+      expect(cancellation.request).toEqual({ id: pending.policyId, source: f.source, workflowPath: '.github/workflows/deploy.yml' });
+      expect(f.context.repos.audit.findByResource('deployment-release-policy', pending.policyId)).toEqual([
+        expect.objectContaining({ action: 'deployment.release-policy.cancelled', details: cancellation })]);
+      reject = false;
+      expect(await f.run({ action: 'propose-release', workflowPath: '.github/workflows/deploy.yml' })).toMatchObject({ ok: true, data: { releasePolicy: { status: 'review-required' } } });
+      const fresh = f.calls.filter(call => call.url.endsWith('/release-policies')).at(-1)!;
+      expect(fresh.body.policyId).not.toBe(pending.policyId); expect(fresh.body.expectedSourceRevision).toBe(git('rev-parse', 'HEAD'));
+      expect(JSON.stringify(f.context.repos.audit.findRecent())).not.toContain(deviceToken);
+    } finally { await f.close(); }
+  });
+  it.each(['approved', 'revoked', 'superseded'])('retains %s policy continuation when exact reconciliation discovers it after status', async status => {
+    const f = await httpFixture();
+    try {
+      await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+      const transport = f.request.getMockImplementation()!; let pending: any;
+      f.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith('/release-policies')) { pending = JSON.parse(String(init?.body)); return Response.json({}, { status: 500 }); }
+        if (String(url).endsWith('/reconciliations')) return Response.json({ applied: 0, skipped: 1, reconciliation: {
+          schemaVersion: 1, projectId: 'app-id', connectionId: String(url).split('/cloud-deployments/')[1].split('/')[0], environment: 'staging',
+          repository: 'github.com/studio/app', request: { id: pending.policyId, source: f.source }, outcome: 'existing',
+          policy: { id: pending.policyId, status, digest: 'f'.repeat(64) } } });
+        return transport(url, init);
+      });
+      expect((await f.run({ action: 'propose-release' })).ok).toBe(false);
+      const result = await f.run({ action: 'reconcile-release' });
+      expect(result).toMatchObject({ ok: true, data: { releasePolicy: { id: pending.policyId, status, digest: 'f'.repeat(64) } } });
+      expect(JSON.stringify(result)).not.toContain('An app owner must approve');
+      expect(f.context.repos.audit.findByResource('deployment-release-policy', pending.policyId)).toEqual([]);
+    } finally { await f.close(); }
+  });
+  it('recovers an existing release after its HTTP acknowledgment is lost without another proposal', async () => {
+    const f = await httpFixture();
+    try {
+      await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' }); f.losePolicy();
+      expect((await f.run({ action: 'propose-release' })).ok).toBe(false);
+      const id = f.calls.find(call => call.url.endsWith('/release-policies'))!.body.policyId;
+      expect(await f.run({ action: 'reconcile-release' })).toMatchObject({ ok: true, data: { releasePolicy: { id, status: 'review-required', digest: 'f'.repeat(64) } } });
+      expect(f.calls.filter(call => call.url.endsWith('/release-policies'))).toHaveLength(1);
+      expect(f.context.repos.audit.findByResource('deployment-release-policy', id)).toEqual([]);
+    } finally { await f.close(); }
+  });
+  it.each(['hidden404', 'malformed', 'lost', 'wrong-scope', 'wrong-source'])('keeps pending release evidence when reconciliation is %s', async failure => {
+    const f = await httpFixture();
+    try {
+      await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+      const transport = f.request.getMockImplementation()!; let pending: any;
+      f.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith('/release-policies')) { pending = JSON.parse(String(init?.body)); return Response.json({}, { status: 500 }); }
+        if (String(url).endsWith('/reconciliations')) {
+          if (failure === 'lost') throw new Error('Transport lost');
+          if (failure === 'wrong-scope' || failure === 'wrong-source') return Response.json({ applied: 1, skipped: 0,
+            reconciliation: { schemaVersion: 1, projectId: 'app-id', connectionId: String(url).split('/cloud-deployments/')[1].split('/')[0],
+              environment: failure === 'wrong-scope' ? 'production' : 'staging', repository: 'github.com/studio/app',
+              request: { id: pending.policyId, source: { ...f.source, ...(failure === 'wrong-source' ? { revision: '0'.repeat(40) } : {}) } },
+              outcome: 'cancelled', cancelledAt: new Date().toISOString() } });
+          return Response.json({}, { status: failure === 'hidden404' ? 404 : 200 });
+        }
+        return transport(url, init);
+      });
+      expect((await f.run({ action: 'propose-release' })).ok).toBe(false);
+      expect((await f.run({ action: 'reconcile-release' })).ok).toBe(false);
+      expect(await f.run({ action: 'status' })).toMatchObject({ ok: true, data: { releasePolicy: { id: pending.policyId, status: 'pending' } } });
+      expect(f.context.repos.audit.findByResource('deployment-release-policy', pending.policyId)).toEqual([]);
+    } finally { await f.close(); }
   });
   it('persists a release-policy request before posting and recovers its exact lost acknowledgment without authorizing release', async () => {
     const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' }); f.losePolicy();

@@ -5,7 +5,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
-import { hasCompleteServiceObservation, type ObservedState } from '../domain/ports/observe.port.js';
+import { hasCompleteServiceConfiguration, hasCompleteServiceObservation, type ObservedState } from '../domain/ports/observe.port.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { hasExactPlanActionConfirmationAuthority } from '../domain/plan/action-authority.js';
@@ -38,11 +38,13 @@ export async function preparedSecretReleaseError(input: { ctx: CommandContext; p
 
 function identityError(environment: Environment, observed: ObservedState | null, services: string[], creating: ReadonlySet<string> = new Set()): string | undefined {
   const bindings = parseHostingBindings(environment);
-  if (!hasCompleteServiceObservation(observed) || observed.provider !== bindings.provider) return 'Runtime reference observation is incomplete.';
+  if (!observed || observed.provider !== bindings.provider) return 'Runtime reference observation is incomplete.';
   for (const name of services) {
     const expected = bindings.services?.[name];
     const candidates = observed.services.filter(service => service.name === name);
-    if (creating.has(name) && !expected?.serviceId && !expected?.jobName && candidates.length === 0) continue;
+    if (creating.has(name) && hasCompleteServiceObservation(observed)
+      && !expected?.serviceId && !expected?.jobName && candidates.length === 0) continue;
+    if (!hasCompleteServiceConfiguration(observed, name, expected?.serviceId)) return 'Runtime reference observation is incomplete.';
     if (!expected?.serviceId || candidates.length !== 1 || candidates[0].externalId !== expected.serviceId)
       return `The runtime identity for ${name} does not match the reviewed environment.`;
   }

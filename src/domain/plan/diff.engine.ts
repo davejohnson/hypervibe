@@ -3,7 +3,7 @@ import { hasPendingDatabaseInitialization } from './database-initialization.cont
 import { createHash } from 'crypto';
 import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
-import { hashEnvValue } from '../ports/observe.port.js';
+import { hashEnvValue, hasCompleteServiceConfiguration, hasCompleteServiceObservation } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
 import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
 import { databaseSeedGeneration } from '../services/database-seed-generation.js';
@@ -309,7 +309,7 @@ export function diffEnvironment(input: {
     const nameCandidates = observedServiceGroups.get(name) ?? [];
     const boundServiceId = localServiceBindings[name]?.serviceId;
     const boundCandidates = boundServiceId
-      ? (serviceObservationKnown ? observed?.services ?? [] : [])
+      ? (serviceObservationKnown || hasCompleteServiceConfiguration(observed, name, boundServiceId) ? observed?.services ?? [] : [])
         .filter((candidate) => candidate.externalId === boundServiceId)
       : [];
 
@@ -451,14 +451,15 @@ export function diffEnvironment(input: {
       continue;
     }
 
-    if (serviceSpec.instanceBounds && (!observed || observed.completeness?.services === 'unknown'
-      || observed.completeness?.services === undefined && observed.partial)) {
+    const boundConfigurationKnown = Boolean(localServiceBindings[name]?.serviceId
+      && hasCompleteServiceConfiguration(observed, name, localServiceBindings[name]!.serviceId));
+    if (serviceSpec.instanceBounds && !hasCompleteServiceObservation(observed) && !boundConfigurationKnown) {
       actions.push({ id, type: 'update', resource, verified: false,
         reason: 'Service instance bounds require complete native observation before planning capacity changes.',
         metadata: { blockedReason: 'service_instance_bounds_unknown' } });
       continue;
     }
-    if (observed && serviceObservationKnown) {
+    if (observed && (serviceObservationKnown || boundConfigurationKnown)) {
       const live = observedServices.get(name);
       if (!live) {
         actions.push({
@@ -1587,9 +1588,11 @@ export function diffEnvironment(input: {
             ? 'noop'
             : 'update',
       resource: { kind: 'domain', name: spec.domain, provider },
-      verified: customDomainsManaged && verified,
+      verified: customDomainsManaged && verified && serviceObservationKnown,
       reason: !customDomainsManaged
         ? `${provider} does not implement managed environment custom domains; DNS will not be changed for ${spec.domain}`
+        : !serviceObservationKnown
+        ? `Cannot verify the current domain attachment for ${spec.domain}; no domain changes are authorized`
         : domainRecreateNeeded
         ? `Domain ${spec.domain} has an unapplied recreate revision`
         : ambiguousDomainAttachment
@@ -1616,6 +1619,7 @@ export function diffEnvironment(input: {
         : {}),
       metadata: {
         ...(!customDomainsManaged ? { blockedReason: 'custom_domain_unsupported' } : {}),
+        ...(customDomainsManaged && !serviceObservationKnown ? { blockedReason: 'domain_observation_unknown' } : {}),
         ...(customDomainsManaged && ambiguousDomainAttachment
           ? { blockedReason: 'ambiguous_domain_identity' }
           : {}),

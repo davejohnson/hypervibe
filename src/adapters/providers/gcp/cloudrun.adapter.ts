@@ -3371,11 +3371,18 @@ export class CloudRunAdapter implements
     const serviceBindings = bindings.services ?? {};
     const warnings: string[] = [];
     const services: ObservedService[] = [];
+    const prepared = this.deploymentConnection?.preparedResources ? this.deploymentConnection : undefined;
+    const serviceConfigurations: Record<string, string> = {};
+    const holdingServices = new Set<string>();
+    const preparedKinds = new Map<string, 'web' | 'worker'>();
+    if (prepared && (bindings.provider !== this.name || bindings.projectId !== this.credentials.projectId
+      || bindings.environmentId !== this.credentials.region || prepared.environment !== environment.name))
+      throw new Error('The recorded Cloud Run environment does not match its deployment connection.');
     let serviceObservationKnown = true;
 
     let domainMappings: CloudRunDomainMapping[] = [];
-    let domainObservationKnown = true;
-    if (this.domainMappingRegionSupported()) {
+    let domainObservationKnown = !prepared;
+    if (!prepared && this.domainMappingRegionSupported()) {
       try {
         domainMappings = await this.listCloudRunDomainMappings(token);
       } catch (error) {
@@ -3396,7 +3403,37 @@ export class CloudRunAdapter implements
     }
 
     let liveServices: CloudRunService[] = [];
-    try {
+    if (prepared) {
+      // Installed authority is resource-scoped. Exact GET evidence can establish
+      // a present configuration, never absence or the regional inventory.
+      serviceObservationKnown = false;
+      warnings.push('Only recorded Cloud Run services were inspected; other workloads and custom domains remain unverified.');
+      for (const [name, binding] of Object.entries(serviceBindings)) {
+        try {
+          const receipt = prepared.preparedResources!.workloads.find(item => item.workload === name);
+          const topology = prepared.deployment.workloads.find(item => item.name === name);
+          if (!binding?.serviceId || binding.jobName || !binding.resourceUid || receipt?.kind !== 'service'
+            || receipt.id !== `projects/${this.credentials.projectId}/locations/${this.credentials.region}/services/${binding.serviceId}`
+            || receipt.lifetimeId !== binding.resourceUid || !topology || topology.kind === 'cron'
+            || Object.values(serviceBindings).filter(item => item?.serviceId === binding.serviceId).length !== 1) throw new Error();
+          const native = await this.getCloudRunServiceStrict(binding.serviceId, token);
+          if (!native || native.name !== receipt.id || native.uid !== receipt.lifetimeId) throw new Error();
+          const holding = gcpPreparedHoldingTransition(prepared, environment, name, native);
+          if (holding) {
+            holdingServices.add(binding.serviceId);
+            preparedKinds.set(binding.serviceId, topology.kind);
+          } else {
+            const configuration = gcpObservedPreparedApplicationConfiguration(native);
+            const image = native.template?.containers?.[0]?.image;
+            if (!image || !this.isImmutableContainerImage(image)) throw new Error();
+            preparedKinds.set(binding.serviceId, configuration.template.containers[0].resources.cpuIdle ? 'web' : 'worker');
+          }
+          liveServices.push(native);
+        } catch {
+          warnings.push(`The exact recorded Cloud Run service ${name} could not be verified; its configuration remains unknown.`);
+        }
+      }
+    } else try {
       liveServices = await this.listCloudRunServices(token);
     } catch (error) {
       serviceObservationKnown = false;
@@ -3431,13 +3468,14 @@ export class CloudRunAdapter implements
         serviceObservationKnown = false;
         warnings.push(`Failed to read Cloud Run IAM policy for ${externalId}: ${this.formatError(error)}`);
       }
+      if (prepared && bindingKey && publicAccess !== undefined) serviceConfigurations[bindingKey] = externalId;
       const serviceMappings = mappingsByRoute.get(externalId) ?? [];
       services.push({
         name: this.observedServiceName(externalId, liveService.labels, bindingKey, prefix),
         externalId,
         // Workers deploy with internal-only ingress; classify by it so the
         // diff can converge a manually flipped ingress back to the spec.
-        workloadKind: liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web',
+        workloadKind: preparedKinds.get(externalId) ?? (liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web'),
         ...(liveService.uri ? { url: liveService.uri } : {}),
         customDomains: serviceMappings.map((mapping) => mapping.metadata!.name!).sort(),
         ...(serviceMappings.length > 0
@@ -3463,8 +3501,9 @@ export class CloudRunAdapter implements
           ...(cacheNetwork ? { cacheNetwork } : {}),
         },
         ...this.observedEnvFromContainer(container),
+        ...(prepared ? { runtimeSecretReferenceActivation: 'application-release' as const } : {}),
         ...this.observedServiceDeployment(liveService),
-        status: readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
+        status: holdingServices.has(externalId) ? 'empty' : readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
         maintenance: {
           state: liveService.scaling?.scalingMode === 'MANUAL'
             && liveService.scaling.manualInstanceCount === 0
@@ -3478,7 +3517,7 @@ export class CloudRunAdapter implements
     }
 
     let liveJobs: CloudRunJob[] = [];
-    try {
+    if (!prepared) try {
       liveJobs = await this.listCloudRunJobs(token);
     } catch (error) {
       serviceObservationKnown = false;
@@ -3567,6 +3606,7 @@ export class CloudRunAdapter implements
         project: 'complete',
         environment: 'complete',
         services: domainObservationKnown && serviceObservationKnown ? 'complete' : 'unknown',
+        ...(prepared ? { serviceConfigurations } : {}),
         databases: 'unknown',
         caches: 'unknown',
         storage: 'complete',

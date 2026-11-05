@@ -14,6 +14,9 @@ import { parse } from 'yaml';
 import { createRequire } from 'node:module';
 import { buildCloudRunGitHubActionsSteps } from '../cloudrun-ci.workflow.js';
 import type { BranchDeployTarget } from '../../../../domain/ports/ci-deploy.port.js';
+import { diffEnvironment } from '../../../../domain/plan/diff.engine.js';
+import { planSecretReference, referenceState } from '../../../../domain/services/secret-reference-plan.js';
+import type { ProjectSpec } from '../../../../domain/spec/spec.schema.js';
 
 // Reconstructed Cloud Run v2 HTTP responses, not live evidence. Independent
 // contracts: projects.locations.services.patch updates one revision template;
@@ -60,7 +63,7 @@ const baseApplicationConfiguration = {
       resources: { limits: { cpu: '1', memory: '512Mi' }, cpuIdle: true, startupCpuBoost: false },
       startupProbe: { tcpSocket: { port: 8080 }, periodSeconds: 240, timeoutSeconds: 240, failureThreshold: 1 } }] },
 };
-function fixture(options: { cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 'owner' | 'instances' | 'denied'; revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack' | 'pending-create'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
+function fixture(options: { observeStatus?: number; cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 'owner' | 'instances' | 'denied'; revokeBeforeJobCreate?: boolean; releaseCommand?: boolean; jobOutcome?: 'success' | 'failed' | 'lost-run' | 'lost-create' | 'pending-ack' | 'pending-create'; bounds?: boolean; secretCreateTime?: string; finalResponse?: (value: any) => any; rejectWrite?: boolean; loseAcknowledgment?: boolean; operationError?: string } = {}) {
   const applicationConfiguration: any = structuredClone(baseApplicationConfiguration);
   if (options.cloudSql) {
     applicationConfiguration.template.containers[0].env.splice(1, 0, { name: 'CLOUD_SQL_CONNECTION_NAME', value: `${projectId}:${region}:database` });
@@ -137,6 +140,10 @@ function fixture(options: { cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 
     if (invalidPolicyRead) return invalidPolicyRead;
     expect(init.redirect).toBe('error');
     expect(new Headers(init.headers).get('authorization')).toBe(`Bearer ${token}`);
+    if (method === 'GET' && /\/(services|jobs|domainmappings)\?/.test(url)) return Response.json({}, { status: 403 });
+    if (url === `https://run.googleapis.com/v2/${resource}:getIamPolicy`) return Response.json({ etag: 'policy', bindings: [] });
+    if (options.observeStatus && url === `https://run.googleapis.com/v2/${resource}` && method === 'GET')
+      return Response.json({}, { status: options.observeStatus });
     if (url === `https://${region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${projectId}/executions/exact-migration`) {
       if (options.v1Fault === 'denied') return Response.json({}, { status: 403 });
       return Response.json({ kind: 'Execution', apiVersion: 'run.googleapis.com/v1', metadata: {
@@ -229,6 +236,86 @@ function fixture(options: { cloudSql?: boolean; v1Fault?: 'uid' | 'namespace' | 
   return { expectedApplication, create, connection, environment, service, environmentSpec, request, writes, taskWrites, taskTemplate, control, makeControl, execution, job, current: () => current };
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+describe('prepared Cloud Run exact configuration observation', () => {
+  // Reconstructed from Google's Service GET contract and the 2026-11-05
+  // customer trace: resource GET/IAM 200, regional inventory GETs 403.
+  // https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/get
+  // https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/list
+  function plans(f: ReturnType<typeof fixture>, observed: Awaited<ReturnType<CloudRunAdapter['observe']>>) {
+    const spec = { version: 1, project: 'app-a', secrets: { API_TOKEN: {
+      ownership: 'delegated', principal: 'email:owner@example.test', environments: ['production'],
+    } }, environments: { production: f.environmentSpec } } as unknown as ProjectSpec;
+    const planned = diffEnvironment({ spec: f.environmentSpec, envName: 'production', observed,
+      local: { projectExists: true, environmentExists: true, services: [], components: [], bindings: f.environment.platformBindings },
+      customDomainManagement: 'managed', providerBehavior: providerRegistry.getMetadata('cloudrun')?.orchestration?.diff });
+    const secret = planSecretReference({ key: 'API_TOKEN', slot: spec.secrets.API_TOKEN, spec,
+      environmentName: 'production', hostingProvider: 'cloudrun', environment: f.environment, observed });
+    return { planned, secret };
+  }
+
+  it('uses exact holding configuration without inventing inventory absence or completed secret injection', async () => {
+    const f = fixture({ bounds: true });
+    f.current().scaling = { maxInstanceCount: 1 };
+    f.environmentSpec.services.unbound = { ...f.environmentSpec.services.web };
+    f.environmentSpec.domain = 'app.example.test';
+    const observed = await (await f.create()).observe(f.environment);
+    expect(observed).toMatchObject({ completeness: { services: 'unknown', serviceConfigurations: { web: nativeServiceName } },
+      partial: true, services: [{ name: 'web', externalId: nativeServiceName, status: 'empty',
+        config: { instanceBounds: { min: 0, max: 1 } }, envVarKeys: [], envVarSecretRefs: {},
+        runtimeSecretReferenceActivation: 'application-release' }] });
+    const { planned } = plans(f, observed);
+    expect(planned.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'update', verified: true });
+    expect(planned.actions.find(action => action.id === 'service:web')?.metadata?.blockedReason).toBeUndefined();
+    expect(planned.actions.find(action => action.id === 'service:unbound')).toMatchObject({ type: 'update', verified: false });
+    expect(planned.actions.find(action => action.id === 'domain:app.example.test')).toMatchObject({ metadata: { blockedReason: 'domain_observation_unknown' } });
+    delete f.environmentSpec.services.unbound;
+    const { secret } = plans(f, observed);
+    expect(secret.blockers).toEqual([]);
+    expect(secret.action).toMatchObject({ type: 'update', verified: true, metadata: { activation: 'application-release' } });
+    expect(referenceState(observed, ['web'], 'API_TOKEN', reference)).toBe('missing');
+    expect(f.request.mock.calls.filter(([url]) => /\/(services|jobs|domainmappings)\?/.test(String(url)))).toEqual([]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it('reads the exact existing application reference without claiming regional inventory completeness', async () => {
+    const f = fixture({ bounds: true });
+    Object.assign(f.current(), structuredClone(f.expectedApplication), { generation: '2', observedGeneration: '2',
+      latestCreatedRevision: `${resource}/revisions/web-production-00002-app`, latestReadyRevision: `${resource}/revisions/web-production-00002-app` });
+    f.current().template.containers[0].image = candidateImage;
+    const observed = await (await f.create()).observe(f.environment);
+    expect(observed).toMatchObject({ completeness: { services: 'unknown', serviceConfigurations: { web: nativeServiceName } },
+      services: [{ status: 'running', envVarSecretRefs: { API_TOKEN: { provider: 'gcp-secret-manager',
+        resource: `projects/${projectNumber}/secrets/production-api`, version: '7' } } }] });
+    const { planned, secret } = plans(f, observed);
+    expect(planned.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'noop', verified: true });
+    // Matching native metadata still needs its explicit local acceptance step.
+    expect(secret.action).toMatchObject({ type: 'update', verified: true, metadata: { activation: 'application-release' } });
+    const { activation: _activation, ...accepted } = secret.action.metadata!;
+    f.environment.platformBindings.secretVersionBindings = { API_TOKEN: accepted };
+    expect(plans(f, observed).secret.action).toMatchObject({ type: 'noop', verified: true });
+    expect(referenceState(observed, ['web'], 'API_TOKEN', reference)).toBe('matching');
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(['replaced', 'missing-uid', 'wrong-scope', 'malformed', 'denied', 'absent', 'holding-secret', 'binding-uid'] as const)(
+    'keeps exact %s evidence unknown and cannot plan replacement creation', async kind => {
+      const f = fixture({ bounds: true, observeStatus: kind === 'denied' ? 403 : kind === 'absent' ? 404 : undefined });
+      if (kind === 'replaced') f.current().uid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      if (kind === 'missing-uid') delete f.current().uid;
+      if (kind === 'wrong-scope') f.current().name = resource.replace(projectId, 'other-project');
+      if (kind === 'malformed') f.current().template.containers = null;
+      if (kind === 'holding-secret') f.current().template.containers[0].env = structuredClone(baseApplicationConfiguration.template.containers[0].env);
+      if (kind === 'binding-uid') delete f.environment.platformBindings.services.web.resourceUid;
+      const observed = await (await f.create()).observe(f.environment);
+      expect(observed.completeness?.services).toBe('unknown');
+      expect(observed.services).toEqual([]);
+      expect(plans(f, observed).planned.actions.find(action => action.id === 'service:web')).toMatchObject({
+        type: 'update', verified: false, metadata: { blockedReason: 'service_instance_bounds_unknown' } });
+      expect(referenceState(observed, ['web'], 'API_TOKEN', reference)).toBe('unknown');
+      expect(plans(f, observed).secret.blockers).toHaveLength(1);
+      expect(f.writes).toEqual([]);
+    });
+});
 describe('prepared Cloud Run first application release', () => {
   it.each([undefined, 'uid', 'namespace', 'owner', 'instances', 'denied'] as const)('verifies omitted v2 Cloud SQL mounts against the same immutable v1 execution: %s', async v1Fault => {
     // Native v2 Execution/Task omit Cloud SQL volumes; the v1 Execution retains

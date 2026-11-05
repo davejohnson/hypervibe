@@ -274,3 +274,20 @@ Normal command/CLI/MCP regressions exercise serialized synthetic HC responses,
 local Git and SQLite authority, state/source/expiry changes during a request,
 closed receipts, response limits and lost acknowledgments. These are offline
 contract checks, not proof that a deployed hosted service supports the endpoint.
+
+## Pending release request recovery
+
+`hv_cloud_connections` with `purpose=deployment-access` and
+`action=reconcile-release` resolves only the encrypted saved pending request ID,
+source and optional workflow. It accepts no source or workflow override. Existing
+policies are recovered without approval or revocation. If no policy exists, the
+host records a cancellation under the same connection lock used by policy creation;
+a delayed original request cannot create that policy afterward. The client validates
+exact scope and request evidence, then atomically retains cancellation in its audit
+history and binding before a later explicit `propose-release` can use a fresh ID.
+
+A generic 404, access failure, malformed response or lost response does not establish
+cancellation. Pending state remains recoverable after the branch revision advances.
+The managed workflow and value-free `.hypervibe/bindings.json` must be committed
+before proposing release; this change does not add a local committed-bindings
+preflight, and the host continues to validate their exact committed contents.

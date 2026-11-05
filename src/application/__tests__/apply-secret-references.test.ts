@@ -72,20 +72,23 @@ describe('native references at the persisted apply boundary', () => {
       expect.objectContaining({ name: 'web' }), {}, expect.objectContaining({ secretVersionRefs: { FLOW_KEY: reference } }));
     expect(f.ctx.repos.runs.findById(run.id)!.plan).not.toHaveProperty('overrides');
   });
-  it.each(['complete', 'unknown', 'identity-only'] as const)(
+  it.each(['complete', 'exact-configuration', 'wrong-exact-id', 'unknown', 'identity-only'] as const)(
     'revalidates persisted reference acceptance using service completeness: %s', async completeness => {
       const f = fixture('7');
       const state = observation('7');
       state.partial = completeness !== 'unknown';
       state.completeness = { storage: 'unknown', services: completeness === 'complete' ? 'complete' : 'unknown',
-        ...(completeness === 'identity-only' ? { serviceIdentities: 'complete' } : {}) };
+        ...(completeness === 'identity-only' ? { serviceIdentities: 'complete' } : {}),
+        ...(['exact-configuration', 'wrong-exact-id'].includes(completeness)
+          ? { serviceConfigurations: { web: completeness === 'wrong-exact-id' ? 'replacement' : 'web-id' } } : {}) };
       vi.mocked(PlanService.prototype.observeEnvironment).mockResolvedValue({ observed: state, warnings: [] });
       const result = await executePlanApply(f.ctx, { project: f.project, spec: f.spec, specRevision: 1,
         planId: f.run().id, confirmActions: [] });
-      expect(result).toMatchObject({ kind: 'executed', result: { success: completeness === 'complete' } });
+      const complete = completeness === 'complete' || completeness === 'exact-configuration';
+      expect(result).toMatchObject({ kind: 'executed', result: { success: complete } });
       expect(f.setEnvVars).not.toHaveBeenCalled();
       const retained = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.secretVersionBindings;
-      if (completeness === 'complete') expect(retained).toHaveProperty('FLOW_KEY.reference', reference);
+      if (complete) expect(retained).toHaveProperty('FLOW_KEY.reference', reference);
       else expect(retained).toBeUndefined();
     });
   it.each([undefined, '7'])('does not let a prepared marker replace release proof for current reference %s', async current => {
@@ -97,6 +100,22 @@ describe('native references at the persisted apply boundary', () => {
     expect(result).toMatchObject({ kind: 'executed', result: { success: false } });
     expect(f.setEnvVars).not.toHaveBeenCalled();
     expect(f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.secretVersionBindings).toBeUndefined();
+  });
+  it.each([undefined, '7'])('accepts exact prepared references only after their application release: %s', async version => {
+    const f = fixture(version), state = observation(version);
+    state.partial = true;
+    state.completeness = { services: 'unknown', serviceConfigurations: { web: 'web-id' } };
+    state.services[0].status = version ? 'running' : 'empty';
+    state.services[0].runtimeSecretReferenceActivation = 'application-release';
+    f.action.metadata!.activation = 'application-release';
+    vi.mocked(PlanService.prototype.observeEnvironment).mockResolvedValue({ observed: state, warnings: [] });
+    const result = await executePlanApply(f.ctx, { project: f.project, spec: f.spec, specRevision: 1,
+      planId: f.run().id, confirmActions: [] });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: version === '7' } });
+    expect(f.setEnvVars).not.toHaveBeenCalled();
+    const accepted = f.ctx.repos.environments.findById(f.environment.id)!.platformBindings.secretVersionBindings;
+    if (version) expect(accepted).toHaveProperty('FLOW_KEY.reference', reference);
+    else expect(accepted).toBeUndefined();
   });
   it('rejects a saved native reference action after the slot acquires credential authority', async () => {
     const f = fixture(); const run = f.run();

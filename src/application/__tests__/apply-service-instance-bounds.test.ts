@@ -18,7 +18,7 @@ describe('fresh service capacity authority at saved-plan apply', () => {
     SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
   });
   afterEach(() => { vi.restoreAllMocks(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
-  it.each(['stripped-marker', 'unknown-bounds', 'duplicate-native-id'] as const)('blocks %s before any workload mutation', async variant => {
+  it.each(['stripped-marker', 'unknown-bounds', 'duplicate-native-id', 'exact-configuration', 'wrong-exact-id'] as const)('checks %s before any workload mutation', async variant => {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'capacity-app', defaultPlatform: 'cloudrun' });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging', platformBindings: {
@@ -32,7 +32,9 @@ describe('fresh service capacity authority at saved-plan apply', () => {
     vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
     vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {
       provider: 'cloudrun', projectExists: true, projectId: 'capacity-project', environmentId: 'us-central1',
-      observedAt: new Date().toISOString(), partial: false, warnings: [], databases: [],
+      observedAt: new Date().toISOString(), partial: variant.includes('exact'), warnings: [], databases: [],
+      ...(variant.includes('exact') ? { completeness: { services: 'unknown' as const,
+        serviceConfigurations: { web: variant === 'wrong-exact-id' ? 'replacement' : 'web' } } } : {}),
       services: Array.from({ length: variant === 'duplicate-native-id' ? 2 : 1 }, () => ({ name: 'web', externalId: 'web',
         workloadKind: 'web', status: 'running', customDomains: [], envVarKeys: [], envVarHashes: {},
         config: variant === 'unknown-bounds' ? {} : { instanceBounds: { min: 0, max: 5 } } })),
@@ -44,6 +46,11 @@ describe('fresh service capacity authority at saved-plan apply', () => {
         verified: true, reason: 'Reviewed workload update', ...(variant === 'stripped-marker' ? {} : { billable: true, requiresConfirm: true }) }],
     } });
     const result = await executePlanApply(ctx, { project, spec, specRevision: 1, planId: run.id, confirmActions: ['service:web'] });
+    if (variant === 'exact-configuration') {
+      expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
+      expect(deploy).toHaveBeenCalledOnce();
+      return;
+    }
     expect(result).toMatchObject({ kind: 'executed', result: { success: false, receipts: [expect.objectContaining({
       actionId: 'service:web', status: 'blocked', message: expect.stringMatching(/instance bounds/i),
     })] } });

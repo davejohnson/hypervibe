@@ -637,7 +637,9 @@ absence may authorize a create based on observed state:
   or `false` that the diff engine will interpret as absence.
 - Track observation completeness per capability. Successful hosting observation
   does not prove database, storage, queue, App Store, DNS, or repository-setting
-  observation succeeded.
+  observation succeeded. Exact per-service configuration evidence may support a
+  verified bound workload even when broader inventory is unknown; it never proves
+  absence, unbound creation authority, or custom-domain coverage.
 - Match existing resources by durable provider id first. Name matching may
   produce adoption candidates, but multiple matches are ambiguity that must be
   reported and blocked.

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { PlanAction } from '../plan/plan.types.js';
-import { hasCompleteServiceObservation, type ObservedState } from '../ports/observe.port.js';
+import { hasCompleteServiceConfiguration, hasCompleteServiceObservation, type ObservedState } from '../ports/observe.port.js';
 import { runtimeSecretReferenceSchema, type RuntimeSecretReference } from '../ports/secret-destination.port.js';
 import type { ProjectSecretSpec, ProjectSpec } from '../spec/spec.schema.js';
 import { runtimeSecretReferenceIdentity } from './runtime-secret-references.js';
@@ -41,11 +41,12 @@ export function secretReferencesForEnvironment(spec: ProjectSpec, environmentNam
 export function referenceState(observed: ObservedState | null, services: string[], key: string,
   reference: RuntimeSecretReference, knownAbsent = false): 'unknown' | 'missing' | 'matching' | 'replacement' {
   if (knownAbsent) return 'missing';
-  if (!hasCompleteServiceObservation(observed) || !services.length) return 'unknown';
+  if (!observed || !services.length) return 'unknown';
   const target = runtimeSecretReferenceIdentity(reference);
   let missing = false;
   let matching = false;
   for (const name of services) {
+    if (!hasCompleteServiceConfiguration(observed, name)) return 'unknown';
     const candidates = observed.services.filter(service => service.name === name);
     if (candidates.length !== 1 || !Array.isArray(candidates[0].envVarKeys)) return 'unknown';
     const service = candidates[0];
@@ -102,8 +103,9 @@ export function planSecretReference(input: {
           && !input.observed!.services.some(service => service.name === name)) : [];
       if (creationOnlyServices.length) metadata.creationOnlyServices = creationOnlyServices;
       const existingServices = services.filter(name => !creationOnlyServices.includes(name));
-      if (!creationOnlyServices.length && existingServices.length && hasCompleteServiceObservation(input.observed)
-        && existingServices.every(name => input.observed!.services.filter(service => service.name === name
+      if (!creationOnlyServices.length && existingServices.length
+        && existingServices.every(name => hasCompleteServiceConfiguration(input.observed, name, hosting?.services?.[name]?.serviceId)
+          && input.observed!.services.filter(service => service.name === name
           && service.externalId === hosting?.services?.[name]?.serviceId
           && service.runtimeSecretReferenceActivation === 'application-release').length === 1)) metadata.activation = 'application-release';
       const state = existingServices.length ? referenceState(input.observed, existingServices, key, parsed.data, input.destinationsAreKnownAbsent) : 'initializing';
@@ -119,7 +121,7 @@ export function planSecretReference(input: {
       const retainedNativeConflict = prior && typeof prior === 'object' && !Array.isArray(prior)
         && conflicts.some(conflict => Object.hasOwn(prior, conflict));
       const conflictsUnknownOrPresent = immutable && conflicts.some(conflict => !input.destinationsAreKnownAbsent
-        && (!hasCompleteServiceObservation(input.observed) || existingServices.some(name => {
+        && (existingServices.some(name => !hasCompleteServiceConfiguration(input.observed, name)) || existingServices.some(name => {
           const service = input.observed!.services.find(candidate => candidate.name === name);
           return !service || !Array.isArray(service.envVarKeys) || service.envVarKeys.includes(conflict);
         })));

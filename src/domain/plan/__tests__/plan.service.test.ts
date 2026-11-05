@@ -1928,6 +1928,23 @@ describe('PlanService.plan', () => {
     expect(storageAdapter).not.toHaveBeenCalled();
   });
 
+  it('preserves exact service configuration coverage without promoting unknown inventory', async () => {
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'cloudrun', projectId: 'customer-project', environmentId: 'us-central1', services: { web: { serviceId: 'installed-web' } },
+    } });
+    const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'cloudrun', region: 'us-central1' }, services: { web: {} } });
+    mockObservingAdapter({ provider: 'cloudrun', projectExists: true, projectId: 'customer-project', environmentId: 'us-central1',
+      observedAt: new Date().toISOString(), partial: true, warnings: [], databases: [],
+      completeness: { services: 'unknown', serviceConfigurations: { web: 'installed-web' } },
+      services: [{ name: 'web', externalId: 'installed-web', workloadKind: 'web', status: 'empty', config: {},
+        customDomains: [], envVarKeys: [], envVarHashes: {}, runtimeSecretReferenceActivation: 'application-release' }],
+    });
+    const result = await new PlanService().observeEnvironment(project, environment, environmentSpec, { hostingOnly: true });
+    expect(result.observed).toMatchObject({ partial: true, completeness: {
+      services: 'unknown', serviceConfigurations: { web: 'installed-web' },
+    }, services: [{ status: 'empty', runtimeSecretReferenceActivation: 'application-release' }] });
+  });
+
   it('resolves standalone storage scope read-only before first-use observation', async () => {
     const environment = new EnvironmentRepository().create({
       projectId: project.id,

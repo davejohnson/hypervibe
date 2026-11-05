@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { getDb } from '../adapters/db/sqlite.adapter.js';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { CommandContext } from './context.js';
@@ -27,8 +28,9 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
   const store = { connections: context.repos.connections, secretStore: context.secretStore };
   return { async run(input: CloudDeploymentsInput) {
     const action = input.action ?? 'status';
-    if (!['start', 'status', 'preview', 'connect', 'continue', 'propose-release', 'propose-source', 'revoke'].includes(action) || !input.env || input.provider || input.credentialsRef || input.credentialKind || input.connectionId || input.previewId
-      || input.workflowPath && action !== 'propose-release') {
+    if (!['start', 'status', 'preview', 'connect', 'continue', 'propose-release', 'reconcile-release', 'propose-source', 'revoke'].includes(action) || !input.env || input.provider || input.credentialsRef || input.credentialKind || input.connectionId || input.previewId
+      || input.workflowPath && action !== 'propose-release'
+      || action === 'reconcile-release' && (input.sourceBranch !== undefined || input.confirm !== undefined)) {
       throw new HvError('VALIDATION', 'Deployment access uses an exact environment and separate browser approval. Cloud keys and native identity overrides are not accepted.');
     }
     if (action === 'revoke') {
@@ -99,7 +101,7 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
     }
     if (grant?.revocation && (grant.revocation.primary === 'pending' || grant.revocation.replacement === 'pending'))
       throw new HvError('VALIDATION', 'Finish the recorded device access removal before starting another approval. Its encrypted recovery evidence is retained.');
-    const historical = (action === 'status' || action === 'preview') && binding && grant?.status === 'verified';
+    const historical = (action === 'status' || action === 'preview' || action === 'reconcile-release') && binding && grant?.status === 'verified';
     if (historical && input.sourceBranch !== undefined) {
       const knownBranches = [binding!.source.branch, binding!.sourceProposal?.source.branch,
         ...(binding!.sourceAuthorization ? [deploymentBindingEffectiveSource(binding!).branch] : [])];
@@ -201,7 +203,7 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
             throw new HvError('PROVIDER_ERROR', 'Approved branch authorization is not the active connection authority.');
         }
       }
-      if (binding!.releasePolicy) {
+      if (binding!.releasePolicy && binding!.releasePolicy.status !== 'cancelled') {
         const retained = binding!.releasePolicy;
         let historical: unknown;
         try { historical = await request(`/api/v1/projects/${encodeURIComponent(binding!.projectId)}/cloud-deployments/${binding!.connectionId}/release-policies/${retained.id}`, { method: 'GET', token: grant.token }); }
@@ -216,7 +218,9 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
       return { status: remote.status, connection: remote, ...(sourceSummary() ? { sourceAuthorization: sourceSummary() } : {}),
         ...(binding!.sourceAuthorization ? { activeSource: deploymentBindingEffectiveSource(binding!) } : {}),
         ...(binding!.releasePolicy ? { releasePolicy: { id: binding!.releasePolicy.id, status: binding!.releasePolicy.status, ...(binding!.releasePolicy.digest ? { digest: binding!.releasePolicy.digest } : {}) } } : {}),
-        ...(remote.status === 'ready' ? { nextStep: changedBranch
+        ...(remote.status === 'ready' ? { nextStep: binding!.releasePolicy?.status === 'pending'
+          ? { command: 'hv_cloud_connections', input: { purpose: 'deployment-access', action: 'reconcile-release', env: local.env, baseUrl }, instruction: 'The release request outcome is still unknown. Recover this saved request before requesting another release policy; recovery preserves an existing policy or cancels an absent request.' }
+          : changedBranch
           ? { command: 'hv_cloud_connections', input: { purpose: 'deployment-access', action: 'start', env: local.env, baseUrl }, instruction: 'Prepare separate device approval for the approved deployment branch. The original cloud resources and installation evidence are retained.' }
           : { command: 'hv_plan', instruction: 'This receipt describes the saved installation. Planning and deployment still require its approved branch and exact committed source; inspecting it does not authorize applying infrastructure changes.' } } : {}) };
     }
@@ -315,10 +319,45 @@ export function createCloudDeployments({ context, fetchImpl = fetch }: { context
       return { status: current.status, connection: current.connection, sourceAuthorization: sourceSummary(), connectUrl: result.data.connectUrl,
         nextStep: { instruction: 'An app owner must approve this exact deployment branch change in the browser. Device and CI approval remain separate.' } };
     }
+    if (action === 'reconcile-release') {
+      const current = await view();
+      const pending = binding!.releasePolicy;
+      if (!pending) throw new HvError('VALIDATION', 'No saved release request needs recovery.');
+      if (pending.status !== 'pending') return current;
+      const response = await request(`/api/v1/projects/${encodeURIComponent(binding!.projectId)}/cloud-deployments/${binding!.connectionId}/release-policies/${pending.id}/reconciliations`, {
+        token: grant.token, body: { source: pending.source, ...(pending.workflowPath ? { workflowPath: pending.workflowPath } : {}) } });
+      const scope = z.object({ schemaVersion: z.literal(1), projectId: z.string(), connectionId: z.string().guid(), repository: z.string(), environment: z.string(),
+        request: z.object({ id: z.string().guid(), source: deploymentBindingSchema.shape.source, workflowPath: z.string().optional() }).strict() });
+      const reconciliation = z.discriminatedUnion('outcome', [
+        scope.extend({ outcome: z.literal('existing'), policy: policySummary }).strict(),
+        scope.extend({ outcome: z.literal('cancelled'), cancelledAt: z.string().datetime() }).strict(),
+      ]);
+      const result = z.object({ applied: z.union([z.literal(0), z.literal(1)]), skipped: z.union([z.literal(0), z.literal(1)]), reconciliation }).strict().safeParse(response);
+      if (!result.success || result.data.applied + result.data.skipped !== 1) throw new HvError('PROVIDER_ERROR', 'The saved release request could not be recovered. Its pending record is retained.');
+      const evidence = result.data.reconciliation;
+      if (evidence.projectId !== binding!.projectId || evidence.connectionId !== binding!.connectionId || evidence.repository !== binding!.repository
+        || evidence.environment !== binding!.env || !isDeepStrictEqual(evidence.request, { id: pending.id, source: pending.source, ...(pending.workflowPath ? { workflowPath: pending.workflowPath } : {}) })
+        || evidence.outcome === 'existing' && (result.data.applied !== 0 || evidence.policy.id !== pending.id || pending.digest && evidence.policy.digest !== pending.digest))
+        throw new HvError('PROVIDER_ERROR', 'Release recovery returned evidence for a different saved request. Its pending record is retained.');
+      if (evidence.outcome === 'existing') saveBinding({ ...binding!, releasePolicy: { ...pending, ...evidence.policy } });
+      else getDb().transaction(() => {
+        assertCurrent();
+        context.repos.audit.create({ action: 'deployment.release-policy.cancelled', resourceType: 'deployment-release-policy', resourceId: pending.id, details: evidence });
+        saveBinding({ ...binding!, releasePolicy: { ...pending, status: 'cancelled' } });
+      })();
+      return { ...current, releasePolicy: { id: binding!.releasePolicy!.id, status: binding!.releasePolicy!.status,
+        ...(binding!.releasePolicy!.digest ? { digest: binding!.releasePolicy!.digest } : {}) },
+        nextStep: evidence.outcome === 'cancelled'
+          ? { command: 'hv_cloud_connections', input: { purpose: 'deployment-access', action: 'propose-release', env: local.env, baseUrl,
+            ...(pending.workflowPath ? { workflowPath: pending.workflowPath } : {}) }, instruction: 'The previous release request was cancelled before a policy was created. Publish the managed workflow and bindings, then request approval for the current committed source.' }
+          : evidence.policy.status === 'review-required'
+            ? { instruction: 'The saved release policy was recovered. An app owner must approve it in the browser before CI releases can run.' }
+            : { command: 'hv_plan', instruction: 'The saved release policy was recovered. Planning and deployment still require the approved branch and exact committed source.' } };
+    }
     if (action === 'propose-release') {
       const current = await view();
       if (binding?.status !== 'ready' || !binding.receipt || current.status !== 'ready') throw new HvError('VALIDATION', 'Finish deployment installation and publish the managed workflow before requesting release approval.');
-      if (binding.releasePolicy && (binding.releasePolicy.status === 'pending' || isDeepStrictEqual(binding.releasePolicy.source, local.source) && binding.releasePolicy.workflowPath === input.workflowPath)) return current;
+      if (binding.releasePolicy && binding.releasePolicy.status !== 'cancelled' && (binding.releasePolicy.status === 'pending' || isDeepStrictEqual(binding.releasePolicy.source, local.source) && binding.releasePolicy.workflowPath === input.workflowPath)) return current;
       saveBinding({ ...binding, releasePolicy: { id: randomUUID(), source: local.source, status: 'pending', ...(input.workflowPath ? { workflowPath: input.workflowPath } : {}) } });
       const pending = binding!.releasePolicy!;
       const response = await request(`/api/v1/projects/${encodeURIComponent(binding!.projectId)}/cloud-deployments/${binding!.connectionId}/release-policies`, {

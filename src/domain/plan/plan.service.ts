@@ -446,6 +446,7 @@ export class PlanService {
             : 'complete'),
         services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
         ...(reportedCompleteness?.serviceIdentities ? { serviceIdentities: reportedCompleteness.serviceIdentities } : {}),
+        ...(reportedCompleteness?.serviceConfigurations ? { serviceConfigurations: reportedCompleteness.serviceConfigurations } : {}),
         databases: observed.completeness?.databases ?? 'complete',
         caches: observed.completeness?.caches ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',

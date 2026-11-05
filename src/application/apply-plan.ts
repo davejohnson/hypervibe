@@ -119,7 +119,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
-import { hashEnvValue, type ObservedState } from '../domain/ports/observe.port.js';
+import { hashEnvValue, hasCompleteServiceConfiguration, type ObservedState } from '../domain/ports/observe.port.js';
 import {
   parseHostingBindings,
   parseHostingServiceCreateRecovery,
@@ -1546,7 +1546,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (capability === 'hosting.service.converge' && action.type === 'update' && desiredInstanceBounds
       && action.metadata?.workloadCreateRequired !== true) {
       const actual = observedServiceIds.length === 1 ? observedServiceIds[0].config.instanceBounds : undefined;
-      if (!servicesComplete || !actual) return { success: false, status: 'blocked',
+      if ((!servicesComplete && !hasCompleteServiceConfiguration(observed, action.resource.name,
+        typeof boundService?.serviceId === 'string' ? boundService.serviceId : undefined)) || !actual) return { success: false, status: 'blocked',
         message: 'Exact native service instance bounds are unknown; re-plan before changing capacity.' };
       if ((actual.min !== desiredInstanceBounds.min || actual.max !== desiredInstanceBounds.max)
         && (action.requiresConfirm !== true || action.billable !== true || !confirmedActionIds.has(action.id))) {
