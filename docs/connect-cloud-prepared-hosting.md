@@ -154,6 +154,19 @@ This override is internal and read-only; ordinary compilation still uses current
 
 ## Observed regression evidence
 
+The November 5 hosted GCP walkthrough exposed a first-CI planning deadlock:
+the exact prepared workload and receipt could be verified, but broader service
+and job inventory reads returned 403. Runtime reference observation correctly
+remained unknown. After the reviewed workflow was published, that unknown state
+also prevented recording the accepted CI contract and preparing its environment.
+A real SQLite/planner regression failed with the same secret-reference error.
+Fresh prepared proof now permits only the existing `managed-ci-credentials`
+stage, with no hosting writes, reference acceptance, deployment marker or release.
+Unknown or replaced prepared identities and external resource dependencies still
+block. After CI setup converges, unknown runtime references still block rollout.
+The normalized provider and CI fixtures are reconstructed; this correction does
+not establish native first-release compatibility or authorize broader read grants.
+
 The challenged assumption was that knowing native names was enough to reuse a prepared
 workload. A first local environment instead planned service creation and lacked the
 reviewed metadata boundary: three real SQLite/spec/planner/apply tests failed before the

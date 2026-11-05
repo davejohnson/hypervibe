@@ -2678,6 +2678,7 @@ export class PlanService {
       return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
     }
     let preparedDirectEvidence: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseEvidence[] = [];
+    let verifiedPreparedFirstRelease = false;
     if (!providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && environment?.platformBindings.projectId
       && (hostingMetadata?.lifecycle?.hosting?.preparedResources === 'installer-receipt-v1' || environment.platformBindings.preparedHosting !== undefined)) {
       try {
@@ -2693,7 +2694,10 @@ export class PlanService {
         // connection/unknown-observation blockers. A present or unreadable
         // hosted binding above must never bypass initial receipt discovery.
         const prepared = hosting.success && hosting.adapter ? await planPreparedHosting({ environment, environmentSpec,
-          hosting: hosting.adapter, project: projectForPlan, spec: specResult.spec, managedSecretValues, onObservation: proof => { preparedDirectEvidence = proof.directReleaseEvidence ?? []; } }) : null;
+          hosting: hosting.adapter, project: projectForPlan, spec: specResult.spec, managedSecretValues, onObservation: proof => {
+            preparedDirectEvidence = proof.directReleaseEvidence ?? [];
+            verifiedPreparedFirstRelease = !environment.platformBindings.localPreparedHosting && proof.preparation.pendingFirstRelease.length > 0;
+          } }) : null;
         if (prepared) {
           if (scope === 'backups') return { error: 'Run hv_plan with scope="full" to review the prepared hosting binding prerequisite before backup setup; backup-only review cannot authorize application bindings.' };
           const imageBindingRefresh = operatorImageUpdate && isOperatorImageBindingRefresh(environment, prepared, operatorImageUpdate);
@@ -3141,7 +3145,17 @@ export class PlanService {
       action.type !== 'noop' && action.metadata?.workflowPublicationRequired !== true
     );
     const ciWorkflowPublicationStage = !ciBindingStage && ciWorkflowPublicationActions.length > 0;
-    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage && !ciProjectBootstrapStage && !namespaceBindingStage) {
+    // A verified holding workload deliberately has no application secrets yet.
+    // Its accepted workflow can be registered and its CI environment prepared
+    // independently of runtime observation. Keep this existing isolated stage
+    // free of hosting changes, secret acceptance and deployment markers.
+    const ciSyncIds = new Set(ciSyncActions.map(action => action.id));
+    const preparedCiCredentialsStage = scope === 'full' && verifiedPreparedFirstRelease && managedCiEnabled
+      && !ciBindingStage && !ciWorkflowPublicationStage && !runtimeAccessActions.length
+      && !queues.actions.some(isRuntimeQueuePrerequisite) && !pendingVolumes
+      && ciSyncActions.length > 0 && ciSyncActions.every(action => isManagedCiCredentialAction(action)
+        && (action.dependsOn ?? []).every(dependency => ciSyncIds.has(dependency)));
+    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage && !ciProjectBootstrapStage && !namespaceBindingStage && !preparedCiCredentialsStage) {
       const detail = delegatedSecrets.blockers
         .map((blocker) => `${blocker.key}: ${blocker.reason}`)
         .join('; ');
@@ -3216,7 +3230,7 @@ export class PlanService {
     actions.push(...ios.actions);
     actions.push(...githubConfirmationActions);
 
-    const ciConfigurationPending = checkpointStageActive || ciBindingStage || ciWorkflowPublicationActions.length > 0;
+    const ciConfigurationPending = checkpointStageActive || ciBindingStage || ciWorkflowPublicationActions.length > 0 || preparedCiCredentialsStage;
     const scheduleActivations = ciConfigurationPending ? [] : planScheduleActivations({ environment, environmentSpec, observed });
     actions.push(...scheduleActivations);
 
@@ -3430,7 +3444,7 @@ export class PlanService {
     if (serviceFilter && recoveryRuntimeStageActive) return { error: 'Run hv_plan without services to review the current backup worker prerequisite stage.' };
     let backupProvisioningStageActive = false;
     let backupReadinessStageActive = false;
-    let ciCredentialsStageActive = false;
+    let ciCredentialsStageActive: boolean = preparedCiCredentialsStage;
     if (checkpointStageActive) {
       // A recovery checkpoint acts only on an already-bound database. It must
       // precede workflow publication and unrelated reconciliation, and must
@@ -3490,6 +3504,9 @@ export class PlanService {
       ciDeploy.warnings.push(
         'This plan is limited to managed CI workflow publication. Merge and re-observe the reviewed files, then re-run hv_plan for provider reconciliation.'
       );
+    } else if (preparedCiCredentialsStage) {
+      actions = ciSyncActions;
+      ciDeploy.warnings.push('This plan prepares only the accepted deployment workflow and its CI environment. Re-run hv_plan afterward; application configuration, private settings and the first release remain unverified.');
     } else if (volumeStageActive) {
       actions = serviceVolumes.actions;
       storage.warnings.push('This plan is limited to the current filesystem component stage. Apply and re-plan to review dependent resources and deployment; no application code is deployed by this stage.');
