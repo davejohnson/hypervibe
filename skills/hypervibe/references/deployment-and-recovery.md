@@ -64,6 +64,80 @@ health probes are per-service configuration, and jobs have different provider
 semantics. Let the current capability/schema express these settings rather than
 assuming a provider resource type from the workload label.
 
+## Pause an app or move visitors to a replacement
+
+For a user who wants to copy database or bucket data themselves, use explicit
+application maintenance on the source environment:
+
+```json
+{ "maintenance": { "enabled": true, "mode": "application" } }
+```
+
+Merge this into the existing environment through `hv_spec`, preserving its
+hosting, services, database, and storage. Run a full `hv_plan`, apply the reviewed
+actions with their required confirmations, and verify the result before the
+user starts copying. Hypervibe serves a Cloudflare 503 page and suspends the
+declared scheduled jobs, workers, and web services. This pause does not open
+database access, change a database write fence, or read, change, or copy bucket
+contents. Keep private data access private.
+
+Explain that current application jobs and uploads should finish first. The
+pause does not prove that external clients stopped writing or that a persistent
+worker completed its current job. GCP native scheduled jobs wait for existing
+executions to finish; provider stop/scaling behavior on other workloads is not
+evidence of graceful application completion. Report an unknown or pending stop
+as incomplete and stop dependent work.
+
+Keep `mode: "application"` explicit: omitted mode retains data maintenance,
+including PostgreSQL fencing. Application maintenance blocks automated
+`dataMigration`. Later full plans keep an enabled application pause isolated
+even when ordinary settings drift. Do not use a service-filtered plan, direct
+deployment, or provider tool to restart the app around that boundary. A paused
+environment cannot switch hosting providers; prepare a separate target through
+its own Hypervibe plan and apply instead.
+
+After the user's manual copy, verify the target app against its intended data
+and storage before moving visitors. If the user wants the existing public URL
+to reach a prepared `next` environment's public `web` service, set this on the
+paused source:
+
+```json
+{
+  "domainTarget": { "environment": "next", "service": "web" },
+  "maintenance": { "enabled": true, "mode": "application", "page": "off" }
+}
+```
+
+Review and apply the source's full plan, then check the public URL. Hypervibe
+keeps a Cloudflare Worker on the source hostname and forwards requests to the
+verified target provider HTTPS URL. The source stays paused. Domain ownership,
+DNS, and the provider custom-domain attachment remain with the source; do not
+describe this as a domain transfer. Keep Cloudflare proxying enabled. Do not
+assign the same hostname to the target, chain targets, or bypass an unavailable
+target observation. A completed routing action does not prove the copied data
+or the target app works; report those checks separately.
+Configure the target app for the original public URL and its trusted forwarding
+settings. The Worker does not rewrite app-generated absolute URLs or cookie
+domains. Verify authentication, redirects, links, and uploads through the
+original hostname after switching traffic.
+After an uncertain routing result, preserve the requested page/target and saved
+transition state. Follow Hypervibe's recovery result before selecting another
+target or page; do not clear bindings or retry through Cloudflare directly.
+
+To show the maintenance page again, change `page` to `"active"` while keeping
+application maintenance enabled and the target declared, then plan and apply.
+This restores the 503 response on the same route without restarting the source
+or stopping writes through the target's other endpoints.
+
+To resume the source, remove `domainTarget` and `page` if present and set
+`maintenance: { "enabled": false, "mode": "application" }`, then plan, apply,
+and verify the source app. Removing maintenance entirely also restores using
+the saved mode when no target remains. Hypervibe restores saved workload
+settings before removing the route; it does not copy target data back. Explain
+any writes made since the switch before proposing a return to the source, and
+never call traffic restoration a data rollback. Verify provider and application
+results for this move; offline tests are not proof of live compatibility.
+
 ## Diagnose, inspect, and adopt
 
 Use `hv_status`, `hv_health`, `hv_logs`, `hv_ci_status`, or the appropriate current

@@ -94,6 +94,9 @@ async function verifyMigrationMaintenance(params: {
   targetSpec: ProjectSpec['environments'][string];
   action: PlanAction;
 }): Promise<ActionResult | null> {
+  if (params.sourceSpec.maintenance?.mode === 'application' || params.targetSpec.maintenance?.mode === 'application') {
+    return stale(params.action, 'Application maintenance does not authorize automated database or bucket copying.');
+  }
   if (
     params.sourceSpec.maintenance?.enabled !== true
     || params.targetSpec.maintenance?.enabled !== true
@@ -116,7 +119,8 @@ async function verifyMigrationMaintenance(params: {
     });
   }));
   const [source, target] = observations;
-  if (!source || !target || source.state !== 'active' || target.state !== 'active') {
+  if (!source || !target || source.state !== 'active' || target.state !== 'active'
+    || source.mode === 'application' || target.mode === 'application') {
     return stale(params.action, 'Provider-verified maintenance is no longer active in both environments.');
   }
   const sourceFingerprint = createHash('sha256').update(JSON.stringify(source)).digest('hex');

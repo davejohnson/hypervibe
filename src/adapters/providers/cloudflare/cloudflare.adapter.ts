@@ -7,9 +7,13 @@ import {
 import type { IDnsProvider, DnsRecord } from '../../../domain/ports/dns.port.js';
 import type {
   IEdgeMaintenanceAdapter,
+  IEdgeTrafficAdapter,
   MaintenanceEdgeBinding,
   MaintenanceEdgeObservation,
+  TrafficEdgeTarget,
+  TrafficEdgeBinding,
 } from '../../../domain/ports/maintenance.port.js';
+import { normalizedTrafficOrigin } from '../../../domain/services/traffic-origin.js';
 import type {
   ILoadBalancerAdapter,
   LoadBalancerEnsureResult,
@@ -28,6 +32,10 @@ const CLOUDFLARE_ACCOUNT_TOKEN_URL = CLOUDFLARE_TOKEN_URLS.account;
 const CLOUDFLARE_DNS_PERMISSIONS = 'Zone > Zone > Read, Zone > Zone Settings > Read or Edit, and Zone > DNS > Edit/Write';
 const CLOUDFLARE_REGISTRAR_PERMISSIONS = 'Registrar write permissions on the target account';
 const CLOUDFLARE_PAGE_CAP = 1000;
+
+function normalizedEdgeHostname(hostname: string): string {
+  return hostname.trim().toLowerCase().replace(/\.+$/, '');
+}
 
 export interface CloudflareZone {
   id: string;
@@ -358,7 +366,7 @@ function isDuplicateDnsRecordError(error: unknown): boolean {
   return /already exists|identical record/i.test(message);
 }
 
-export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IEdgeMaintenanceAdapter {
+export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IEdgeMaintenanceAdapter, IEdgeTrafficAdapter {
   readonly name = 'cloudflare';
   private credentials: CloudflareCredentials | null = null;
 
@@ -529,7 +537,7 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
   }
 
   private maintenanceScript(hostname: string): { name: string; source: string; contentHash: string } {
-    const normalized = hostname.trim().replace(/\.$/, '').toLowerCase();
+    const normalized = normalizedEdgeHostname(hostname);
     const contentHash = createHash('sha256').update(`hypervibe-maintenance-v1:${normalized}`).digest('hex');
     const name = `hv-maintenance-${createHash('sha256').update(normalized).digest('hex').slice(0, 20)}`;
     const source = `addEventListener("fetch",event=>event.respondWith(new Response("Temporarily unavailable for maintenance\\n",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store","Retry-After":"30","X-Hypervibe-Maintenance":"${contentHash}"}})));`;
@@ -540,6 +548,7 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
     hostname: string,
     binding?: MaintenanceEdgeBinding
   ): Promise<MaintenanceEdgeObservation> {
+    hostname = normalizedEdgeHostname(hostname);
     try {
       const expected = this.maintenanceScript(hostname);
       const scope = await this.resolveLoadBalancerScope(hostname);
@@ -563,7 +572,7 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
           : { state: 'unknown', hostname, markerVerified: false, reason: 'maintenance_edge_unbound_route' };
       }
       if (
-        binding.hostname !== hostname
+        normalizedEdgeHostname(binding.hostname) !== hostname
         || binding.accountId !== scope.accountId
         || binding.zoneId !== scope.zoneId
         || binding.scriptName !== expected.name
@@ -596,11 +605,13 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
     expectedContentHash: string,
     binding?: MaintenanceEdgeBinding
   ): Promise<Receipt> {
+    hostname = normalizedEdgeHostname(hostname);
     try {
       const expected = this.maintenanceScript(hostname);
       if (expected.contentHash !== expectedContentHash) {
         throw new Error('Reviewed maintenance content changed.');
       }
+      if (binding) await this.verifyRetainedTrafficRoute(hostname, binding);
       const scope = await this.resolveLoadBalancerScope(hostname);
       const pattern = `${hostname.trim().replace(/\.$/, '').toLowerCase()}/*`;
       const routes = await this.listPaginated<{ id: string; pattern: string; script?: string }>(
@@ -659,12 +670,13 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
 
   async removeMaintenanceEdge(binding: MaintenanceEdgeBinding): Promise<Receipt> {
     try {
+      const hostname = normalizedEdgeHostname(binding.hostname);
       const routes = await this.listPaginated<{ id: string; pattern: string; script?: string }>(
         `/zones/${binding.zoneId}/workers/routes`
       );
       const route = routes.find((candidate) => candidate.id === binding.routeId);
       if (route && (
-        route.pattern.toLowerCase() !== `${binding.hostname.toLowerCase()}/*`
+        route.pattern.toLowerCase() !== `${hostname}/*`
         || route.script !== binding.scriptName
       )) {
         throw new Error('The bound Cloudflare route identity changed.');
@@ -693,6 +705,93 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
 
   maintenanceContentHash(hostname: string): string {
     return this.maintenanceScript(hostname).contentHash;
+  }
+
+  private trafficScript(hostname: string, target: TrafficEdgeTarget): { name: string; source: string; contentHash: string; origin: string } {
+    hostname = normalizedEdgeHostname(hostname);
+    const origin = normalizedTrafficOrigin(hostname, target.origin);
+    if (!target.targetFingerprint.trim()) throw new Error('Reviewed traffic target identity is missing.');
+    const name = this.maintenanceScript(hostname).name;
+    const contentHash = createHash('sha256').update(JSON.stringify({
+      contract: 'hypervibe-traffic-v1', hostname, origin, targetFingerprint: target.targetFingerprint,
+    })).digest('hex');
+    // Workers Request/fetch contracts: rewrite URL and Host together; never
+    // follow redirects carrying application credentials to another origin.
+    // https://developers.cloudflare.com/workers/runtime-apis/request/
+    const source = `addEventListener("fetch",event=>event.respondWith((async()=>{
+const incoming=event.request;const url=new URL(incoming.url);
+if(url.hostname.toLowerCase().replace(/[.]+$/,"")!==${JSON.stringify(hostname)})return new Response("Unavailable",{status:503});
+if(url.pathname==="/.well-known/hypervibe-traffic")return new Response(null,{status:204,headers:{"Cache-Control":"no-store","X-Hypervibe-Traffic":${JSON.stringify(contentHash)}}});
+const destination=new URL(${JSON.stringify(origin)});destination.pathname=url.pathname;destination.search=url.search;
+const headers=new Headers(incoming.headers);headers.set("Host",destination.host);headers.set("X-Forwarded-Host",url.host);headers.set("X-Forwarded-Proto",url.protocol.slice(0,-1));headers.delete("Forwarded");
+try{return await fetch(new Request(new Request(destination.toString(),incoming),{headers,redirect:"manual"}));}
+catch{return new Response("Temporarily unavailable for maintenance\\n",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store","Retry-After":"30"}});}
+})()));`;
+    return { name, source, contentHash, origin };
+  }
+
+  private async verifyRetainedTrafficRoute(hostname: string, binding: MaintenanceEdgeBinding): Promise<void> {
+    hostname = normalizedEdgeHostname(hostname);
+    const scope = await this.resolveLoadBalancerScope(hostname);
+    const expectedName = this.maintenanceScript(hostname).name;
+    if (normalizedEdgeHostname(binding.hostname) !== hostname || binding.accountId !== scope.accountId
+      || binding.zoneId !== scope.zoneId || binding.scriptName !== expectedName || !binding.routeId) {
+      throw new Error('The retained maintenance route no longer matches the reviewed account, zone, hostname and script.');
+    }
+    const routes = await this.listPaginated<{ id: string; pattern: string; script?: string }>(`/zones/${scope.zoneId}/workers/routes`);
+    const pattern = `${hostname.toLowerCase()}/*`;
+    const matching = routes.filter(route => route.pattern.toLowerCase() === pattern);
+    if (matching.length !== 1 || matching[0]?.id !== binding.routeId || matching[0]?.script !== binding.scriptName
+      || routes.some(route => route.pattern.toLowerCase().startsWith(`${hostname.toLowerCase()}/`) && route.pattern.toLowerCase() !== pattern)) {
+      throw new Error('The exact retained maintenance route is missing, changed or shadowed; no route will be created.');
+    }
+  }
+
+  async ensureTrafficEdge(hostname: string, target: TrafficEdgeTarget, binding: MaintenanceEdgeBinding): Promise<Receipt> {
+    hostname = normalizedEdgeHostname(hostname);
+    try {
+      const expected = this.trafficScript(hostname, target);
+      const nextBinding = await this.prepareTrafficEdge(hostname, target, binding);
+      if (binding.origin === nextBinding.origin && binding.targetFingerprint === nextBinding.targetFingerprint
+        && binding.contentHash === nextBinding.contentHash) {
+        const observation = await this.observeTrafficEdge(hostname, target, binding);
+        if (observation.state === 'active' && observation.markerVerified) {
+          return { success: true, message: `Traffic for ${hostname} already uses the reviewed target`, data: { binding: nextBinding, applied: 0, skipped: 1 } };
+        }
+      }
+      await this.rawRequest('PUT', `/accounts/${binding.accountId}/workers/scripts/${encodeURIComponent(binding.scriptName)}`, {
+        body: expected.source, contentType: 'application/javascript',
+      });
+      return { success: true, message: `Traffic for ${hostname} now uses the reviewed target`, data: { binding: nextBinding, applied: 1, skipped: 0 } };
+    } catch (error) {
+      return { success: false, message: `Traffic for ${hostname} was not switched`, error: error instanceof Error ? error.message : 'Traffic routing failed' };
+    }
+  }
+
+  async prepareTrafficEdge(hostname: string, target: TrafficEdgeTarget, binding: MaintenanceEdgeBinding): Promise<TrafficEdgeBinding> {
+    hostname = normalizedEdgeHostname(hostname);
+    const expected = this.trafficScript(hostname, target);
+    await this.verifyRetainedTrafficRoute(hostname, binding);
+    return { ...binding, hostname, origin: expected.origin, targetFingerprint: target.targetFingerprint, contentHash: expected.contentHash };
+  }
+
+  async observeTrafficEdge(hostname: string, target: TrafficEdgeTarget, binding: MaintenanceEdgeBinding): Promise<MaintenanceEdgeObservation> {
+    hostname = normalizedEdgeHostname(hostname);
+    try {
+      const expected = this.trafficScript(hostname, target);
+      await this.verifyRetainedTrafficRoute(hostname, binding);
+      if (binding.origin !== expected.origin || binding.targetFingerprint !== target.targetFingerprint || binding.contentHash !== expected.contentHash) {
+        return { state: 'unknown', hostname, markerVerified: false, binding, reason: 'traffic_edge_target_changed' };
+      }
+      const marker = await fetch(`https://${hostname}/.well-known/hypervibe-traffic?nonce=${Date.now()}`, {
+        redirect: 'manual', headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(10_000),
+      });
+      const markerVerified = marker.status === 204 && marker.headers.get('x-hypervibe-traffic') === expected.contentHash;
+      return { state: markerVerified ? 'active' : 'unknown', hostname, markerVerified, binding,
+        ...(markerVerified ? {} : { reason: 'traffic_edge_marker_unverified' }) };
+    } catch {
+      return { state: 'unknown', hostname, markerVerified: false, binding, reason: 'traffic_edge_observation_failed' };
+    }
   }
 
   private async listPaginated<T>(

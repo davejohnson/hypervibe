@@ -713,6 +713,15 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'environmentName')
   ) {
     const operation = action.metadata?.operation;
+    if (operation === MAINTENANCE_OPERATIONS.edgeRoute
+      && action.resource.provider === 'cloudflare'
+      && action.resource.name === metadataString(action, 'hostname')
+      && action.requiresConfirm === true && action.billable === true
+      && metadataString(action, 'targetEnvironment') && metadataString(action, 'targetService')
+      && /^https:\/\//.test(metadataString(action, 'origin') ?? '')
+      && /^[a-f0-9]{64}$/.test(metadataString(action, 'targetFingerprint') ?? '')) {
+      return authority(action, 'maintenance.edge.mutate');
+    }
     if (
       (operation === MAINTENANCE_OPERATIONS.edgeEnable
         || operation === MAINTENANCE_OPERATIONS.edgeDisable)

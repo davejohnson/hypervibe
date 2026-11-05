@@ -4,6 +4,7 @@ import type { ActionResult } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import {
   supportsEdgeMaintenance,
+  supportsEdgeTraffic,
   supportsWorkloadMaintenance,
   type MaintenanceEdgeBinding,
   type MaintenanceWorkloadSnapshot,
@@ -15,6 +16,9 @@ import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.
 import {
   observeEnvironmentMaintenance,
   maintenanceWorkloadsRestored,
+  maintenanceMode,
+  maintenanceModeChanged,
+  maintenanceTransitionChanged,
   parseEnvironmentMaintenanceBinding,
   type EnvironmentMaintenanceBinding,
 } from '../domain/services/environment-maintenance.service.js';
@@ -71,6 +75,12 @@ export async function applyMaintenanceAction(params: {
   action: PlanAction;
 }): Promise<ActionResult | null> {
   if (!isMaintenanceAction(params.action)) return null;
+  if (params.action.type === 'noop') {
+    return { success: true, message: 'Maintenance action requires no changes.', data: { applied: 0, skipped: 1 } };
+  }
+  if (params.action.type !== 'update' || stringField(params.action, 'environmentName') !== params.environmentName) {
+    return blocked('Maintenance action target changed', 'Re-plan the exact environment before changing maintenance.');
+  }
   let environment = params.ctx.repos.environments.findByProjectAndName(
     params.project.id,
     params.environmentName
@@ -80,6 +90,59 @@ export async function applyMaintenanceAction(params: {
   }
   const operation = params.action.metadata?.operation;
   const currentBinding = parseEnvironmentMaintenanceBinding(environment);
+  const mode = maintenanceMode(params.environmentSpec, currentBinding);
+  if (maintenanceModeChanged(params.environmentSpec, currentBinding)) {
+    return blocked('Maintenance mode changed while the app is paused', 'Resume using the saved maintenance mode before selecting a different mode.');
+  }
+  if (params.environmentSpec.maintenance?.enabled !== true && (params.environmentSpec.domainTarget || currentBinding?.pendingEdge)) {
+    return blocked('Traffic switching must be resolved before restoring the original app', 'Reconcile the pending route first, then remove the target selection before resuming the original app.');
+  }
+
+  if (operation === MAINTENANCE_OPERATIONS.edgeRoute) {
+    const hostname = stringField(params.action, 'hostname');
+    const destination = params.environmentSpec.domainTarget;
+    if (mode !== 'application' || params.environmentSpec.maintenance?.enabled !== true
+      || params.environmentSpec.maintenance.page !== 'off' || !hostname || hostname !== params.environmentSpec.domain
+      || params.action.resource.provider !== 'cloudflare' || params.action.resource.name !== hostname
+      || params.action.requiresConfirm !== true || params.action.billable !== true
+      || destination?.environment !== stringField(params.action, 'targetEnvironment')
+      || destination?.service !== stringField(params.action, 'targetService') || !currentBinding?.edge) {
+      return blocked('Traffic destination changed', 'Keep the original app paused and re-plan the exact replacement destination.');
+    }
+    const result = getCloudflareAdapter(hostname);
+    const sourceAdapter = await hostingAdapter(params);
+    if ('error' in result || !supportsEdgeTraffic(result.adapter) || !sourceAdapter) {
+      return blocked('Traffic switching is unavailable', 'The source hosting connection and owned Cloudflare route must both be available.');
+    }
+    const fresh = await observeEnvironmentMaintenance({ project: params.project, environment,
+      environmentSpec: params.environmentSpec, hostingAdapter: sourceAdapter });
+    const target = fresh.routing?.target;
+    if (fresh.edge.state !== 'active' || !fresh.edge.markerVerified
+      || Object.values(fresh.workloads).some(workload => workload.state !== 'suspended')
+      || fresh.routing?.state !== 'ready' || !target
+      || target.origin !== stringField(params.action, 'origin')
+      || target.targetFingerprint !== stringField(params.action, 'targetFingerprint')
+      || maintenanceTransitionChanged(params.environmentSpec, currentBinding, target)) {
+      return blocked('Traffic switch is not ready', 'The original workloads must remain paused and the exact replacement must still be healthy.');
+    }
+    let proposed: MaintenanceEdgeBinding;
+    try {
+      proposed = await result.adapter.prepareTrafficEdge(hostname, target, currentBinding.edge);
+    } catch {
+      return blocked('Traffic route could not be verified', 'The exact owned route must be verified before switching traffic.');
+    }
+    environment = saveBinding(params.ctx, environment, { ...currentBinding, mode, state: 'entering',
+      pendingEdge: proposed, updatedAt: new Date().toISOString() });
+    const receipt = await result.adapter.ensureTrafficEdge(hostname, target, proposed);
+    if (!receipt.success) return blocked('Traffic switch was not verified', receipt.error ?? receipt.message);
+    const verified = await result.adapter.observeTrafficEdge(hostname, target, proposed);
+    if (verified.state !== 'active' || !verified.markerVerified) {
+      return blocked('Traffic switch is still being verified', 'The proposed route is saved. Re-plan to reconcile this same destination.');
+    }
+    saveBinding(params.ctx, environment, { ...currentBinding, mode, state: 'entering', edge: proposed,
+      pendingEdge: undefined, updatedAt: new Date().toISOString() });
+    return { success: true, message: 'Public traffic now reaches the replacement; the original app remains paused.', data: receipt.data };
+  }
 
   if (
     operation === MAINTENANCE_OPERATIONS.edgeEnable
@@ -97,6 +160,17 @@ export async function applyMaintenanceAction(params: {
       const contentHash = (result.adapter as { maintenanceContentHash?: (value: string) => string })
         .maintenanceContentHash?.(hostname);
       if (!contentHash) return blocked('Maintenance edge content is unavailable', 'The connected Cloudflare adapter cannot produce the reviewed maintenance marker.');
+      if (currentBinding?.pendingEdge && params.environmentSpec.maintenance?.page === 'off') {
+        return blocked('A previous traffic switch still needs verification', 'Reconcile that exact destination before changing the maintenance page.');
+      }
+      // Keep an uncertain traffic update until a page overwrite is acknowledged.
+      // The old page may still be visible while that traffic update propagates;
+      // replacing its journal with the page would let a retry trust stale output.
+      if (currentBinding?.edge && !currentBinding.pendingEdge?.origin) {
+        const { origin: _origin, targetFingerprint: _targetFingerprint, ...prior } = currentBinding.edge;
+        environment = saveBinding(params.ctx, environment, { ...currentBinding, mode, state: 'entering',
+          pendingEdge: { ...prior, contentHash }, updatedAt: new Date().toISOString() });
+      }
       const receipt = await result.adapter.ensureMaintenanceEdge(hostname, contentHash, currentBinding?.edge);
       if (!receipt.success) {
         return blocked('Maintenance edge was not enabled', receipt.error ?? receipt.message);
@@ -108,7 +182,9 @@ export async function applyMaintenanceAction(params: {
       environment = saveBinding(params.ctx, environment, {
         ...currentBinding,
         state: 'entering',
+        mode,
         edge,
+        pendingEdge: undefined,
         updatedAt: new Date().toISOString(),
       });
       const verified = await result.adapter.observeMaintenanceEdge(hostname, edge);
@@ -135,7 +211,7 @@ export async function applyMaintenanceAction(params: {
     });
     if (
       !maintenanceWorkloadsRestored(exitObservation.workloads, currentBinding)
-      || !['unfenced', 'not-applicable'].includes(exitObservation.database.state)
+      || !['unfenced', 'not-applicable', ...(mode === 'application' ? ['unmanaged'] : [])].includes(exitObservation.database.state)
     ) {
       return blocked(
         'Maintenance edge removal preconditions changed',
@@ -209,7 +285,7 @@ export async function applyMaintenanceAction(params: {
           snapshots[name] = {
             ...observed,
             workloadKind: spec.workloadKind,
-            wasRunning: observed.state === 'running',
+            wasRunning: observed.wasRunning ?? observed.state === 'running',
           };
         }
       }
@@ -230,6 +306,7 @@ export async function applyMaintenanceAction(params: {
       environment = saveBinding(params.ctx, environment, {
         ...currentBinding,
         state: 'entering',
+        mode,
         workloads: snapshots,
         updatedAt: new Date().toISOString(),
       });
@@ -266,6 +343,7 @@ export async function applyMaintenanceAction(params: {
     operation === MAINTENANCE_OPERATIONS.databaseFence
     || operation === MAINTENANCE_OPERATIONS.databaseUnfence
   ) {
+    if (mode !== 'data') return blocked('Database changes are outside this application pause', 'Application maintenance leaves database access and data unchanged.');
     const enabling = operation === MAINTENANCE_OPERATIONS.databaseFence;
     const fresh = await observeEnvironmentMaintenance({
       project: params.project,
@@ -327,9 +405,16 @@ export async function applyMaintenanceAction(params: {
       );
     }
     if (entering) {
+      const pending = currentBinding?.pendingEdge;
+      if (pending && observation.edge.contentHash !== pending.contentHash) {
+        return blocked('A previous traffic update is still unresolved', 'Re-plan and apply the maintenance page update before finalizing this pause.');
+      }
+      const completedEdge = pending && observation.edge.contentHash === pending.contentHash ? pending : currentBinding?.edge;
       saveBinding(params.ctx, environment, {
         ...currentBinding,
         state: 'active',
+        edge: completedEdge,
+        pendingEdge: undefined,
         updatedAt: new Date().toISOString(),
       });
     } else {
@@ -338,7 +423,10 @@ export async function applyMaintenanceAction(params: {
     return {
       success: true,
       message: entering
-        ? `Maintenance is active and provider-verified for ${params.environmentName}`
+        ? mode === 'application'
+          ? observation.page === 'off' ? 'Public traffic reaches the replacement; the original app remains paused.'
+            : 'The app is paused and the maintenance page is active. Database and bucket access are unchanged.'
+          : `Maintenance is active and provider-verified for ${params.environmentName}`
         : `Maintenance is inactive and normal operation is restored for ${params.environmentName}`,
       data: { applied: 1, skipped: 0, state: observation.state, stage: observation.stage },
     };

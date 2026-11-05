@@ -1,0 +1,31 @@
+{
+  "provider": "cloudrun",
+  "sourceRevision": "1e3baa918084cc4097d4de7e1f81876671f8e7ff",
+  "reviewedAt": "2026-11-04",
+  "evidence": "Official source snapshots; reconstructed offline HTTP responses, not recorded provider traffic.",
+  "files": [
+    {
+      "file": "execution.proto",
+      "sourceUrl": "https://github.com/googleapis/googleapis/blob/1e3baa918084cc4097d4de7e1f81876671f8e7ff/google/cloud/run/v2/execution.proto",
+      "sha256": "287b1e2ca823b017a7626587df71b36fae31413afd18a377d80b91a608f6f6ef",
+      "extraction": "Complete upstream file, unchanged."
+    },
+    {
+      "file": "cloudscheduler.proto",
+      "sourceUrl": "https://github.com/googleapis/googleapis/blob/1e3baa918084cc4097d4de7e1f81876671f8e7ff/google/cloud/scheduler/v1/cloudscheduler.proto",
+      "sha256": "d054dcfe0f77b2bda7ddda5134ac471b19f9a96cb991c660a3a26f68551fdb1b",
+      "extraction": "Complete upstream file, unchanged."
+    },
+    {
+      "file": "job.proto",
+      "sourceUrl": "https://github.com/googleapis/googleapis/blob/1e3baa918084cc4097d4de7e1f81876671f8e7ff/google/cloud/scheduler/v1/job.proto",
+      "sha256": "82cb30d49234af8421380b3f1589c6de11b6d884910f0b48e9815be020a50818",
+      "extraction": "Complete upstream file, unchanged."
+    }
+  ],
+  "limitations": [
+    "These source files are reviewed semantic evidence, not a compiled response-schema validator.",
+    "No live provider pause, drain, permissions, resume or application task completion has been verified.",
+    "Only exact bound native Cloud Scheduler HTTP triggers targeting the bound Cloud Run job are admitted; internal worker timers and additional external triggers are not drained."
+  ]
+}

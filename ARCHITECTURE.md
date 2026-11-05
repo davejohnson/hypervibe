@@ -2236,24 +2236,53 @@ transfer engines own PostgreSQL snapshot and object streaming semantics. See
 `docs/data-migration.md` for the operator contract.
 
 Environment maintenance is a provider-neutral desired-state boundary under
-`environments.<name>.maintenance.enabled`. Entry is ordered and verified:
-Cloudflare publishes a bound static 503 Worker route, cron/worker/web workloads
-are suspended in that order with exact restoration snapshots, PostgreSQL sets
-`default_transaction_read_only` for the bound role and database, and a final
-fresh observation records the active state. Exit reverses the database and
-workload changes before removing the exact bound edge route. Every stage stores
-only durable provider identity and non-secret restoration state, and a failed
-or unknown observation blocks the next mutation. Migration copy actions carry
-fresh source and target maintenance fingerprints and re-observe both immediately
-before provisioning a candidate target.
+`environments.<name>.maintenance.enabled`. With omitted `mode` or `mode: "data"`,
+entry verifies a bound Cloudflare static 503 Worker route, suspends cron/worker/web
+workloads in that order with exact restoration snapshots, sets PostgreSQL
+`default_transaction_read_only` for the bound role and database, and records the
+active state after fresh observation. Exit reverses the database and workload
+changes before removing the exact bound edge route. Migration copy actions
+require this data maintenance boundary, carry fresh source and target
+fingerprints, and re-observe both immediately before provisioning a candidate.
+
+Explicit `maintenance.mode: "application"` verifies the same edge and workload
+pause without opening database access, fencing PostgreSQL, or accessing/copying
+bucket contents. Database maintenance observation is `unmanaged`; this state
+cannot authorize `dataMigration`. It does not prove that external writers,
+uploads, or application jobs have drained. A settled enabled application pause
+remains an isolated full-plan stage: ordinary service, source, environment
+configuration, and deployment drift cannot restart the app. Service-filtered
+plans and a hosting-provider change in the paused source environment are blocked.
+Resume restores the saved workload settings; removing maintenance intent uses
+the saved mode. A bound pause cannot change modes until it has exited.
+
+Application maintenance may route the source hostname to a separately prepared
+environment with `domainTarget: { environment, service }` and
+`maintenance.page: "off"`, while keeping `enabled: true` and
+`mode: "application"`. The target must be a public web service in another declared
+environment with a verified provider-native HTTPS URL. A persistent Cloudflare Worker forwards
+traffic to that URL; DNS/custom-domain ownership stays with the paused source.
+This is not a DNS or provider custom-domain transfer. Target chains and shared
+hostname ownership are rejected. The target app must accept the original public
+URL and trusted forwarding; the Worker does not rewrite app-generated absolute
+URLs or cookie domains. Setting `page: "active"` restores the 503 page
+on the same route without resuming the source or stopping target writes. To
+resume source traffic, remove `domainTarget` and `page` and disable maintenance;
+this restores workload snapshots, not copied data or writes made at the target.
+Every stage stores durable provider identity and non-secret restoration state,
+and failed or unknown observation blocks the next mutation. See
+[manual application moves](docs/data-migration.md#pause-the-app-for-a-manual-move).
 
 The workload port is implemented by Azure Container Apps, GCP Cloud Run, and
-Railway. Cloudflare supplies the
-common public edge and PostgreSQL supplies the provider-independent write
-fence. ECS Express explicitly declares maintenance unsupported until it can
-prove all background and direct-origin workloads are reversibly stopped.
+Railway. Cloudflare supplies the common public edge; PostgreSQL supplies the
+write fence only in data mode. GCP pauses native cron scheduling and waits for
+current executions to finish. Provider stop/scaling operations for web services
+and persistent workers do not establish graceful completion of application jobs,
+requests, or uploads. ECS Express explicitly declares maintenance unsupported
+until it can prove all background and direct-origin workloads are reversibly stopped.
 Generic planning must fail closed for unsupported providers; capability
-presence is never inferred from a provider name.
+presence is never inferred from a provider name. Offline lifecycle and contract
+checks do not establish live compatibility for a specific app or account.
 
 Service filesystem mounts are separate from object storage. Optional hosting
 `serviceVolumes` capability metadata gates `services.<name>.volume.mountPath`;
