@@ -4,6 +4,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { createCloudJsonClient, cloudAccessRejected } from '../../application/cloud-http.js';
+import { CLOUD_DEPLOYMENT_SESSION_TIMEOUT_MS } from '../../domain/services/cloud-deployment-session-budget.js';
 import { normalizeHypervibeCloudBaseUrl } from '../../application/cloud-pairing.js';
 import { resolveCloudSourceBranch, sourceBranchSchema } from '../../application/cloud-source-branch.js';
 import { findRepoRoot, readRepoSpecFile } from '../../domain/spec/repo-spec-file.js';
@@ -131,7 +132,7 @@ export async function resolveDeploymentAdapter<T>(input: { providerName: string;
   const selected = selectedDeploymentAccess(input);
   if (!selected) return { selected: false };
   const { binding, receipt, sourceAuthorization, accessCipher, grant, local, assertCurrent } = selected;
-  const request = createCloudJsonClient(binding.baseUrl, input.fetchImpl ?? fetch, 15_000);
+  const request = createCloudJsonClient(binding.baseUrl, input.fetchImpl ?? fetch, CLOUD_DEPLOYMENT_SESSION_TIMEOUT_MS);
   async function session(signal: AbortSignal, target?: 'resource-manager' | 'container-registry') {
     if (signal.aborted) throw failure(); assertCurrent();
     let raw: unknown;

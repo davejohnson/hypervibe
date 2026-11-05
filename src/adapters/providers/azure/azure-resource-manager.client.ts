@@ -1,5 +1,6 @@
 import { DefaultAzureCredential } from '@azure/identity';
 import { DestinationBudget } from '../secret-destination-http.js';
+import { acquireDeploymentSession } from '../../../domain/services/cloud-deployment-session-budget.js';
 import { redactExactValues } from '../../../utils/redact-exact-values.js';
 
 const AZURE_MANAGEMENT_URL = 'https://management.azure.com';
@@ -566,14 +567,16 @@ export class AzureResourceManagerClient {
 
   private async transientRequest<T>(url: string, method: string, body?: unknown): Promise<{ value: T; operation?: string }> {
     if (this.credentials.authMode !== 'federated') throw new Error('Azure transient authorization is unavailable.');
+    const credentials = this.credentials;
+    let access: { token: string; expiresAt: string };
+    try {
+      access = await acquireDeploymentSession(signal => credentials.getAccessToken('resource-manager', signal),
+        { deadlineMs: this.options.deadlineMs });
+      if (!access || typeof access.token !== 'string' || !access.token || access.token.length > 65_536 || /[\r\n]/.test(access.token)
+        || typeof access.expiresAt !== 'string' || !Number.isFinite(Date.parse(access.expiresAt)) || Date.parse(access.expiresAt) <= Date.now()) throw new Error();
+    } catch { throw new Error('Azure transient authorization is unavailable.'); }
     const budget = new DestinationBudget({ deadlineMs: this.options.deadlineMs });
     try {
-      let access: { token: string; expiresAt: string };
-      try {
-        access = await budget.wait(this.credentials.getAccessToken('resource-manager', budget.signal));
-        if (!access || typeof access.token !== 'string' || !access.token || access.token.length > 65_536 || /[\r\n]/.test(access.token)
-          || typeof access.expiresAt !== 'string' || !Number.isFinite(Date.parse(access.expiresAt)) || Date.parse(access.expiresAt) <= Date.now()) throw new Error();
-      } catch { throw new Error('Azure transient authorization is unavailable.'); }
       if (budget.signal.aborted) throw new Error('Azure transient authorization is unavailable.');
       const response = await budget.wait(fetch(url, { method, redirect: 'error', signal: budget.signal,
         headers: { Accept: 'application/json', Authorization: `Bearer ${access.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },

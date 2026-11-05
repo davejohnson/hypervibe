@@ -107,6 +107,45 @@ function fixture(options: { tokenUid?: string; accountUid?: string; projectNumbe
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Cloud Run deployment access through native token and identity contracts', () => {
+  // Google separates metadata GET/getIamPolicy from versions/{id}:access:
+  // https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/getIamPolicy
+  // https://cloud.google.com/secret-manager/docs/view-secret-version
+  it.each(['', '/versions/7', ':getIamPolicy?options.requestedPolicyVersion=3'])('reads reviewed Secret Manager metadata through the protected deployment transport: %s', async suffix => {
+    const f = fixture({ withSecret: true }), adapter = await f.create();
+    const response = await (adapter as any).request(`https://secretmanager.googleapis.com/v1/projects/${projectNumber}/secrets/production-api${suffix}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${f.token}` } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).not.toHaveProperty('payload');
+    await adapter.disconnect();
+  });
+  it.each([
+    ['GET', `projects/${projectNumber}/secrets/production-api/versions/7:access`],
+    ['POST', `projects/${projectNumber}/secrets/production-api:addVersion`],
+    ['POST', `projects/${projectNumber}/secrets/production-api:setIamPolicy`],
+    ['DELETE', `projects/${projectNumber}/secrets/production-api`],
+    ['GET', 'projects/other-project/secrets/production-api'],
+    ['GET', `projects/${projectNumber}/secrets/production-api/versions/latest`],
+  ])('rejects payload, mutation, unpinned or foreign secret requests before dispatch: %s %s', async (method, resource) => {
+    const f = fixture({ withSecret: true }), adapter = await f.create(); f.request.mockClear();
+    await expect((adapter as any).request(`https://secretmanager.googleapis.com/v1/${resource}`,
+      { method, headers: { Authorization: `Bearer ${f.token}` } })).rejects.toMatchObject({ code: 'scope_mismatch' });
+    expect(f.request).not.toHaveBeenCalled(); await adapter.disconnect();
+  });
+  it('finishes hosted session verification beyond fifteen seconds before checking native identity', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture(), issue = f.getAccessToken.getMockImplementation()!;
+      f.getAccessToken.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 25_000)); return issue();
+      });
+      const pending = f.create().then(adapter => ({ adapter, error: undefined }), error => ({ adapter: undefined, error }));
+      await vi.advanceTimersByTimeAsync(25_000);
+      const result = await pending;
+      expect(result.error).toBeUndefined();
+      expect(f.request.mock.calls.some(([url]) => String(url).endsWith('/tokeninfo'))).toBe(true);
+      await result.adapter?.disconnect();
+    } finally { vi.useRealTimers(); }
+  });
   it('does not treat hosted deployment access as authority to inspect, rotate or recover registry credentials', async () => {
     const f = fixture({ installedRuntime: true, existingService: true });
     const adapter = await f.create();

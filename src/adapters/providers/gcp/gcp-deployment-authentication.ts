@@ -4,6 +4,7 @@ import { CloudDeploymentAccessError } from '../../../domain/services/cloud-deplo
 import { redactExactValues } from '../../../utils/redact-exact-values.js';
 import { DestinationBudget, destinationJson } from '../secret-destination-http.js';
 import { assertGcpProjectIdentity } from './gcp-project-identity.js';
+import { acquireDeploymentSession } from '../../../domain/services/cloud-deployment-session-budget.js';
 
 export const gcpDeploymentScopeSchema = z.object({
   projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/),
@@ -22,10 +23,11 @@ export class GcpDeploymentAuthentication {
 
   async token(): Promise<string> {
     if (this.cached && this.cached.expiresAt > Date.now() + 60_000) return this.cached.token;
-    const budget = new DestinationBudget();
+    let budget: DestinationBudget | undefined;
     try {
-      const issued = await budget.wait(this.authentication.getAccessToken(budget.signal));
+      const issued = await acquireDeploymentSession(signal => this.authentication.getAccessToken(signal));
       this.secrets.add(issued.token);
+      budget = new DestinationBudget();
       const { principal } = this.authentication;
       const info = await destinationJson((url, init) => fetch(url, { ...init,
         headers: { ...init?.headers, 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' } }),
@@ -49,7 +51,7 @@ export class GcpDeploymentAuthentication {
     } catch (error) {
       this.cached = undefined;
       throw error instanceof CloudDeploymentAccessError ? error : new CloudDeploymentAccessError('authorization_unavailable');
-    } finally { budget.close(); }
+    } finally { budget?.close(); }
   }
 
   /** All new-path provider output is bounded and checked for echoed bearer values. */
@@ -57,8 +59,17 @@ export class GcpDeploymentAuthentication {
     const budget = new DestinationBudget({ signal: init?.signal ?? undefined });
     try {
       const url = new URL(String(input));
+      // Deployment verifies immutable references and reader policies, never
+      // payloads. Native IAM still limits metadata access to reviewed secrets.
+      const secretMetadata = url.origin === 'https://secretmanager.googleapis.com';
+      if (secretMetadata) {
+        const target = /^\/v1\/projects\/([^/]+)\/secrets\/[A-Za-z0-9_-]{1,255}(?::getIamPolicy|\/versions\/[1-9]\d*)?$/.exec(url.pathname);
+        if ((init?.method ?? 'GET') !== 'GET' || !target
+          || ![this.authentication.principal.projectId, this.authentication.principal.projectNumber].includes(target[1]!))
+          throw new CloudDeploymentAccessError('scope_mismatch');
+      }
       if (url.protocol !== 'https:' || url.username || url.password || url.hash
-        || !(hosts.has(url.hostname) || /^[a-z]+-[a-z]+[0-9]-run\.googleapis\.com$/.test(url.hostname)))
+        || !(secretMetadata || hosts.has(url.hostname) || /^[a-z]+-[a-z]+[0-9]-run\.googleapis\.com$/.test(url.hostname)))
         throw new CloudDeploymentAccessError('scope_mismatch');
       const authorization = new Headers(init?.headers).get('authorization');
       if (!authorization?.startsWith('Bearer ') || !this.secrets.has(authorization.slice(7)))

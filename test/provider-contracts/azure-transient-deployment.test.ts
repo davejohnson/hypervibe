@@ -72,6 +72,39 @@ describe('Azure transient deployment ARM authentication', () => {
     expect(JSON.stringify(native)).not.toContain('opaque-sensitive-token');
   });
 
+  it.each([
+    { nativeDelayMs: 14_000, expected: principalId },
+    { nativeDelayMs: 16_000, expected: 'Azure transient request could not be verified.' },
+  ])('gives a slow hosted session its own budget before a $nativeDelayMs ms native identity read', async ({ nativeDelayMs, expected }) => {
+    vi.useFakeTimers();
+    try {
+      let sessionSignal: AbortSignal | undefined;
+      let nativeSignal: AbortSignal | null | undefined;
+      const getAccessToken = vi.fn((_target: string, signal: AbortSignal) => {
+        sessionSignal = signal;
+        return new Promise<{ token: string; expiresAt: string }>(resolve => {
+          setTimeout(() => resolve({ token: 'opaque-sensitive-token', expiresAt: expiresAt() }), 16_000);
+        });
+      });
+      const request = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+        nativeSignal = init?.signal;
+        return new Promise<Response>(resolve => setTimeout(() => resolve(Response.json(nativeIdentity)), nativeDelayMs));
+      });
+      vi.stubGlobal('fetch', request);
+      const client = new AzureResourceManagerClient({ authMode: 'federated', tenantId, subscriptionId,
+        clientId, principalId, identityResourceId, resourceGroup, getAccessToken });
+      const outcome = client.servicePrincipalId().catch((error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(sessionSignal?.aborted).toBe(false);
+      expect(request).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(request).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(Math.min(nativeDelayMs, 15_001));
+      expect(await outcome).toBe(expected);
+      expect(nativeSignal?.aborted).toBe(nativeDelayMs > 15_000);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('bounds transient token acquisition and response bodies even when transport ignores abort', async () => {
     const credentials = { authMode: 'federated' as const, tenantId, subscriptionId, clientId, principalId, identityResourceId,
       resourceGroup, getAccessToken: async () => ({ token: 'opaque-sensitive-token', expiresAt: expiresAt() }) };

@@ -10,6 +10,22 @@ import { AwsSecretsAdapter } from '../../secretmanagers/aws-secrets.adapter.js';
 import { ecsTransientFixture as fixture, accountId, region, connection } from './ecs-transient.fixture.js';
 
 describe('ECS transient access real SDK boundary', () => {
+  it('finishes hosted session verification beyond fifteen seconds before checking the native role', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture(), issue = f.getCredentials.getMockImplementation()!;
+      f.getCredentials.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 25_000)); return issue();
+      });
+      const provider = createAwsDeploymentCredentialProvider(f.input, { requestHandler: f.handler });
+      const pending = provider(new AbortController().signal).then(credentials => ({ credentials, error: undefined }), error => ({ credentials: undefined, error }));
+      await vi.advanceTimersByTimeAsync(25_000);
+      const result = await pending;
+      expect(result.error).toBeUndefined();
+      expect(result.credentials?.accessKeyId).toBe('ASIA1111111111111111');
+      expect(f.requests.some(item => item.operation === 'GetCallerIdentity')).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
   it.each(['root', 'user/Alice'])('does not accept an operator %s session as the installed deployment role', async principal => {
     const f = fixture(); let identityReads = 0;
     const handler = { handle: async (request: any) => {

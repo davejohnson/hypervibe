@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { buildGitHubDeploymentSessionRuntime } from '../cloud-deployment-ci.js';
+import { CLOUD_DEPLOYMENT_SESSION_TIMEOUT_MS } from '../cloud-deployment-session-budget.js';
 import '../../../adapters/providers/aws/ecs-express.adapter.js';
 import { brokerTarget } from './cloud-deployment-ci.fixture.js';
 
@@ -20,6 +21,19 @@ async function fixture() {
   return { get, core, github, context, content, calls, state, session, logs };
 }
 describe('emitted GitHub deployment broker runtime', () => {
+  it('finishes hosted session verification beyond fifteen seconds through the emitted response reader', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = await fixture(); let timer: ReturnType<typeof setTimeout>;
+      f.state.response = () => new Response(new ReadableStream({ start(controller) {
+        timer = setTimeout(() => { controller.enqueue(new TextEncoder().encode(JSON.stringify(f.session))); controller.close(); }, 25_000);
+      }, cancel() { clearTimeout(timer); } }));
+      const pending = f.get().then((value: unknown) => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+      await vi.advanceTimersByTimeAsync(25_000);
+      const result = await pending;
+      expect(result.error).toBeUndefined(); expect(result.value).toEqual(f.session); expect(f.calls).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
   it('uses workflow source and fresh audience-bound identity while keeping candidate SHA and secrets out of requests/output', async () => {
     const f = await fixture(); expect(await f.get()).toEqual(f.session); expect(await f.get()).toEqual(f.session);
     expect(f.core.getIDToken).toHaveBeenCalledWith('https://hypervibe.dev/api/v1/deployment-sessions'); expect(f.core.getIDToken).toHaveBeenCalledTimes(2);
@@ -47,7 +61,7 @@ describe('emitted GitHub deployment broker runtime', () => {
     try {
       const f = await fixture(), cancel = vi.fn(); f.state.response = () => new Response(new ReadableStream({ cancel }));
       const outcome = f.get().then(() => 'unexpected', (error: Error) => error.message);
-      await vi.advanceTimersByTimeAsync(15001);
+      await vi.advanceTimersByTimeAsync(CLOUD_DEPLOYMENT_SESSION_TIMEOUT_MS + 1);
       expect(await outcome).toBe('Cloud deployment release access could not be verified.'); expect(f.calls).toHaveLength(1); expect(cancel).toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });

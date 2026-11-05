@@ -125,6 +125,22 @@ function fixture() {
     rewriteAuthorization: (fn: typeof rewriteAuthorization) => { rewriteAuthorization = fn; } };
 }
 describe('device deployment authority through the ordinary command and adapter boundaries', () => {
+  it('finishes hosted session verification beyond fifteen seconds with the saved device and source', async () => {
+    const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+    const selected = await f.adapter('staging'); expect(selected.success).toBe(true);
+    const send = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith('/deployment-sessions')) await new Promise(resolve => setTimeout(resolve, 25_000));
+      return send(...args);
+    });
+    vi.useFakeTimers();
+    try {
+      const pending = runWithWorkspaceDirectories([root], () => (selected.adapter as any).input.authentication.getAccessToken(new AbortController().signal))
+        .then((value: unknown) => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+      await vi.advanceTimersByTimeAsync(25_000);
+      const result = await pending; expect(result.error).toBeUndefined(); expect(result.value).toHaveProperty('token', nativeToken);
+    } finally { vi.useRealTimers(); }
+  });
   it('proposes a branch transfer using the retained device after its old branch is deleted, without replacing native evidence', async () => {
     git('switch', '-c', 'review/cloud'); const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
     const before = f.context.secretStore.decryptObject(f.context.repos.connections.findAllByProvider('hypervibe-deployment-binding')[0]!.credentialsEncrypted) as any;

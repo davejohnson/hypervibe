@@ -1,5 +1,6 @@
 import { ECS_BOOTSTRAP_IMAGE as BOOTSTRAP_IMAGE, ECS_BOOTSTRAP_COMMAND as BOOTSTRAP_COMMAND, ecsInstalledBootstrapConfiguration, ecsInstalledBootstrapTask, ecsInstalledReleaseIdentity } from './ecs-installed-configuration.js';
 import { AwsConnectionAuthentication, awsAuthenticationFields, awsConnectionRegion, checkedAwsAccountId, validateAwsAuthentication, canUseAwsCredentialsForAutomation } from './aws-authentication.js';
+import { CLOUD_DEPLOYMENT_AUTHENTICATION_TIMEOUT_MS } from '../../../domain/services/cloud-deployment-session-budget.js';
 import type { ProviderRuntimeIdentity } from '../../../domain/ports/provider.port.js';
 import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
 import { createEcsRegistryCredentialLifecycle } from './ecs-registry-credential.js';
@@ -346,7 +347,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
     }
     const config = {
       region: this.credentials.region,
-      credentials: this.transient ? () => this.transient!.credentials(AbortSignal.timeout(30_000)) : this.authentication!.credentials,
+      credentials: this.transient ? () => this.transient!.credentials(AbortSignal.timeout(CLOUD_DEPLOYMENT_AUTHENTICATION_TIMEOUT_MS)) : this.authentication!.credentials,
       ...(this.transient ? { maxAttempts: 1, requestHandler: this.transient.requestHandler } : {}),
     };
     this.clients = {

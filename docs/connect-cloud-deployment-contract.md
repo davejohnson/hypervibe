@@ -37,6 +37,20 @@ plans, command envelopes, log messages, queues, or browser storage. The authenti
 broker response must bind origin, device or observed CI identity, purpose, app/environment
 and exact receipt. Receipt possession alone does not authorize a session.
 
+Hosted session acquisition has a separate 60-second client deadline, covering the
+broker's native verification and surrounding source/authority checks. AWS, Azure
+and GCP start their existing native identity/request budget after acquisition.
+The emitted CI session reader also has a 60-second total deadline. Cancellation
+still discards late credentials, and no path retries issuance automatically.
+The general secret-delivery deadline and body bounds are unchanged.
+
+Google deployment transport permits only same-project Secret Manager metadata
+GETs for a secret, an immutable version, or its IAM policy. These are the
+[version metadata](https://cloud.google.com/secret-manager/docs/view-secret-version)
+and [policy](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/getIamPolicy)
+APIs; payload access, mutations, aliases and other projects are rejected before
+dispatch. Native IAM still restricts which reviewed secrets can be inspected.
+
 ## Provider contract and evidence matrix
 
 | Cloud | Administrator installation | Ongoing access and native identity proof | Runtime and initial blockers |
@@ -235,9 +249,9 @@ connections never fall back to them.
 `hv_cloud_connections action="continue"` is available only for `connect-cloud`
 and `deployment-access`. It sends exactly `{}` to the saved connection's
 `setup-continuations` endpoint, without changing device, repository, environment,
-source, targets or consent. The hosted operation shares a cooperative 20-second abort budget across at
+source, targets or consent. The hosted operation shares a cooperative 180-second abort budget across at
 most three existing stages. It may outlive that budget when an awaited operation
-does not cooperate; the client preserves its 30-second deadline and
+does not cooperate; the client preserves its 240-second deadline and
 64 KiB response bound. A client timeout therefore remains uncertain, with the saved grant and binding
 preserved; there is no automatic HTTP retry or local polling loop.
 

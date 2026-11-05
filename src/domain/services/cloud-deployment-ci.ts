@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CLOUD_DEPLOYMENT_SESSION_TIMEOUT_MS } from './cloud-deployment-session-budget.js';
 import type { BranchDeployTarget, CloudDeploymentCiAccessV1 } from '../ports/ci-deploy.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { cloudDeploymentEffectiveSourceV1, cloudDeploymentSourceAuthorityDigestV1,
@@ -58,7 +59,7 @@ ${options.retainSourceSpec ? 'let hvDeploymentSource;\n' : ''}async function hvD
   const unavailable = () => new Error('Cloud deployment release access could not be verified.');
   const controller = new AbortController();
   let timer;
-  const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, 15000); });
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, ${CLOUD_DEPLOYMENT_SESSION_TIMEOUT_MS}); });
   const bounded = promise => Promise.race([promise, deadline]);
   const exact = (a, b) => {
     if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b)) return a === b;
