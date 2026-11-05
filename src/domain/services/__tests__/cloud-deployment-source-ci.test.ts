@@ -84,11 +84,17 @@ describe.each(['aws', 'gcp', 'azure'])('%s emitted CI after reviewed source tran
   });
 });
 
-it('preserves prior non-ECS broker runtime bytes', () => {
+it('preserves prior non-ECS broker runtime bytes except the reviewed session deadline', () => {
   // Compared directly with the committed 584342e generator before pinning.
+  // 74446137 intentionally raised the shared deadline to 60 seconds. Preserve
+  // the original byte hashes after reversing only that exact emitted change;
   // ECS alone opts into retaining broker-verified source in transient memory.
   const hashes = { gcp: '1cc9188c88a17be67d79f8a881e0f60e06fd7ae62fe57909b78421083eb431d2', azure: '178dd64cfd0df3f81c178866a388dd6485c4e4d540bd3c8633dc32473d56a064' };
+  const deadline = '  const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, 60000); });';
   for (const [provider, target] of [['gcp', gcpBrokerTarget()], ['azure', azureTarget()]] as const) {
-    expect(createHash('sha256').update(buildGitHubDeploymentSessionRuntime(target)).digest('hex')).toBe(hashes[provider]);
+    const runtime = buildGitHubDeploymentSessionRuntime(target);
+    expect(runtime.split(deadline)).toHaveLength(2);
+    const priorRuntime = runtime.replace(deadline, deadline.replace('60000', '15000'));
+    expect(createHash('sha256').update(priorRuntime).digest('hex')).toBe(hashes[provider]);
   }
 });

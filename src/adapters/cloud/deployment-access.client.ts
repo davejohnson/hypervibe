@@ -94,17 +94,19 @@ export function revokeMatchingDeploymentGrant(store: DeploymentPersistence, bind
 /** A selected binding is authoritative even when unusable; callers must never fall back. */
 export function selectedDeploymentAccess(input: { providerName: string; scopeHints?: string[]; environment?: string; store: DeploymentPersistence }) {
   const provider = providerRegistry.get(input.providerName);
-  if (!provider) throw new CloudDeploymentAccessError('unsupported');
   // Deployment category also includes repository providers with separate authority.
   // Keep selected bindings authoritative for hosting, including an unsupported or
   // removed transient capability, so switching hosts cannot select legacy keys.
-  if (!provider.transientAuthentication && !provider.metadata.lifecycle?.hosting) return null;
+  if (provider && !provider.transientAuthentication && !provider.metadata.lifecycle?.hosting) return null;
   const repositories = input.scopeHints?.filter(value => /^github\.com\/[^/]+\/[^/]+$/.test(value)) ?? [];
   const candidates = input.store.connections.findAllByProvider(DEPLOYMENT_BINDING_PROVIDER).filter(record => repositories.some(repository => record.scope?.startsWith(`${repository}|`)));
   if (!candidates.length) return null;
   if (!input.environment || repositories.length !== 1) throw failure();
   const row = candidates.find(record => record.scope === deploymentBindingScope(repositories[0], input.environment!));
   if (!row) return null;
+  // An unknown provider cannot consume a selected binding. Without one, callers
+  // retain their own unsupported-capability result rather than an access failure.
+  if (!provider) throw new CloudDeploymentAccessError('unsupported');
   const binding = deploymentBindingSchema.parse(input.store.secretStore.decryptObject(row.credentialsEncrypted));
   if (binding.repository !== repositories[0] || binding.env !== input.environment || normalizeHypervibeCloudBaseUrl(binding.baseUrl) !== binding.baseUrl
     || binding.status !== 'ready' || row.status !== 'verified') throw failure();

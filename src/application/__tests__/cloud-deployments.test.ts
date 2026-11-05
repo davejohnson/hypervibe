@@ -148,6 +148,16 @@ describe('device deployment authority through the ordinary command and adapter b
     else expect(resolved).toMatchObject({ success: false, error: expect.stringContaining('No connection found for github') });
     expect(await f.adapter('staging')).toMatchObject({ success: true, connectionProvider: 'hypervibe-deployment-binding' });
   });
+  it.each(['absent', 'other-repository', 'other-environment'])('does not select an unknown provider when its hosted binding is %s', async scope => {
+    const f = fixture();
+    if (scope !== 'absent') {
+      await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
+    }
+    expect(selectedDeploymentAccess({ providerName: 'unknown-provider',
+      scopeHints: [scope === 'other-repository' ? 'github.com/studio/another-app' : 'github.com/studio/app'],
+      environment: scope === 'other-environment' ? 'production' : 'staging',
+      store: { connections: f.context.repos.connections, secretStore: f.context.secretStore } })).toBeNull();
+  });
   it('keeps unknown and mismatched hosting providers blocked with a selected hosted binding', async () => {
     const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
     const plan = new PlanService();
@@ -160,7 +170,7 @@ describe('device deployment authority through the ordinary command and adapter b
         .toMatchObject({ success: false, error: expect.stringContaining('Exact environment deployment access') });
     }
     expect(() => selectedDeploymentAccess({ providerName: 'unknown-provider', scopeHints: ['github.com/studio/app'], environment: 'staging',
-      store: { connections: f.context.repos.connections, secretStore: f.context.secretStore } })).toThrow();
+      store: { connections: f.context.repos.connections, secretStore: f.context.secretStore } })).toThrow('Cloud deployment access: unsupported.');
   });
   it('finishes hosted session verification beyond fifteen seconds with the saved device and source', async () => {
     const f = fixture(); await f.pair(); await f.run({ action: 'connect' }); f.setReady(); await f.run({ action: 'status' });
