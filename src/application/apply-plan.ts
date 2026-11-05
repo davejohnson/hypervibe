@@ -1,3 +1,5 @@
+import { applyCloudRetirement, cloudRetirementRecreationBlock } from './cloud-retirement.js';
+import { cloudRetirementComplete } from '../domain/ports/cloud-retirement.port.js';
 import { randomUUID } from 'node:crypto';
 import { retainedDeleteRecoverySchema, retainedDeleteTargetHash, type RetainedDeleteRecovery } from '../domain/ports/retained-cleanup.port.js';
 import { canonicalJsonSha256 as retainedRecoveryHash } from '../lib/canonical-json.js';
@@ -805,7 +807,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const saved = ctx.repos.runs.findById(planId);
     const retainedDatabaseExecution = ctx.repos.environments.findByProjectId(project.id).some(candidate =>
       ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
-    if (!retainedDatabaseExecution && (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'operator-artifacts', 'operator-applications', 'hosting-preparation'].includes(String(asRecord(saved.plan)?.scope))))
+    if (!retainedDatabaseExecution && (saved?.type !== 'plan' || saved.projectId !== project.id || !['cloud-scope', 'cloud-retirement', 'operator-artifacts', 'operator-applications', 'hosting-preparation'].includes(String(asRecord(saved.plan)?.scope))))
       return invalidSpec;
   }
   const executor = new ConvergeExecutor();
@@ -813,6 +815,23 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if ('error' in loaded) {
     return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
   }
+  const retirementBlock = cloudRetirementRecreationBlock(project, loaded.document.environmentName, spec.environments[loaded.document.environmentName]?.cloudRetirement);
+  if (retirementBlock) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: retirementBlock }] };
+  if (loaded.document.scope === 'cloud-retirement') {
+    const envName = loaded.document.environmentName, proof = loaded.document.cloudRetirement;
+    const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (!proof || !environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap
+      || !isDeepStrictEqual(spec.environments[envName]?.cloudRetirement, proof.declaration)
+      || !loaded.document.actions.length && !cloudRetirementComplete(proof.response))
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Cloud cleanup requires its exact current owner-approved plan. Run hv_plan again; no setup or deletion was authorized.' }] };
+    const unchangedPlan = () => isDeepStrictEqual(ctx.repos.runs.findById(planId)?.plan, loaded.run.plan);
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: (action, execution) => applyCloudRetirement({ project, environment: envName, proof, action,
+        authorize: () => ctx.repos.runs.findById(execution.applyRunId)?.status === 'running' && unchangedPlan() }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Only the exact saved cleanup was authorized. Recorded identities and unrelated bindings are preserved.'] };
+  }
+  if (spec.environments[loaded.document.environmentName]?.cloudRetirement)
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'This environment has explicit cloud cleanup intent. Run hv_plan to review that operation before any other changes.' }] };
   // Older persisted plans may put GitHub secret writes before reviewed file
   // publication. Require the prerequisite before any effects, including when
   // publication was moved to the end for confirmation.

@@ -1,3 +1,5 @@
+import { planCloudRetirement, cloudRetirementRecreationBlock } from '../../application/cloud-retirement.js';
+import type { CloudRetirementResponse } from '../ports/cloud-retirement.port.js';
 import { retainedDeleteRecoverySchema, retainedDeleteTargetHash } from '../ports/retained-cleanup.port.js';
 import { canonicalJsonSha256 as retainedRecoveryHash } from '../../lib/canonical-json.js';
 import { manualBackupFingerprint, planManualBackup } from '../services/manual-backup.service.js';
@@ -192,7 +194,7 @@ export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
   credential?: string;
   intent?: 'adopt' | 'rotate';
-  scope?: 'full' | 'credentials' | 'secret-destinations' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases' | 'backups' | 'runtime-access';
+  scope?: 'cloud-retirement' | 'full' | 'credentials' | 'secret-destinations' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases' | 'backups' | 'runtime-access';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -206,6 +208,7 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  cloudRetirement?: CloudRetirementResponse;
   retirement?: OperatorRetirementSummary;
   cloudScopeReview?: CloudInstallationReview;
   databaseConsumers?: DatabaseConsumerReadiness[];
@@ -217,7 +220,7 @@ export interface EnvironmentPlan {
   webhookReadiness?: WebhookReadiness;
   emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'backup-run' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-provisioning-recovery' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  scope: 'cloud-retirement' | 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'secret-destinations' | 'cloud-scope' | 'operator-artifacts' | 'operator-applications' | 'hosting-preparation' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'hosting-prepared-bindings' | 'service-volumes' | 'runtime-access' | 'backup-runtime' | 'backup-run' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-provisioning-recovery' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
   backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
@@ -1863,6 +1866,29 @@ export class PlanService {
     }
     const scope = options?.scope ?? 'full';
     const operatorDesired = specResult.spec.environments[environmentName];
+    const retirementBlock = cloudRetirementRecreationBlock(project, environmentName, operatorDesired?.cloudRetirement);
+    if (retirementBlock) return { error: retirementBlock };
+    if (scope === 'cloud-retirement' || operatorDesired?.cloudRetirement) {
+      if (!operatorDesired?.cloudRetirement || !['full', 'cloud-retirement'].includes(scope))
+        return { error: 'Cloud cleanup requires its durable cloudRetirement declaration and an isolated cloud-retirement or full plan.' };
+      if (options?.serviceFilter !== undefined || options?.envVarOverrides !== undefined || options?.envFile !== undefined
+        || options?.secretRefs !== undefined || options?.includeEnvFile === true || options?.credential !== undefined || options?.intent !== undefined)
+        return { error: 'Cloud cleanup accepts no deployment inputs, secret values, service selections or credential changes.' };
+      try {
+        const prepared = await planCloudRetirement(project, environmentName, operatorDesired.cloudRetirement);
+        const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
+          ?? this.envRepo.create({ projectId: project.id, name: environmentName, platformBindings: {} });
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: 'cloud-retirement', environmentName, specRevision: specResult.revision,
+          observedFingerprint: null, actions: prepared.actions, cloudRetirement: prepared.proof };
+        planRunDocumentSchema.parse(document);
+        const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return { planRunId: run.id, scope: 'cloud-retirement', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' }, environmentName,
+          verified: true, observed: null, actions: prepared.actions, cloudRetirement: prepared.response,
+          unmanaged: [], warnings: [], inputRequired: [], blocked: prepared.blocked };
+      } catch { return { error: 'Cloud cleanup could not be safely prepared. Preserve the original connection and cleanup declaration; inspect hv_status and the owner review before continuing.' }; }
+    }
+
     // Persist explicit intent without interpreting retirement as new setup.
     // Provider retirement drivers and their exact plan projections are separate
     // capabilities; until installed this path cannot prepare dependencies.

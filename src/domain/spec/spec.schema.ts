@@ -1,3 +1,4 @@
+import { cloudRetirementDeclarationSchema } from '../ports/cloud-retirement.port.js';
 import { credentialTrackingSchema } from './credential.schema.js';
 import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
@@ -1600,6 +1601,7 @@ export const secretDestinationBindingSchema = z.object({
 });
 
 export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z.object({
+  cloudRetirement: cloudRetirementDeclarationSchema.optional(),
   /** Operator release assets; target, content and public-read changes are separately reviewed. */
   operatorArtifacts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorArtifactDeclarationSchema).optional(),
   operatorApplications: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), operatorApplicationDeclarationSchema).optional(),

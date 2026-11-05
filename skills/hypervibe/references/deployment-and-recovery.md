@@ -279,6 +279,27 @@ deletions stop dependent work. Retained data still incurs costs; a later
 retain-to-delete continuation and GCP parent repository removal remain
 unsupported. Preserve exact receipts and report remaining work.
 
+For hosted GCP installations, declare
+`environments.<env>.cloudRetirement` with a new UUID `id`, the approved HTTPS
+`baseUrl`, and original `connectionIds`. Use `mode: "disconnect"` with the
+collection connection to remove hosted collection access while retaining the
+app, stored secrets and runtime reader. Use `mode: "delete-owned"` with both the
+original collection and deployment connections to review deletion of their owned
+resources. Do not substitute current names, new credentials or source approvals.
+
+Run `hv_plan` with `scope: "cloud-retirement"` (an ordinary full plan also isolates
+an explicit declaration). Open its exact `cloudRetirement.reviewUrl` for any
+required administrator sign-in and owner approval, then create a fresh plan.
+Apply only that saved plan with its exact `confirmActions`; deployment inputs,
+service selections and secret values are not accepted. Use `hv_status` to inspect
+the outcome. A pending or lost response requires status inspection and a fresh
+confirmed recovery plan; it is not completed deletion or permission to repeat an
+uncertain native write. Preserve the declaration and recorded identities while
+cleanup is unresolved. After owned deletion starts, removing the declaration
+cannot authorize app recreation; that requires a separately reviewed reconnect.
+A completed collection disconnect does not remove deployment authority: removing
+its declaration permits ordinary app planning again.
+
 Temporary test setup includes teardown of every resource created for that test.
 Track workloads, data, backups, images, identities, permissions and external app
 registrations, while preserving pre-existing shared resources. Collection

@@ -13,6 +13,7 @@ import { GcpSecretWriterClient, type WriterIamPolicy } from './gcp-secret-writer
 import { createGcpProjectPreparationDriver, discoverGcpProjectPreparationScopes, gcpProjectPreparationScopeSchema } from './gcp-project-installation.js';
 import { createGcpBillingPreparationDriver, gcpBillingPreparationScopeSchema, gcpInitialBillingSetupReview } from './gcp-billing-installation.js';
 import { createGcpCloudDeploymentDriver } from './gcp-cloud-deployment.js';
+import { createGcpCloudRetirementDriver } from './gcp-cloud-retirement.js';
 
 const SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 const scopeSchema = z.object({ projectId: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/), projectNumber: z.string().regex(/^[1-9]\d{5,29}$/) }).strict();
@@ -611,10 +612,11 @@ export function createGcpCloudInstallationDriver(options: { fetch?: typeof fetch
   const preparation = createGcpProjectPreparationDriver(options);
   const billing = createGcpBillingPreparationDriver(options);
   const deployment = createGcpCloudDeploymentDriver(options);
-  const selected = (intent: CloudInstallationIntent) => intent.stage === 'scope-preparation'
+  const retirement = createGcpCloudRetirementDriver(options);
+  const selected = (intent: CloudInstallationIntent) => intent.mode === 'retire' ? retirement : intent.stage === 'scope-preparation'
     ? intent.nativeScope.scopeKind === 'project-billing' ? billing : preparation : intent.purpose === 'deployment' ? deployment : driver;
   return {
-    ...driver, setup: setupCapability(preparation, billing), deployment: deployment.deployment, scopePreparation: {
+    ...driver, retirement: retirement.retirement, setup: setupCapability(preparation, billing), deployment: deployment.deployment, scopePreparation: {
       continuationStage: record => selected(record.intent).scopePreparation!.continuationStage?.(record) ?? 'collection',
       resolvedScope: record => selected(record.intent).scopePreparation!.resolvedScope(record),
       reviewResources: record => selected(record.intent).scopePreparation!.reviewResources(record),

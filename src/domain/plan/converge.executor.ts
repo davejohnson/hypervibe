@@ -1,3 +1,4 @@
+import { cloudRetirementPlanSchema, cloudRetirementPlanMatches, CLOUD_RETIREMENT_OPERATION } from '../ports/cloud-retirement.port.js';
 import { manualBackupActionValid, MANUAL_BACKUP_OPERATION } from '../services/manual-backup.service.js';
 import { OPERATOR_APPLICATION_OPERATION, isOperatorApplicationAction, operatorApplicationPlanSchema } from '../ports/operator-application.port.js';
 import { isRecoveryRuntimeAction } from '../services/recovery-runtime.service.js';
@@ -246,6 +247,7 @@ export const planRunDocumentSchema = z.object({
     'secrets',
     'secret-destinations',
     'cloud-scope',
+    'cloud-retirement',
     'operator-artifacts',
     'operator-applications',
     'hosting-preparation',
@@ -274,6 +276,7 @@ export const planRunDocumentSchema = z.object({
   ]).optional(),
   environmentName: z.string().min(1),
   cloudScope: localCloudScopePlanSchema.optional(),
+  cloudRetirement: cloudRetirementPlanSchema.optional(),
   artifactPublication: operatorArtifactPlanSchema.optional(),
   applicationRegistration: operatorApplicationPlanSchema.optional(),
   holdingPreparation: localHoldingPlanSchema.optional(),
@@ -306,6 +309,16 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'cloud-retirement') {
+    const proof = document.cloudRetirement;
+    if (!proof || proof.environment !== document.environmentName || !cloudRetirementPlanMatches(proof, document.actions)
+      || document.observedFingerprint !== null || Object.keys(document).some(key => !['kind', 'scope', 'environmentName', 'specRevision', 'observedFingerprint', 'actions', 'cloudRetirement', 'warnings'].includes(key)))
+      ctx.addIssue({ code: 'custom', message: 'Cloud cleanup requires only its exact saved declaration, owner-reviewed plan and confirmed action.' });
+    return;
+  }
+  if (document.cloudRetirement || document.actions.some(action => action.metadata?.operation === CLOUD_RETIREMENT_OPERATION))
+    ctx.addIssue({ code: 'custom', message: 'Cloud cleanup requires its isolated cloud-retirement plan.' });
+
   if (document.overrides?.operatorImageUpdate && (document.scope !== 'full' || !document.overrides.services?.length
     || Object.keys(document.overrides).some(key => !['services', 'operatorImageUpdate'].includes(key))
     || document.actions.some(action => action.type !== 'noop' && (action.type !== 'update' || action.resource.kind !== 'service'

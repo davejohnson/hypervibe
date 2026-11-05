@@ -1,3 +1,4 @@
+import { inspectCloudRetirement, cloudRetirementHint, cloudRetirementRecreationBlock } from '../application/cloud-retirement.js';
 import { inspectOperatorApplications, operatorApplicationWorkRequired } from '../domain/services/operator-application.service.js';
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { inspectLocalCloudScope, localCloudScopeRequired } from '../domain/services/local-cloud-scope.service.js';
@@ -763,13 +764,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup, or a one-use backups.run.id on an existing prepared runtime, in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Slots with secretDestinations use direct hosted collection or generation and immutable native version references; their values never enter a plan. Legacy Hypervibe-owned slots are generated inside the encrypted plan boundary; legacy delegated slots accept only safe secretRefs. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. An explicit environment cloudRetirement declaration routes full or scope="cloud-retirement" planning only to the original hosted GCP cleanup and browser owner review; no deployment inputs are accepted and app setup cannot run. scope="backups" reviews explicitly requested backup setup, or a one-use backups.run.id on an existing prepared runtime, in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Slots with secretDestinations use direct hosted collection or generation and immutable native version references; their values never enter a plan. Legacy Hypervibe-owned slots are generated inside the encrypted plan boundary; legacy delegated slots accept only safe secretRefs. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations', 'backups', 'runtime-access']).optional().describe('Default full. runtime-access selects exact existing services or retained identities after service removal and isolates their runtime access or retirement review, without deployment inputs, application deployment or unrelated cloud setup. backups isolates requested setup or backups.run.id one-use backup plus isolated logical restore on an existing prepared runtime; never deploys or activates a schedule for that one-use request. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['cloud-retirement', 'full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'secret-destinations', 'backups', 'runtime-access']).optional().describe('Default full. cloud-retirement reviews only explicit hosted GCP cleanup with the original connections and separate browser owner approval; accepts no deployment inputs. runtime-access selects exact existing services or retained identities after service removal and isolates their runtime access or retirement review, without deployment inputs, application deployment or unrelated cloud setup. backups isolates requested setup or backups.run.id one-use backup plus isolated logical restore on an existing prepared runtime; never deploys or activates a schedule for that one-use request. secret-destinations prepares reviewed missing empty native secret containers without values, IAM or workload deployment. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy); runtime-access also accepts exact retained identities after their service is removed. Existing immutable-image-only updates verify their exact published image and runtime dependencies without reauthorizing completed unrelated operator setup. Mutable images, changed runtime inputs and unfinished setup still require their ordinary review.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -804,21 +805,28 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
-      const retainedDatabase = planService.retainedDatabaseWork(project, plannedEnvironment, scope);
+      const retirementBlock = cloudRetirementRecreationBlock(project, plannedEnvironment, currentSpec?.environments[plannedEnvironment]?.cloudRetirement);
+      if (retirementBlock) return commandError('VALIDATION', retirementBlock, { next: ['hv_status', 'hv_spec'] });
+      const cloudRetirementOnly = scope === 'cloud-retirement' || Boolean(currentSpec?.environments[plannedEnvironment]?.cloudRetirement);
+      if (cloudRetirementOnly && (services !== undefined || envVars !== undefined || envFile !== undefined || secretRefs !== undefined
+        || includeEnvFile === true || credential !== undefined || intent !== undefined))
+        return commandError('VALIDATION', 'Cloud cleanup accepts no deployment inputs, secret values, service selections or credential changes.', { next: ['hv_plan'] });
+
+      const retainedDatabase = cloudRetirementOnly ? { pendingBootstrap: false, pendingInitialization: false } : planService.retainedDatabaseWork(project, plannedEnvironment, scope);
       const databaseOnly = retainedDatabase.pendingBootstrap || retainedDatabase.pendingInitialization;
       // Retained database work owns the next stage. PlanService decides whether
       // its exact state permits observation/cleanup or requires current provider
       // validation; unrelated setup and dotenv inputs cannot preempt that choice.
-      const cloudScopeOnly = scope !== 'runtime-access' && !databaseOnly && await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
-      const retainedArtifactOnly = scope !== 'runtime-access' && !databaseOnly && await operatorArtifactWorkRequired(project, plannedEnvironment);
-      const holdingOnly = scope !== 'runtime-access' && !databaseOnly && await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
-      const operatorOnly = scope !== 'runtime-access' && !databaseOnly && await operatorApplicationWorkRequired(project, plannedEnvironment, currentSpec);
-      if (currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly) validateInstalledProviders(currentSpec);
+      const cloudScopeOnly = !cloudRetirementOnly && scope !== 'runtime-access' && !databaseOnly && await localCloudScopeRequired(project, plannedEnvironment, currentSpec);
+      const retainedArtifactOnly = !cloudRetirementOnly && scope !== 'runtime-access' && !databaseOnly && await operatorArtifactWorkRequired(project, plannedEnvironment);
+      const holdingOnly = !cloudRetirementOnly && scope !== 'runtime-access' && !databaseOnly && await localHoldingWorkRequired(project, plannedEnvironment, currentSpec);
+      const operatorOnly = !cloudRetirementOnly && scope !== 'runtime-access' && !databaseOnly && await operatorApplicationWorkRequired(project, plannedEnvironment, currentSpec);
+      if (currentSpec && !cloudRetirementOnly && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly) validateInstalledProviders(currentSpec);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations' && scope !== 'backups' && scope !== 'runtime-access'
+      const preparedLocalEnv = currentSpec && !cloudRetirementOnly && !databaseOnly && !cloudScopeOnly && !retainedArtifactOnly && !holdingOnly && !operatorOnly && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'secret-destinations' && scope !== 'backups' && scope !== 'runtime-access'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -863,7 +871,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = databaseOnly || result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'operator-applications' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' || scope === 'runtime-access' ? undefined : mergeLocalEnvWrites(
+        localEnv = databaseOnly || result.scope === 'cloud-retirement' || result.scope === 'cloud-scope' || result.scope === 'operator-artifacts' || result.scope === 'operator-applications' || result.scope === 'hosting-preparation' || scope === 'credentials' || scope === 'secrets' || scope === 'secret-destinations' || scope === 'runtime-access' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -926,7 +934,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       let hint: string;
       let next: string[] | undefined;
 
-      if (hardBlockRecovery) {
+      if (result.cloudRetirement) {
+        hint = cloudRetirementHint(result.cloudRetirement);
+      } else if (hardBlockRecovery) {
         hint = hardBlockRecovery.hint;
       } else if (connectBeforeApply.length > 0) {
         hint = connectionRecoveryHint(connectBeforeApply, {
@@ -989,11 +999,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           scope: result.scope,
           ...(result.cloudScopeReview ? { cloudScopeReview: result.cloudScopeReview } : {}),
           ...(result.retirement ? { retirement: result.retirement } : {}),
+          ...(result.cloudRetirement ? { cloudRetirement: result.cloudRetirement } : {}),
           ...(result.backupCoverage ? { backupCoverage: result.backupCoverage } : {}),
           ...(result.backupReadiness ? { backupReadiness: result.backupReadiness } : {}),
           ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
-          ...(result.scope !== 'secrets' && plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
+          ...(result.scope !== 'cloud-retirement' && result.scope !== 'secrets' && plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
             ? { managedDatabase: managedDatabaseContract(plannedEnvironmentSpec) }
             : {}),
           specRevision: result.specRevision,
@@ -1020,7 +1031,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           warnings: [
             ...result.warnings,
             ...actionScopedWarnings,
-            ...(currentSpec && scope !== 'retained-cleanup' && scope !== 'secrets' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
+            ...(currentSpec && result.scope !== 'cloud-retirement' && scope !== 'retained-cleanup' && scope !== 'secrets' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
           ],
           next,
           ...(hardBlockRecovery?.agentInstruction ? { agentInstruction: hardBlockRecovery.agentInstruction }
@@ -1041,7 +1052,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_status',
-    'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, pending runtime rollouts, and observed service endpoints. inSync requires a provider-observed post-configuration deployment whenever the provider reports that activation is still pending; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
+    'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, pending runtime rollouts, and observed service endpoints. inSync requires a provider-observed post-configuration deployment whenever the provider reports that activation is still pending; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. An explicit cloudRetirement declaration reports only the exact cleanup outcome, including unknown or pending results, without preparing app setup. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapCommandHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: true });
@@ -1049,6 +1060,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       try { inspectionSpec = specStore.getForInspection(project); }
       catch (error) { if (!env?.trim()) throw error; }
       const inspectionEnvironment = inspectionSpec ? commandEnvironment(inspectionSpec.spec, env) : env?.trim() || 'staging';
+      const cloudRetirement = await inspectCloudRetirement(project, inspectionEnvironment, inspectionSpec?.spec);
+      if (cloudRetirement) return commandSuccess(cloudRetirement, { hint: cloudRetirement.hint ?? (cloudRetirement.cloudRetirement.status === 'unknown'
+        ? 'Cloud cleanup status is unknown. Preserve the saved operation and inspect its owner review.' : cloudRetirementHint(cloudRetirement.cloudRetirement)), next: cloudRetirement.inSync ? undefined : ['hv_plan'] });
+
       const cloudScope = await inspectLocalCloudScope(project, inspectionEnvironment);
       if (cloudScope) return commandSuccess(cloudScope, {
         hint: cloudScope.stage === 'continuation'

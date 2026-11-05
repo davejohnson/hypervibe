@@ -35,7 +35,9 @@ export interface CloudInstallationIntent {
   purpose?: 'collection' | 'deployment';
   /** Exact committed hosting topology and immutable runtime references, separately reviewed. */
   deployment?: CloudDeploymentTopologyV1;
-  mode: 'connect' | 'connect-existing' | 'migrate' | 'disconnect';
+  mode: 'connect' | 'connect-existing' | 'migrate' | 'disconnect' | 'retire';
+  /** Explicit destructive retirement, separate from preservation-only disconnect. */
+  retirement?: { schemaVersion: 1; data: 'delete-owned'; records: CloudInstallationRecord[] };
   /** Omitted on historical collection records; scope preparation never authorizes writers. */
   stage?: CloudInstallationStage;
   /** Immutable predecessor plan; a bounded hosted review may include both stages. */
@@ -50,9 +52,13 @@ export interface CloudInstallationIntent {
   /** Exact previously verified resources for a separate disconnect review. */
   installed?: CloudInstallationEvidence[];
 }
+export interface CloudInstallationRetirementIntent extends CloudInstallationIntent {
+  mode: 'retire';
+  retirement: { schemaVersion: 1; data: 'delete-owned'; records: CloudInstallationRecord[] };
+}
 /** Local desired-state authority is not hosted federation or a source-code release. */
 export interface LocalCloudScopePreparationIntent extends Omit<CloudInstallationIntent,
-  'source' | 'hostIdentity' | 'purpose' | 'deployment' | 'mode' | 'stage' | 'scopePreparation' | 'keys' | 'migrationTargets' | 'installed'> {
+  'source' | 'hostIdentity' | 'purpose' | 'deployment' | 'mode' | 'stage' | 'scopePreparation' | 'keys' | 'migrationTargets' | 'installed' | 'retirement'> {
   execution: { kind: 'local-administrator'; authentication: 'google-user-adc' };
   hostingProvider: string;
   source: { kind: 'local-spec'; repository: string; specRevision: number; specDigest: string };
@@ -243,6 +249,8 @@ export interface CloudInstallationSetupCapability {
   assertStage(input: { setup: CloudInstallationSetupReviewV1; record: CloudInstallationRecord; history: CloudInstallationRecord[] }): void;
 }
 export interface CloudInstallationDriver<I extends CloudInstallationExecutableIntent = CloudInstallationIntent> {
+  /** Explicit hosted customer-resource retirement; never expands disconnect. */
+  readonly retirement?: { schemaVersion: 1; validateCompletedEvidence?(evidence: CloudInstallationEvidence, intent: I): void };
   /** Local completed-resource retirement only; never hosted disconnect authority. */
   readonly operatorRetirement?: { schemaVersion: 1 };
   /** Hosted setup only; absent means an exact single-plan review, never future authority. */
