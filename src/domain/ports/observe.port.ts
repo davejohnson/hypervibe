@@ -15,6 +15,8 @@ import type { Component } from '../entities/component.entity.js';
 export interface ObservedService {
   name: string;
   externalId: string;
+  /** Provider-observed immutable lifetime identity when the native name can be reused. */
+  resourceUid?: string;
   workloadKind: 'web' | 'worker' | 'cron';
   url?: string;
   customDomains: string[];
@@ -112,6 +114,8 @@ export interface ObservedMaintenanceEdge {
   routeId?: string;
   scriptName?: string;
   contentHash?: string;
+  origin?: string;
+  targetFingerprint?: string;
   reason?: string;
 }
 
@@ -119,6 +123,8 @@ export interface ObservedMaintenanceWorkload {
   state: 'running' | 'suspended' | 'unknown';
   serviceId: string;
   workloadKind: string;
+  /** Prior trigger/scaling state may differ from currently draining execution state. */
+  wasRunning?: boolean;
   deploymentId?: string;
   deploymentStatus?: string;
   numReplicas?: number;
@@ -129,15 +135,18 @@ export interface ObservedMaintenanceWorkload {
 }
 
 export interface ObservedMaintenanceDatabase {
-  state: 'fenced' | 'unfenced' | 'not-applicable' | 'unknown';
+  state: 'fenced' | 'unfenced' | 'not-applicable' | 'unmanaged' | 'unknown';
   componentId?: string;
   externalId?: string;
   reason?: string;
 }
 
 export interface EnvironmentMaintenanceObservation {
+  mode?: 'application' | 'data';
+  page?: 'active' | 'off' | 'unknown';
+  routing?: { state: 'ready' | 'unknown'; target?: { origin: string; targetFingerprint: string }; reason?: string };
   state: 'active' | 'inactive' | 'partial' | 'unknown';
-  stage: 'edge' | 'workloads' | 'database' | 'verified' | 'exit' | 'unknown';
+  stage: 'edge' | 'workloads' | 'database' | 'routing' | 'verified' | 'exit' | 'unknown';
   edge: ObservedMaintenanceEdge;
   workloads: Record<string, ObservedMaintenanceWorkload>;
   database: ObservedMaintenanceDatabase;

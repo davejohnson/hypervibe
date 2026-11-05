@@ -2957,6 +2957,9 @@ export class CloudRunAdapter implements
         `Bound Cloud Run environment is in ${bindings.environmentId}, but desired hosting.region is ${this.credentials.region}. Region changes require an explicit teardown and recreate; Hypervibe will not create a cross-region replacement over existing bindings.`
       );
     }
+    if (bindings.projectId !== this.credentials.projectId) {
+      throw new Error(`Bound Cloud Run project ${bindings.projectId} does not match connected project ${this.credentials.projectId}. Reconnect the exact target before observing workloads.`);
+    }
 
     const token = await this.getAccessToken();
     const prefix = this.environmentResourcePrefix(environment);
@@ -3005,6 +3008,14 @@ export class CloudRunAdapter implements
         continue;
       }
 
+      const liveUid = typeof liveService.uid === 'string' && liveService.uid.trim().length > 0
+        && liveService.uid === liveService.uid.trim() ? liveService.uid : undefined;
+      const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
+      const identityKnown = liveUid !== undefined && (boundUid === undefined || boundUid === liveUid);
+      if (!identityKnown) {
+        serviceObservationKnown = false;
+        warnings.push(`Cloud Run workload ${externalId} has a missing or different provider lifetime identity.`);
+      }
       const container = this.primaryContainer(liveService);
       const readiness = this.cloudRunServiceReadiness(liveService);
       const startCommand = this.containerStartCommand(container);
@@ -3022,6 +3033,7 @@ export class CloudRunAdapter implements
       services.push({
         name: this.observedServiceName(externalId, liveService.labels, bindingKey, prefix),
         externalId,
+        ...(liveUid ? { resourceUid: liveUid } : {}),
         // Workers deploy with internal-only ingress; classify by it so the
         // diff can converge a manually flipped ingress back to the spec.
         workloadKind: liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web',
@@ -3049,9 +3061,9 @@ export class CloudRunAdapter implements
         },
         ...this.observedEnvFromContainer(container),
         ...this.observedServiceDeployment(liveService),
-        status: readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
+        status: !identityKnown ? 'unknown' : readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
         maintenance: {
-          state: liveService.scaling?.scalingMode === 'MANUAL'
+          state: !identityKnown ? 'unknown' : liveService.scaling?.scalingMode === 'MANUAL'
             && liveService.scaling.manualInstanceCount === 0
             ? 'suspended'
             : readiness.ready ? 'running' : 'unknown',
@@ -3477,25 +3489,43 @@ export class CloudRunAdapter implements
       return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_unbound' };
     }
     if (workloadKind === 'cron') {
-      const schedulerJobName = binding.schedulerJobName
-        ?? this.schedulerResourceName(binding.jobName ?? binding.serviceId ?? serviceId);
-      const scheduler = await this.getCloudSchedulerJob(schedulerJobName, token);
-      if (!scheduler) {
-        return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_scheduler_missing' };
+      try {
+        const { schedulerJobName, jobName } = binding;
+        if (!this.credentials || !schedulerJobName || !jobName
+          || !/^[a-zA-Z0-9_-]+$/.test(schedulerJobName) || !/^[a-zA-Z0-9_-]+$/.test(jobName)
+          || parseHostingBindings(environment).projectId !== this.credentials.projectId) {
+          throw new Error('The scheduled workload identities are missing.');
+        }
+        const parent = `projects/${this.credentials.projectId}/locations/${this.credentials.region}`;
+        const schedulerTarget = `https://run.googleapis.com/v2/${parent}/jobs/${jobName}:run`;
+        const scheduler = await this.getCloudSchedulerJob(schedulerJobName, token);
+        if (!scheduler || scheduler.name !== `${parent}/jobs/${schedulerJobName}`
+          || typeof scheduler.schedule !== 'string' || !scheduler.schedule.trim()
+          || (scheduler.timeZone !== undefined && typeof scheduler.timeZone !== 'string')
+          || scheduler.httpTarget?.uri !== schedulerTarget || scheduler.httpTarget.httpMethod !== 'POST'
+          || !['PAUSED', 'ENABLED'].includes(scheduler.state ?? '')) {
+          throw new Error('The scheduled workload configuration could not be verified.');
+        }
+        const executions = await this.listCloudRunJobExecutionsStrict(jobName, token);
+        // Scheduler pause stops future triggers. Execution completion is a separate
+        // observation; an absent completion timestamp includes pending executions.
+        const draining = executions.some((execution) => !execution.completionTime
+          || execution.reconciling === true || (execution.runningCount ?? 0) > 0);
+        return {
+          serviceId,
+          workloadKind,
+          wasRunning: scheduler.state === 'ENABLED',
+          cronSchedule: scheduler.schedule,
+          state: scheduler.state === 'PAUSED' && !draining ? 'suspended' : 'running',
+          ...(scheduler.state === 'PAUSED' && draining ? { reason: 'maintenance_executions_draining' } : {}),
+          providerState: {
+            schedulerJobName, schedulerState: scheduler.state, jobName,
+            schedulerTimeZone: scheduler.timeZone || 'UTC', schedulerTarget,
+          },
+        };
+      } catch {
+        return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_cron_observation_failed' };
       }
-      return {
-        serviceId,
-        workloadKind,
-        wasRunning: scheduler.state === 'ENABLED',
-        cronSchedule: scheduler.schedule,
-        state: scheduler.state === 'PAUSED' ? 'suspended'
-          : scheduler.state === 'ENABLED' ? 'running' : 'unknown',
-        providerState: {
-          schedulerJobName,
-          schedulerState: scheduler.state ?? 'unknown',
-          jobName: binding.jobName,
-        },
-      };
     }
     const serviceName = binding.serviceId ?? serviceId;
     const service = await this.getCloudRunService(serviceName, token);
@@ -3519,23 +3549,32 @@ export class CloudRunAdapter implements
     expected: MaintenanceWorkloadSnapshot
   ): Promise<Receipt> {
     const current = await this.observeMaintenanceWorkload(environment, expected.serviceId, expected.workloadKind);
+    if (expected.workloadKind === 'cron' && !this.matchesMaintenanceCronSnapshot(current, expected)) {
+      return { success: false, message: 'The scheduled workload was not paused', error: 'Its saved schedule or exact workload could not be verified.' };
+    }
     if (current.state === 'suspended') {
       return { success: true, message: `Cloud Run workload ${expected.serviceId} is already suspended`, data: { applied: 0, skipped: 1 } };
     }
     if (current.state !== 'running') {
       return { success: false, message: 'Cloud Run workload was not suspended', error: 'The bound workload state is unknown.' };
     }
-    const token = await this.getAccessToken();
-    if (expected.workloadKind === 'cron') {
-      await this.mutateSchedulerState(String(current.providerState?.schedulerJobName ?? ''), 'pause', token);
-      await this.quiesceCloudRunJob(String(current.providerState?.jobName ?? ''), token);
-    } else {
-      await this.updateMaintenanceScaling(expected.serviceId, { scalingMode: 'MANUAL', manualInstanceCount: 0 }, token);
+    try {
+      const token = await this.getAccessToken();
+      if (expected.workloadKind === 'cron') {
+        // A retry after pause must continue draining without issuing another pause.
+        if (current.providerState?.schedulerState === 'ENABLED') {
+          await this.mutateSchedulerState(String(current.providerState.schedulerJobName), 'pause', token);
+        }
+      } else {
+        await this.updateMaintenanceScaling(expected.serviceId, { scalingMode: 'MANUAL', manualInstanceCount: 0 }, token);
+      }
+      const verified = await this.waitForMaintenanceState(environment, expected, 'suspended');
+      return verified
+        ? { success: true, message: `Suspended Cloud Run workload ${expected.serviceId}`, data: { applied: 1, skipped: 0 } }
+        : { success: false, message: 'Cloud Run suspension was not verified', error: 'The workload has not finished stopping. Its saved settings remain available for a retry.' };
+    } catch {
+      return { success: false, message: 'Cloud Run suspension was not verified', error: 'The provider response could not be verified. Retry using the saved maintenance settings.' };
     }
-    const verified = await this.waitForMaintenanceState(environment, expected, 'suspended');
-    return verified
-      ? { success: true, message: `Suspended Cloud Run workload ${expected.serviceId}`, data: { applied: 1, skipped: 0 } }
-      : { success: false, message: 'Cloud Run suspension was not verified', error: 'The provider did not report a suspended workload before the verification deadline.' };
   }
 
   async resumeMaintenanceWorkload(
@@ -3543,12 +3582,16 @@ export class CloudRunAdapter implements
     snapshot: MaintenanceWorkloadSnapshot
   ): Promise<Receipt> {
     const current = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
+    if (snapshot.workloadKind === 'cron' && !this.matchesMaintenanceCronSnapshot(current, snapshot)) {
+      return { success: false, message: 'The scheduled workload was not restored', error: 'Its saved schedule or exact workload changed or could not be verified.' };
+    }
     if (!snapshot.wasRunning) {
       return current.state === 'suspended'
         ? { success: true, message: `Cloud Run workload ${snapshot.serviceId} was stopped before maintenance`, data: { applied: 0, skipped: 1 } }
         : { success: false, message: 'Cloud Run restoration was blocked', error: 'A workload that was previously stopped is now running.' };
     }
-    if (current.state === 'running') {
+    if (current.state === 'running'
+      && (snapshot.workloadKind !== 'cron' || current.providerState?.schedulerState === 'ENABLED')) {
       return { success: true, message: `Cloud Run workload ${snapshot.serviceId} is already running`, data: { applied: 0, skipped: 1 } };
     }
     if (current.state !== 'suspended') {
@@ -3613,6 +3656,10 @@ export class CloudRunAdapter implements
   ): Promise<CloudRunExecution[]> {
     if (!this.credentials || !jobName) throw new Error('Cloud Run job identity is missing.');
     const executions: CloudRunExecution[] = [];
+    const jobResourceName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`;
+    const executionPrefix = `${jobResourceName}/executions/`;
+    const executionNames = new Set<string>();
+    const pageTokens = new Set<string>();
     let pageToken: string | undefined;
     for (let page = 1; page <= 20; page += 1) {
       const query = new URLSearchParams({ pageSize: '1000' });
@@ -3624,45 +3671,53 @@ export class CloudRunAdapter implements
       if (!response.ok) {
         throw new Error(`Cloud Run execution observation failed (${response.status}).`);
       }
-      const body = await response.json() as {
-        executions?: CloudRunExecution[];
-        nextPageToken?: string;
-      };
-      executions.push(...(body.executions ?? []));
-      pageToken = body.nextPageToken;
+      const rawBody: unknown = await response.json();
+      if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
+        throw new Error('Cloud Run execution inventory is malformed.');
+      }
+      const body = rawBody as Record<string, unknown>;
+      if (body.executions !== undefined && !Array.isArray(body.executions)) {
+        throw new Error('Cloud Run execution inventory is malformed.');
+      }
+      for (const rawExecution of body.executions ?? []) {
+        if (!rawExecution || typeof rawExecution !== 'object' || Array.isArray(rawExecution)) {
+          throw new Error('Cloud Run execution is malformed.');
+        }
+        const execution = rawExecution as CloudRunExecution;
+        if (typeof execution.name !== 'string' || !execution.name.startsWith(executionPrefix)
+          || !/^[a-zA-Z0-9_-]+$/.test(execution.name.slice(executionPrefix.length))
+          || executionNames.has(execution.name)
+          || (execution.job !== undefined && execution.job !== jobResourceName)
+          || (execution.reconciling !== undefined && typeof execution.reconciling !== 'boolean')
+          || (execution.runningCount !== undefined && (!Number.isSafeInteger(execution.runningCount) || execution.runningCount < 0))
+          || (execution.completionTime !== undefined && (typeof execution.completionTime !== 'string'
+            || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(execution.completionTime)
+            || !Number.isFinite(Date.parse(execution.completionTime))))) {
+          throw new Error('Cloud Run execution identity or completion could not be verified.');
+        }
+        executionNames.add(execution.name);
+        executions.push(execution);
+      }
+      if (body.nextPageToken !== undefined && typeof body.nextPageToken !== 'string') {
+        throw new Error('Cloud Run execution pagination is malformed.');
+      }
+      pageToken = body.nextPageToken as string | undefined;
       if (!pageToken) return executions;
+      if (pageTokens.has(pageToken)) throw new Error('Cloud Run execution pagination repeated.');
+      pageTokens.add(pageToken);
     }
     throw new Error('Cloud Run execution observation exceeded the safe pagination bound.');
   }
 
-  private async quiesceCloudRunJob(jobName: string, token: string): Promise<void> {
-    if (!this.credentials || !jobName) throw new Error('Cloud Run job identity is missing.');
-    const cancelled = new Set<string>();
-    for (let attempt = 1; attempt <= 120; attempt += 1) {
-      const executions = await this.listCloudRunJobExecutionsStrict(jobName, token);
-      const running = executions.filter((execution) => this.executionStatus(execution) === 'running');
-      if (running.length === 0) return;
-      for (const execution of running) {
-        const executionName = this.lastPathSegment(execution.name);
-        if (!executionName || cancelled.has(executionName)) continue;
-        const response = await fetch(
-          `https://run.googleapis.com/v2/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${encodeURIComponent(jobName)}/executions/${encodeURIComponent(executionName)}:cancel`,
-          {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: '{}',
-          }
-        );
-        if (!response.ok && response.status !== 409) {
-          throw new Error(`Cloud Run execution cancellation failed (${response.status}).`);
-        }
-        cancelled.add(executionName);
-      }
-      if (attempt < 120) {
-        await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
-      }
-    }
-    throw new Error('Cloud Run job executions did not reach terminal state before the verification deadline.');
+  private matchesMaintenanceCronSnapshot(
+    current: MaintenanceWorkloadObservation,
+    snapshot: MaintenanceWorkloadSnapshot
+  ): boolean {
+    return current.state !== 'unknown' && Boolean(snapshot.cronSchedule)
+      && current.cronSchedule === snapshot.cronSchedule
+      && ['schedulerJobName', 'jobName', 'schedulerTimeZone', 'schedulerTarget'].every((key) =>
+        typeof snapshot.providerState?.[key] === 'string'
+        && current.providerState?.[key] === snapshot.providerState[key]);
   }
 
   private async waitForMaintenanceState(
@@ -3672,7 +3727,10 @@ export class CloudRunAdapter implements
   ): Promise<boolean> {
     for (let attempt = 1; attempt <= 120; attempt += 1) {
       const observed = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
-      if (observed.state === expected) return true;
+      if (snapshot.workloadKind === 'cron' && !this.matchesMaintenanceCronSnapshot(observed, snapshot)) return false;
+      if (observed.state === expected
+        && (snapshot.workloadKind !== 'cron' || expected !== 'running'
+          || observed.providerState?.schedulerState === 'ENABLED')) return true;
       if (observed.state === 'unknown') return false;
       if (attempt < 120) await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
     }

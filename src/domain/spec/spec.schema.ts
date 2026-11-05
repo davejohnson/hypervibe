@@ -1220,6 +1220,10 @@ export const dataMigrationSpecSchema = z.object({
  */
 export const maintenanceSpecSchema = z.object({
   enabled: z.boolean(),
+  /** Application pause leaves databases and buckets available for manual work. Omitted preserves legacy data maintenance. */
+  mode: z.enum(['application', 'data']).optional(),
+  /** Keep the page up while paused, or send public traffic to the separately prepared domainTarget. */
+  page: z.enum(['active', 'off']).optional(),
 }).strict();
 
 export const stripePriceEnvBindingSpecSchema = z.object({
@@ -1596,6 +1600,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
   domain: z.string().min(1).optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
   domainProxy: z.boolean().optional(),
+  /** Route this hostname through its owned Cloudflare Worker to a verified service in a separate environment. */
+  domainTarget: z.object({ environment: z.string().min(1), service: z.string().min(1) }).strict().optional(),
   /** One-time custom-domain replacement revision. A new value plans a confirmation-gated provider delete/recreate. */
   domainRecreateRevision: z.string().min(1).max(100).optional(),
   loadBalancer: loadBalancerSpecSchema.optional(),
@@ -1639,6 +1645,15 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.domainTarget || environment.maintenance?.page === 'off') {
+    if (!environment.domainTarget || !environment.domain || environment.domainProxy === false
+      || environment.maintenance?.mode !== 'application' || environment.maintenance.enabled !== true) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
+        message: 'Traffic switching requires a domainTarget, a proxied domain, and enabled application maintenance. Keep the original app paused while routing to its replacement.' });
+    }
+    if (environment.loadBalancer) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
+      message: 'Traffic switching cannot also manage a load balancer for the same hostname.' });
+  }
   const databaseBootstrap = environment.database?.freshInitialization?.bootstrap;
   if (databaseBootstrap && !Object.hasOwn(environment.services, databaseBootstrap.service)) {
     ctx.addIssue({ code: 'custom', path: ['database', 'freshInitialization', 'bootstrap', 'service'],
@@ -2187,6 +2202,18 @@ export const projectSpecSchema = z.object({
     ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
     : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    if (environment.domainTarget) {
+      const destination = spec.environments[environment.domainTarget.environment];
+      const service = destination?.services[environment.domainTarget.service];
+      if (environment.domainTarget.environment === environmentName || !destination || !service
+        || service.workloadKind !== 'web' || service.public === false || destination.domainTarget
+        || (destination.domain && environment.domain
+          && destination.domain.trim().toLowerCase().replace(/\.+$/, '')
+            === environment.domain.trim().toLowerCase().replace(/\.+$/, ''))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'domainTarget'],
+          message: 'Choose a public web service in a different declared environment, without routing chains or shared domain ownership.' });
+      }
+    }
     if (environment.api) {
       if (!githubActions) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection currently requires GitHub Actions; other release paths cannot verify its evidence', path: ['environments', environmentName, 'api'] });
       if (!spec.runtime) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API compatibility checks require an explicit project runtime', path: ['runtime'] });

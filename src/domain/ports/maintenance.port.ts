@@ -46,6 +46,29 @@ export interface MaintenanceEdgeBinding {
   routeId: string;
   scriptName: string;
   contentHash: string;
+  /** Present only while this exact retained route forwards to a reviewed target. */
+  origin?: string;
+  targetFingerprint?: string;
+}
+
+export interface TrafficEdgeTarget {
+  origin: string;
+  targetFingerprint: string;
+}
+
+export type TrafficEdgeBinding = MaintenanceEdgeBinding & TrafficEdgeTarget;
+
+/** Changes only an existing owned Worker script; never creates or changes DNS. */
+export interface IEdgeTrafficAdapter {
+  prepareTrafficEdge(hostname: string, target: TrafficEdgeTarget, binding: MaintenanceEdgeBinding): Promise<TrafficEdgeBinding>;
+  ensureTrafficEdge(hostname: string, target: TrafficEdgeTarget, binding: MaintenanceEdgeBinding): Promise<Receipt>;
+  observeTrafficEdge(hostname: string, target: TrafficEdgeTarget, binding: MaintenanceEdgeBinding): Promise<MaintenanceEdgeObservation>;
+}
+
+export function supportsEdgeTraffic(value: unknown): value is IEdgeTrafficAdapter {
+  const candidate = value as Partial<IEdgeTrafficAdapter> | null;
+  return Boolean(candidate && typeof candidate.prepareTrafficEdge === 'function' && typeof candidate.ensureTrafficEdge === 'function'
+    && typeof candidate.observeTrafficEdge === 'function');
 }
 
 export interface MaintenanceEdgeObservation {

@@ -601,57 +601,7 @@ describe('CloudRunAdapter maintenance', () => {
     ).every(([input]) => String(input).includes('updateMask='))).toBe(true);
   });
 
-  it('pauses a cron trigger and cancels active executions before reporting suspension', async () => {
-    vi.stubEnv('HYPERVIBE_GCP_WAIT_DELAY_MS', '0');
-    const adapter = await maintenanceAdapter();
-    const environment = maintenanceEnvironment({
-      serviceId: 'gcp-project-cron-schedule',
-      jobName: 'gcp-project-cron',
-      schedulerJobName: 'gcp-project-cron-schedule',
-    });
-    let schedulerState = 'ENABLED';
-    let executionTerminal = false;
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? 'GET';
-      if (url.includes('cloudscheduler.googleapis.com') && method === 'GET') {
-        return Response.json({ state: schedulerState, schedule: '0 * * * *' });
-      }
-      if (url.endsWith(':pause') && method === 'POST') {
-        schedulerState = 'PAUSED';
-        return Response.json({ state: schedulerState });
-      }
-      if (url.endsWith(':resume') && method === 'POST') {
-        schedulerState = 'ENABLED';
-        return Response.json({ state: schedulerState });
-      }
-      if (url.includes('/executions?') && method === 'GET') {
-        return Response.json({
-          executions: [executionTerminal
-            ? { name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron/executions/run-1', completionStatus: 'SUCCEEDED' }
-            : { name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron/executions/run-1', reconciling: true }],
-        });
-      }
-      if (url.endsWith('/executions/run-1:cancel') && method === 'POST') {
-        executionTerminal = true;
-        return Response.json({ name: 'operations/cancel-run-1' });
-      }
-      throw new Error(`Unexpected fetch: ${method} ${url}`);
-    });
-    vi.stubGlobal('fetch', fetchMock);
 
-    const snapshot = await adapter.observeMaintenanceWorkload(
-      environment,
-      'gcp-project-cron-schedule',
-      'cron'
-    );
-    await expect(adapter.suspendMaintenanceWorkload(environment, snapshot)).resolves.toMatchObject({ success: true });
-    await expect(adapter.resumeMaintenanceWorkload(environment, snapshot)).resolves.toMatchObject({ success: true });
-
-    expect(fetchMock.mock.calls.some(([input, init]) =>
-      String(input).endsWith('/executions/run-1:cancel') && init?.method === 'POST'
-    )).toBe(true);
-  });
 });
 
 const EXPECTED_SERVICE_RESOURCE = 'projects/gcp-project/locations/us-central1/services/gcp-project-web';

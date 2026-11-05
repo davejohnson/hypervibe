@@ -141,6 +141,7 @@ import { planDataMigration } from '../services/data-migration-plan.service.js';
 import { planMaintenance } from '../services/maintenance-plan.service.js';
 import {
   observeEnvironmentMaintenance,
+  maintenanceMode,
   parseEnvironmentMaintenanceBinding,
 } from '../services/environment-maintenance.service.js';
 
@@ -2137,7 +2138,10 @@ export class PlanService {
           providers: [],
           warnings: [],
         };
-    if (maintenance.pending && serviceFilter) {
+    const applicationMaintenanceActive = environmentSpec.maintenance?.enabled === true
+      && maintenanceMode(environmentSpec, parseEnvironmentMaintenanceBinding(environmentForObserve)) === 'application';
+    const maintenanceStageActive = maintenance.pending || applicationMaintenanceActive;
+    if (maintenanceStageActive && serviceFilter) {
       return {
         error: 'Environment maintenance must use a full environment plan. Remove services= and re-run hv_plan.',
       };
@@ -2349,7 +2353,7 @@ export class PlanService {
       providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
       nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
     });
-    const providerSafetyStageActive = checkpointStageActive || maintenance.pending
+    const providerSafetyStageActive = checkpointStageActive || maintenanceStageActive
       || dataMigration.pending
       || nativeDeploySources.actions.length > 0;
     if (scope === 'backups' && providerSafetyStageActive) {
@@ -2363,7 +2367,7 @@ export class PlanService {
     if (backupPolicyStageActive && serviceFilter) {
       return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
     }
-    const blocked: EnvironmentPlan['blocked'] = maintenance.pending
+    const blocked: EnvironmentPlan['blocked'] = maintenanceStageActive
       ? this.providerPreflight(maintenance.providers)
       : dataMigration.pending
       ? this.providerPreflight(dataMigration.providers)
@@ -2917,7 +2921,7 @@ export class PlanService {
     }
 
     if (
-      !maintenance.pending
+      !maintenanceStageActive
       && !dataMigration.pending
       && nativeDeploySources.actions.length === 0
       && !ciBindingStage
@@ -2966,7 +2970,7 @@ export class PlanService {
     // desired database/bucket or deploy services in the same apply: each copy
     // handler owns a fresh unreachable candidate, verifies it, and only then
     // records it as active for a later plan.
-    if (maintenance.pending) {
+    if (maintenanceStageActive) {
       const scaffolding = actions.filter((action) =>
         (action.resource.kind === 'project' || action.resource.kind === 'environment')
         && action.type !== 'destroy'
