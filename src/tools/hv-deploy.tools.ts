@@ -1,3 +1,4 @@
+import path from 'path';
 import { isEngineManaged, releaseEngineServices } from '../application/infrastructure-engine.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
@@ -126,7 +127,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         if (supplied) {
           return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
         }
-        const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}) });
+        const sourceDirectory = specResult.source?.kind === 'repo' ? path.dirname(path.dirname(specResult.source.path)) : undefined;
+        const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });
         if ('blocked' in released) {
           return commandError('VALIDATION', released.blocked, {
             next: ['hv_plan'],
@@ -145,10 +147,15 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           status: 'succeeded',
           environment: envName,
           applyRunId: released.applyRunId,
+          ...(released.source ? { source: released.source } : {}),
           results: released.results,
           serviceUrls: Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url])),
           message: `Released ${released.results.length} service(s).`,
-        }, { next: ['hv_health'] });
+        }, {
+          ...(released.source?.uncommittedChangesExcluded
+            ? { warnings: ['Only committed code was deployed; uncommitted changes in this repository were not included.'] } : {}),
+          next: ['hv_health'],
+        });
       }
 
       const ciDeploy = ciBranchDeployGuidance(project, envName);

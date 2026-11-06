@@ -111,3 +111,29 @@ describe('engine segments', () => {
     expect(result.receipts[0]?.status).toBe('skipped_requires_confirm');
   });
 });
+
+describe('engine plan documents', () => {
+  it('accept every action shape the OpenTofu stage persists', async () => {
+    const { planRunDocumentSchema } = await import('../converge.executor.js');
+    const hv = (id: string, kind: PlanAction['resource']['kind'], operation: string, type: PlanAction['type'] = 'create'): PlanAction =>
+      ({ id, type, resource: { kind, name: id, provider: 'gcp' }, verified: true, reason: 'x', metadata: { operation } });
+    const actions: PlanAction[] = [
+      hv('secret:SESSION_SECRET', 'secret', 'gcpSecretManagerEnsure'),
+      hv('domain-verify:app.example.com', 'domain', 'gcpDomainVerify'),
+      hv('domain-dns:app.example.com', 'domain', 'gcpDomainDns'),
+      engineAction('web', { billable: true, requiresConfirm: true }),
+      { ...engineAction('db'), id: 'database:postgres', resource: { kind: 'database', name: 'postgres', provider: 'gcp' }, billable: true, dataBearing: true },
+      { ...engineAction('domain'), id: 'domain:app.example.com', resource: { kind: 'domain', name: 'app.example.com', provider: 'gcp' } },
+      { ...engineAction('uploads'), id: 'storage:uploads', resource: { kind: 'storage', name: 'uploads', provider: 'gcp' }, billable: true, dataBearing: true, requiresConfirm: true },
+      { ...engineAction('uploads-gone'), id: 'storage:old', type: 'destroy', resource: { kind: 'storage', name: 'old', provider: 'gcp' }, dataBearing: true, requiresConfirm: true },
+      hv('database-credential:postgres', 'secret', 'gcpDatabaseCredentialEnsure'),
+      hv('domain-ready:app.example.com', 'domain', 'gcpDomainReady', 'update'),
+      { ...hv('secret-delete:old', 'secret', 'gcpSecretManagerDelete', 'destroy'), dataBearing: true, requiresConfirm: true },
+      { ...hv('domain-dns-remove:old.example.com', 'domain', 'gcpDomainDnsRemove', 'destroy'), requiresConfirm: true },
+      { ...hv('release:web', 'service', 'engineImageRelease', 'update') },
+    ];
+    const document = { kind: 'hv_plan', scope: 'infrastructure-engine', engine: { planId: 'p' }, environmentName: 'staging', specRevision: 1, observedFingerprint: null, actions };
+    const parsed = planRunDocumentSchema.safeParse(document);
+    expect(parsed.success ? [] : parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)).toEqual([]);
+  });
+});

@@ -194,6 +194,8 @@ describe('runCloudPrepare', () => {
       etag: 'runtime-etag-1',
       bindings: [{ role: 'roles/viewer', members: ['user:runtime-owner@example.com'] }],
     };
+    let bucket: Record<string, any> | undefined;
+    let bucketPolicy: { bindings: Array<{ role: string; members: string[] }> } = { bindings: [] };
     let deployPolicy: { version: number; etag: string; bindings: Array<{ role: string; members: string[] }> } = { version: 1, etag: 'deploy-etag-1', bindings: [] };
     let projectPolicyRevision = 1;
     let runtimePolicyRevision = 1;
@@ -277,6 +279,20 @@ describe('runCloudPrepare', () => {
         deployPolicy = { ...JSON.parse(String(init?.body)).policy, etag: `deploy-etag-${Date.now()}` };
         return Response.json(deployPolicy);
       }
+      // Private build-source bucket for local-repository builds.
+      const bucketBase = 'https://storage.googleapis.com/storage/v1/b/hls-property-care-hv-build-source';
+      if (url === bucketBase && method === 'GET') {
+        return bucket ? Response.json(bucket) : new Response('{}', { status: 404 });
+      }
+      if (url === 'https://storage.googleapis.com/storage/v1/b?project=hls-property-care' && method === 'POST') {
+        bucket = { ...JSON.parse(String(init?.body)), projectNumber: '123456789012' };
+        return Response.json(bucket);
+      }
+      if (url === `${bucketBase}/iam` && method === 'GET') return Response.json(bucketPolicy);
+      if (url === `${bucketBase}/iam` && method === 'PUT') {
+        bucketPolicy = JSON.parse(String(init?.body));
+        return Response.json(bucketPolicy);
+      }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -308,6 +324,8 @@ describe('runCloudPrepare', () => {
       members: ['user:runtime-owner@example.com'],
     });
     expect(deployPolicy.bindings).toContainEqual({ role: 'roles/iam.serviceAccountUser', members: [deployMember] });
+    expect(bucket?.iamConfiguration).toEqual({ uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced' });
+    expect(bucketPolicy.bindings).toEqual([{ role: 'roles/storage.objectAdmin', members: [deployMember] }]);
     expect(projectPolicy.bindings.some((binding) => binding.role === 'roles/editor')).toBe(false);
 
     const refreshed = new ProjectRepository().findById(project.id)!;

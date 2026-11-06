@@ -542,6 +542,74 @@ export class CloudRunAdapter implements
     return this.getAccessToken();
   }
 
+  /**
+   * OpenTofu engine integration only: a short-lived token limited to Google
+   * Site Verification, used to prove domain ownership as the deployment identity.
+   */
+  async siteVerificationAccessToken(): Promise<string> {
+    if (!this.serviceAccountCreds) throw new Error('No service account credentials');
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await this.createJwt({ alg: 'RS256', typ: 'JWT' }, {
+      iss: this.serviceAccountCreds.client_email,
+      sub: this.serviceAccountCreds.client_email,
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 600,
+      scope: 'https://www.googleapis.com/auth/siteverification',
+    }, this.serviceAccountCreds.private_key);
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }),
+    });
+    if (!response.ok) throw new Error(`Site Verification token exchange failed: HTTP ${response.status}`);
+    return ((await response.json()) as { access_token: string }).access_token;
+  }
+
+  /** The deployment identity's email, which becomes the verified domain owner. */
+  engineDeploymentIdentity(): string {
+    if (!this.serviceAccountCreds) throw new Error('No service account credentials');
+    return this.serviceAccountCreds.client_email;
+  }
+
+  /**
+   * Builds from an archive of the user's local repository (an exact commit),
+   * so private repositories need no git credentials. The archive is uploaded
+   * to the project's private build-source bucket prepared during GCP setup.
+   */
+  async buildReleaseImageFromArchive(
+    service: Service,
+    environment: Environment,
+    source: { archive: Buffer; commitSha: string; bucket: string }
+  ): Promise<CloudBuildResult> {
+    if (!this.credentials) return { success: false, error: 'Not connected. Call connect() first.' };
+    try {
+      const token = await this.getAccessToken();
+      const { projectId, region } = this.credentials;
+      const object = `source/${environment.name}/${service.name}/${source.commitSha}-${Date.now()}.tar.gz`;
+      const upload = await fetch(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(source.bucket)}/o?uploadType=media&name=${encodeURIComponent(object)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/gzip' },
+        body: new Uint8Array(source.archive),
+      });
+      if (upload.status === 403 || upload.status === 404) {
+        return { success: false, error: 'The private build-source bucket is not ready. Re-run GCP setup (hv_connections action="prepare" for cloudrun), then retry.' };
+      }
+      if (!upload.ok) return { success: false, error: `Uploading the source archive failed (HTTP ${upload.status}).` };
+      const repository = 'hypervibe';
+      const imageName = this.sanitizeName(`${environment.name}-${service.name}`);
+      const imageUri = `${region}-docker.pkg.dev/${projectId}/${repository}/${imageName}:${source.commitSha.slice(0, 12)}-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}`;
+      await this.ensureArtifactRepository(repository, token);
+      const build = await this.submitCloudBuild({
+        token, service, sourceRepoUrl: '', revision: source.commitSha, imageUri,
+        storageSource: { bucket: source.bucket, object },
+      });
+      return { success: true, imageUri: build.imageUri, buildId: build.id, logsUrl: build.logsUrl, resolvedCommitSha: source.commitSha };
+    } catch (error) {
+      return { success: false, error: this.formatError(error) };
+    }
+  }
+
   /** Builds an immutable image in the configured region without touching any Cloud Run resource. */
   async buildReleaseImage(
     service: Service,
@@ -5105,6 +5173,8 @@ export class CloudRunAdapter implements
     sourceRepoUrl: string;
     revision: string;
     imageUri: string;
+    /** Build from an uploaded archive instead of cloning a git URL. */
+    storageSource?: { bucket: string; object: string };
   }): Promise<{
     id?: string;
     logsUrl?: string;
@@ -5123,12 +5193,14 @@ export class CloudRunAdapter implements
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        source: {
-          gitSource: {
-            url: params.sourceRepoUrl,
-            revision: params.revision,
+        source: params.storageSource
+          ? { storageSource: params.storageSource }
+          : {
+            gitSource: {
+              url: params.sourceRepoUrl,
+              revision: params.revision,
+            },
           },
-        },
         steps: [{
           name: 'gcr.io/cloud-builders/docker',
           entrypoint: 'bash',

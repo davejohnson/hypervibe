@@ -282,7 +282,8 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
-  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure'];
+  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
+    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
     if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha

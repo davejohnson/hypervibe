@@ -3,6 +3,7 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
+import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
 import { GoogleAuth } from 'google-auth-library';
 import type { Project } from '../entities/project.entity.js';
 import { getProjectScopeHints } from './project-scope.js';
@@ -86,6 +87,8 @@ interface CloudPreparePlan {
   runtimeServiceAccountGrantRoles: string[];
   /** Deployment identity may act as itself so Cloud Build never needs the Editor default account. */
   buildIdentityGrantRoles?: string[];
+  /** Private bucket that holds local-repository build archives. */
+  buildSourceBucket?: { name: string; role: string; expiresAfterDays: number };
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
@@ -235,7 +238,10 @@ export async function runCloudPrepare(params: {
     ...(runtimeGrantRoles.length > 0 ? { runtimeGrantScope: 'project' as const } : {}),
     runtimeRevokeRoles,
     runtimeServiceAccountGrantRoles,
-    ...(basePreparation ? { buildIdentityGrantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES] } : {}),
+    ...(basePreparation ? {
+      buildIdentityGrantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES],
+      buildSourceBucket: { name: buildSourceBucketName(resolved.gcpProjectId), role: 'roles/storage.objectAdmin', expiresAfterDays: 14 },
+    } : {}),
     ...(gcsAccess ? { gcsAccess } : {}),
     ...(memorystoreAccess ? { memorystoreAccess } : {}),
     ...(queueAccess ? { queueAccess } : {}),
@@ -289,6 +295,9 @@ export async function runCloudPrepare(params: {
         member,
         grantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES],
       });
+    }
+    if (basePreparation) {
+      await ensureBuildSourceBucket({ token, projectId: resolved.gcpProjectId, member });
     }
     const iamResult = await reconcileProjectIamRoles({
       token,
@@ -449,13 +458,26 @@ export async function runCloudPrepare(params: {
   }
 }
 
+/**
+ * One-time admin access for GCP setup. Uses an existing local Google login
+ * (Application Default Credentials) silently when present; otherwise opens a
+ * browser sign-in, so users never need gcloud or terminal commands.
+ */
 export async function getDefaultAdminAccessToken(): Promise<string> {
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const client = await auth.getClient();
-  const result = await client.getAccessToken();
-  const token = typeof result === 'string' ? result : result.token;
-  if (!token) throw new Error('Google Application Default Credentials did not return an access token.');
-  return token;
+  try {
+    const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+    const client = await auth.getClient();
+    const result = await client.getAccessToken();
+    const token = typeof result === 'string' ? result : result.token;
+    if (token) return token;
+  } catch {
+    // No local Google login; fall through to browser sign-in.
+  }
+  const oauthClient = configuredGoogleOAuthClient();
+  if (!oauthClient) {
+    throw new Error('Google sign-in is not available: no local Google login was found and this Hypervibe build has no Google sign-in client configured.');
+  }
+  return signInWithGoogle({ client: oauthClient });
 }
 
 function resolveGcpBootstrapTarget(params: {
@@ -690,6 +712,51 @@ function parseAdminCredentials(adminCredentialsJson?: string): ServiceAccountCre
     throw new Error('adminCredentialsJson must include client_email and private_key');
   }
   return creds;
+}
+
+/** Private bucket for local-repository build archives; never public, uploads expire. */
+export function buildSourceBucketName(gcpProjectId: string): string {
+  return `${gcpProjectId}-hv-build-source`;
+}
+
+async function ensureBuildSourceBucket(params: { token: string; projectId: string; member: string }): Promise<void> {
+  await enableRequiredApis({ token: params.token, projectId: params.projectId, services: ['storage.googleapis.com'] });
+  const bucket = buildSourceBucketName(params.projectId);
+  const headers = { Authorization: `Bearer ${params.token}`, 'Content-Type': 'application/json' };
+  const base = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}`;
+  const projectResponse = await fetch(`https://cloudresourcemanager.googleapis.com/v3/projects/${params.projectId}`, { headers });
+  if (!projectResponse.ok) throw new Error(`Could not read GCP project ${params.projectId} (HTTP ${projectResponse.status}).`);
+  const projectNumber = String((await projectResponse.json() as { name?: string }).name ?? '').replace('projects/', '');
+  const existing = await fetch(base, { headers });
+  if (existing.status === 404) {
+    const created = await fetch(`https://storage.googleapis.com/storage/v1/b?project=${encodeURIComponent(params.projectId)}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name: bucket,
+        location: 'US',
+        labels: { 'managed-by': 'hypervibe' },
+        iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced' },
+        lifecycle: { rule: [{ action: { type: 'Delete' }, condition: { age: 14 } }] },
+      }),
+    });
+    if (!created.ok && created.status !== 409) throw new Error(`Creating the build-source bucket failed (HTTP ${created.status}).`);
+  } else if (existing.ok) {
+    const body = await existing.json() as { projectNumber?: string };
+    if (body.projectNumber !== projectNumber) throw new Error(`Bucket ${bucket} belongs to another project; Hypervibe will not use it.`);
+  } else {
+    throw new Error(`Bucket ${bucket} could not be checked (HTTP ${existing.status}); it may belong to someone else.`);
+  }
+  const policyResponse = await fetch(`${base}/iam`, { headers });
+  if (!policyResponse.ok) throw new Error(`Reading build-source bucket access failed (HTTP ${policyResponse.status}).`);
+  const policy = await policyResponse.json() as { bindings?: Array<{ role: string; members: string[] }>; etag?: string };
+  const role = 'roles/storage.objectAdmin';
+  const bindings = policy.bindings ?? [];
+  const binding = bindings.find((entry) => entry.role === role);
+  if (binding?.members.includes(params.member)) return;
+  if (binding) binding.members.push(params.member); else bindings.push({ role, members: [params.member] });
+  const updated = await fetch(`${base}/iam`, { method: 'PUT', headers, body: JSON.stringify({ ...policy, bindings }) });
+  if (!updated.ok) throw new Error(`Granting build-source bucket access failed (HTTP ${updated.status}).`);
 }
 
 async function enableRequiredApis(params: {

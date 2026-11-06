@@ -101,7 +101,34 @@ export interface GcpCloudRunEngineInput {
   database?: GcpCloudSqlInput;
   /** A database this environment previously created that is no longer desired. */
   retiredDatabase?: boolean;
+  /** Custom domains mapped to services. Ownership verification and DNS stay with Hypervibe. */
+  domains?: Array<{ domain: string; service: string }>;
+  /** Domains this environment previously mapped that are no longer desired. */
+  retiredDomains?: string[];
+  /** Cloud Storage buckets; the runtime identity gets object access to each, nothing broader. */
+  storage?: GcpStorageInput[];
+  /** Buckets this environment previously created that are no longer desired. */
+  retiredStorage?: string[];
+  runtimeServiceAccountEmail?: string;
 }
+
+export interface GcpStorageInput {
+  name: string;
+  bucketName: string;
+  location: string;
+  /** Services that receive the gcs-native-adc-v1 runtime variables. */
+  injectInto: string[];
+}
+
+export function storageEngineKey(name: string): string {
+  return `storage_${name.replace(/[^a-z0-9]/g, '_')}`;
+}
+
+export function domainEngineKey(domain: string): string {
+  return `domain_${domain.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+}
+
+const DOMAIN_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
 export interface GcpCloudSqlInput {
   /** Physical instance name; unique per project for a week after deletion, so Hypervibe picks and records it. */
@@ -156,6 +183,18 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
     }),
   ];
   const isWorker = service.workload === 'worker';
+  const buckets = (input.storage ?? []).filter((bucket) => bucket.injectInto.includes(service.logicalName));
+  if (buckets.length > 1) throw new Error(`Service ${service.logicalName} can receive only one bucket's variables.`);
+  for (const bucket of buckets) {
+    const reference = `\${google_storage_bucket.${storageEngineKey(bucket.name)}.name}`;
+    for (const [name, value] of Object.entries({
+      OBJECT_STORAGE_PROVIDER: 'gcs', OBJECT_STORAGE_BUCKET: reference,
+      GOOGLE_CLOUD_PROJECT: input.projectId, GOOGLE_CLOUD_STORAGE_BUCKET: reference,
+    })) {
+      if (env.some((entry) => entry.name === name)) throw new Error(`Environment variable ${name} conflicts with storage ${bucket.name}.`);
+      env.push({ name, value });
+    }
+  }
   const wired = input.database?.wireServices === true;
   if (wired) {
     // The socket path and connection name are infrastructure facts; the credential is a secret reference.
@@ -263,6 +302,54 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   if (input.database || input.retiredDatabase) {
     for (const address of DATABASE_ENGINE_ADDRESSES) resources[address] = databaseMapping;
   }
+  const buckets: Record<string, unknown> = {};
+  const bucketIam: Record<string, unknown> = {};
+  for (const bucket of input.storage ?? []) {
+    if (!/^[a-z][a-z0-9-]{0,60}$/.test(bucket.name) || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket.bucketName)) {
+      throw new Error(`Storage ${bucket.name} has an invalid name.`);
+    }
+    if (!input.runtimeServiceAccountEmail) throw new Error('Storage access requires the runtime identity.');
+    const key = storageEngineKey(bucket.name);
+    buckets[key] = {
+      name: bucket.bucketName,
+      project: input.projectId,
+      location: bucket.location.toUpperCase(),
+      uniform_bucket_level_access: true,
+      public_access_prevention: 'enforced',
+      // Never delete objects implicitly: a non-empty bucket blocks deletion until the user empties it.
+      force_destroy: false,
+      labels: { 'managed-by': 'hypervibe', 'hv-storage': bucket.name },
+    };
+    bucketIam[`${key}_runtime`] = {
+      bucket: `\${google_storage_bucket.${key}.name}`,
+      role: 'roles/storage.objectUser',
+      member: `serviceAccount:${input.runtimeServiceAccountEmail}`,
+    };
+  }
+  for (const name of [...(input.storage ?? []).map((bucket) => bucket.name), ...(input.retiredStorage ?? [])]) {
+    const key = storageEngineKey(name);
+    const mapping: EngineResourceMapping = { actionId: `storage:${name}`, kind: 'storage', name, dataBearing: true, billable: true };
+    resources[`google_storage_bucket.${key}`] = mapping;
+    resources[`google_storage_bucket_iam_member.${key}_runtime`] = mapping;
+  }
+  const domainMappings: Record<string, unknown> = {};
+  for (const { domain, service } of input.domains ?? []) {
+    if (!DOMAIN_PATTERN.test(domain)) throw new Error(`Domain ${domain} is invalid.`);
+    const serviceKey = engineKey(service);
+    if (!services[serviceKey]) throw new Error(`Domain ${domain} targets undeclared service ${service}.`);
+    const key = domainEngineKey(domain);
+    domainMappings[key] = {
+      location: input.region,
+      name: domain,
+      metadata: [{ namespace: input.projectId }],
+      spec: [{ route_name: `\${google_cloud_run_v2_service.${serviceKey}.name}` }],
+    };
+    resources[`google_cloud_run_domain_mapping.${key}`] = { actionId: `domain:${domain}`, kind: 'domain', name: domain };
+  }
+  for (const domain of input.retiredDomains ?? []) {
+    const key = domainEngineKey(domain);
+    resources[`google_cloud_run_domain_mapping.${key}`] ??= { actionId: `domain:${domain}`, kind: 'domain', name: domain };
+  }
   for (const retired of input.retiredServices ?? []) {
     const key = engineKey(retired);
     if (seen.has(key)) continue;
@@ -278,9 +365,13 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
         resource: {
           google_cloud_run_v2_service: services,
           ...(Object.keys(iam).length ? { google_cloud_run_v2_service_iam_member: iam } : {}),
+          ...(Object.keys(domainMappings).length ? { google_cloud_run_domain_mapping: domainMappings } : {}),
         },
       } : {},
       'cloudsql.tf.json': Object.keys(sql).length ? { resource: sql } : {},
+      'storage.tf.json': Object.keys(buckets).length ? {
+        resource: { google_storage_bucket: buckets, google_storage_bucket_iam_member: bucketIam },
+      } : {},
     },
     resources,
   };

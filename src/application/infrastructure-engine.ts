@@ -1,4 +1,9 @@
 import crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
+
+const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { resourceName } from '../domain/services/resource-names.js';
@@ -24,6 +29,12 @@ import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { normalizeGitRemoteForBuild } from '../lib/git-remote.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
+import {
+  DOMAIN_DNS_OPERATION, DOMAIN_DNS_REMOVE_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_VERIFY_OPERATION,
+  executeDomainAction, planDomain, planDomainDnsRemoval, type DomainPlanActions,
+} from './infrastructure-engine-domain.js';
+
+const DOMAIN_OPERATIONS = new Set([DOMAIN_VERIFY_OPERATION, DOMAIN_DNS_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_DNS_REMOVE_OPERATION]);
 
 /**
  * OpenTofu-managed GCP environments (pilot).
@@ -57,8 +68,9 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   const problems: string[] = [];
   if (environment.hosting.provider !== 'cloudrun') problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   const unsupported: Array<[string, unknown]> = [
-    ['cache', environment.cache], ['storage', environment.storage],
-    ['queues', environment.queues], ['domain', environment.domain], ['loadBalancer', environment.loadBalancer],
+    ['cache', environment.cache],
+    ['queues', environment.queues], ['loadBalancer', environment.loadBalancer],
+    ['domainTarget', environment.domainTarget], ['domainRecreateRevision', environment.domainRecreateRevision],
     ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
     ['email', environment.email?.enabled ? environment.email : undefined],
@@ -67,6 +79,17 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   for (const [field, value] of unsupported) {
     if (value !== undefined && value !== null && !(typeof value === 'object' && Object.keys(value as object).length === 0)) {
       problems.push(`${field} is not yet managed by the OpenTofu engine; remove it from this environment or use the standard lifecycle.`);
+    }
+  }
+  if (environment.domain) {
+    if (environment.domainProxy) problems.push('domainProxy must be off: Google issues the certificate and needs DNS-only records.');
+    if (domainServiceFor(environment) === undefined) problems.push('A custom domain needs exactly one public web service to point at.');
+  }
+  for (const [name, storage] of Object.entries(environment.storage ?? {})) {
+    if (storage.provider !== 'gcs') problems.push(`Storage ${name}: the OpenTofu engine manages buckets only with provider "gcs".`);
+    if (storage.purpose === 'backup') problems.push(`Storage ${name}: backup destinations are not yet managed by the OpenTofu engine.`);
+    for (const service of storage.injectInto) {
+      if (!environment.services[service]) problems.push(`Storage ${name}: injectInto names undeclared service ${service}.`);
     }
   }
   const database = environment.database;
@@ -89,6 +112,13 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   return problems;
 }
 
+function domainServiceFor(environment: EnvironmentSpec): string | undefined {
+  const candidates = Object.entries(environment.services)
+    .filter(([, service]) => service.workloadKind !== 'worker' && service.workloadKind !== 'cron' && service.public !== false)
+    .map(([name]) => name);
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 function engineSecretKeys(spec: ProjectSpec, environmentName: string): string[] {
   return Object.entries(spec.secrets)
     .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(environmentName))
@@ -109,6 +139,14 @@ function labelValue(value: string): string {
 interface EngineBinding {
   kind?: 'opentofu';
   database?: { instanceName: string; connectionName?: string };
+  domains?: string[];
+  storage?: string[];
+}
+
+/** Globally unique, stable bucket name; bucket names can be reused after deletion. */
+export function engineBucketName(gcpProjectId: string, environmentName: string, storageName: string): string {
+  const hash = crypto.createHash('sha256').update(`${gcpProjectId}/${environmentName}/${storageName}`).digest('hex').slice(0, 8);
+  return `hv-${hash}-${environmentName}-${storageName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
 }
 
 interface EngineContext {
@@ -449,6 +487,17 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : [])]);
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
+  // Custom domain: Hypervibe verifies ownership and writes DNS before OpenTofu maps it.
+  const desiredDomain = environmentSpec!.domain?.trim().toLowerCase().replace(/\.$/, '');
+  const domainService = desiredDomain ? domainServiceFor(environmentSpec!) : undefined;
+  const domainContext = { adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region };
+  let domainActions: DomainPlanActions = { before: [], after: [] };
+  if (desiredDomain && domainService) {
+    domainActions = await planDomain(domainContext, desiredDomain, environmentSpec!.services[domainService]!.healthCheckPath ?? '/');
+    if (domainActions.blocked) return { blocked: [domainActions.blocked] };
+  }
+  const retiredDomains = (engineBinding.domains ?? []).filter((domain) => domain !== desiredDomain);
+
   const binary = await ensureEngineBinary();
   if (!binary.ok) return { blocked: [binary.error] };
   const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
@@ -461,6 +510,13 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
     ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady } } : {}),
     ...(!databaseSpec && engineBinding.database ? { retiredDatabase: true } : {}),
+    ...(desiredDomain && domainService ? { domains: [{ domain: desiredDomain, service: domainService }] } : {}),
+    ...(retiredDomains.length ? { retiredDomains } : {}),
+    runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
+      name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
+    })),
+    retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
   const planId = crypto.randomUUID();
   const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
@@ -468,9 +524,17 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if (planned.blockers.length) return { blocked: planned.blockers };
 
   const secretIds = secretActions.filter((a) => a.type !== 'noop').map((a) => a.id);
-  const serviceActions = planned.actions.map((action) => action.type === 'create' || action.type === 'update' || action.type === 'replace'
-    ? { ...action, ...(secretIds.length ? { dependsOn: [...(action.dependsOn ?? []), ...secretIds] } : {}) }
-    : action);
+  const domainPrerequisites = domainActions.before.filter((a) => a.type !== 'noop').map((a) => a.id);
+  const serviceActions = planned.actions.map((action) => {
+    if (action.type !== 'create' && action.type !== 'update' && action.type !== 'replace') return action;
+    const extra = [...secretIds, ...(action.id.startsWith('domain:') ? domainPrerequisites : [])];
+    return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
+  });
+  const engineDomainAction = desiredDomain ? serviceActions.find((a) => a.id === `domain:${desiredDomain}`) : undefined;
+  const domainAfter = domainActions.after.map((action) => action.type !== 'noop' && engineDomainAction && engineDomainAction.type !== 'noop'
+    ? { ...action, dependsOn: [engineDomainAction.id] } : action);
+  const domainRemovals = retiredDomains.map((domain) => planDomainDnsRemoval(domainContext, domain,
+    serviceActions.filter((a) => a.id === `domain:${domain}` && a.type === 'destroy').map((a) => a.id)));
   // Secrets are deleted only after every service that could read them is gone.
   const existingIds = existing.state === 'present' ? existing.value : [];
   const deletes: PlanAction[] = existingIds.filter((id) => !desiredIds.has(id)).map((secretId) => ({
@@ -498,7 +562,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       databaseName: ENGINE_DATABASE_NAME, user: ENGINE_DATABASE_USER,
     },
   }] : [];
-  const actions = [...secretActions, ...serviceActions, ...credentialActions, ...deletes];
+  // Array order matters: prerequisites precede the engine segment so it runs only once they complete.
+  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...domainAfter, ...deletes, ...domainRemovals];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -594,6 +659,9 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
       if (metadata?.gcpProjectId !== context.gcpProjectId) return { success: false, status: 'blocked', message: 'Secret target changed; re-run hv_plan.' };
       if (operation === ENGINE_SECRET_OPERATION) return ensureSecret(token, action);
       if (operation === ENGINE_SECRET_DELETE_OPERATION) return deleteSecret(token, action);
+      if (typeof operation === 'string' && DOMAIN_OPERATIONS.has(operation)) {
+        return executeDomainAction({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, action);
+      }
       if (operation === ENGINE_DATABASE_CREDENTIAL_OPERATION) {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
           return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
@@ -637,6 +705,17 @@ async function recordServiceBindings(
   for (const member of members) {
     const addresses = engineSegmentOf(member)?.addresses ?? [];
     if (!addresses.every((address) => outcomes[address] === 'succeeded')) continue;
+    if (member.id.startsWith('storage:')) {
+      const remaining = (engine.storage ?? []).filter((entry) => entry !== member.resource.name);
+      engine = { ...engine, storage: member.type === 'destroy' ? remaining : [...remaining, member.resource.name].sort() };
+      continue;
+    }
+    if (member.id.startsWith('domain:')) {
+      const domain = member.resource.name;
+      const remaining = (engine.domains ?? []).filter((entry) => entry !== domain);
+      engine = { ...engine, domains: member.type === 'destroy' ? remaining : [...remaining, domain].sort() };
+      continue;
+    }
     if (member.id === 'database:postgres') {
       engine = member.type === 'destroy' ? { ...engine, database: undefined } : { ...engine, database: { instanceName: databaseInstanceName! } };
       continue;
@@ -688,14 +767,16 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   specRevision: number;
   services?: string[];
   revision?: string;
-}): Promise<{ results: EngineReleaseResult[]; applyRunId: string } | { blocked: string }> {
+  /** Local repository root; when present, the exact HEAD commit is built without any git credentials. */
+  sourceDirectory?: string;
+}): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
   const { spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
   if (!isEngineManaged(environmentSpec)) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
-  const repoUrl = normalizeGitRemoteForBuild(params.project.gitRemoteUrl ?? spec.gitRemoteUrl);
-  if (!repoUrl) return { blocked: 'This project has no git remote for Cloud Build to build from. Set gitRemoteUrl with hv_spec.' };
+  const source = await resolveReleaseSource(params);
+  if ('blocked' in source) return source;
   const bindings = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services ?? {};
   const selected = params.services?.length ? params.services : Object.keys(environmentSpec!.services);
   const missing = selected.filter((name) => !environmentSpec!.services[name] || !bindings[name]?.serviceId);
@@ -726,7 +807,7 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
     currentSpecRevision: params.specRevision,
     handler: async (action) => {
       const name = action.resource.name;
-      const result = await releaseOne(context, params.project, spec, environmentName, name, String(action.metadata?.resource), repoUrl, params.revision ?? 'main');
+      const result = await releaseOne(context, params.project, spec, environmentName, name, String(action.metadata?.resource), source);
       results.push(result);
       const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}), ...(result.health ? { health: result.health } : {}) };
       if (result.status === 'released') return { success: true, message: result.message, data };
@@ -735,7 +816,37 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
     },
   });
   if (!execution.applyRunId) return { blocked: execution.error ?? 'The release could not start.' };
-  return { results, applyRunId: execution.applyRunId };
+  return { results, applyRunId: execution.applyRunId, source: source.summary };
+}
+
+interface ReleaseSource {
+  archive?: Buffer;
+  repoUrl?: string;
+  summary: { kind: 'local-commit' | 'git-remote'; revision: string; commitSha?: string; uncommittedChangesExcluded?: boolean };
+}
+
+/**
+ * Prefers the user's local repository: the exact HEAD commit is archived and
+ * uploaded, so private repositories and unpushed commits deploy without any
+ * git credentials. Falls back to cloning a public remote.
+ */
+async function resolveReleaseSource(params: { project: Project; spec: ProjectSpec; revision?: string; sourceDirectory?: string }): Promise<ReleaseSource | { blocked: string }> {
+  if (params.sourceDirectory) {
+    try {
+      const git = async (args: string[]) => String((await execFileAsync('git', ['-C', params.sourceDirectory!, ...args])).stdout);
+      const commitSha = (await git(['rev-parse', 'HEAD'])).trim();
+      if (/^[0-9a-f]{40}$/.test(commitSha)) {
+        const archive = (await execFileAsync('git', ['-C', params.sourceDirectory, 'archive', '--format=tar.gz', commitSha], { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 })).stdout as Buffer;
+        const dirty = (await git(['status', '--porcelain', '--untracked-files=no'])).trim().length > 0;
+        return { archive, summary: { kind: 'local-commit', revision: commitSha, commitSha, ...(dirty ? { uncommittedChangesExcluded: true } : {}) } };
+      }
+    } catch {
+      // Not a usable git checkout; fall back to the remote.
+    }
+  }
+  const repoUrl = normalizeGitRemoteForBuild(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
+  if (!repoUrl) return { blocked: 'Hypervibe needs either this project\'s local git repository or a git remote to build from.' };
+  return { repoUrl, summary: { kind: 'git-remote', revision: params.revision ?? 'main' } };
 }
 
 async function releaseOne(
@@ -745,8 +856,7 @@ async function releaseOne(
   environmentName: string,
   name: string,
   resource: string,
-  repoUrl: string,
-  revision: string
+  source: ReleaseSource
 ): Promise<EngineReleaseResult> {
   const serviceSpec = spec.environments[environmentName]!.services[name]!;
   const now = new Date();
@@ -758,7 +868,9 @@ async function releaseOne(
       ...(spec.runtime ? { runtime: spec.runtime as ProjectRuntime } : {}),
     },
   };
-  const build = await context.adapter.buildReleaseImage(service, context.environment, { repoUrl, revision });
+  const build = source.archive
+    ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId) })
+    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { service: name, status: 'failed', message: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}) };
   }
