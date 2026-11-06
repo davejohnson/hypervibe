@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { proposeTargetEnvironment } from '../migrate.js';
+import { pointsAtSourceData, proposeTargetEnvironment } from '../migrate.js';
 import type { EnvironmentSpec } from '../../domain/spec/spec.schema.js';
 
 describe('proposed migration target', () => {
@@ -27,5 +27,14 @@ describe('proposed migration target', () => {
     // Features the engine cannot manage yet are not silently carried over.
     expect(target.email).toBeUndefined();
     expect(Object.keys(target.services)).toEqual(['staging-web', 'staging-worker']);
+  });
+});
+
+describe('migrated settings', () => {
+  it('never copies a setting that points at the source database or cache, whatever its name', () => {
+    expect(pointsAtSourceData('postgresql://user:pw@roundhouse.proxy.rlwy.net:5432/railway')).toBe(true);
+    expect(pointsAtSourceData('rediss://default:pw@host:6379')).toBe(true);
+    expect(pointsAtSourceData('https://api.anthropic.com')).toBe(false);
+    expect(pointsAtSourceData('sk-ant-abc')).toBe(false);
   });
 });

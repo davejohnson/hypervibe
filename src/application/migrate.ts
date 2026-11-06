@@ -54,7 +54,15 @@ export type MigrateResult =
     };
 
 /** Settings providers manage themselves; these are regenerated on the target, never copied. */
-const MANAGED_KEY = /^(DATABASE_URL|DATABASE_PUBLIC_URL|DATABASE_PRIVATE_URL|PG[A-Z_]*|POSTGRES_[A-Z_]*|PORT|HOSTNAME|RAILWAY_[A-Z_]*|REDIS_URL|REDIS_[A-Z_]*|QUEUE_[A-Z_]*|OBJECT_STORAGE_[A-Z_]*|GOOGLE_CLOUD_[A-Z_]*|AWS_[A-Z_]*|BUCKET[A-Z_]*|K_SERVICE|K_REVISION|K_CONFIGURATION|CLOUD_SQL_CONNECTION_NAME)$/;
+const MANAGED_KEY = /^(DATABASE_URL|DATABASE_PUBLIC_URL|DATABASE_PRIVATE_URL|PG[A-Z0-9_]*|POSTGRES_[A-Z0-9_]*|PORT|HOSTNAME|RAILWAY_[A-Z0-9_]*|REDIS_URL|REDIS_[A-Z0-9_]*|QUEUE_[A-Z0-9_]*|OBJECT_STORAGE_[A-Z0-9_]*|GOOGLE_CLOUD_[A-Z0-9_]*|AWS_[A-Z0-9_]*|BUCKET[A-Z0-9_]*|HYPERVIBE_[A-Z0-9_]*|K_SERVICE|K_REVISION|K_CONFIGURATION|CLOUD_SQL_CONNECTION_NAME)$/;
+
+/**
+ * A value that points at the source's own data services (any name, for example
+ * DIRECT_URL). Copying it would connect the target app back to the source.
+ */
+export function pointsAtSourceData(value: string): boolean {
+  return /^(postgres(ql)?|mysql|redis|rediss|mongodb(\+srv)?|amqps?):\/\//i.test(value.trim());
+}
 
 /** A target environment equivalent to the source on OpenTofu-managed Google Cloud. */
 export function proposeTargetEnvironment(source: EnvironmentSpec, options: { region?: string; domain?: string }): EnvironmentSpec {
@@ -145,7 +153,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     }
     const declared = new Set([...Object.keys(spec.environments[params.to]!.envVars), ...Object.entries(spec.secrets)
       .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key)]);
-    const keys = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key)).sort();
+    const keys = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
     if (!params.importSecrets) {
       return {
         status: 'needs_secret_import', keys,
