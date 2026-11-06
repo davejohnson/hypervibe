@@ -1,0 +1,96 @@
+import { describe, expect, it } from 'vitest';
+import { interpretApplyEvents, parseEnginePlan, translateEnginePlan } from '../plan-mapping.js';
+import { buildCloudRunConfiguration, gcpEngineAuthentication } from '../../../providers/gcp/tofu/gcp-engine.backend.js';
+import { redactEngineOutput } from '../runner.js';
+
+const IMAGE = `us-docker.pkg.dev/demo-project/app/web@sha256:${'a'.repeat(64)}`;
+const configuration = buildCloudRunConfiguration({
+  projectId: 'demo-project',
+  region: 'us-central1',
+  services: [{
+    logicalName: 'web', resourceName: 'web-staging', workload: 'web', initialImage: IMAGE,
+    runtimeServiceAccountEmail: 'web-runtime@demo-project.iam.gserviceaccount.com', public: true,
+    env: { NODE_ENV: 'production' }, secretEnv: { API_KEY: { secretId: 'web-api-key', version: '3' } },
+    healthCheckPath: '/health',
+  }],
+});
+const segment = { id: 'opentofu:p1', engine: 'opentofu' as const, planDigest: 'd', configurationDigest: 'c', engineVersion: '1.13.9', providerVersions: {} };
+
+function plan(changes: Array<{ address: string; type: string; actions: string[]; before?: unknown; after?: unknown }>): string {
+  return JSON.stringify({
+    resource_changes: changes.map((c) => ({ address: c.address, type: c.type, mode: 'managed', change: { actions: c.actions, before: c.before ?? null, after: c.after ?? null } })),
+  });
+}
+
+describe('Cloud Run engine configuration', () => {
+  it('wires secrets by reference, keeps image ownership narrow and never embeds values', () => {
+    const service = (configuration.files['cloudrun.tf.json'] as any).resource.google_cloud_run_v2_service.web;
+    const env = service.template[0].containers[0].env;
+    expect(env).toContainEqual({ name: 'API_KEY', value_source: [{ secret_key_ref: [{ secret: 'web-api-key', version: '3' }] }] });
+    expect(service.lifecycle[0].ignore_changes).toEqual(['template[0].containers[0].image', 'client', 'client_version']);
+    expect(configuration.resources).toHaveProperty('google_cloud_run_v2_service_iam_member.web_public');
+  });
+
+  it('rejects mutable image tags', () => {
+    expect(() => buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1',
+      services: [{ logicalName: 'web', resourceName: 'web', workload: 'web', initialImage: 'nginx:latest', runtimeServiceAccountEmail: 'r@demo-project.iam.gserviceaccount.com', public: false }],
+    })).toThrow(/digest/);
+  });
+
+  it('carries the connection credential only in the process environment and redacts it', () => {
+    const credentials = JSON.stringify({ type: 'service_account', client_email: 'd@demo-project.iam.gserviceaccount.com', private_key: '-----BEGIN PRIVATE KEY-----\nabcdef\n-----END PRIVATE KEY-----\n' });
+    const auth = gcpEngineAuthentication({ projectId: 'demo-project', credentials });
+    expect(JSON.stringify(configuration.files)).not.toContain('private_key');
+    expect(redactEngineOutput(`Error: bad key ${JSON.stringify(credentials)}`, auth.redact)).not.toContain('abcdef');
+  });
+});
+
+describe('engine plan translation', () => {
+  it('maps service and IAM changes to one reviewed action', () => {
+    const parsed = parseEnginePlan(plan([
+      { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['create'], after: { name: 'web-staging' } },
+      { address: 'google_cloud_run_v2_service_iam_member.web_public', type: 'google_cloud_run_v2_service_iam_member', actions: ['create'], after: { role: 'roles/run.invoker' } },
+    ]));
+    const { actions, blockers } = translateEnginePlan({ provider: 'gcp', parsed, configuration, segment });
+    expect(blockers).toEqual([]);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ id: 'service:web', type: 'create', billable: true });
+    expect((actions[0]!.metadata!.engineSegment as any).addresses).toHaveLength(2);
+  });
+
+  it('requires confirmation for replacement and reports no-ops as noop without a segment', () => {
+    const replace = translateEnginePlan({ provider: 'gcp', configuration, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['delete', 'create'], before: { name: 'a' }, after: { name: 'b' } },
+    ])) });
+    expect(replace.actions[0]).toMatchObject({ type: 'replace', requiresConfirm: true, diff: [{ field: 'google_cloud_run_v2_service.name' }] });
+    const noop = translateEnginePlan({ provider: 'gcp', configuration, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['no-op'] },
+    ])) });
+    expect(noop.actions[0]).toMatchObject({ type: 'noop' });
+    expect(noop.actions[0]!.metadata).toBeUndefined();
+  });
+
+  it('blocks unmanaged addresses and unsupported actions', () => {
+    const { blockers } = translateEnginePlan({ provider: 'gcp', configuration, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_sql_database_instance.db', type: 'google_sql_database_instance', actions: ['delete'] },
+      { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['forget'] },
+    ])) });
+    expect(blockers).toHaveLength(2);
+  });
+});
+
+describe('apply event interpretation', () => {
+  it('only treats explicit completion as success', () => {
+    const events = [
+      { type: 'apply_start', hook: { resource: { addr: 'a.one' } } },
+      { type: 'apply_complete', hook: { resource: { addr: 'a.one' } } },
+      { type: 'apply_start', hook: { resource: { addr: 'a.two' } } },
+      { type: 'apply_errored', hook: { resource: { addr: 'a.two' } } },
+      { type: 'apply_start', hook: { resource: { addr: 'a.three' } } },
+    ].map((e) => JSON.stringify(e)).join('\n');
+    expect(interpretApplyEvents(events, ['a.one', 'a.two', 'a.three', 'a.four'])).toEqual({
+      'a.one': 'succeeded', 'a.two': 'failed', 'a.three': 'unknown', 'a.four': 'not_started',
+    });
+  });
+});
