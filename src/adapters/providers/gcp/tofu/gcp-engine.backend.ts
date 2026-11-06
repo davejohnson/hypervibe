@@ -64,7 +64,13 @@ export interface GcpCloudRunServiceInput {
   logicalName: string;
   /** Physical Cloud Run name, resolved by Hypervibe's naming/binding rules. */
   resourceName: string;
-  workload: 'web' | 'worker';
+  /** `job` is a scheduled Cloud Run job triggered by Cloud Scheduler. */
+  workload: 'web' | 'worker' | 'job';
+  /** job: five-field cron schedule and IANA time zone. */
+  schedule?: string;
+  timeZone?: string;
+  /** job: the shell command each run executes. */
+  jobCommand?: string;
   /**
    * Immutable image for first creation. After creation the image is owned by
    * the release path (CI or hv_deploy) and ignored by infrastructure plans.
@@ -249,6 +255,75 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
   };
 }
 
+function jobAddresses(key: string): string[] {
+  return [`google_cloud_run_v2_job.${key}`, `google_cloud_scheduler_job.${key}_schedule`, `google_cloud_run_v2_job_iam_member.${key}_invoker`];
+}
+
+/**
+ * A scheduled workload: a Cloud Run job with the same runtime identity,
+ * configuration, secrets and database wiring as services, a Cloud Scheduler
+ * trigger authenticated as the runtime identity, and permission for that
+ * identity to start exactly this job.
+ */
+function addScheduledJob(
+  input: GcpCloudRunEngineInput,
+  service: GcpCloudRunServiceInput,
+  key: string,
+  jobs: Record<string, unknown>,
+  schedules: Record<string, unknown>,
+  jobIam: Record<string, unknown>
+): void {
+  if (!service.schedule || !/^(\S+\s+){4}\S+$/.test(service.schedule.trim())) throw new Error(`Scheduled job ${service.logicalName} needs a five-field cron schedule.`);
+  if (!service.jobCommand?.trim()) throw new Error(`Scheduled job ${service.logicalName} needs an explicit command (startCommand).`);
+  // Reuse the service builder for env, secrets and database wiring, then reshape it as a job.
+  const base = serviceResource(input, { ...service, workload: 'worker' }) as { labels: unknown; template: Array<Record<string, unknown>> };
+  const template = base.template[0]!;
+  const container = { ...(template.containers as Array<Record<string, unknown>>)[0] };
+  const resources = (container.resources as Array<Record<string, unknown>>)[0]!;
+  container.resources = [{ limits: resources.limits }];
+  container.command = ['/bin/sh'];
+  container.args = ['-lc', service.jobCommand.trim()];
+  jobs[key] = {
+    name: service.resourceName,
+    project: input.projectId,
+    location: input.region,
+    deletion_protection: false,
+    labels: base.labels,
+    template: [{
+      template: [{
+        service_account: service.runtimeServiceAccountEmail,
+        max_retries: 1,
+        timeout: '3600s',
+        containers: [container],
+        ...(template.volumes ? { volumes: template.volumes } : {}),
+      }],
+    }],
+    lifecycle: [{ ignore_changes: ['template[0].template[0].containers[0].image', 'client', 'client_version'] }],
+  };
+  schedules[`${key}_schedule`] = {
+    name: `${service.resourceName}-schedule`.slice(0, 500),
+    project: input.projectId,
+    region: input.region,
+    schedule: service.schedule.trim(),
+    time_zone: service.timeZone ?? 'UTC',
+    attempt_deadline: '320s',
+    http_target: [{
+      http_method: 'POST',
+      uri: `https://run.googleapis.com/v2/projects/${input.projectId}/locations/${input.region}/jobs/\${google_cloud_run_v2_job.${key}.name}:run`,
+      headers: { 'Content-Type': 'application/json' },
+      body: Buffer.from('{}').toString('base64'),
+      oauth_token: [{ service_account_email: service.runtimeServiceAccountEmail, scope: 'https://www.googleapis.com/auth/cloud-platform' }],
+    }],
+  };
+  jobIam[`${key}_invoker`] = {
+    project: input.projectId,
+    location: input.region,
+    name: `\${google_cloud_run_v2_job.${key}.name}`,
+    role: 'roles/run.invoker',
+    member: `serviceAccount:${service.runtimeServiceAccountEmail}`,
+  };
+}
+
 export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): EngineConfiguration {
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(input.projectId)) throw new Error('GCP project id is invalid.');
   if (!/^[a-z]+-[a-z]+[0-9]$/.test(input.region)) throw new Error('GCP region is invalid.');
@@ -256,14 +331,22 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   const iam: Record<string, unknown> = {};
   const resources: Record<string, EngineResourceMapping> = {};
   const seen = new Set<string>();
+  const jobs: Record<string, unknown> = {};
+  const schedules: Record<string, unknown> = {};
+  const jobIam: Record<string, unknown> = {};
   for (const service of input.services) {
     const key = engineKey(service.logicalName);
     if (seen.has(key)) throw new Error(`Duplicate engine address for service ${service.logicalName}.`);
     seen.add(key);
-    services[key] = serviceResource(input, service);
     const mapping: EngineResourceMapping = {
       actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true,
     };
+    if (service.workload === 'job') {
+      addScheduledJob(input, service, key, jobs, schedules, jobIam);
+      for (const address of jobAddresses(key)) resources[address] = mapping;
+      continue;
+    }
+    services[key] = serviceResource(input, service);
     resources[`google_cloud_run_v2_service.${key}`] = mapping;
     if (service.public && service.workload === 'web') {
       iam[`${key}_public`] = {
@@ -363,6 +446,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     const mapping: EngineResourceMapping = { actionId: `service:${retired}`, kind: 'service', name: retired };
     resources[`google_cloud_run_v2_service.${key}`] = mapping;
     resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
+    for (const address of jobAddresses(key)) resources[address] = mapping;
   }
   const imports: Record<string, string> = {};
   if (input.adopt?.databaseInstance) {
@@ -380,6 +464,9 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       ...(Object.keys(imports).length ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id })) } } : {}),
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
       // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
+      'jobs.tf.json': Object.keys(jobs).length ? {
+        resource: { google_cloud_run_v2_job: jobs, google_cloud_scheduler_job: schedules, google_cloud_run_v2_job_iam_member: jobIam },
+      } : {},
       'cloudrun.tf.json': Object.keys(services).length ? {
         resource: {
           google_cloud_run_v2_service: services,

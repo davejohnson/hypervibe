@@ -241,9 +241,11 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
     ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...(binding.engine ?? {}), kind: 'opentofu', ci } });
   }
   const services = Object.entries(environmentSpec.services).flatMap(([name, service]) => {
-    const resource = binding.services?.[name]?.serviceId;
+    const bound = (binding.services as Record<string, { serviceId?: string; jobName?: string }> | undefined)?.[name];
+    const resource = bound?.serviceId ?? bound?.jobName;
+    const kind = bound?.jobName && !bound.serviceId ? 'jobs' as const : 'services' as const;
     return resource ? [{
-      name, resource, ...(service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/' } : {}),
+      name, resource, kind, ...(kind === 'services' && service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/' } : {}),
       image: `${context.region}-docker.pkg.dev/${context.gcpProjectId}/hypervibe/${params.environmentName}-${name}`.toLowerCase(),
     }] : [];
   });

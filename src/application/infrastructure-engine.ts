@@ -107,7 +107,9 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     }
   }
   for (const [name, service] of Object.entries(environment.services)) {
-    if (service.workloadKind === 'cron') problems.push(`Service ${name}: scheduled workloads are not yet managed by the OpenTofu engine.`);
+    if (service.workloadKind === 'cron' && (!service.cronSchedule || !service.startCommand)) {
+      problems.push(`Scheduled job ${name} needs cronSchedule and startCommand (the command each run executes).`);
+    }
     if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
     if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
   }
@@ -214,7 +216,8 @@ export async function resolveEngineContext(
 }
 
 function serviceResourceName(context: EngineContext, environmentName: string, serviceName: string): string {
-  const bound = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services?.[serviceName]?.serviceId;
+  const binding = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string; jobName?: string }> }).services?.[serviceName];
+  const bound = binding?.serviceId ?? binding?.jobName;
   return bound ?? resourceName(serviceName, { maxLength: 49, scope: [context.gcpProjectId, environmentName] });
 }
 
@@ -232,7 +235,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
     projectId: context.gcpProjectId,
     region: context.region,
     services: Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => {
-      const workload = service.workloadKind === 'worker' ? 'worker' as const : 'web' as const;
+      const workload = service.workloadKind === 'cron' ? 'job' as const : service.workloadKind === 'worker' ? 'worker' as const : 'web' as const;
       return {
         logicalName: name,
         resourceName: context.resourceNameFor(name),
@@ -243,6 +246,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         secretEnv,
         public: service.public ?? workload === 'web',
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
+        ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
     }),
   };
@@ -441,14 +445,12 @@ async function planDatabaseCredential(params: {
 
 /** The DATABASE_URL secret version each bound service currently runs. */
 async function pinnedDatabaseVersions(token: string, context: EngineContext): Promise<{ versions: string[] } | { blocked: string }> {
-  const bound = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services ?? {};
   const versions: string[] = [];
-  for (const binding of Object.values(bound)) {
-    if (!binding.serviceId) continue;
-    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, binding.serviceId);
+  for (const workload of boundWorkloads(context.environment)) {
+    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, workload.resource, workload.kind);
     if (observed.state === 'unknown') return { blocked: observed.reason };
     if (observed.state === 'absent') continue;
-    const env = (observed.value.template?.containers?.[0]?.env ?? []) as Array<{ name?: string; valueSource?: { secretKeyRef?: { version?: string } } }>;
+    const env = (workloadContainers(workload.kind, observed.value)[0]?.env ?? []) as Array<{ name?: string; valueSource?: { secretKeyRef?: { version?: string } } }>;
     const entry = env.find((item) => item.name === ENGINE_DATABASE_URL_KEY);
     if (entry) versions.push(entry.valueSource?.secretKeyRef?.version ?? 'unknown');
   }
@@ -722,8 +724,27 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
 
 // ---------------------------------------------------------------- Apply
 
-async function cloudRunGet(token: string, gcpProjectId: string, region: string, name: string): Promise<Observed<Record<string, any>>> {
-  const response = await fetchWithRetry(`https://run.googleapis.com/v2/projects/${gcpProjectId}/locations/${region}/services/${name}`, {
+type WorkloadKind = 'services' | 'jobs';
+
+/** Bound Cloud Run workloads: services record serviceId, scheduled jobs record jobName. */
+function boundWorkloads(environment: Environment): Array<{ name: string; kind: WorkloadKind; resource: string }> {
+  const bound = (environment.platformBindings as { services?: Record<string, { serviceId?: string; jobName?: string }> }).services ?? {};
+  const workloads: Array<{ name: string; kind: WorkloadKind; resource: string }> = [];
+  for (const [name, binding] of Object.entries(bound)) {
+    if (binding.serviceId) workloads.push({ name, kind: 'services', resource: binding.serviceId });
+    else if (binding.jobName) workloads.push({ name, kind: 'jobs', resource: binding.jobName });
+  }
+  return workloads;
+}
+
+/** The single container of a service, or of a job's task template. */
+function workloadContainers(kind: WorkloadKind, value: Record<string, any>): Array<Record<string, any>> {
+  const containers = kind === 'jobs' ? value.template?.template?.containers : value.template?.containers;
+  return Array.isArray(containers) ? containers : [];
+}
+
+async function cloudRunGet(token: string, gcpProjectId: string, region: string, name: string, kind: WorkloadKind = 'services'): Promise<Observed<Record<string, any>>> {
+  const response = await fetchWithRetry(`https://run.googleapis.com/v2/projects/${gcpProjectId}/locations/${region}/${kind}/${name}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (response.status === 404) return { state: 'absent' };
@@ -737,15 +758,13 @@ async function cloudRunGet(token: string, gcpProjectId: string, region: string, 
  * after any other write, such as a release, could roll that write back.
  */
 async function serviceGenerations(token: string, context: EngineContext, environmentName: string): Promise<{ generations: Record<string, string> } | { blocked: string }> {
-  const bound = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services ?? {};
-  const generations: Record<string, string> = {};
-  for (const [name, binding] of Object.entries(bound)) {
-    if (!binding.serviceId) continue;
-    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, binding.serviceId);
-    if (observed.state === 'unknown') return { blocked: observed.reason };
-    generations[name] = observed.state === 'present' ? String(observed.value.generation ?? '') : 'absent';
-  }
   void environmentName;
+  const generations: Record<string, string> = {};
+  for (const workload of boundWorkloads(context.environment)) {
+    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, workload.resource, workload.kind);
+    if (observed.state === 'unknown') return { blocked: observed.reason };
+    generations[workload.name] = observed.state === 'present' ? String(observed.value.generation ?? '') : 'absent';
+  }
   return { generations };
 }
 
@@ -870,6 +889,10 @@ async function recordServiceBindings(
       continue;
     }
     const resource = serviceResourceName(context, environmentName, name);
+    if (addresses.some((address) => address.startsWith('google_cloud_run_v2_job.'))) {
+      services[name] = { jobName: resource };
+      continue;
+    }
     const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource);
     services[name] = {
       serviceId: resource,
@@ -921,9 +944,9 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);
   if ('blocked' in source) return source;
-  const bindings = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services ?? {};
+  const workloads = new Map(boundWorkloads(context.environment).map((workload) => [workload.name, workload]));
   const selected = params.services?.length ? params.services : Object.keys(environmentSpec!.services);
-  const missing = selected.filter((name) => !environmentSpec!.services[name] || !bindings[name]?.serviceId);
+  const missing = selected.filter((name) => !environmentSpec!.services[name] || !workloads.get(name));
   if (missing.length) return { blocked: `Create the infrastructure first: ${missing.join(', ')} has no engine-managed service. Run hv_plan scope="infrastructure" and hv_apply.` };
 
   // A release is a recorded plan run executed under the same per-environment
@@ -934,7 +957,7 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
     resource: { kind: 'service', name, provider: 'gcp' },
     verified: true,
     reason: `Build ${params.revision ?? 'main'} and release it to ${name}; only the running image changes.`,
-    metadata: { operation: ENGINE_RELEASE_OPERATION, gcpProjectId: context.gcpProjectId, resource: bindings[name]!.serviceId },
+    metadata: { operation: ENGINE_RELEASE_OPERATION, gcpProjectId: context.gcpProjectId, resource: workloads.get(name)!.resource, workloadKind: workloads.get(name)!.kind },
   }));
   const document = {
     kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
@@ -951,7 +974,8 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
     currentSpecRevision: params.specRevision,
     handler: async (action) => {
       const name = action.resource.name;
-      const result = await releaseOne(context, params.project, spec, environmentName, name, String(action.metadata?.resource), source);
+      const result = await releaseOne(context, params.project, spec, environmentName, name, String(action.metadata?.resource), source,
+        action.metadata?.workloadKind === 'jobs' ? 'jobs' : 'services');
       results.push(result);
       const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}), ...(result.health ? { health: result.health } : {}) };
       if (result.status === 'released') return { success: true, message: result.message, data };
@@ -1000,7 +1024,8 @@ async function releaseOne(
   environmentName: string,
   name: string,
   resource: string,
-  source: ReleaseSource
+  source: ReleaseSource,
+  kind: WorkloadKind = 'services'
 ): Promise<EngineReleaseResult> {
   const serviceSpec = spec.environments[environmentName]!.services[name]!;
   const now = new Date();
@@ -1018,7 +1043,7 @@ async function releaseOne(
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { service: name, status: 'failed', message: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}) };
   }
-  const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri);
+  const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri, kind);
   const result: EngineReleaseResult = { service: name, imageUri: build.imageUri, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}), ...released };
   if (released.status === 'released' && released.url && serviceSpec.workloadKind !== 'worker') {
     const path = serviceSpec.healthCheckPath ?? '/';
@@ -1038,7 +1063,38 @@ async function releaseOne(
   return result;
 }
 
-async function releaseImage(token: string, context: EngineContext, resource: string, imageUri: string): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
+/** Image-only, etag-guarded update of a scheduled job's task template; the next scheduled run uses it. */
+async function releaseJobImage(token: string, context: EngineContext, resource: string, imageUri: string): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
+  const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/jobs/${resource}`;
+  const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'jobs');
+  if (observed.state !== 'present') return { status: 'failed', message: observed.state === 'absent' ? `Job ${resource} does not exist.` : observed.reason };
+  const containers = workloadContainers('jobs', observed.value).map((container) => ({ ...container }));
+  if (containers.length !== 1) return { status: 'failed', message: `Job ${resource} must have exactly one container for an image release.` };
+  containers[0]!.image = imageUri;
+  const patch = await fetchWithRetry(`${url}?updateMask=template.template.containers`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ etag: observed.value.etag, template: { template: { containers } } }),
+  });
+  if (patch.status === 409 || patch.status === 412) return { status: 'failed', message: `Job ${resource} changed while releasing. Nothing was overwritten; retry hv_deploy.` };
+  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the job image release (HTTP ${patch.status}).` };
+  let operation = await patch.json() as { name?: string; done?: boolean; error?: { message?: string } };
+  for (let attempt = 0; attempt < 100 && !operation.done && operation.name; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const polled = await fetchWithRetry(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (polled.ok) operation = await polled.json() as typeof operation;
+  }
+  if (!operation.done) return { status: 'unknown', message: `The job release for ${resource} did not finish in time.` };
+  if (operation.error) return { status: 'failed', message: `Cloud Run could not update job ${resource}: ${operation.error.message ?? 'unknown error'}` };
+  const after = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'jobs');
+  if (after.state !== 'present' || workloadContainers('jobs', after.value)[0]?.image !== imageUri) {
+    return { status: 'unknown', message: `Job ${resource} did not report the new image.` };
+  }
+  return { status: 'released', message: `Released ${imageUri.split('@')[0]} to scheduled job ${resource}; its next run uses it.` };
+}
+
+async function releaseImage(token: string, context: EngineContext, resource: string, imageUri: string, kind: WorkloadKind = 'services'): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
+  if (kind === 'jobs') return releaseJobImage(token, context, resource, imageUri);
   const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/services/${resource}`;
   const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource);
   if (observed.state !== 'present') {

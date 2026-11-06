@@ -82,6 +82,24 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates a scheduled Cloud Run job with its trigger and permission', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1',
+      database: { instanceName: 'hv-db-1', databaseName: 'app', wireServices: true },
+      services: [{
+        logicalName: 'nightly', resourceName: 'nightly-staging', workload: 'job', schedule: '0 3 * * *', timeZone: 'America/New_York',
+        jobCommand: 'node scripts/nightly.js', initialImage: `us-docker.pkg.dev/demo-project/app/web@sha256:${'a'.repeat(64)}`,
+        runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', public: false,
+        secretEnv: { DATABASE_URL: { secretId: 'hv-staging-database-url', version: '2' } },
+      }],
+    });
+    expect(Object.keys(configuration.resources).sort()).toEqual([
+      'google_cloud_run_v2_job.nightly', 'google_cloud_run_v2_job_iam_member.nightly_invoker', 'google_cloud_scheduler_job.nightly_schedule',
+      'google_sql_database.app', 'google_sql_database_instance.db',
+    ]);
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates an environment with no services (teardown)', async () => {
     const empty = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [] });
     expect(await engine.validate(gcpEngineBackend, empty)).toEqual({ ok: true });
