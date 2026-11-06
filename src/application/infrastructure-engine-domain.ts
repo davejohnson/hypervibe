@@ -1,4 +1,5 @@
 import type { ActionResult } from '../domain/plan/converge.executor.js';
+import { fetchWithRetry } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { CloudRunAdapter } from '../adapters/providers/gcp/cloudrun.adapter.js';
 import { findCloudflareZone, getCloudflareAdapterFromHints } from '../domain/services/cloudflare-ops.service.js';
@@ -58,7 +59,7 @@ export async function cloudflareFor(domain: string): Promise<{ adapter: Cloudfla
 }
 
 async function siteVerificationFetch(token: string, path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`https://www.googleapis.com/siteVerification/v1/${path}`, {
+  return fetchWithRetry(`https://www.googleapis.com/siteVerification/v1/${path}`, {
     ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
   });
 }
@@ -97,7 +98,7 @@ async function observeTrafficDns(domain: string): Promise<Tri | { conflict: stri
 
 async function domainMapping(context: DomainContext, domain: string): Promise<{ state: 'present'; ready: boolean; certificate: string } | { state: 'absent' } | { state: 'unknown'; reason: string }> {
   const token = await context.adapter.engineAccessToken();
-  const response = await fetch(`https://${context.region}-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/${context.gcpProjectId}/domainmappings/${domain}`, {
+  const response = await fetchWithRetry(`https://${context.region}-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/${context.gcpProjectId}/domainmappings/${domain}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (response.status === 404) return { state: 'absent' };
@@ -167,7 +168,7 @@ export function planDomainDnsRemoval(context: DomainContext, domain: string, dep
 
 async function enableSiteVerification(context: DomainContext): Promise<boolean> {
   const token = await context.adapter.engineAccessToken();
-  const response = await fetch(`https://serviceusage.googleapis.com/v1/projects/${context.gcpProjectId}/services/siteverification.googleapis.com:enable`, {
+  const response = await fetchWithRetry(`https://serviceusage.googleapis.com/v1/projects/${context.gcpProjectId}/services/siteverification.googleapis.com:enable`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}',
   });
   if (!response.ok) return false;
@@ -238,7 +239,7 @@ export async function executeDomainAction(context: DomainContext, action: PlanAc
       last = mapping.certificate;
       if (mapping.ready) {
         try {
-          const response = await fetch(`https://${domain}${healthPath ?? '/'}`, { redirect: 'manual', signal: AbortSignal.timeout(20_000) });
+          const response = await fetchWithRetry(`https://${domain}${healthPath ?? '/'}`, { redirect: 'manual', signal: AbortSignal.timeout(20_000) });
           if (response.status < 500) return { success: true, message: `https://${domain} answers (HTTP ${response.status}).`, data: { url: `https://${domain}` } };
         } catch { /* certificate or edge still settling */ }
       }

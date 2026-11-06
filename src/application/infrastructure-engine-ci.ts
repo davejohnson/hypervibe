@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { fetchWithRetry } from '../utils/fetch-retry.js';
 import path from 'path';
 
 /**
@@ -28,7 +29,7 @@ export function ciWorkloadIdentityProvider(projectNumber: string): string {
 type Json = Record<string, unknown>;
 
 async function google(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
+  return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
 }
 
 async function waitOperation(token: string, base: string, operation: { name?: string; done?: boolean }): Promise<void> {
@@ -149,7 +150,7 @@ const RELEASE_SCRIPT = String.raw`
 const [service, image, healthPath] = process.argv.slice(2);
 const token = process.env.GCP_TOKEN;
 const base = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT + '/locations/' + process.env.GCP_REGION + '/services/' + service;
-const call = async (url, init = {}) => fetch(url, { ...init, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
+const call = async (url, init = {}) => fetchWithRetry(url, { ...init, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
 const current = await (await call(base)).json();
 const containers = (current.template?.containers ?? []).map((c) => ({ ...c }));
 if (containers.length !== 1) throw new Error('Service must have exactly one container.');
@@ -164,7 +165,7 @@ if (!operation.done || operation.error) throw new Error('Rollout failed: ' + (op
 const after = await (await call(base)).json();
 if (after.template?.containers?.[0]?.image !== image || after.latestReadyRevision !== after.latestCreatedRevision) throw new Error('The new image is not serving.');
 if (healthPath) {
-  const response = await fetch(new URL(healthPath, after.uri));
+  const response = await fetchWithRetry(new URL(healthPath, after.uri));
   if (response.status >= 500) throw new Error(healthPath + ' returned HTTP ' + response.status);
   console.log('Health ' + healthPath + ': HTTP ' + response.status);
 }

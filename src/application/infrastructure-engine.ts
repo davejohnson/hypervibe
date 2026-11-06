@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
@@ -252,7 +253,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
 type Observed<T> = { state: 'present'; value: T } | { state: 'absent' } | { state: 'unknown'; reason: string };
 
 export async function secretManagerFetch(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
+  return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
 }
 
 interface ObservedSecret { labels: Record<string, string>; hasEnabledVersion: boolean; latestVersion?: string }
@@ -343,7 +344,7 @@ async function deleteSecret(token: string, action: PlanAction): Promise<ActionRe
 // ---------------------------------------------------------------- Database login (Hypervibe-owned)
 
 export async function sqlAdmin(token: string, gcpProjectId: string, path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`https://sqladmin.googleapis.com/v1/projects/${gcpProjectId}/${path}`, {
+  return fetchWithRetry(`https://sqladmin.googleapis.com/v1/projects/${gcpProjectId}/${path}`, {
     ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
   });
 }
@@ -517,7 +518,7 @@ async function findOwnLeftovers(
   for (const name of storageNames) {
     if (!creating.has(`storage:${name}`)) continue;
     const bucket = engineBucketName(context.gcpProjectId, environmentName, name);
-    const response = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
     if (response.status === 404) continue;
     if (!response.ok) return { blocked: `Bucket ${bucket} could not be checked (HTTP ${response.status}); it may belong to someone else.` };
     const labels = (await response.json() as { labels?: Record<string, string> }).labels ?? {};
@@ -722,7 +723,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
 // ---------------------------------------------------------------- Apply
 
 async function cloudRunGet(token: string, gcpProjectId: string, region: string, name: string): Promise<Observed<Record<string, any>>> {
-  const response = await fetch(`https://run.googleapis.com/v2/projects/${gcpProjectId}/locations/${region}/services/${name}`, {
+  const response = await fetchWithRetry(`https://run.googleapis.com/v2/projects/${gcpProjectId}/locations/${region}/services/${name}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (response.status === 404) return { state: 'absent' };
@@ -1022,7 +1023,7 @@ async function releaseOne(
   if (released.status === 'released' && released.url && serviceSpec.workloadKind !== 'worker') {
     const path = serviceSpec.healthCheckPath ?? '/';
     try {
-      const response = await fetch(new URL(path, released.url), { redirect: 'manual', signal: AbortSignal.timeout(30_000) });
+      const response = await fetchWithRetry(new URL(path, released.url), { redirect: 'manual', signal: AbortSignal.timeout(30_000) });
       result.health = { status: response.status, path };
       if (response.status >= 500) {
         result.status = 'failed';
@@ -1048,7 +1049,7 @@ async function releaseImage(token: string, context: EngineContext, resource: str
   if (containers.length !== 1) return { status: 'failed', message: `Service ${resource} must have exactly one container for an image release.` };
   containers[0].image = imageUri;
   // Only the image changes; every other field is sent back exactly as observed.
-  const patch = await fetch(`${url}?updateMask=template.containers`, {
+  const patch = await fetchWithRetry(`${url}?updateMask=template.containers`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ etag: current.etag, template: { containers } }),
@@ -1063,7 +1064,7 @@ async function releaseImage(token: string, context: EngineContext, resource: str
   let error = operation.error;
   while (!done && operation.name && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
-    const polled = await fetch(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${token}` } });
+    const polled = await fetchWithRetry(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${token}` } });
     if (!polled.ok) continue;
     const body = await polled.json() as { done?: boolean; error?: { message?: string } };
     done = body.done === true;

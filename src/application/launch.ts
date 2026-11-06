@@ -1,4 +1,5 @@
 import type { CommandContext } from './context.js';
+import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
@@ -71,7 +72,18 @@ function summarize(action: PlanAction): { id: string; change: string } {
   return { id: action.id, change: action.reason };
 }
 
-export async function launchEnvironment(ctx: CommandContext, params: {
+export async function launchEnvironment(ctx: CommandContext, params: Parameters<typeof runLaunch>[1]): Promise<LaunchResult> {
+  try {
+    return await runLaunch(ctx, params);
+  } catch (error) {
+    if (!isNetworkError(error)) throw error;
+    // Only reads are retried automatically; a dropped write is safe to repeat because every
+    // run re-observes what exists and adopts or skips instead of duplicating.
+    return { status: 'pending', message: 'The internet connection dropped while talking to Google or Cloudflare. Nothing was duplicated; run hv_launch again once the connection is stable.', receipts: [] };
+  }
+}
+
+async function runLaunch(ctx: CommandContext, params: {
   project: Project;
   spec: ProjectSpec;
   specRevision: number;
@@ -199,7 +211,7 @@ export async function launchEnvironment(ctx: CommandContext, params: {
   };
 }
 
-async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof launchEnvironment>[1], environmentSpec: EnvironmentSpec): Promise<{ path: string; changed: boolean; branch: string } | LaunchResult> {
+async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec): Promise<{ path: string; changed: boolean; branch: string } | LaunchResult> {
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
   if (!repository) return { status: 'blocked', message: 'CI releases need this project on GitHub (set gitRemoteUrl with hv_spec).' };
   if (!params.sourceDirectory) return { status: 'blocked', message: 'CI releases need the local repository so Hypervibe can add the workflow file.' };

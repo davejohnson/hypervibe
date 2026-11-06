@@ -33,6 +33,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
         ...(confirmActions ? { confirmActions } : {}),
         ...(approveAccess ? { approveAccess } : {}),
       });
+      if (!result) return commandError('INTERNAL', 'hv_launch returned no result.');
       switch (result.status) {
         case 'needs_billing_choice':
           return commandSuccess(result, {

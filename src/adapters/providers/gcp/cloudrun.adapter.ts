@@ -48,6 +48,7 @@ import type {
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   CLOUD_RUN_SOURCE_COMMIT_ANNOTATION,
@@ -557,11 +558,11 @@ export class CloudRunAdapter implements
       exp: now + 600,
       scope: 'https://www.googleapis.com/auth/siteverification',
     }, this.serviceAccountCreds.private_key);
-    const response = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await fetchWithRetry('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }),
-    });
+    }, 4, true);
     if (!response.ok) throw new Error(`Site Verification token exchange failed: HTTP ${response.status}`);
     return ((await response.json()) as { access_token: string }).access_token;
   }
@@ -5429,14 +5430,14 @@ export class CloudRunAdapter implements
     const jwt = await this.createJwt(header, payload, this.serviceAccountCreds.private_key);
 
     // Exchange JWT for access token
-    const response = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await fetchWithRetry('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
         assertion: jwt,
       }),
-    });
+    }, 4, true);
 
     if (!response.ok) {
       const text = await response.text();
