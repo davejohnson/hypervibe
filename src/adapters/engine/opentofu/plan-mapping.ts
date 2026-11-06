@@ -133,8 +133,9 @@ export function translateEnginePlan(params: {
       ACTION_RANK[change.action] > ACTION_RANK[best.action] ? change : best);
     const type = ENGINE_ACTION_TYPE[dominant.action as Exclude<EngineChangeAction, 'read'>];
     const destructive = changes.some((change) => change.action === 'delete' || change.action === 'replace');
+    // Field lists help review changes to existing resources; for creates and deletes they are noise.
     const diff: PlanFieldDiff[] = changes
-      .filter((change) => change.action !== 'noop')
+      .filter((change) => change.action === 'update' || change.action === 'replace')
       .flatMap((change) => change.changedAttributes.map((field) => ({ field: `${change.type}.${field}` })));
     const mutating = changes.filter((change) => change.action !== 'noop').map((change) => change.address);
     actions.push({

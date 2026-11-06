@@ -194,6 +194,7 @@ describe('runCloudPrepare', () => {
       etag: 'runtime-etag-1',
       bindings: [{ role: 'roles/viewer', members: ['user:runtime-owner@example.com'] }],
     };
+    let deployPolicy: { version: number; etag: string; bindings: Array<{ role: string; members: string[] }> } = { version: 1, etag: 'deploy-etag-1', bindings: [] };
     let projectPolicyRevision = 1;
     let runtimePolicyRevision = 1;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -263,6 +264,19 @@ describe('runCloudPrepare', () => {
         };
         return Response.json(projectPolicy);
       }
+      // The deployment identity may act as itself so builds never use the Editor default account.
+      const deployAccountUrl = 'https://iam.googleapis.com/v1/projects/hls-property-care/serviceAccounts/'
+        + encodeURIComponent(DEPLOY_SERVICE_ACCOUNT_EMAIL);
+      const deployPolicyUrl = 'https://iam.googleapis.com/v1/projects/hls-property-care/serviceAccounts/223456789012345678901';
+      if (url === deployAccountUrl && method === 'GET') {
+        return Response.json({ name: `projects/hls-property-care/serviceAccounts/${DEPLOY_SERVICE_ACCOUNT_EMAIL}`,
+          projectId: 'hls-property-care', uniqueId: '223456789012345678901', email: DEPLOY_SERVICE_ACCOUNT_EMAIL });
+      }
+      if (url === `${deployPolicyUrl}:getIamPolicy` && method === 'POST') return Response.json(deployPolicy);
+      if (url === `${deployPolicyUrl}:setIamPolicy` && method === 'POST') {
+        deployPolicy = { ...JSON.parse(String(init?.body)).policy, etag: `deploy-etag-${Date.now()}` };
+        return Response.json(deployPolicy);
+      }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -293,6 +307,8 @@ describe('runCloudPrepare', () => {
       role: 'roles/viewer',
       members: ['user:runtime-owner@example.com'],
     });
+    expect(deployPolicy.bindings).toContainEqual({ role: 'roles/iam.serviceAccountUser', members: [deployMember] });
+    expect(projectPolicy.bindings.some((binding) => binding.role === 'roles/editor')).toBe(false);
 
     const refreshed = new ProjectRepository().findById(project.id)!;
     expect(isCloudPrepared(refreshed, 'cloudrun')).toBe(true);

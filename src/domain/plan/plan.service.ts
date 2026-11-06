@@ -1699,6 +1699,9 @@ export class PlanService {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
     const scope = options?.scope ?? 'full';
+    if (specResult.spec.environments[environmentName]?.hosting.engine === 'opentofu') {
+      return { error: `Environment "${environmentName}" is managed by the OpenTofu engine. Plan infrastructure with hv_plan scope="infrastructure" and release code with hv_deploy.` };
+    }
     if (scope === 'backups') {
       if (options?.serviceFilter !== undefined || options?.envVarOverrides !== undefined || options?.envFile !== undefined
         || options?.secretRefs !== undefined || options?.includeEnvFile === true) {

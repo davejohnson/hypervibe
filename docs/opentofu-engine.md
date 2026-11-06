@@ -1,7 +1,8 @@
 # OpenTofu infrastructure engine (GCP pilot)
 
-Status: **exploration branch** (`feat/opentofu-gcp-engine`). Nothing here is on a
-user's default path yet; existing GCP lifecycle code is unchanged.
+Status: **pilot, opt-in per environment** (`hosting.engine: "opentofu"`). The
+complete Cloud Run journey has been demonstrated live (below). Environments
+without the flag use the standard lifecycle unchanged.
 
 ## Decision
 
@@ -155,21 +156,79 @@ Retain (operational):
   Moving parts of it into a project-shared engine state is a later, separately
   approved change.
 
-## Next steps (in order)
+## How it works for a user
 
-1. **Wire into `hv_plan`/`hv_apply` behind an explicit opt-in.** Add an engine
-   lifecycle registration to the provider registry; in plan, build
-   `GcpCloudRunEngineInput` from the spec and bindings (resource names, runtime
-   identity, built image digest, secret references), call `OpenTofuEngine.plan`,
-   persist the segment with the plan run, and surface blockers. In apply, pass a
-   `segmentHandler` that calls `OpenTofuEngine.apply` under the environment lock.
-   Turn off the old Cloud Run service writer for opted-in environments.
-2. Distribute the pinned binary: download to `~/.hypervibe/engine/bin`, check
-   against `OPENTOFU_ARCHIVE_SHA256`, never upgrade silently.
-3. Secret Manager reference wiring through the approved secret workflow.
-4. CI writer: limit to image and release metadata, add the etag guard.
-5. Live Cloud Run journey on a new environment (needs your approval for billable
-   creates): connect → create → deploy → health → newer image → infra change →
-   image preserved → noop → concurrent CI release + apply → approved teardown.
-6. Cloud SQL, then GCS / Memorystore / Pub/Sub / jobs, then import of the existing
-   sites, then shared state for multiple machines.
+1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun", engine: "opentofu" }`.
+2. `hv_connections action="bootstrap"`: preview, choose a billing account, confirm.
+   Hypervibe creates the project, deployment and runtime identities and connections.
+3. `hv_plan scope="infrastructure"` → `hv_apply` (with confirmations for billable or
+   destructive actions). Hypervibe generates its secrets into Secret Manager;
+   OpenTofu creates the services from a placeholder image (`cloudrun/container/hello`, pinned).
+4. `hv_deploy` builds from the git remote and releases it: a recorded plan run under
+   the environment lock that changes only the running image (etag-guarded), then
+   checks the health path.
+5. Teardown: remove services and secrets from the spec, plan, apply with confirmations.
+
+The pinned OpenTofu binary is downloaded and checksum-verified on first use into
+`~/.hypervibe/engine/bin`; providers are cached in `~/.hypervibe/engine/plugins`.
+
+## Live journey (2026-11-05)
+
+Fresh repository `davejohnson/hypervibe-engine-pilot`, fresh project
+`hv-hypervibe-engine--eb0c996d`, separate Hypervibe data directory:
+
+| Step | Result |
+| --- | --- |
+| Connect (bootstrap preview → billing choice → confirm) | Project, identities, verified connections |
+| Plan/apply infrastructure | Secret generated + stored; service and public access created (per-address receipts) |
+| Release v1 | Built as the deployment identity; image-only change; `/health` 200 with secret present |
+| Release newer code (b2) | New digest running |
+| Change config (`APP_VERSION` v1→v2) via OpenTofu | In-place template update; **b2 digest still running** |
+| Plan with no changes | 0 actions |
+| Plan → release b3 → apply old plan | **Refused** ("A service changed since this plan"); b3 kept |
+| Unconfirmed teardown | Refused before any change |
+| Confirmed teardown | Service then secret deleted; URL 404; next plan empty |
+
+Not exercised: CI releases (blocked for engine environments), concurrent
+multi-machine execution, Cloud SQL, domains.
+
+## Problems found and fixed along the way
+
+- **New-project setup failed at step one.** Resource Manager answers 403 for a project
+  id that does not exist; bootstrap treated that as an error. It now confirms with a
+  project search and treats an invisible id as not yet created (creation is atomic on a
+  globally unique id, so nothing foreign can be adopted).
+- **Billing failures were opaque** ("HTTP 400"). Recognized Google conditions (billing
+  account at its project limit, project quota, missing billing permission) now produce
+  plain-language next steps.
+- **Builds failed in new projects.** New projects build as the Compute Engine default
+  account (Editor). Hypervibe never acts as it: setup now lets the deployment identity
+  act as itself and write build logs, and builds fall back to running as that identity.
+  This also affects the standard (non-engine) Cloud Run path.
+- Pattern redaction could silently corrupt OpenTofu JSON; machine-readable output now
+  uses exact-value redaction only, and every diagnostic gets the full scrub.
+- An environment with no services generated invalid configuration, and deletions of
+  removed services were flagged as unmanaged; both fixed for teardown.
+- A saved plan could have rolled back a release made after it; applies now refuse when a
+  service's generation changed since planning, and releases share the apply lock.
+
+## Gap to the target experience
+
+Target: install the MCP, say "deploy this web service and database to GCP with a domain",
+sign in once, and get a working app. Remaining work, in order:
+
+1. **Cloud SQL through the engine** (instance and database by OpenTofu; Hypervibe keeps
+   password generation/rotation, connection wiring via the runtime identity, recovery).
+2. **Custom domain** (Cloud Run domain mapping or load balancer by OpenTofu; DNS through
+   the existing Cloudflare integration) with certificate readiness verification.
+3. **One guided flow**: today the agent runs spec → bootstrap → plan → apply → deploy as
+   separate calls. A single orchestrated "deploy" that stops only for sign-in, billing
+   choice and cost confirmation.
+4. **Sign-in without gcloud**: bootstrap still borrows local Application Default
+   Credentials for the one-time admin step; replace with a browser OAuth flow.
+5. **Private repositories**: builds clone the public git URL; private repos need a
+   source upload or a Cloud Build repository connection.
+6. CI releases for engine environments (etag-guarded image writer), scheduled jobs,
+   storage, Memorystore, Pub/Sub; import of existing sites; shared state for multi-machine.
+7. Teardown leaves the Artifact Registry images and the (empty) GCP project; decide
+   whether "delete everything" should include them.

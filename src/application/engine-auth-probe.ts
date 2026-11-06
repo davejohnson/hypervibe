@@ -1,19 +1,13 @@
 import os from 'os';
-import path from 'path';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { gcpEngineAuthentication, gcpEngineBackend } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { getDataDir } from '../adapters/storage/paths.js';
+import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 
 export type EngineAuthProbeResult =
   | { status: 'verified'; identity: string; projectId: string; projectNumber: string }
   | { status: 'missing_connection' | 'permission_denied' | 'scope_mismatch' | 'engine_unavailable' | 'engine_error'; message: string };
-
-/** Locates the pinned engine binary; never downloads or upgrades implicitly. */
-export function engineBinary(): string {
-  return process.env.HYPERVIBE_TOFU_BINARY?.trim() || path.join(getDataDir(), 'engine', 'bin', process.platform === 'win32' ? 'tofu.exe' : 'tofu');
-}
 
 /**
  * Read-only proof that the OpenTofu Google provider authenticates as the
@@ -37,10 +31,12 @@ export async function probeGcpEngineAuthentication(params: { scope: string | nul
     return { status: 'missing_connection', message: error instanceof Error ? error.message : String(error) };
   }
   const expectedIdentity = (JSON.parse(credentials.credentials) as { client_email: string }).client_email;
+  const binary = await ensureEngineBinary();
+  if (!binary.ok) return { status: 'engine_unavailable', message: binary.error };
   const engine = new OpenTofuEngine({
-    binary: engineBinary(),
+    binary: binary.binary,
     cipher: getSecretStore(),
-    pluginCacheDir: process.env.TF_PLUGIN_CACHE_DIR,
+    pluginCacheDir: enginePluginCacheDir(),
     timeoutMs: 5 * 60 * 1000,
     signal: params.signal,
   });

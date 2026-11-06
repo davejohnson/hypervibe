@@ -39,7 +39,7 @@ function engineAction(name: string, extra: Partial<PlanAction> = {}): PlanAction
 }
 
 function storePlan(actions: PlanAction[]): string {
-  const document: PlanRunDocument = { kind: 'hv_plan', environmentName: 'staging', specRevision: 1, observedFingerprint: null, actions };
+  const document = { kind: 'hv_plan', scope: 'infrastructure-engine', engine: { planId: 'plan-1' }, environmentName: 'staging', specRevision: 1, observedFingerprint: null, actions } as PlanRunDocument;
   return new RunRepository().create({ projectId, environmentId, type: 'plan', plan: document as unknown as Record<string, unknown> }).id;
 }
 
@@ -77,6 +77,12 @@ describe('engine segments', () => {
     });
   });
 
+  it('rejects engine actions outside the isolated engine stage', async () => {
+    const document = { kind: 'hv_plan', environmentName: 'staging', specRevision: 1, observedFingerprint: null, actions: [engineAction('web')] } as PlanRunDocument;
+    const planRunId = new RunRepository().create({ projectId, environmentId, type: 'plan', plan: document as unknown as Record<string, unknown> }).id;
+    expect(new ConvergeExecutor().loadPlan(planRunId)).toHaveProperty('error');
+  });
+
   it('blocks engine actions when the apply path has no engine executor', async () => {
     const planRunId = storePlan([engineAction('web')]);
     const result = await new ConvergeExecutor().execute({ planRunId, currentSpecRevision: 1, handler: vi.fn() });
@@ -85,7 +91,7 @@ describe('engine segments', () => {
 
   it('does not run the engine before its external prerequisites complete', async () => {
     const prerequisite: PlanAction = {
-      id: 'secret:api-key', type: 'create', resource: { kind: 'secret', name: 'api-key', provider: 'gcp' }, verified: true, reason: 'secret',
+      id: 'secret:api-key', type: 'create', resource: { kind: 'secret', name: 'api-key', provider: 'gcp' }, verified: true, reason: 'secret', metadata: { operation: 'gcpSecretManagerEnsure' },
     };
     const planRunId = storePlan([prerequisite, engineAction('web', { dependsOn: ['secret:api-key'] })]);
     const segmentHandler = vi.fn();

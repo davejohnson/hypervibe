@@ -319,7 +319,7 @@ interface CloudRunContainer {
   livenessProbe?: { httpGet?: { path?: string } };
 }
 
-interface CloudBuildResult {
+export interface CloudBuildResult {
   success: boolean;
   imageUri?: string;
   buildId?: string;
@@ -525,6 +525,33 @@ export class CloudRunAdapter implements
     } catch {
       throw new Error('Invalid service account JSON');
     }
+  }
+
+  /**
+   * OpenTofu engine integration only: the connection's deployment credential
+   * for the engine process environment. Callers must redact it from every output.
+   */
+  engineConnection(): { projectId: string; credentials: string; runtimeServiceAccountEmail?: string } {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId, credentials, runtimeServiceAccountEmail } = this.credentials;
+    return { projectId, credentials, ...(runtimeServiceAccountEmail ? { runtimeServiceAccountEmail } : {}) };
+  }
+
+  /** OpenTofu engine integration only: short-lived token for retained operational calls. */
+  async engineAccessToken(): Promise<string> {
+    return this.getAccessToken();
+  }
+
+  /** Builds an immutable image in the configured region without touching any Cloud Run resource. */
+  async buildReleaseImage(
+    service: Service,
+    environment: Environment,
+    source: { repoUrl: string; revision: string }
+  ): Promise<CloudBuildResult> {
+    return this.buildImageForService(service, environment, {
+      HYPERVIBE_SOURCE_REPO_URL: source.repoUrl,
+      HYPERVIBE_SOURCE_REVISION: source.revision,
+    });
   }
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
@@ -5089,7 +5116,7 @@ export class CloudRunAdapter implements
     }
 
     const { projectId } = this.credentials;
-    const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
+    const submit = (buildIdentity?: string) => fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${params.token}`,
@@ -5109,9 +5136,27 @@ export class CloudRunAdapter implements
         }],
         images: [params.imageUri],
         timeout: '1200s',
+        // A user-specified build identity requires an explicit logging mode.
+        ...(buildIdentity
+          ? { serviceAccount: `projects/${projectId}/serviceAccounts/${buildIdentity}`, options: { logging: 'CLOUD_LOGGING_ONLY' } }
+          : {}),
       }),
     });
 
+    let response = await submit();
+    if (response.status === 403) {
+      const text = await response.text();
+      const deployIdentity = this.serviceAccountCreds?.client_email;
+      // Newer projects build as the Compute Engine default account (Editor).
+      // Never act as it; build as the deployment identity instead.
+      if (!/act as service account/i.test(text) || !deployIdentity) {
+        throw new Error(`Cloud Build submission failed: ${response.status} ${text}`);
+      }
+      response = await submit(deployIdentity);
+      if (response.status === 403) {
+        throw new Error('Cloud Build cannot run as the Hypervibe deployment identity yet. Re-run GCP setup (hv_connections action="prepare" for cloudrun) to grant the build permissions, then retry.');
+      }
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`Cloud Build submission failed: ${response.status} ${text}`);

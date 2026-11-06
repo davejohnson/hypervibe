@@ -1582,6 +1582,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
+    /** Opt-in: OpenTofu plans and applies this environment's infrastructure (Cloud Run pilot). */
+    engine: z.literal('opentofu').optional(),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

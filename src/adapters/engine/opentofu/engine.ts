@@ -11,6 +11,7 @@ import type {
 import type { PlanAction } from '../../../domain/plan/plan.types.js';
 import { getDataDir, PRIVATE_FILE_MODE } from '../../storage/paths.js';
 import { interpretApplyEvents, parseEnginePlan, translateEnginePlan } from './plan-mapping.js';
+import { redactSensitiveString } from '../../../utils/redact-sensitive-string.js';
 import { runTofu, verifyEngineVersion, type TofuCommand, type TofuRunResult } from './runner.js';
 import { OPENTOFU_VERSION } from './versions.js';
 import {
@@ -52,7 +53,7 @@ function failure(stage: string, run: TofuRunResult): EngineStepFailure {
     : run.interrupted === 'cancelled'
       ? 'was cancelled'
       : `exited with ${run.exitCode}`;
-  const detail = (run.stderr || run.stdout).trim().split('\n').slice(-20).join('\n');
+  const detail = redactSensitiveString((run.stderr || run.stdout).trim().split('\n').slice(-20).join('\n'));
   return { ok: false, stage, error: `OpenTofu ${stage} ${reason}.${detail ? `\n${detail}` : ''}` };
 }
 
@@ -250,8 +251,16 @@ export class OpenTofuEngine {
     const prepared = await this.prepare({ backend: params.backend, configuration, auth: params.auth, state: params.state });
     if (!prepared.ok) return notStarted(prepared.error);
     try {
-      backupState(paths, params.planId);
       fs.copyFileSync(planFile, path.join(prepared.directory, 'saved.tfplan'));
+      // Approval must equal the saved plan's actual mutations, read back from the plan itself.
+      const shown = await this.run({ kind: 'show-plan', planFile: 'saved.tfplan' }, prepared.directory, prepared.env, prepared.redact);
+      if (shown.exitCode !== 0) return notStarted(failure('plan inspection', shown).error);
+      const parsed = parseEnginePlan(shown.stdout);
+      const mutations = parsed.changes.filter((change) => change.action !== 'noop').map((change) => change.address);
+      if (parsed.unsupported.length || mutations.length !== approved.size || mutations.some((address) => !approved.has(address))) {
+        return notStarted('The saved engine plan does not match the approved changes. Re-run hv_plan.');
+      }
+      backupState(paths, params.planId);
       const applied = await this.run({ kind: 'apply', planFile: 'saved.tfplan' }, prepared.directory, prepared.env, prepared.redact);
       const outcomes = interpretApplyEvents(applied.stdout, params.approvedAddresses);
       const diagnostics: string[] = [];

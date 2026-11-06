@@ -59,6 +59,11 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates an environment with no services (teardown)', async () => {
+    const empty = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [] });
+    expect(await engine.validate(gcpEngineBackend, empty)).toEqual({ ok: true });
+  }, 300_000);
+
   it('plans, applies, reaches noop and rejects a stale saved plan, with secrets encrypted at rest', async () => {
     const configuration = config({ app: { input: '${var.secret}' } });
     const first = await engine.plan({ backend: builtinBackend, configuration, auth, state, planId: 'plan-1' });

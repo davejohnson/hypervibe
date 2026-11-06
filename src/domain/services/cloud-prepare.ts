@@ -105,6 +105,14 @@ export const CLOUD_RUN_RUNTIME_QUEUE_ROLES = [
 /** Existing cloud preparation grants these at project scope, not bucket scope. */
 export const CLOUD_RUN_RUNTIME_STORAGE_ROLES = ['roles/storage.objectUser'] as const;
 
+/**
+ * Lets Cloud Build run as the deployment identity instead of the project's
+ * Compute Engine default account (Editor). Granted during base preparation but
+ * not required by isCloudPrepared, so existing projects keep working.
+ */
+export const CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES = ['roles/logging.logWriter'] as const;
+export const CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES = ['roles/iam.serviceAccountUser'] as const;
+
 export const CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES = [
   'roles/iam.serviceAccountUser',
 ] as const;

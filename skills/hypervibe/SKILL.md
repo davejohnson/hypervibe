@@ -56,6 +56,13 @@ replace them with remembered permission tables or dashboard procedures.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
 
+An environment with `hosting.engine: "opentofu"` (experimental Cloud Run pilot;
+use it only when the spec already has it or the user asks) has two separate
+steps: `hv_plan scope="infrastructure"` then `hv_apply` for infrastructure and
+Hypervibe-generated secrets, and `hv_deploy` to release code. A full-scope
+`hv_plan` is refused for it. Databases, domains and other resources it reports
+as unsupported stay blocked; do not work around them.
+
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
 requires explicit intent to adopt and the exact reviewed mapping.

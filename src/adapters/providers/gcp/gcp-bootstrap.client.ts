@@ -82,13 +82,38 @@ export interface GcpIamPolicy extends Record<string, unknown> {
 export class GcpBootstrapApiError extends Error {
   constructor(
     readonly status: number | undefined,
-    operation: string
+    operation: string,
+    /** Plain-language explanation of a recognized provider condition, when one applies. */
+    readonly explanation?: string
   ) {
     super(status === undefined
       ? `GCP ${operation} request failed.`
-      : `GCP ${operation} request failed with HTTP ${status}.`);
+      : explanation
+        ? `GCP ${operation} request failed with HTTP ${status}. ${explanation}`
+        : `GCP ${operation} request failed with HTTP ${status}.`);
     this.name = 'GcpBootstrapApiError';
   }
+}
+
+/**
+ * Recognizes actionable Google error details without echoing provider text
+ * verbatim (which could include request inputs). Only fixed explanations are returned.
+ */
+export function explainGcpBootstrapError(operation: string, body: unknown): string | undefined {
+  const error = (body as { error?: { status?: string; details?: Array<Record<string, unknown>> } } | null)?.error;
+  const details = error?.details ?? [];
+  const quota = details.find((detail) => detail['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure');
+  const violations = (quota?.violations as Array<{ description?: string }> | undefined) ?? [];
+  if (violations.some((violation) => /billing quota/i.test(violation.description ?? ''))) {
+    return 'This billing account has reached Google\'s limit on linked projects. Choose a different billing account, unlink a project you no longer use, or request more capacity at https://support.google.com/code/contact/billing_quota_increase. The project Hypervibe created is kept and will be reused.';
+  }
+  if (quota && /project creation|project/i.test(operation)) {
+    return 'Google\'s project quota for this account is exhausted. Delete unused projects or request more at https://support.google.com/code/contact/project_quota_increase.';
+  }
+  if (error?.status === 'PERMISSION_DENIED' && /billing/i.test(operation)) {
+    return 'Your Google account cannot link this billing account. Ask its billing administrator for the Billing Account User role, or choose another account.';
+  }
+  return undefined;
 }
 
 export class GcpBootstrapKeyCleanupRequiredError extends Error {
@@ -128,10 +153,31 @@ export class GcpBootstrapClient {
 
   async getProject(projectId: string): Promise<GcpBootstrapProject | null> {
     this.assertProjectId(projectId);
-    const payload = await this.getNullable(
-      `${CLOUD_RESOURCE_MANAGER_BASE}/projects/${encodeURIComponent(projectId)}`,
-      'project lookup'
-    );
+    let payload: unknown | null;
+    try {
+      payload = await this.getNullable(
+        `${CLOUD_RESOURCE_MANAGER_BASE}/projects/${encodeURIComponent(projectId)}`,
+        'project lookup'
+      );
+    } catch (error) {
+      // Resource Manager answers 403, not 404, for a project id that does not
+      // exist, so a brand-new project would otherwise look forbidden. Confirm
+      // with a search the caller is authorized to run. An id invisible to the
+      // caller is treated as not yet created: project creation is atomic on a
+      // globally unique id and fails if anyone else owns it, so nothing foreign
+      // can be adopted through this path.
+      if (!(error instanceof GcpBootstrapApiError) || error.status !== 403) throw error;
+      const search = await this.requestJson(
+        `${CLOUD_RESOURCE_MANAGER_BASE}/projects:search?query=${encodeURIComponent(`id:${projectId}`)}`,
+        { method: 'GET' },
+        'project search'
+      ) as { projects?: unknown[] };
+      const visible = (search?.projects ?? []).filter((project) =>
+        (project as { projectId?: unknown }).projectId === projectId);
+      if (visible.length === 0) return null;
+      if (visible.length > 1) throw new Error('GCP project search returned an ambiguous match.');
+      payload = visible[0]!;
+    }
     return payload === null ? null : this.parseProject(payload, projectId);
   }
 
@@ -594,7 +640,9 @@ export class GcpBootstrapClient {
       throw new GcpBootstrapApiError(undefined, operation);
     }
     if (!response.ok) {
-      throw new GcpBootstrapApiError(response.status, operation);
+      let body: unknown = null;
+      try { body = await response.json(); } catch { /* non-JSON error body */ }
+      throw new GcpBootstrapApiError(response.status, operation, explainGcpBootstrapError(operation, body));
     }
     if (response.status === 204) return undefined;
     try {

@@ -91,6 +91,12 @@ export interface GcpCloudRunEngineInput {
   projectId: string;
   region: string;
   services: GcpCloudRunServiceInput[];
+  /**
+   * Services this environment previously created that are no longer desired.
+   * They contribute only address mappings, so their deletion is reviewable
+   * instead of being reported as an unmanaged change.
+   */
+  retiredServices?: string[];
 }
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -198,15 +204,23 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
     }
   }
+  for (const retired of input.retiredServices ?? []) {
+    const key = engineKey(retired);
+    if (seen.has(key)) continue;
+    const mapping: EngineResourceMapping = { actionId: `service:${retired}`, kind: 'service', name: retired };
+    resources[`google_cloud_run_v2_service.${key}`] = mapping;
+    resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
+  }
   return {
     files: {
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
-      'cloudrun.tf.json': {
+      // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
+      'cloudrun.tf.json': Object.keys(services).length ? {
         resource: {
-          ...(Object.keys(services).length ? { google_cloud_run_v2_service: services } : {}),
+          google_cloud_run_v2_service: services,
           ...(Object.keys(iam).length ? { google_cloud_run_v2_service_iam_member: iam } : {}),
         },
-      },
+      } : {},
     },
     resources,
   };

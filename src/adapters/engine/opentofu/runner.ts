@@ -69,7 +69,8 @@ export function tofuArguments(command: TofuCommand): string[] {
   }
 }
 
-export function redactEngineOutput(text: string, exactValues: string[]): string {
+/** Exact-value redaction only; safe for machine-readable JSON because it never spans structure. */
+export function redactExactEngineValues(text: string, exactValues: string[]): string {
   let result = text;
   const values = [...new Set(exactValues)].filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
   for (const value of values) {
@@ -78,8 +79,16 @@ export function redactEngineOutput(text: string, exactValues: string[]): string 
     const escaped = JSON.stringify(value).slice(1, -1);
     if (escaped !== value) result = result.split(escaped).join('[redacted]');
   }
-  return redactSensitiveString(result);
+  return result;
 }
+
+/** Full redaction for human-readable text and diagnostics: exact values plus known secret patterns. */
+export function redactEngineOutput(text: string, exactValues: string[]): string {
+  return redactSensitiveString(redactExactEngineValues(text, exactValues));
+}
+
+/** Commands whose stdout is parsed as JSON; pattern redaction could corrupt it. */
+const MACHINE_READABLE: ReadonlySet<TofuCommand['kind']> = new Set(['version', 'validate', 'apply', 'show-plan', 'show-state', 'output']);
 
 export function engineProcessEnv(explicit: Record<string, string>, parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const env: Record<string, string> = {};
@@ -135,7 +144,7 @@ export async function runTofu(command: TofuCommand, options: TofuRunOptions): Pr
   return {
     exitCode,
     interrupted,
-    stdout: redactEngineOutput(stdout, options.redact),
+    stdout: MACHINE_READABLE.has(command.kind) ? redactExactEngineValues(stdout, options.redact) : redactEngineOutput(stdout, options.redact),
     stderr: redactEngineOutput(stderr, options.redact),
   };
 }

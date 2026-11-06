@@ -252,6 +252,7 @@ export const planRunDocumentSchema = z.object({
     'backup-program-publication',
     'managed-ci-publication',
     'managed-ci-credentials',
+    'infrastructure-engine',
   ]).optional(),
   environmentName: z.string().min(1),
   databaseCredentialAliasesReady: z.boolean().optional(),
@@ -281,6 +282,20 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease'];
+  if (document.scope === 'infrastructure-engine') {
+    const engine = (document as { engine?: { planId?: unknown } }).engine;
+    if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length
+      || document.actions.some((action) => action.type !== 'noop' && !engineSegmentOf(action)
+        && !engineOperations.includes(String(action.metadata?.operation)))) {
+      ctx.addIssue({ code: 'custom', message: 'Engine plans contain only reviewed engine changes and Hypervibe-owned secret actions.' });
+    }
+    return;
+  }
+  if (document.actions.some((action) => engineSegmentOf(action) || engineOperations.includes(String(action.metadata?.operation)))) {
+    ctx.addIssue({ code: 'custom', message: 'Infrastructure-engine actions require their isolated stage.' });
+  }
   if (document.scope === 'database-bootstrap') {
     if (document.actions.length > 1 || document.actions.some(action => !isDatabaseBootstrapAction(action))
       || (document.actions.length === 1) !== (document.databaseBootstrapReady === true)

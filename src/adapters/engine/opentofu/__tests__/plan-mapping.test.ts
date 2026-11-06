@@ -94,3 +94,26 @@ describe('apply event interpretation', () => {
     });
   });
 });
+
+describe('engine output redaction', () => {
+  it('keeps machine-readable JSON parseable when a URL precedes an email address', async () => {
+    const { redactExactEngineValues } = await import('../runner.js');
+    const json = JSON.stringify({ uri: 'https://web-x.a.run.app', sa: 'runtime@demo-project.iam.gserviceaccount.com' });
+    expect(() => JSON.parse(redactExactEngineValues(json, ['unrelated-secret']))).not.toThrow();
+    // Pattern redaction silently swallows structure here, which is why JSON output never uses it.
+    expect(JSON.parse(redactEngineOutput(json, [])).sa).toBeUndefined();
+  });
+});
+
+describe('teardown mapping', () => {
+  it('maps deletion of a previously created service to a confirm-gated action', () => {
+    const retired = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [], retiredServices: ['web'] });
+    const { actions, blockers } = translateEnginePlan({ provider: 'gcp', configuration: retired, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['delete'], before: { name: 'web' } },
+      { address: 'google_cloud_run_v2_service_iam_member.web_public', type: 'google_cloud_run_v2_service_iam_member', actions: ['delete'] },
+    ])) });
+    expect(blockers).toEqual([]);
+    expect(actions).toEqual([expect.objectContaining({ id: 'service:web', type: 'destroy', requiresConfirm: true })]);
+    expect(retired.files['cloudrun.tf.json']).toEqual({});
+  });
+});

@@ -12,6 +12,8 @@ import {
   CLOUD_RUN_RUNTIME_QUEUE_ROLES,
   CLOUD_RUN_RUNTIME_STORAGE_ROLES,
   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES,
+  CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES,
+  CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES,
   getCloudPrepareProfile,
   getCloudPreparation,
   MEMORYSTORE_PREPARE_ADDONS,
@@ -82,6 +84,8 @@ interface CloudPreparePlan {
   runtimeGrantScope?: 'project';
   runtimeRevokeRoles: string[];
   runtimeServiceAccountGrantRoles: string[];
+  /** Deployment identity may act as itself so Cloud Build never needs the Editor default account. */
+  buildIdentityGrantRoles?: string[];
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
@@ -172,6 +176,7 @@ export async function runCloudPrepare(params: {
           ))
         : profile.requiredRoles
       : []),
+    ...(basePreparation ? CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES : []),
     ...(queueAddon?.requiredRoles ?? []),
     ...(gcsAddon?.requiredRoles ?? []),
     ...(memorystoreAddon?.requiredRoles ?? []),
@@ -200,7 +205,7 @@ export async function runCloudPrepare(params: {
     ...(removalOnly
       ? REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable')
       : REQUIRED_ADMIN_PERMISSIONS),
-    ...(runtimeServiceAccountGrantRoles.length > 0
+    ...(runtimeServiceAccountGrantRoles.length > 0 || basePreparation
       ? REQUIRED_SERVICE_ACCOUNT_POLICY_PERMISSIONS
       : []),
   ]));
@@ -208,7 +213,7 @@ export async function runCloudPrepare(params: {
     ...(removalOnly
       ? REQUIRED_ADMIN_ROLES.filter((role) => role !== 'roles/serviceusage.serviceUsageAdmin')
       : REQUIRED_ADMIN_ROLES),
-    ...(runtimeServiceAccountGrantRoles.length > 0
+    ...(runtimeServiceAccountGrantRoles.length > 0 || basePreparation
       ? REQUIRED_SERVICE_ACCOUNT_POLICY_ROLES
       : []),
   ]));
@@ -230,6 +235,7 @@ export async function runCloudPrepare(params: {
     ...(runtimeGrantRoles.length > 0 ? { runtimeGrantScope: 'project' as const } : {}),
     runtimeRevokeRoles,
     runtimeServiceAccountGrantRoles,
+    ...(basePreparation ? { buildIdentityGrantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES] } : {}),
     ...(gcsAccess ? { gcsAccess } : {}),
     ...(memorystoreAccess ? { memorystoreAccess } : {}),
     ...(queueAccess ? { queueAccess } : {}),
@@ -275,6 +281,15 @@ export async function runCloudPrepare(params: {
           grantRoles: runtimeServiceAccountGrantRoles,
         })
       : undefined;
+    if (basePreparation) {
+      await reconcileServiceAccountIamRoles({
+        token,
+        projectId: resolved.gcpProjectId,
+        serviceAccountEmail: resolved.deployServiceAccountEmail,
+        member,
+        grantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES],
+      });
+    }
     const iamResult = await reconcileProjectIamRoles({
       token,
       projectId: resolved.gcpProjectId,
