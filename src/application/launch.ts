@@ -4,7 +4,6 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionReceipt } from '../domain/plan/converge.executor.js';
-import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { cloudflareFor } from './infrastructure-engine-domain.js';
@@ -21,6 +20,7 @@ import {
   planInfrastructureEngine,
   releaseEngineServices,
   resolveEngineContext,
+  engineGcpAdapter,
   type EngineBinding,
   type EngineReleaseResult,
 } from './infrastructure-engine.js';
@@ -109,8 +109,8 @@ async function runLaunch(ctx: CommandContext, params: {
   }
 
   // 1. Connect GCP, asking only for the billing account.
-  const connected = await adapterFactory.getProviderAdapter('cloudrun', params.project);
-  if (!connected.success) {
+  // Only a connection scoped to this repository counts; global ones point at other projects.
+  if (!await engineGcpAdapter(params.project)) {
     const preview = await runGcpBootstrap({ project: params.project });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'GCP setup preview failed.'), details: preview };
     const target = (preview as { target?: { projectId?: string } }).target?.projectId;
@@ -137,7 +137,7 @@ async function runLaunch(ctx: CommandContext, params: {
 
   // 1b. Extra access some resources need (bucket lifecycle), shown before it is granted.
   if (Object.keys(environmentSpec.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle' });
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), gcsAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The storage access preview failed.'), details: preview };
     if (!params.approveAccess?.includes('storage')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
@@ -148,12 +148,12 @@ async function runLaunch(ctx: CommandContext, params: {
         grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
       };
     }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), gcsAccess: 'lifecycle', adminAuth: 'default', confirm: true });
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting storage access failed.'), details: granted };
   }
 
   if (environmentSpec.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', memorystoreAccess: 'lifecycle' });
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), memorystoreAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The Redis access preview failed.'), details: preview };
     if (!params.approveAccess?.includes('memorystore')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
@@ -163,12 +163,12 @@ async function runLaunch(ctx: CommandContext, params: {
         grants: { deploymentIdentity: plan.grantRoles, apis: plan.enableApis },
       };
     }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', memorystoreAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), memorystoreAccess: 'lifecycle', adminAuth: 'default', confirm: true });
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting Redis access failed.'), details: granted };
   }
 
   if (Object.keys(environmentSpec.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(params.project.id) ?? params.project, 'cloudrun')) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', queueAccess: 'lifecycle' });
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), queueAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The queue access preview failed.'), details: preview };
     if (!params.approveAccess?.includes('queues')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
@@ -178,7 +178,7 @@ async function runLaunch(ctx: CommandContext, params: {
         grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
       };
     }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', queueAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), queueAccess: 'lifecycle', adminAuth: 'default', confirm: true });
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting queue access failed.'), details: granted };
   }
 
@@ -250,6 +250,11 @@ async function runLaunch(ctx: CommandContext, params: {
     infrastructureRounds: rounds,
     ...(ciWorkflow ? { ciWorkflow } : {}),
   };
+}
+
+/** The exact Google Cloud project of this repository's own connection, never a global one. */
+async function scopedGcpProjectId(project: Project): Promise<string | undefined> {
+  return (await engineGcpAdapter(project))?.engineConnection().projectId;
 }
 
 async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec): Promise<{ path: string; changed: boolean; branch: string } | LaunchResult> {

@@ -9,7 +9,6 @@ import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/qu
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
-import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
@@ -31,7 +30,8 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
-import { normalizeGitRemoteForBuild } from '../lib/git-remote.js';
+import { normalizeGitRemoteForBuild, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import {
   executeDatabaseCredential, observeDatabaseCredential, otherLogin,
@@ -186,6 +186,21 @@ export interface EngineContext {
   state: EngineStateIdentity;
 }
 
+/**
+ * The Google Cloud connection scoped to exactly this project's repository.
+ * Global or other projects' connections are never used: they point at someone
+ * else's Google Cloud project, and an engine environment must live in its own.
+ */
+export async function engineGcpAdapter(project: Pick<Project, 'gitRemoteUrl'>): Promise<CloudRunAdapter | undefined> {
+  const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+  if (!repository) return undefined;
+  const connection = new ConnectionRepository().findByProviderAndScope('cloudrun', repository);
+  if (!connection || connection.status !== 'verified') return undefined;
+  const adapter = new CloudRunAdapter();
+  await adapter.connect(getSecretStore().decryptObject(connection.credentialsEncrypted));
+  return adapter;
+}
+
 export async function resolveEngineContext(
   ctx: CommandContext,
   project: Project,
@@ -193,11 +208,10 @@ export async function resolveEngineContext(
   environmentName: string
 ): Promise<EngineContext | { blocked: string }> {
   const environmentSpec = spec.environments[environmentName]!;
-  const adapterResult = await adapterFactory.getProviderAdapter('cloudrun', project);
-  if (!adapterResult.success || !(adapterResult.adapter instanceof CloudRunAdapter)) {
-    return { blocked: 'No verified GCP connection is available for this project. Connect GCP with hv_connections action="bootstrap", then re-run hv_plan.' };
+  const adapter = await engineGcpAdapter(project);
+  if (!adapter) {
+    return { blocked: 'This project has no Google Cloud connection of its own yet. Run hv_launch (or hv_connections action="bootstrap") to set one up.' };
   }
-  const adapter = adapterResult.adapter;
   const region = environmentSpec.hosting.region ?? DEFAULT_REGION;
   adapter.configureTarget({ region });
   const connection = adapter.engineConnection();
