@@ -212,23 +212,37 @@ multi-machine execution, Cloud SQL, domains.
 - A saved plan could have rolled back a release made after it; applies now refuse when a
   service's generation changed since planning, and releases share the apply lock.
 
-## Gap to the target experience
+## Database, domain, storage, launch (2026-11-06)
 
-Target: install the MCP, say "deploy this web service and database to GCP with a domain",
-sign in once, and get a working app. Remaining work, in order:
+| Capability | Ownership | Live evidence |
+| --- | --- | --- |
+| Cloud SQL Postgres | OpenTofu: instance (backups + PITR), database. Hypervibe: login, generated password, `DATABASE_URL` secret | Created; login set; service wired in round 2; app writes/reads rows; later config apply kept login, data and image |
+| Custom domain | Hypervibe: ownership proof (TXT + Site Verification API), DNS-only records, certificate wait. OpenTofu: Cloud Run domain mapping | `pilot.hypervibe.dev` verified and mapped with no Search Console step; certificate was still issuing when last checked |
+| Cloud Storage | OpenTofu: private bucket, object access for the runtime identity | Validated and planned; not yet created live (see below) |
+| Local-commit builds | Hypervibe: `git archive` of HEAD → private expiring bucket → Cloud Build as the deployment identity | An unpushed local commit was built and released |
+| `hv_launch` | Orchestrates everything above | Stops at the cost/approval step with plain-language changes and estimates; the confirmed run was not executed (DNS for a new hostname needs owner approval) |
+| Browser sign-in | Loopback OAuth + PKCE when no local Google login exists | Unit-tested; needs Hypervibe's registered Google OAuth client to run live |
 
-1. **Cloud SQL through the engine** (instance and database by OpenTofu; Hypervibe keeps
-   password generation/rotation, connection wiring via the runtime identity, recovery).
-2. **Custom domain** (Cloud Run domain mapping or load balancer by OpenTofu; DNS through
-   the existing Cloudflare integration) with certificate readiness verification.
-3. **One guided flow**: today the agent runs spec → bootstrap → plan → apply → deploy as
-   separate calls. A single orchestrated "deploy" that stops only for sign-in, billing
-   choice and cost confirmation.
-4. **Sign-in without gcloud**: bootstrap still borrows local Application Default
-   Credentials for the one-time admin step; replace with a browser OAuth flow.
-5. **Private repositories**: builds clone the public git URL; private repos need a
-   source upload or a Cloud Build repository connection.
-6. CI releases for engine environments (etag-guarded image writer), scheduled jobs,
-   storage, Memorystore, Pub/Sub; import of existing sites; shared state for multi-machine.
-7. Teardown leaves the Artifact Registry images and the (empty) GCP project; decide
-   whether "delete everything" should include them.
+Design notes:
+
+- The database password never enters OpenTofu, so no engine apply can restore an old
+  one. First deployments take two rounds (database, then wiring once the login exists);
+  `hv_launch` runs both.
+- The Google provider treats a pending certificate as success for domain mappings but
+  fails when ownership is unverified, so verification and DNS precede the mapping.
+- Hypervibe never overwrites DNS records it did not create and removes only the exact
+  Google targets it wrote.
+
+## Remaining work
+
+1. **Register Hypervibe's Google OAuth client** ("Desktop app"; owner action) and set
+   `HYPERVIBE_GOOGLE_OAUTH_CLIENT_ID` in the build. Sensitive-scope verification by
+   Google is required before broad public use.
+2. **Database password rotation without downtime**: services reference `latest`, so a
+   rotation needs a new revision; a two-login handover is the safe design.
+3. **CI releases for engine environments** (etag-guarded image writer), scheduled jobs,
+   Memorystore, Pub/Sub, import of existing sites, shared state for multiple machines.
+4. A from-scratch `hv_launch` run (new environment with database, storage and domain).
+5. Teardown leaves Artifact Registry images and the GCP project.
+6. Connection guidance text for missing Cloudflare access is far too long for the
+   intended audience.

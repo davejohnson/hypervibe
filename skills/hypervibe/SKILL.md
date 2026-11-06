@@ -56,12 +56,17 @@ replace them with remembered permission tables or dashboard procedures.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
 
-An environment with `hosting.engine: "opentofu"` (experimental Cloud Run pilot;
-use it only when the spec already has it or the user asks) has two separate
-steps: `hv_plan scope="infrastructure"` then `hv_apply` for infrastructure and
-Hypervibe-generated secrets, and `hv_deploy` to release code. A full-scope
-`hv_plan` is refused for it. Databases, domains and other resources it reports
-as unsupported stay blocked; do not work around them.
+An environment with `hosting.engine: "opentofu"` (experimental GCP path; use it
+only when the spec already has it or the user asks) is driven end to end by
+`hv_launch`: it connects GCP, creates or updates the Cloud Run services, Cloud
+SQL database, storage buckets and custom domain in reviewed rounds, releases
+the committed local code and verifies it. Ask the user only at its stop points:
+`needs_billing_choice` (they pick the account) and `needs_confirmation` (show
+the changes and estimated monthly cost, then pass exactly `confirmActions`).
+Call it again after `pending`. `hv_plan scope="infrastructure"`/`hv_apply` and
+`hv_deploy` remain available for individual steps; a full-scope `hv_plan` is
+refused. Resources it reports as unsupported stay blocked; do not work around
+them.
 
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
