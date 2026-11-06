@@ -423,6 +423,24 @@ async function ensureDatabaseCredential(token: string, action: PlanAction): Prom
 
 // ---------------------------------------------------------------- Interrupted creates
 
+/** Domains whose reviewed DNS removal an earlier apply attempted but did not complete. */
+function unfinishedDomainRemovals(environmentId: string): string[] {
+  const runs = new RunRepository();
+  const pending = new Map<string, boolean>();
+  // Oldest first, so a later successful removal clears an earlier unfinished one.
+  for (const run of [...runs.findByEnvironmentId(environmentId, 100)].reverse()) {
+    if (run.type !== 'apply') continue;
+    const planRunId = (run.plan as { planRunId?: unknown } | undefined)?.planRunId;
+    const plan = typeof planRunId === 'string' ? runs.findById(planRunId)?.plan as { actions?: PlanAction[] } | undefined : undefined;
+    for (const action of plan?.actions ?? []) {
+      if (action.metadata?.operation !== DOMAIN_DNS_REMOVE_OPERATION) continue;
+      const done = (run.receipts ?? []).some((receipt) => receipt.step === action.id && receipt.status === 'success');
+      pending.set(String(action.metadata.domain), !done);
+    }
+  }
+  return [...pending].filter(([, unfinished]) => unfinished).map(([domain]) => domain);
+}
+
 /** Database identity of the most recent engine plan that an apply actually attempted. */
 function lastAttemptedDatabaseInstance(environmentId: string): string | undefined {
   const runs = new RunRepository();
@@ -558,7 +576,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     domainActions = await planDomain(domainContext, desiredDomain, environmentSpec!.services[domainService]!.healthCheckPath ?? '/');
     if (domainActions.blocked) return { blocked: [domainActions.blocked] };
   }
-  const retiredDomains = (engineBinding.domains ?? []).filter((domain) => domain !== desiredDomain);
+  const retiredDomains = [...new Set([...(engineBinding.domains ?? []), ...unfinishedDomainRemovals(context.environment.id)])]
+    .filter((domain) => domain !== desiredDomain).sort();
 
   const binary = await ensureEngineBinary();
   if (!binary.ok) return { blocked: [binary.error] };
@@ -736,7 +755,16 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
       if (operation === ENGINE_SECRET_OPERATION) return ensureSecret(token, action);
       if (operation === ENGINE_SECRET_DELETE_OPERATION) return deleteSecret(token, action);
       if (typeof operation === 'string' && DOMAIN_OPERATIONS.has(operation)) {
-        return executeDomainAction({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, action);
+        const result = await executeDomainAction({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, action);
+        if (operation === DOMAIN_DNS_REMOVE_OPERATION && result.success) {
+          const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+          const binding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
+          const domain = (action.metadata as { domain: string }).domain;
+          ctx.repos.environments.updatePlatformBindings(current.id, {
+            engine: { ...binding, kind: 'opentofu', domains: (binding.domains ?? []).filter((entry) => entry !== domain) },
+          });
+        }
+        return result;
       }
       if (operation === ENGINE_DATABASE_CREDENTIAL_OPERATION) {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
@@ -797,7 +825,8 @@ async function recordServiceBindings(
     if (member.id.startsWith('domain:')) {
       const domain = member.resource.name;
       const remaining = (engine.domains ?? []).filter((entry) => entry !== domain);
-      engine = { ...engine, domains: member.type === 'destroy' ? remaining : [...remaining, domain].sort() };
+      // A removed mapping keeps the domain recorded until its DNS is removed too.
+      if (member.type !== 'destroy') engine = { ...engine, domains: [...remaining, domain].sort() };
       continue;
     }
     if (member.id === 'database:postgres') {

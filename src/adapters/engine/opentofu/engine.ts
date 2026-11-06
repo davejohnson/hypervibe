@@ -333,7 +333,7 @@ export class OpenTofuEngine {
   }
 }
 
-const NETWORK_ERROR = /no such host|can't assign requested address|connection reset|connection refused|i\/o timeout|TLS handshake timeout|network is unreachable|EOF$|broken pipe|context deadline exceeded/i;
+const NETWORK_ERROR = /error while retrieving operation|no such host|can't assign requested address|connection reset|connection refused|i\/o timeout|TLS handshake timeout|network is unreachable|EOF$|broken pipe|context deadline exceeded/i;
 
 /** Addresses whose apply error is a local network failure rather than a provider decision. */
 export function networkInterruptedAddresses(stdout: string): Set<string> {
