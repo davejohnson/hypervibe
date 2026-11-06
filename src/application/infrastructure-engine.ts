@@ -164,6 +164,8 @@ export interface EngineBinding {
   queues?: string[];
   /** Cloud Run job that runs the release command. */
   releaseJob?: string;
+  /** Runtime secrets copied from a migration source into Secret Manager. */
+  importedSecrets?: string[];
   /** Keyless CI release trust granted for this exact repository. */
   ci?: { repository: string; provider: string; releaseIdentity: string };
 }
@@ -241,11 +243,13 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   cacheWired?: boolean;
   /** Storage names whose S3-compatible access key has been published. */
   s3WiredStorage?: string[];
+  /** Keys of secrets imported from a migration source. */
+  importedSecrets?: string[];
   /** Exact secret versions to pin; a new version then rolls services through a reviewed update. */
   secretVersions?: Record<string, string>;
 }): GcpCloudRunEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
-  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
+  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.importedSecrets ?? []), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
     ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
   const secretEnv = Object.fromEntries(secretKeys
     .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: context.secretVersions?.[key] ?? 'latest' }]));
@@ -702,6 +706,17 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     cacheReady = observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.labels['hv-cache-instance'] === cacheInstanceName;
     if (cacheReady && observed.state === 'present' && observed.value.latestVersion) secretVersions[ENGINE_CACHE_URL_KEY] = observed.value.latestVersion;
   }
+  // Secrets imported from a migration source must exist; Hypervibe never invents their values.
+  const importedSecrets = engineBinding.importedSecrets ?? [];
+  for (const key of importedSecrets) {
+    const secretId = engineSecretId(environmentName, key);
+    const observed = await observeSecret(token, context.gcpProjectId, secretId);
+    if (observed.state === 'unknown') return { blocked: [observed.reason] };
+    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) {
+      return { blocked: [`The imported secret ${key} is missing from Secret Manager. Run hv_migrate again to copy it from the source.`] };
+    }
+    secretVersions[key] = observed.value.latestVersion;
+  }
   // S3-compatible bucket access: Hypervibe-owned access keys, published before services are wired.
   const s3Storage = Object.entries(environmentSpec!.storage ?? {}).filter(([, storage]) => storage.access === 's3').map(([name]) => name);
   const s3Ready: string[] = [];
@@ -725,7 +740,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : []),
-    ...(cacheSpec ? [cacheSecretId] : []), ...s3SecretIds]);
+    ...(cacheSpec ? [cacheSecretId] : []), ...s3SecretIds, ...importedSecrets.map((key) => engineSecretId(environmentName, key))]);
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
   // Custom domain: Hypervibe verifies ownership and writes DNS before OpenTofu maps it.
@@ -752,6 +767,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       databaseWired: databaseCredentialReady,
       cacheWired: cacheReady,
       s3WiredStorage: s3Ready,
+      importedSecrets,
       secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
