@@ -105,13 +105,12 @@ marked soft-deleted. Soft deletion is not a claim of immediate physical erasure.
 The final `hv_status` reported `retired`, verified and in sync; a fresh plan had
 zero actions and no blockers. The deleted app endpoint returned HTTP 404.
 
-The shared project, both host services and three shared identities retained their
-original identities. The shared host returned HTTP 200; its existing PostgreSQL
-instance remained `RUNNABLE`. No app database existed in this customer fixture,
-so this does not establish customer-database teardown. Shared hosting, its
-database/backups, browser registrations and the fixture repository remain for
-later walkthroughs. AWS/Azure, full shared-host teardown and MCP owner approval
-without the website remain outside this completed GCP checkpoint.
+At that customer-cleanup checkpoint the shared project, both host services and
+three shared identities retained their original identities. The shared host
+returned HTTP 200 and its PostgreSQL instance remained `RUNNABLE`. No app database
+existed in the customer fixture. The owner then requested shared-host teardown,
+recorded below; AWS/Azure and MCP owner approval without the website remain
+outside this completed customer-cleanup checkpoint.
 
 One service-account deletion was acknowledged before absence could be confirmed.
 Exact ID and email reads subsequently returned 404, and supported reconciliation
@@ -119,3 +118,34 @@ completed it without another delete. The final apply response was lost; read-onl
 status recovered the completed record without replay. The deployed host used the
 verified unpublished library archive; publishing and pinning that compatible
 library remain release prerequisites.
+
+### Owner-requested shared-host teardown
+
+The local MCP workflow saved an empty workload declaration for
+`hypercloud-connect-test` / `connect-test`, with backups disabled. Its full plan
+contained exactly three mutations: destroy worker, destroy web, then destroy
+Cloud SQL after both services. The existing approval covered those removals.
+Independent authenticated Google metadata reads confirmed HTTP 404 for
+`worker-fada86a786`, `web-fada86a786` and `postgres-de3064ad5d`. The project and
+private backup bucket remained present, and Cloud Scheduler inventory was empty.
+The managed apply recorded all three removals successful. A subsequent full plan
+contained only the retained backup bucket's noop, with no mutations or blockers.
+
+The live plan exposed completed setup being incorrectly revalidated as new
+publication, holding deployment and runtime configuration. Empty-workload teardown
+now retains exact completed artifact, registration and holding records. Pending
+operations and changed declarations still require their original recovery.
+Local prepared runtime identities/grants are retained using immutable receipt
+and binding checks, without requiring removed desired workloads or live siblings.
+Ordinary native observation and dependency-ordered deletion remain required.
+The build and existing focused setup/runtime checks passed; no new tests were
+written for this change.
+
+The original spec, exact tested source archive, immutable images, secret values,
+browser registrations, runtime identities and backup archive are retained for
+recreation. A fresh database is empty unless its archive is restored; recreation
+from this post-teardown state has not been exercised. The completed, inactive
+`web-fada86a786-migration` job also remains: local administrator-prepared runtime
+has no supported job-retirement action. Its latest execution was completed and
+no schedule exists. This is verified site/database teardown, not removal of every
+resource in the shared project.

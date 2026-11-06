@@ -272,7 +272,7 @@ export async function planOperatorArtifactRetirement(input: { project: Project; 
   }
   return terminal ? projected(terminal.record, terminal.name, 'retire', environment) : undefined;
 }
-export async function planOperatorArtifacts(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object }) {
+export async function planOperatorArtifacts(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object; preserveCompleted?: boolean }) {
   const declaration = input.specResult.spec.environments[input.environmentName]?.operatorArtifacts ?? {};
   if (Object.values(declaration).some(item => item.retirement)) return planOperatorArtifactRetirement(input);
   let environment = new EnvironmentRepository().findByProjectAndName(input.project.id, input.environmentName);
@@ -293,6 +293,22 @@ export async function planOperatorArtifacts(input: { project: Project; environme
     let record = acceptedJournalLeaf(history);
     if (record?.status === 'retired') { if (declaration[name]) throw unavailable(); continue; }
     if (record?.intent.mode === 'retire') return planOperatorArtifactRetirement(input);
+    if (input.preserveCompleted && record && declaration[name] && historicalInstallationEvidence(record)) {
+      const retained = declaration[name];
+      const capability = providerRegistry.getArtifactPublication(retained.provider);
+      const repository = normalizeGitRemoteIdentity(input.specResult.spec.gitRemoteUrl ?? input.project.gitRemoteUrl ?? undefined);
+      // Historical completion permits retaining an unused publication, never
+      // consuming it or concealing an unfinished stage or changed declaration.
+      // Parsing new publication inputs would incorrectly require its historical
+      // package version to equal the currently running CLI version.
+      if (record.intent.customerId === input.project.id && record.intent.appId === input.project.id
+        && record.intent.environment === environment.name && repository && record.intent.source.repository === repository
+        && capability && record.intent.artifactProvider === retained.provider
+        && record.intent.selection?.declarationDigest === canonicalJsonSha256(retained)
+        && isDeepStrictEqual(record.intent.artifacts, retained.artifacts)
+        && (!retained.refreshFrom || isDeepStrictEqual(record.intent.predecessor, retained.refreshFrom))
+        && !capability.nextScope(record)) continue;
+    }
     // Durable operations are admitted before parsing a possibly removed,
     // malformed or reassigned current declaration. Only readback is permitted.
     if (record) record = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, record.intent, true),

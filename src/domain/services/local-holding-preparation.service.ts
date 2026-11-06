@@ -17,8 +17,10 @@ import { isLocalHoldingAction, LOCAL_HOLDING_OPERATION, localHoldingPlanSchema, 
 import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
+import { preparedHostingMarkerSchema } from '../ports/hosting-prepared.port.js';
+import { preparedReleaseAttempts } from './prepared-direct-release.service.js';
 import { environmentConnectionScope } from './project-scope.js';
-import { applyCloudInstallationV1, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
+import { applyCloudInstallationV1, historicalInstallationEvidence, planCloudInstallationV1, reconcileCloudInstallationV1, reviewCloudInstallationRetryV1 } from './cloud-installation-runtime.js';
 
 type RecordV1 = CloudInstallationRecord<LocalCloudScopePreparationIntent>;
 const route = z.object({ intent: z.object({ hostingProvider: z.string() }).passthrough() }).passthrough();
@@ -119,11 +121,26 @@ function matchesRetainedReceipt(value: unknown, receipt: LocalPreparedHostingRec
     && receipt.deployment.workloads[index].runtimeSecrets.length === 0 ? { ...item, runtimeSecrets: [] } : item);
   return isDeepStrictEqual({ ...parsed.data, deployment: { ...parsed.data.deployment, workloads } }, receipt);
 }
-function matchesBinding(environment: Environment, receipt: LocalPreparedHostingReceiptV1) {
+export async function completedLocalHoldingTeardown(project: Project, environment: Environment): Promise<boolean> {
+  const desired = new SpecStore().getForInspection(project)?.spec.environments[environment.name];
+  if (!environment.platformBindings.localPreparedHosting || !desired || Object.keys(desired.services).length
+    || desired.database || desired.migrations || desired.backups?.mode !== 'disabled'
+    || desired.hosting.provider !== environment.platformBindings.provider) return false;
+  try {
+    // Load after repository initialization; hosting preparation also uses the
+    // adapter factory that calls this receipt verifier.
+    const { assertPreparedBindingRecoveryClear } = await import('./hosting-prepared.service.js');
+    assertPreparedBindingRecoveryClear(environment);
+    return preparedHostingMarkerSchema.parse(environment.platformBindings.preparedHosting).pendingFirstRelease.length === 0
+      && Object.values(preparedReleaseAttempts(environment)).every(attempt => attempt.status === 'completed');
+  } catch { return false; }
+}
+function matchesBinding(environment: Environment, receipt: LocalPreparedHostingReceiptV1, allowRemoved = false) {
   const bindings = environment.platformBindings, services = bindings.services as Record<string, Record<string, unknown>> | undefined;
   return bindings.provider === receipt.hostingProvider && bindings.projectId === receipt.nativeScope.projectId
     && bindings.environmentId === receipt.deployment.region && !!services && receipt.preparedResources.workloads.every(item =>
-      services[item.workload]?.serviceId === item.id.split('/').at(-1) && services[item.workload]?.resourceUid === item.lifetimeId)
+      allowRemoved && !Object.hasOwn(services, item.workload)
+        || services[item.workload]?.serviceId === item.id.split('/').at(-1) && services[item.workload]?.resourceUid === item.lifetimeId)
     && matchesRetainedReceipt(bindings.localPreparedHosting, receipt)
     && (environment.platformBindings.preparedHosting as any)?.receiptDigest === canonicalJsonSha256(receipt);
 }
@@ -131,7 +148,8 @@ export async function localHoldingWorkRequired(project: Project, environmentName
   const declared = Boolean(spec?.environments[environmentName]?.hosting.preparation);
   const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName); if (!environment) return declared;
   const record = acceptedJournalLeaf(await journal(project, environment).findByScope());
-  return record ? record.status !== 'scope-ready' || !matchesBinding(environment, providerRegistry.getHoldingPreparation(record.intent.hostingProvider)!.receipt(record)) : declared;
+  return record ? record.status !== 'scope-ready' || !matchesBinding(environment, providerRegistry.getHoldingPreparation(record.intent.hostingProvider)!.receipt(record),
+    await completedLocalHoldingTeardown(project, environment)) : declared;
 }
 /** Existing binding bytes are accepted only against the immutable local journal. */
 export async function verifiedLocalHoldingReceipt(project: Project, environment: Environment): Promise<LocalPreparedHostingReceiptV1 | undefined> {
@@ -139,15 +157,32 @@ export async function verifiedLocalHoldingReceipt(project: Project, environment:
   const record = acceptedJournalLeaf(await journal(project, environment).findByScope());
   if (!record || record.status !== 'scope-ready' || !connected(project, environment, record.intent)) throw unavailable();
   const receipt = providerRegistry.getHoldingPreparation(record.intent.hostingProvider)!.receipt(record);
-  if (!matchesBinding(environment, receipt)) throw unavailable(); return receipt;
+  if (!matchesBinding(environment, receipt, await completedLocalHoldingTeardown(project, environment))) throw unavailable(); return receipt;
 }
-export async function planLocalHolding(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object }) {
+export async function planLocalHolding(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object; preserveCompleted?: boolean }) {
   const desired = input.specResult.spec.environments[input.environmentName];
   const environment = new EnvironmentRepository().findByProjectAndName(input.project.id, input.environmentName);
   if (!environment) { if (desired?.hosting.preparation) throw unavailable(); return undefined; }
   const history = await journal(input.project, environment).findByScope(); let record = acceptedJournalLeaf(history);
   if (!record && !desired?.hosting.preparation) return undefined;
   const capability = providerRegistry.getHoldingPreparation(record?.intent.hostingProvider ?? desired.hosting.provider); if (!capability) throw unavailable();
+  if (input.preserveCompleted && await completedLocalHoldingTeardown(input.project, environment)
+    && record?.status === 'scope-ready' && historicalInstallationEvidence(record)) {
+    const receipt = capability.receipt(record), bindings = environment.platformBindings;
+    const repository = normalizeGitRemoteIdentity(input.specResult.spec.gitRemoteUrl ?? input.project.gitRemoteUrl ?? undefined);
+    // A completed preparation remains historical evidence during workload
+    // teardown. Removed service bindings must not trigger holding recreation.
+    // Native workload observation still authorizes each individual deletion.
+    if (record.intent.appId === input.project.id && record.intent.customerId === input.project.id
+      && record.intent.environment === environment.name && repository && record.intent.source.repository === repository
+      && connected(input.project, environment, record.intent)
+      && desired.hosting.provider === receipt.hostingProvider && bindings.provider === receipt.hostingProvider
+      && bindings.projectId === receipt.nativeScope.projectId && bindings.environmentId === receipt.deployment.region
+      && (desired.hosting.region ?? bindings.environmentId) === receipt.deployment.region
+      && desired.hosting.preparation?.image === receipt.deployment.preparation?.image
+      && matchesRetainedReceipt(bindings.localPreparedHosting, receipt)
+      && (bindings.preparedHosting as any)?.receiptDigest === canonicalJsonSha256(receipt)) return undefined;
+  }
   if (record?.status === 'scope-ready' && matchesBinding(environment, capability.receipt(record))) {
     if (desired.hosting.preparation && (desired.hosting.provider !== record.intent.hostingProvider
       || !isDeepStrictEqual(capability.parseDeclaration({ environment: desired, bindings: environment.platformBindings,

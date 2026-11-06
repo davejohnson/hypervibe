@@ -98,8 +98,28 @@ export class CloudRunLocalPreparedRuntime implements IRuntimeIdentities {
   }
   async inspect(input: RuntimeIdentityRequest): ReturnType<IRuntimeIdentities['inspect']> {
     try {
+      if (input.mode === 'destroy') {
+        // Workload teardown retains administrator-prepared identities/grants.
+        // It cannot require a desired workload or inspect already deleted
+        // siblings, and it must never hide an unresolved permission write.
+        const receipt = await this.load(), descriptor = describePreparedHosting(receipt);
+        const principal = descriptor.runtimeIdentities.find(item => item.workload === input.service.name)?.principal;
+        const workload = descriptor.preparedResources.workloads.find(item => item.workload === input.service.name);
+        const evidence = input.binding?.evidence;
+        if (input.binding?.pending || input.environmentSpec?.services[input.service.name]
+          || input.environment.name !== descriptor.environment || input.environment.projectId !== descriptor.appId
+          || input.environment.platformBindings.projectId !== descriptor.nativeScope.projectId
+          || input.environment.platformBindings.environmentId !== descriptor.deployment.region
+          || principal?.kind !== 'gcp-service-account' || !workload
+          || evidence && (input.binding?.provider !== 'cloudrun' || evidence.receiptDigest !== descriptor.receiptDigest
+            || evidence.runtimeInstallationId !== descriptor.installationId || evidence.runtimePlanDigest !== descriptor.planDigest
+            || evidence.projectId !== principal.projectId || evidence.region !== descriptor.deployment.region
+            || evidence.email !== principal.serviceAccountEmail || evidence.uniqueId !== principal.serviceAccountUniqueId
+            || evidence.environmentId !== input.environment.id || evidence.serviceName !== input.service.name
+            || evidence.workloadResource !== workload.id || evidence.workloadUid !== workload.lifetimeId)) throw new Error();
+        return { state: 'ready', warnings: ['Local administrator-prepared identities and grants are retained.'] };
+      }
       const proof = await this.proof(input);
-      if (input.mode === 'destroy') return { state: 'ready', warnings: ['Local administrator-prepared identities and grants are retained.'] };
       if (input.binding?.pending) {
         const target = { ...input.binding.pending.step.target }; delete target.recoverAttemptId;
         if (target.phase === repairPhase) return { state: 'action', step: { operation: 'recover', target: { ...this.ownershipTarget(proof, input, target), recoverAttemptId: input.binding.pending.attemptId }, requiresConfirm: false, description: 'Read back the exact ownership-label repair; do not resubmit it.' } };

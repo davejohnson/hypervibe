@@ -382,7 +382,17 @@ export async function planOperatorApplicationRetirement(input: { project: Projec
   return terminal ? projected(terminal.record, terminal.name, 'retire', environment) : undefined;
 }
 
-export async function planOperatorApplications(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object }) {
+function completedRegistrationMatches(project: Project, environment: Environment, name: string, spec: ProjectSpec, record: Registration | undefined): boolean {
+  const declaration = spec.environments[environment.name]?.operatorApplications?.[name];
+  const repository = normalizeGitRemoteIdentity(spec.gitRemoteUrl ?? project.gitRemoteUrl ?? undefined);
+  return Boolean(declaration && !declaration.retirement && record && record.intent.mode === 'connect'
+    && environment.projectId === project.id && record.intent.customerId === project.id && record.intent.appId === project.id
+    && record.intent.environment === environment.name && repository && record.intent.source.repository === repository
+    && record.intent.applicationProvider === declaration.provider && record.intent.selection?.declarationDigest === canonicalJsonSha256(declaration)
+    && (!declaration.restartFrom || isDeepStrictEqual(record.intent.predecessor, declaration.restartFrom))
+    && historicalInstallationEvidence(record));
+}
+export async function planOperatorApplications(input: { project: Project; environmentName: string; specResult: SpecResult; options?: object; preserveCompleted?: boolean }) {
   const declaration = input.specResult.spec.environments[input.environmentName]?.operatorApplications ?? {};
   if (Object.values(declaration).some(item => item.retirement)) return planOperatorApplicationRetirement(input);
   const environment = new EnvironmentRepository().findByProjectAndName(input.project.id, input.environmentName);
@@ -393,6 +403,9 @@ export async function planOperatorApplications(input: { project: Project; enviro
   for (const name of [...histories.keys()].sort((a, b) => priority(a) - priority(b) || a.localeCompare(b))) {
     const history = histories.get(name)!; let record = acceptedJournalLeaf(history);
     if (record?.status === 'retired') { if (declaration[name]) throw retirementUnavailable(); continue; }
+    // A removed workload consumes no origin or private output. Keep its exact
+    // finished registration without reopening current runtime prerequisites.
+    if (input.preserveCompleted && completedRegistrationMatches(input.project, environment, name, input.specResult.spec, record)) continue;
     if (record) record = await reconcileCloudInstallationV1({ ...await context(input.project, environment, name, record.intent, true), installationId: record.installationId, planDigest: record.plan.digest });
     let selected: Awaited<ReturnType<typeof selection>> | undefined;
     try { if (declaration[name]) selected = await selection(input.project, environment, name, input.specResult); }
@@ -441,9 +454,18 @@ export async function planOperatorApplications(input: { project: Project; enviro
 }
 
 /** Prepare declared output containers before credentials can be issued. Never bypass an active registration attempt. */
-export async function operatorOutputPrerequisiteKeys(project: Project, environmentName: string, spec: ProjectSpec): Promise<string[]> {
+export async function operatorOutputPrerequisiteKeys(project: Project, environmentName: string, spec: ProjectSpec, preserveCompleted = false): Promise<string[]> {
   const declarations = spec.environments[environmentName]?.operatorApplications ?? {}, keys = [...new Set(Object.values(declarations).flatMap(item => Object.values(item.outputs ?? {})))];
   if (!keys.length) return [];
+  const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+  if (preserveCompleted && environment) {
+    let complete = true;
+    for (const name of new Set([...names(project, environment), ...Object.keys(declarations)])) {
+      const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
+      if (!completedRegistrationMatches(project, environment, name, spec, record)) complete = false;
+    }
+    if (complete) return [];
+  }
   const desired = spec.environments[environmentName], outputCapability = providerRegistry.getOperatorOutputDelivery(desired.hosting.provider);
   for (const declaration of Object.values(declarations)) {
     const capability = providerRegistry.getOperatorApplication(declaration.provider);
@@ -451,7 +473,7 @@ export async function operatorOutputPrerequisiteKeys(project: Project, environme
   }
   if (!outputCapability || keys.some(key => !desired.secretDestinations?.[key]
     || !outputCapability.providers.includes(desired.secretDestinations[key].destination.provider))) throw operatorApplicationUnavailable();
-  const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName); if (!environment) return keys;
+  if (!environment) return keys;
   for (const name of new Set([...names(project, environment), ...Object.keys(declarations)])) {
     const record = acceptedJournalLeaf(await journal(project, environment, name).findByScope());
     if (record && active(record) && record.status !== 'scope-ready') return [];

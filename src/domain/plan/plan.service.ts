@@ -22,7 +22,7 @@ import { operatorArtifactWorkRequired, operatorArtifactRetirementRequired, planO
 import { operatorArtifactPreparationMessage } from '../ports/operator-artifact.port.js';
 import { isOperatorImageBindingRefresh, operatorImageUpdateSelection, verifyOperatorImageUpdate } from '../services/operator-image-update.service.js';
 import { localCloudScopeRequired, planLocalCloudScope } from '../services/local-cloud-scope.service.js';
-import { localHoldingWorkRequired, planLocalHolding } from '../services/local-holding-preparation.service.js';
+import { completedLocalHoldingTeardown, localHoldingWorkRequired, planLocalHolding, verifiedLocalHoldingReceipt } from '../services/local-holding-preparation.service.js';
 import type { CloudInstallationReview } from '../ports/cloud-installation.port.js';
 import { planDatabaseFreshInitialization } from '../services/database-fresh-initialization.service.js';
 import { planDatabaseProvisioningRecovery } from '../services/database-provisioning-recovery.service.js';
@@ -2001,11 +2001,19 @@ export class PlanService {
           unmanaged: [], warnings: prepared.warnings, inputRequired: [], blocked: [] };
       }
     } catch { return { error: 'Cloud project preparation could not be verified. Preserve any saved allocation and its exact native operation; no hosting or replacement project is authorized.' }; }
+    const setupEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    // Empty workload intent retains completed operator setup, including after
+    // the final deletion. Native workload observation still governs teardown.
+    const preserveCompletedOperatorSetup = Boolean(scope === 'full' && setupEnvironment && operatorDesired
+      && setupEnvironment.platformBindings.provider === operatorDesired.hosting.provider
+      && Object.keys(operatorDesired.services).length === 0 && !operatorDesired.database && !operatorDesired.migrations
+      && operatorDesired.backups?.mode === 'disabled'
+      && options?.serviceFilter === undefined && options?.envVarOverrides === undefined && options?.envFile === undefined
+      && options?.secretRefs === undefined && options?.includeEnvFile !== true && !options?.credential && !options?.intent);
     let operatorImageUpdate: Awaited<ReturnType<typeof operatorImageUpdateSelection>>;
     try {
-      const existing = this.envRepo.findByProjectAndName(project.id, environmentName);
-      operatorImageUpdate = await operatorImageUpdateSelection(project, existing, specResult.spec, options);
-      if (operatorImageUpdate) await verifyOperatorImageUpdate(project, existing!, specResult.spec, operatorImageUpdate.images);
+      operatorImageUpdate = await operatorImageUpdateSelection(project, setupEnvironment, specResult.spec, options);
+      if (operatorImageUpdate) await verifyOperatorImageUpdate(project, setupEnvironment!, specResult.spec, operatorImageUpdate.images);
     } catch { return { error: 'The existing image update prerequisites could not be verified. Preserve retained setup records and use the full plan to review other changes.' }; }
     if (scope !== 'full') {
       try { if (await operatorArtifactWorkRequired(project, environmentName)) return { error: 'Run hv_plan with scope=full to recover the retained operator artifact operation before narrower work.' }; }
@@ -2013,7 +2021,8 @@ export class PlanService {
     }
     if (scope === 'full' && !operatorImageUpdate) {
       try {
-        const prepared = await planOperatorArtifacts({ project, environmentName, specResult, options });
+        const prepared = await planOperatorArtifacts({ project, environmentName, specResult, options,
+          preserveCompleted: preserveCompletedOperatorSetup });
         if (prepared) {
           const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-artifacts', environmentName,
             specRevision: specResult.revision, observedFingerprint: null, actions: prepared.actions,
@@ -2031,7 +2040,8 @@ export class PlanService {
     try {
       if (scope !== 'full' && await localHoldingWorkRequired(project, environmentName, specResult.spec))
         return { error: 'Run hv_plan with scope=full to review or recover the isolated holding prerequisite; no narrower scope bypasses it.' };
-      const holding = scope === 'full' ? await planLocalHolding({ project, environmentName, specResult, options }) : undefined;
+      const holding = scope === 'full' ? await planLocalHolding({ project, environmentName, specResult, options,
+        preserveCompleted: preserveCompletedOperatorSetup }) : undefined;
       if (holding) {
         const document: PlanRunDocument = { kind: 'hv_plan', scope: 'hosting-preparation', environmentName, specRevision: specResult.revision,
           observedFingerprint: null, actions: holding.actions, holdingPreparation: holding.holdingPreparation, warnings: holding.warnings };
@@ -2044,11 +2054,13 @@ export class PlanService {
       }
     } catch { return { error: 'Holding preparation requires its exact reviewed local project scope, published holding image and retained native identity; no application deployment is authorized.' }; }
     try {
-      const outputPrerequisites = scope === 'full' && !operatorImageUpdate ? await operatorOutputPrerequisiteKeys(project, environmentName, specResult.spec) : [];
+      const outputPrerequisites = scope === 'full' && !operatorImageUpdate
+        ? await operatorOutputPrerequisiteKeys(project, environmentName, specResult.spec, preserveCompletedOperatorSetup) : [];
       if (outputPrerequisites.length) return this.planSecretDestinations(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options ?? {}, outputPrerequisites);
       if (scope !== 'full' && await operatorApplicationWorkRequired(project, environmentName, specResult.spec))
         return { error: 'Run hv_plan with scope=full to recover operator application registration before narrower work.' };
-      const registration = scope === 'full' && !operatorImageUpdate ? await planOperatorApplications({ project, environmentName, specResult, options }) : undefined;
+      const registration = scope === 'full' && !operatorImageUpdate ? await planOperatorApplications({ project, environmentName, specResult, options,
+        preserveCompleted: preserveCompletedOperatorSetup }) : undefined;
       if (registration) {
         const document: PlanRunDocument = { kind: 'hv_plan', scope: 'operator-applications', environmentName,
           specRevision: specResult.revision, observedFingerprint: null, actions: registration.actions,
@@ -2706,7 +2718,15 @@ export class PlanService {
     }
     let preparedDirectEvidence: import('../ports/hosting-prepared.port.js').PreparedDirectReleaseEvidence[] = [];
     let verifiedPreparedFirstRelease = false;
+    let retainCompletedPreparation = false;
+    if (preserveCompletedOperatorSetup && environment?.platformBindings.localPreparedHosting) {
+      try {
+        retainCompletedPreparation = await completedLocalHoldingTeardown(projectForPlan, environment)
+          && Boolean(await verifiedLocalHoldingReceipt(projectForPlan, environment));
+      } catch { return { error: 'Completed local hosting history could not be verified for teardown. Preserve its records before continuing.' }; }
+    }
     if (!providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && environment?.platformBindings.projectId
+      && !retainCompletedPreparation
       && (hostingMetadata?.lifecycle?.hosting?.preparedResources === 'installer-receipt-v1' || environment.platformBindings.preparedHosting !== undefined)) {
       try {
         if (hostingMetadata?.lifecycle?.hosting?.preparedResources !== 'installer-receipt-v1') throw new Error('Prepared hosting capability is unavailable.');
