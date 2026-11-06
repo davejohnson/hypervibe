@@ -131,6 +131,10 @@ describe('engine plan documents', () => {
       { ...hv('secret-delete:old', 'secret', 'gcpSecretManagerDelete', 'destroy'), dataBearing: true, requiresConfirm: true },
       { ...hv('domain-dns-remove:old.example.com', 'domain', 'gcpDomainDnsRemove', 'destroy'), requiresConfirm: true },
       { ...hv('release:web', 'service', 'engineImageRelease', 'update') },
+      { ...engineAction('redis'), id: 'cache:redis', resource: { kind: 'cache', name: 'redis', provider: 'gcp' }, billable: true, requiresConfirm: true },
+      hv('cache-credential:redis', 'secret', 'gcpCacheCredentialEnsure'),
+      { ...engineAction('emails'), id: 'queue:emails', resource: { kind: 'queue', name: 'emails', provider: 'gcp' }, billable: true, dataBearing: true, requiresConfirm: true },
+      { ...engineAction('nightly'), id: 'service:nightly', billable: true, requiresConfirm: true },
     ];
     const document = { kind: 'hv_plan', scope: 'infrastructure-engine', engine: { planId: 'p' }, environmentName: 'staging', specRevision: 1, observedFingerprint: null, actions };
     const parsed = planRunDocumentSchema.safeParse(document);

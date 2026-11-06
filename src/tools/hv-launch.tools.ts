@@ -16,7 +16,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       env: envField,
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
-      approveAccess: z.array(z.enum(['storage', 'ci-release'])).optional()
+      approveAccess: z.array(z.enum(['storage', 'memorystore', 'queues', 'ci-release'])).optional()
         .describe('accessId values from needs_access results, passed only after the user approved that exact access.'),
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),

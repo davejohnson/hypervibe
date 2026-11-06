@@ -215,6 +215,13 @@ export function isCloudPreparedForStorage(project: Pick<Project, 'policies'> | n
   return Boolean(record && GCS_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
+/** Whether GCP setup granted Memorystore lifecycle access (the memorystoreAccess="lifecycle" add-on). */
+export function isCloudPreparedForCache(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record && MEMORYSTORE_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
+}
+
 export function withCloudPreparationRecord(
   policies: Record<string, unknown>,
   provider: CloudPrepareProvider,

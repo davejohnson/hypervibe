@@ -100,6 +100,37 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates Memorystore Redis with services wired through the VPC', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1',
+      cache: { instanceName: 'hv-staging-cache-1', tier: 'BASIC', memorySizeGb: 1, network: 'default', subnetwork: 'default', wireServices: true },
+      services: [{
+        logicalName: 'web', resourceName: 'web-staging', workload: 'web',
+        initialImage: `us-docker.pkg.dev/demo-project/app/web@sha256:${'a'.repeat(64)}`,
+        runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', public: true,
+        secretEnv: { REDIS_URL: { secretId: 'hv-staging-redis-url', version: '1' } },
+      }],
+    });
+    const web = (configuration.files['cloudrun.tf.json'] as any).resource.google_cloud_run_v2_service.web.template[0];
+    expect(web.vpc_access[0]).toEqual({ network_interfaces: [{ network: 'default', subnetwork: 'default' }], egress: 'PRIVATE_RANGES_ONLY' });
+    expect(configuration.resources['google_redis_instance.cache']).toMatchObject({ actionId: 'cache:redis', billable: true });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
+  it('validates Pub/Sub queues with runtime-only access', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
+      queues: [{ name: 'emails', topicId: 'emails-abc123', ackDeadlineSeconds: 30 }],
+      services: [],
+    });
+    expect(Object.keys(configuration.resources).sort()).toEqual([
+      'google_pubsub_subscription.queue_emails', 'google_pubsub_subscription_iam_member.queue_emails_subscriber',
+      'google_pubsub_topic.queue_emails', 'google_pubsub_topic_iam_member.queue_emails_publisher',
+    ]);
+    expect(configuration.resources['google_pubsub_topic.queue_emails']).toMatchObject({ dataBearing: true });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates an environment with no services (teardown)', async () => {
     const empty = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [] });
     expect(await engine.validate(gcpEngineBackend, empty)).toEqual({ ok: true });

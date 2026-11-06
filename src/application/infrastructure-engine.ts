@@ -3,7 +3,8 @@ import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
-import { isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
+import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/queue-env.js';
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
@@ -55,6 +56,9 @@ export const ENGINE_SECRET_DELETE_OPERATION = 'gcpSecretManagerDelete';
 export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export const ENGINE_RELEASE_OPERATION = 'engineImageRelease';
 export const ENGINE_STORAGE_ACCESS_BLOCKER = 'Storage buckets need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=true, or run hv_connections provider="cloudrun" action="prepare" gcsAccess="lifecycle" (preview, then confirm).';
+export const ENGINE_CACHE_CREDENTIAL_OPERATION = 'gcpCacheCredentialEnsure';
+export const ENGINE_CACHE_URL_KEY = 'REDIS_URL';
+export const ENGINE_CACHE_ACCESS_BLOCKER = 'Redis needs one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["memorystore"], or run hv_connections provider="cloudrun" action="prepare" memorystoreAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure';
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
 export const ENGINE_DATABASE_URL_KEY = 'DATABASE_URL';
@@ -74,8 +78,7 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   const problems: string[] = [];
   if (environment.hosting.provider !== 'cloudrun') problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   const unsupported: Array<[string, unknown]> = [
-    ['cache', environment.cache],
-    ['queues', environment.queues], ['loadBalancer', environment.loadBalancer],
+    ['loadBalancer', environment.loadBalancer],
     ['domainTarget', environment.domainTarget], ['domainRecreateRevision', environment.domainRecreateRevision],
     ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
@@ -98,6 +101,9 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     for (const service of storage.injectInto) {
       if (!environment.services[service]) problems.push(`Storage ${name}: injectInto names undeclared service ${service}.`);
     }
+  }
+  if (environment.cache && environment.cache.provider !== 'memorystore') {
+    problems.push('The OpenTofu engine manages caches only with provider "memorystore".');
   }
   const database = environment.database;
   if (database) {
@@ -150,6 +156,8 @@ export interface EngineBinding {
   database?: { instanceName: string; connectionName?: string };
   domains?: string[];
   storage?: string[];
+  cache?: { instanceName: string };
+  queues?: string[];
   /** Keyless CI release trust granted for this exact repository. */
   ci?: { repository: string; provider: string; releaseIdentity: string };
 }
@@ -224,11 +232,13 @@ function serviceResourceName(context: EngineContext, environmentName: string, se
 export function buildEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'runtimeServiceAccountEmail'> & {
   resourceNameFor: (service: string) => string;
   databaseWired?: boolean;
+  cacheWired?: boolean;
   /** Exact secret versions to pin; a new version then rolls services through a reviewed update. */
   secretVersions?: Record<string, string>;
 }): GcpCloudRunEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
-  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : [])];
+  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
+    ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
   const secretEnv = Object.fromEntries(secretKeys
     .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: context.secretVersions?.[key] ?? 'latest' }]));
   return {
@@ -242,7 +252,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         workload,
         initialImage: ENGINE_HOLDING_IMAGE,
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
-        env: { ...environmentSpec.envVars },
+        // Queue names follow the shared Pub/Sub contract so apps see the same variables on every path.
+        env: { ...buildQueueEnvVars({ environmentSpec, environment: { name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, backend: environmentSpec.queues ? 'pubsub' : undefined, gcpProjectId: context.gcpProjectId }), ...environmentSpec.envVars },
         secretEnv,
         public: service.public ?? workload === 'web',
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
@@ -392,6 +403,27 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   }
   if (!added.ok) return { success: false, message: `Writing ${secretId} failed (HTTP ${added.status}).`, error: `HTTP ${added.status}` };
   return undefined;
+}
+
+// ---------------------------------------------------------------- Redis URL (Hypervibe-owned)
+
+/** Publishes REDIS_URL from the instance's private address and Google-generated AUTH string. */
+async function ensureCacheCredential(token: string, action: PlanAction): Promise<ActionResult> {
+  const { gcpProjectId, region, instanceName, secretId, labels } = action.metadata as { gcpProjectId: string; region: string; instanceName: string; secretId: string; labels: Record<string, string> };
+  const base = `https://redis.googleapis.com/v1/projects/${gcpProjectId}/locations/${region}/instances/${instanceName}`;
+  const instanceResponse = await fetchWithRetry(base, { headers: { Authorization: `Bearer ${token}` } });
+  if (instanceResponse.status === 404) return { success: false, status: 'blocked', message: `Redis instance ${instanceName} does not exist yet.` };
+  if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Memorystore returned HTTP ${instanceResponse.status} for ${instanceName}.` };
+  const instance = await instanceResponse.json() as { state?: string; host?: string; port?: number; labels?: Record<string, string> };
+  if (instance.state !== 'READY' || !instance.host) return { success: false, status: 'pending', message: `Redis instance ${instanceName} is not ready yet.` };
+  if (instance.labels?.['managed-by'] !== 'hypervibe') return { success: false, status: 'blocked', message: `Redis instance ${instanceName} is not managed by Hypervibe.` };
+  const authResponse = await fetchWithRetry(`${base}/authString`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!authResponse.ok) return { success: false, status: 'blocked', message: `Reading the Redis AUTH string returned HTTP ${authResponse.status}.` };
+  const authString = (await authResponse.json() as { authString?: string }).authString;
+  if (!authString) return { success: false, status: 'pending', message: `Redis instance ${instanceName} has no AUTH string yet.` };
+  const failure = await writeSecretVersion(token, gcpProjectId, secretId, labels, `redis://:${encodeURIComponent(authString)}@${instance.host}:${instance.port ?? 6379}`);
+  if (failure) return failure;
+  return { success: true, message: `REDIS_URL for ${instanceName} is stored in ${secretId}.` };
 }
 
 // ---------------------------------------------------------------- Database login lifecycle
@@ -557,6 +589,12 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if (Object.keys(environmentSpec!.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(project.id) ?? project)) {
     return { blocked: [ENGINE_STORAGE_ACCESS_BLOCKER] };
   }
+  if (environmentSpec!.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(project.id) ?? project)) {
+    return { blocked: [ENGINE_CACHE_ACCESS_BLOCKER] };
+  }
+  if (Object.keys(environmentSpec!.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(project.id) ?? project, 'cloudrun')) {
+    return { blocked: ['Queues need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["queues"], or run hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle" (preview, then confirm).'] };
+  }
 
   // Hypervibe-owned secrets: explicit, observed, tri-state.
   const token = await context.adapter.engineAccessToken();
@@ -598,9 +636,25 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     if (observed.ready && observed.latestVersion) secretVersions[ENGINE_DATABASE_URL_KEY] = observed.latestVersion;
   }
   const databaseCredentialReady = databaseCredential.ready;
+  // Cache: OpenTofu owns the Redis instance; Hypervibe publishes REDIS_URL from Google's generated AUTH string.
+  const cacheSpec = environmentSpec!.cache;
+  const cacheInstanceName = engineBinding.cache?.instanceName
+    ?? `hv-${environmentName}-cache-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40);
+  const cacheSecretId = engineSecretId(environmentName, ENGINE_CACHE_URL_KEY);
+  let cacheReady = false;
+  if (cacheSpec) {
+    const observed = await observeSecret(token, context.gcpProjectId, cacheSecretId);
+    if (observed.state === 'unknown') return { blocked: [observed.reason] };
+    if (observed.state === 'present' && observed.value.labels['hv-environment'] !== labels['hv-environment']) {
+      return { blocked: [`Secret Manager already has ${cacheSecretId}, but it is not owned by this Hypervibe environment.`] };
+    }
+    cacheReady = observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.labels['hv-cache-instance'] === cacheInstanceName;
+    if (cacheReady && observed.state === 'present' && observed.value.latestVersion) secretVersions[ENGINE_CACHE_URL_KEY] = observed.value.latestVersion;
+  }
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
-  const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : [])]);
+  const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : []),
+    ...(cacheSpec ? [cacheSecretId] : [])]);
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
   // Custom domain: Hypervibe verifies ownership and writes DNS before OpenTofu maps it.
@@ -625,11 +679,23 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     ...buildEngineInput(spec, environmentName, {
       ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
       databaseWired: databaseCredentialReady,
+      cacheWired: cacheReady,
       secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
     ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady } } : {}),
     ...(!databaseSpec && engineBinding.database ? { retiredDatabase: true } : {}),
+    ...(cacheSpec ? { cache: {
+      instanceName: cacheInstanceName, tier: (cacheSpec.tier === 'STANDARD_HA' ? 'STANDARD_HA' : 'BASIC') as 'BASIC' | 'STANDARD_HA',
+      memorySizeGb: Math.max(1, parseInt(cacheSpec.size ?? '1', 10) || 1),
+      network: cacheSpec.network ?? 'default', subnetwork: cacheSpec.subnetwork ?? cacheSpec.network ?? 'default', wireServices: cacheReady,
+    } } : {}),
+    ...(!cacheSpec && engineBinding.cache ? { retiredCache: true } : {}),
+    queues: Object.entries(environmentSpec!.queues ?? {}).map(([name, queue]) => ({
+      name, topicId: pubsubQueueResourceIds({ name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, name, context.gcpProjectId).topicId,
+      ...(queue.ackDeadlineSeconds ? { ackDeadlineSeconds: queue.ackDeadlineSeconds } : {}),
+    })),
+    retiredQueues: (engineBinding.queues ?? []).filter((name) => !environmentSpec!.queues?.[name]),
     ...(desiredDomain && domainService ? { domains: [{ domain: desiredDomain, service: domainService }] } : {}),
     ...(retiredDomains.length ? { retiredDomains } : {}),
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
@@ -690,11 +756,22 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     })
     : [];
   if ('blocked' in credentialActions) return { blocked: [credentialActions.blocked] };
+  const cacheAction = serviceActions.find((action) => action.id === 'cache:redis');
+  const cacheCredentialActions: PlanAction[] = cacheSpec && !cacheReady ? [{
+    id: 'cache-credential:redis', type: 'create', verified: true,
+    resource: { kind: 'secret', name: ENGINE_CACHE_URL_KEY, provider: 'gcp' },
+    reason: `Hypervibe will store the Redis connection URL in Secret Manager (${cacheSecretId}) so services can use it.`,
+    ...(cacheAction && cacheAction.type !== 'noop' ? { dependsOn: [cacheAction.id] } : {}),
+    metadata: { operation: ENGINE_CACHE_CREDENTIAL_OPERATION, gcpProjectId: context.gcpProjectId, region: context.region,
+      instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
+  }] : [];
   // Array order matters: prerequisites precede the engine segment so it runs only once they complete.
-  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...domainAfter, ...deletes, ...domainRemovals];
+  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...cacheCredentialActions, ...domainAfter, ...deletes, ...domainRemovals];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
+    ...(cacheSpec && !cacheReady && anyService
+      ? ['Services are connected to Redis in the next infrastructure plan, once Hypervibe has published its URL.'] : []),
     ...(databaseSpec && !databaseCredentialReady && anyService
       ? ['Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login. Run hv_plan scope="infrastructure" again after this apply.']
       : []),
@@ -707,6 +784,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
+      ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
     },
   } as PlanRunDocument;
   const runRepo = new RunRepository();
@@ -778,7 +856,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string } } };
+  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string } } };
   const environmentName = document.environmentName;
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {
     return { kind: 'blocked', reason: 'This plan is not an OpenTofu engine plan for an engine-managed environment. Re-run hv_plan.' };
@@ -816,6 +894,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         }
         return result;
       }
+      if (operation === ENGINE_CACHE_CREDENTIAL_OPERATION) return ensureCacheCredential(token, action);
       if (operation === ENGINE_DATABASE_CREDENTIAL_OPERATION) {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
           return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
@@ -834,6 +913,11 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         };
       }
       // Record the attempted database identity first, so an interrupted create is found, not duplicated.
+      if (reviewed.cache?.instanceName && members.some((member) => member.id === 'cache:redis' && member.type !== 'destroy')) {
+        const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        const engineBinding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
+        ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...engineBinding, kind: 'opentofu', cache: { instanceName: reviewed.cache.instanceName } } });
+      }
       if (reviewed.database?.instanceName && members.some((member) => member.id === 'database:postgres' && member.type !== 'destroy')) {
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
         const engineBinding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
@@ -867,6 +951,11 @@ async function recordServiceBindings(
   for (const member of members) {
     const addresses = engineSegmentOf(member)?.addresses ?? [];
     if (!addresses.every((address) => outcomes[address] === 'succeeded')) continue;
+    if (member.id.startsWith('queue:')) {
+      const remaining = (engine.queues ?? []).filter((entry) => entry !== member.resource.name);
+      engine = { ...engine, queues: member.type === 'destroy' ? remaining : [...remaining, member.resource.name].sort() };
+      continue;
+    }
     if (member.id.startsWith('storage:')) {
       const remaining = (engine.storage ?? []).filter((entry) => entry !== member.resource.name);
       engine = { ...engine, storage: member.type === 'destroy' ? remaining : [...remaining, member.resource.name].sort() };
@@ -877,6 +966,10 @@ async function recordServiceBindings(
       const remaining = (engine.domains ?? []).filter((entry) => entry !== domain);
       // A removed mapping keeps the domain recorded until its DNS is removed too.
       if (member.type !== 'destroy') engine = { ...engine, domains: [...remaining, domain].sort() };
+      continue;
+    }
+    if (member.id === 'cache:redis') {
+      if (member.type === 'destroy') engine = { ...engine, cache: undefined };
       continue;
     }
     if (member.id === 'database:postgres') {

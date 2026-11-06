@@ -5,6 +5,7 @@ import path from 'path';
 import pg from 'pg';
 import { Connector, GoogleAuth, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
+import { isNetworkError } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import {
   observeSecret, secretManagerFetch, sqlAdmin, waitForSqlOperation, writeSecretVersion,
@@ -121,8 +122,14 @@ async function setLoginPassword(token: string, gcpProjectId: string, instanceNam
 /** Makes `login` act as the shared owner role on every connection, then proves it. */
 async function verifyLogin(serviceAccount: Record<string, unknown>, connectionName: string, login: DatabaseLogin, secret: string, databaseName: string): Promise<boolean> {
   return withSession(serviceAccount, connectionName, login, secret, databaseName, async (client) => {
-    // A role may set its own session defaults; membership in app_owner allows the switch.
-    await client.query(`ALTER ROLE ${login} SET role = '${DATABASE_OWNER_ROLE}'`);
+    // Setup gives each login a default of acting as app_owner. Only set it when missing, and
+    // only as the login itself: SET ROLE NONE returns to the session user, whereas RESET ROLE
+    // would return to that very default.
+    const { rows: settings } = await client.query<{ config: string[] | null }>(`SELECT rolconfig AS config FROM pg_roles WHERE rolname = session_user`);
+    if (!(settings[0]?.config ?? []).includes(`role=${DATABASE_OWNER_ROLE}`)) {
+      await client.query('SET ROLE NONE');
+      await client.query(`ALTER ROLE ${login} SET role = '${DATABASE_OWNER_ROLE}'`);
+    }
     await client.query(`SET role = '${DATABASE_OWNER_ROLE}'`);
     const { rows } = await client.query<{ role: string }>(`SELECT current_user AS role`);
     return rows[0]?.role === DATABASE_OWNER_ROLE;
@@ -195,7 +202,11 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     if (!patched.ok) return { success: false, status: 'pending', message: `The old password was revoked, but ${meta.secretId} could not be updated yet.` };
     return { success: true, message: `The previous password for ${retired} no longer works. Rotation is complete.` };
   } catch (error) {
-    // Connection failures through the connector are local network problems more often than not.
-    return { success: false, status: 'pending', message: `Talking to the database failed (${error instanceof Error ? error.message.split('\n')[0] : 'unknown error'}). Run the same command again; completed steps are not repeated.` };
+    const reason = error instanceof Error ? error.message.split('\n')[0] : 'unknown error';
+    // Only connection problems are worth simply repeating; a database refusal needs a fix.
+    if (isNetworkError(error) || /timeout|ECONN|ENOTFOUND|EAI_AGAIN|Connection terminated/i.test(reason)) {
+      return { success: false, status: 'pending', message: `The connection to the database dropped (${reason}). Run the same command again; the app keeps using its current login.` };
+    }
+    return { success: false, message: `The database refused a credential step (${reason}). The app keeps using its current login.`, error: reason };
   }
 }

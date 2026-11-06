@@ -14,7 +14,7 @@ import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.exe
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
-import { isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
   isEngineManaged,
@@ -34,7 +34,7 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[] }
-  | { status: 'needs_access'; accessId: 'storage' | 'ci-release'; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_access'; accessId: 'storage' | 'memorystore' | 'queues' | 'ci-release'; access: string; grants: Record<string, unknown> }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
@@ -50,6 +50,9 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
   const services = Object.keys(environment.services).length;
   if (services) lines.push({ item: `${services} Cloud Run service(s)`, estimate: '$0 while idle; roughly $0.40 per million requests plus CPU time while serving' });
   if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
+  if (environment.cache) lines.push({ item: `Memorystore Redis (${environment.cache.tier ?? 'BASIC'}, ${environment.cache.size ?? '1gb'})`, estimate: environment.cache.tier === 'STANDARD_HA' ? 'about $90 per month' : 'about $35 per month' });
+  const queues = Object.keys(environment.queues ?? {}).length;
+  if (queues) lines.push({ item: `${queues} Pub/Sub queue(s)`, estimate: 'free up to 10 GB of messages per month, then about $40 per TB' });
   const buckets = Object.keys(environment.storage ?? {}).length;
   if (buckets) lines.push({ item: `${buckets} Cloud Storage bucket(s)`, estimate: 'about $0.02 per GB stored per month, plus small per-request charges' });
   lines.push({ item: 'Secret Manager, Artifact Registry, Cloud Build', estimate: 'usually under $1 per month for a small app' });
@@ -143,6 +146,36 @@ async function runLaunch(ctx: CommandContext, params: {
     }
     const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle', adminAuth: 'default', confirm: true });
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting storage access failed.'), details: granted };
+  }
+
+  if (environmentSpec.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', memorystoreAccess: 'lifecycle' });
+    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The Redis access preview failed.'), details: preview };
+    if (!params.approveAccess?.includes('memorystore')) {
+      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
+      return {
+        status: 'needs_access', accessId: 'memorystore',
+        access: 'Let Hypervibe create a private Redis cache in this project and connect your app to it over the project network.',
+        grants: { deploymentIdentity: plan.grantRoles, apis: plan.enableApis },
+      };
+    }
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', memorystoreAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting Redis access failed.'), details: granted };
+  }
+
+  if (Object.keys(environmentSpec.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(params.project.id) ?? params.project, 'cloudrun')) {
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', queueAccess: 'lifecycle' });
+    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The queue access preview failed.'), details: preview };
+    if (!params.approveAccess?.includes('queues')) {
+      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
+      return {
+        status: 'needs_access', accessId: 'queues',
+        access: 'Let Hypervibe create Pub/Sub queues in this project, and let your app send and receive their messages.',
+        grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
+      };
+    }
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', queueAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting queue access failed.'), details: granted };
   }
 
   // 2. Infrastructure, in as many reviewed rounds as staging requires.

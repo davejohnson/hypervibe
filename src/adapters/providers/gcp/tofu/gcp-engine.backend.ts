@@ -123,6 +123,29 @@ export interface GcpCloudRunEngineInput {
   adopt?: { databaseInstance?: string; buckets?: string[] };
   /** Environment id stamped on owned resources so adoption can prove ownership. */
   environmentId?: string;
+  /** Memorystore Redis owned by the engine; Hypervibe publishes REDIS_URL. */
+  cache?: GcpCacheInput;
+  /** A cache this environment previously created that is no longer desired. */
+  retiredCache?: boolean;
+  /** Pub/Sub queues: one topic and one subscription each. */
+  queues?: Array<{ name: string; topicId: string; ackDeadlineSeconds?: number }>;
+  /** Queues this environment previously created that are no longer desired. */
+  retiredQueues?: string[];
+}
+
+export function queueEngineKey(name: string): string {
+  return `queue_${name.replace(/[^a-z0-9]/g, '_')}`;
+}
+
+export interface GcpCacheInput {
+  instanceName: string;
+  tier: 'BASIC' | 'STANDARD_HA';
+  memorySizeGb: number;
+  /** VPC network and subnetwork names services use to reach the private Redis address. */
+  network: string;
+  subnetwork: string;
+  /** Wire services (VPC egress + REDIS_URL reference) once Hypervibe has published the URL. */
+  wireServices: boolean;
 }
 
 export interface GcpStorageInput {
@@ -244,6 +267,11 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
       }],
       containers: [container],
       ...(wired ? { volumes: [{ name: 'cloudsql', cloud_sql_instance: [{ instances: ['${google_sql_database_instance.db.connection_name}'] }] }] } : {}),
+      // Direct VPC egress reaches the private Redis address; everything else still leaves normally.
+      ...(input.cache?.wireServices ? { vpc_access: [{
+        network_interfaces: [{ network: input.cache.network, subnetwork: input.cache.subnetwork }],
+        egress: 'PRIVATE_RANGES_ONLY',
+      }] } : {}),
     }],
     lifecycle: [{
       // Narrow release ownership: only the running image (and the client
@@ -296,6 +324,7 @@ function addScheduledJob(
         timeout: '3600s',
         containers: [container],
         ...(template.volumes ? { volumes: template.volumes } : {}),
+        ...(template.vpc_access ? { vpc_access: template.vpc_access } : {}),
       }],
     }],
     lifecycle: [{ ignore_changes: ['template[0].template[0].containers[0].image', 'client', 'client_version'] }],
@@ -392,6 +421,50 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   if (input.database || input.retiredDatabase) {
     for (const address of DATABASE_ENGINE_ADDRESSES) resources[address] = databaseMapping;
   }
+  const redis: Record<string, unknown> = {};
+  const cacheMapping: EngineResourceMapping = { actionId: 'cache:redis', kind: 'cache', name: 'redis', billable: true };
+  if (input.cache) {
+    if (!/^[a-z][a-z0-9-]{0,38}[a-z0-9]$/.test(input.cache.instanceName)) throw new Error('Memorystore instance name is invalid.');
+    if (!/^[a-z][a-z0-9-]{0,62}$/.test(input.cache.network) || !/^[a-z][a-z0-9-]{0,62}$/.test(input.cache.subnetwork)) throw new Error('Cache network names are invalid.');
+    redis.cache = {
+      name: input.cache.instanceName,
+      project: input.projectId,
+      region: input.region,
+      tier: input.cache.tier,
+      memory_size_gb: input.cache.memorySizeGb,
+      redis_version: 'REDIS_7_2',
+      authorized_network: `projects/${input.projectId}/global/networks/${input.cache.network}`,
+      // AUTH stays on; the generated AUTH string lives only in encrypted engine state and in Secret Manager.
+      auth_enabled: true,
+      labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
+    };
+  }
+  if (input.cache || input.retiredCache) resources['google_redis_instance.cache'] = cacheMapping;
+  const topics: Record<string, unknown> = {};
+  const subscriptions: Record<string, unknown> = {};
+  const topicIam: Record<string, unknown> = {};
+  const subscriptionIam: Record<string, unknown> = {};
+  for (const queue of input.queues ?? []) {
+    if (!/^[a-z][a-z0-9-]{0,60}$/.test(queue.name) || !/^[A-Za-z][A-Za-z0-9._~%+-]{2,254}$/.test(queue.topicId)) throw new Error(`Queue ${queue.name} has an invalid name.`);
+    if (!input.runtimeServiceAccountEmail) throw new Error('Queues require the runtime identity.');
+    const key = queueEngineKey(queue.name);
+    const labels = { 'managed-by': 'hypervibe', 'hv-queue': queue.name, ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) };
+    topics[key] = { name: queue.topicId, project: input.projectId, labels };
+    subscriptions[key] = {
+      name: queue.topicId, project: input.projectId, topic: `\${google_pubsub_topic.${key}.id}`,
+      ack_deadline_seconds: queue.ackDeadlineSeconds ?? 60, message_retention_duration: '604800s', labels,
+    };
+    const member = `serviceAccount:${input.runtimeServiceAccountEmail}`;
+    topicIam[`${key}_publisher`] = { project: input.projectId, topic: `\${google_pubsub_topic.${key}.name}`, role: 'roles/pubsub.publisher', member };
+    subscriptionIam[`${key}_subscriber`] = { project: input.projectId, subscription: `\${google_pubsub_subscription.${key}.name}`, role: 'roles/pubsub.subscriber', member };
+  }
+  for (const name of [...(input.queues ?? []).map((queue) => queue.name), ...(input.retiredQueues ?? [])]) {
+    const key = queueEngineKey(name);
+    // Deleting a queue discards messages still waiting in it.
+    const mapping: EngineResourceMapping = { actionId: `queue:${name}`, kind: 'queue', name, dataBearing: true, billable: true };
+    for (const address of [`google_pubsub_topic.${key}`, `google_pubsub_subscription.${key}`,
+      `google_pubsub_topic_iam_member.${key}_publisher`, `google_pubsub_subscription_iam_member.${key}_subscriber`]) resources[address] = mapping;
+  }
   const buckets: Record<string, unknown> = {};
   const bucketIam: Record<string, unknown> = {};
   for (const bucket of input.storage ?? []) {
@@ -475,6 +548,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
         },
       } : {},
       'cloudsql.tf.json': Object.keys(sql).length ? { resource: sql } : {},
+      'memorystore.tf.json': Object.keys(redis).length ? { resource: { google_redis_instance: redis } } : {},
+      'pubsub.tf.json': Object.keys(topics).length ? { resource: {
+        google_pubsub_topic: topics, google_pubsub_subscription: subscriptions,
+        google_pubsub_topic_iam_member: topicIam, google_pubsub_subscription_iam_member: subscriptionIam,
+      } } : {},
       'storage.tf.json': Object.keys(buckets).length ? {
         resource: { google_storage_bucket: buckets, google_storage_bucket_iam_member: bucketIam },
       } : {},
