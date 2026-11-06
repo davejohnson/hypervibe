@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
+import { S3_COMPATIBLE_SECRET_KEYS } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
@@ -57,6 +58,7 @@ export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export const ENGINE_RELEASE_OPERATION = 'engineImageRelease';
 export const ENGINE_STORAGE_ACCESS_BLOCKER = 'Storage buckets need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=true, or run hv_connections provider="cloudrun" action="prepare" gcsAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_CACHE_CREDENTIAL_OPERATION = 'gcpCacheCredentialEnsure';
+export const ENGINE_STORAGE_S3_KEY_OPERATION = 'gcpStorageS3KeyEnsure';
 export const ENGINE_CACHE_URL_KEY = 'REDIS_URL';
 export const ENGINE_CACHE_ACCESS_BLOCKER = 'Redis needs one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["memorystore"], or run hv_connections provider="cloudrun" action="prepare" memorystoreAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure';
@@ -91,6 +93,8 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
       problems.push(`${field} is not yet managed by the OpenTofu engine; remove it from this environment or use the standard lifecycle.`);
     }
   }
+  if (environment.migrations?.mode === 'tool') problems.push('migrations.mode="tool" is not yet supported by the OpenTofu engine; use "releaseCommand".');
+  if (environment.migrations?.mode === 'releaseCommand' && !environment.migrations.command?.trim()) problems.push('migrations.mode="releaseCommand" needs a command.');
   if (environment.domain) {
     if (environment.domainProxy) problems.push('domainProxy must be off: Google issues the certificate and needs DNS-only records.');
     if (domainServiceFor(environment) === undefined) problems.push('A custom domain needs exactly one public web service to point at.');
@@ -158,6 +162,8 @@ export interface EngineBinding {
   storage?: string[];
   cache?: { instanceName: string };
   queues?: string[];
+  /** Cloud Run job that runs the release command. */
+  releaseJob?: string;
   /** Keyless CI release trust granted for this exact repository. */
   ci?: { repository: string; provider: string; releaseIdentity: string };
 }
@@ -233,6 +239,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   resourceNameFor: (service: string) => string;
   databaseWired?: boolean;
   cacheWired?: boolean;
+  /** Storage names whose S3-compatible access key has been published. */
+  s3WiredStorage?: string[];
   /** Exact secret versions to pin; a new version then rolls services through a reviewed update. */
   secretVersions?: Record<string, string>;
 }): GcpCloudRunEngineInput {
@@ -241,10 +249,14 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
     ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
   const secretEnv = Object.fromEntries(secretKeys
     .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: context.secretVersions?.[key] ?? 'latest' }]));
-  return {
-    projectId: context.gcpProjectId,
-    region: context.region,
-    services: Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => {
+  // S3-compatible keys go only to the services that use that bucket.
+  const s3SecretEnvFor = (service: string) => Object.fromEntries(Object.entries(environmentSpec.storage ?? {})
+    .filter(([storageName, storage]) => storage.access === 's3' && storage.injectInto.includes(service) && context.s3WiredStorage?.includes(storageName))
+    .flatMap(([storageName]) => S3_COMPATIBLE_SECRET_KEYS.map((key) => {
+      const secretKey = `${storageName}_${key}`;
+      return [key, { secretId: engineSecretId(environmentName, secretKey), version: context.secretVersions?.[secretKey] ?? 'latest' }];
+    })));
+  const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => {
       const workload = service.workloadKind === 'cron' ? 'job' as const : service.workloadKind === 'worker' ? 'worker' as const : 'web' as const;
       return {
         logicalName: name,
@@ -254,13 +266,29 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
         // Queue names follow the shared Pub/Sub contract so apps see the same variables on every path.
         env: { ...buildQueueEnvVars({ environmentSpec, environment: { name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, backend: environmentSpec.queues ? 'pubsub' : undefined, gcpProjectId: context.gcpProjectId }), ...environmentSpec.envVars },
-        secretEnv,
+        secretEnv: { ...secretEnv, ...s3SecretEnvFor(name) },
         public: service.public ?? workload === 'web',
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
-    }),
+    });
+  // The release command runs with the web service's configuration (secrets, database, storage).
+  const command = releaseCommandFor(environmentSpec);
+  const primary = services.find((service) => service.workload === 'web') ?? services.find((service) => service.workload !== 'job');
+  return {
+    projectId: context.gcpProjectId,
+    region: context.region,
+    services,
+    ...(command && primary ? { releaseJob: {
+      ...primary, logicalName: 'release', resourceName: context.resourceNameFor('release-command'), workload: 'worker' as const,
+      public: false, jobCommand: command, healthCheckPath: undefined,
+    } } : {}),
   };
+}
+
+/** The reviewed migration command run before each release, when the spec asks for one. */
+export function releaseCommandFor(environmentSpec: EnvironmentSpec): string | undefined {
+  return environmentSpec.migrations?.mode === 'releaseCommand' ? environmentSpec.migrations.command?.trim() || undefined : undefined;
 }
 
 // ---------------------------------------------------------------- Secret Manager (Hypervibe-owned)
@@ -424,6 +452,29 @@ async function ensureCacheCredential(token: string, action: PlanAction): Promise
   const failure = await writeSecretVersion(token, gcpProjectId, secretId, labels, `redis://:${encodeURIComponent(authString)}@${instance.host}:${instance.port ?? 6379}`);
   if (failure) return failure;
   return { success: true, message: `REDIS_URL for ${instanceName} is stored in ${secretId}.` };
+}
+
+/** Creates a Cloud Storage HMAC key for the runtime identity and publishes both halves to Secret Manager. */
+async function ensureStorageS3Key(token: string, action: PlanAction): Promise<ActionResult> {
+  const { gcpProjectId, storageName, runtimeServiceAccountEmail, secretIds, labels } = action.metadata as {
+    gcpProjectId: string; storageName: string; runtimeServiceAccountEmail: string; secretIds: Record<string, string>; labels: Record<string, string>;
+  };
+  let created: Response;
+  try {
+    created = await fetch(`https://storage.googleapis.com/storage/v1/projects/${gcpProjectId}/hmacKeys?serviceAccountEmail=${encodeURIComponent(runtimeServiceAccountEmail)}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    return { success: false, status: 'pending', message: `Creating the S3 access key for ${storageName} has an unknown outcome. Run the same command again.` };
+  }
+  if (!created.ok) return { success: false, message: `Cloud Storage could not create an S3 access key (HTTP ${created.status}): ${await googleErrorMessage(created)}` };
+  const key = await created.json() as { secret?: string; metadata?: { accessId?: string } };
+  if (!key.secret || !key.metadata?.accessId) return { success: false, message: 'Cloud Storage returned an incomplete S3 access key.' };
+  for (const [name, value] of [['AWS_ACCESS_KEY_ID', key.metadata.accessId], ['AWS_SECRET_ACCESS_KEY', key.secret]] as const) {
+    const failure = await writeSecretVersion(token, gcpProjectId, secretIds[name]!, labels, value);
+    if (failure) return failure;
+  }
+  return { success: true, message: `An S3-compatible access key for ${storageName} is stored in Secret Manager.` };
 }
 
 // ---------------------------------------------------------------- Database login lifecycle
@@ -651,10 +702,30 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     cacheReady = observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.labels['hv-cache-instance'] === cacheInstanceName;
     if (cacheReady && observed.state === 'present' && observed.value.latestVersion) secretVersions[ENGINE_CACHE_URL_KEY] = observed.value.latestVersion;
   }
+  // S3-compatible bucket access: Hypervibe-owned access keys, published before services are wired.
+  const s3Storage = Object.entries(environmentSpec!.storage ?? {}).filter(([, storage]) => storage.access === 's3').map(([name]) => name);
+  const s3Ready: string[] = [];
+  const s3SecretIds: string[] = [];
+  for (const storageName of s3Storage) {
+    let ready = true;
+    for (const key of S3_COMPATIBLE_SECRET_KEYS) {
+      const secretKey = `${storageName}_${key}`;
+      const secretId = engineSecretId(environmentName, secretKey);
+      s3SecretIds.push(secretId);
+      const observed = await observeSecret(token, context.gcpProjectId, secretId);
+      if (observed.state === 'unknown') return { blocked: [observed.reason] };
+      if (observed.state === 'present' && observed.value.labels['hv-environment'] !== labels['hv-environment']) {
+        return { blocked: [`Secret Manager already has ${secretId}, but it is not owned by this Hypervibe environment.`] };
+      }
+      if (observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.latestVersion) secretVersions[secretKey] = observed.value.latestVersion;
+      else ready = false;
+    }
+    if (ready) s3Ready.push(storageName);
+  }
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : []),
-    ...(cacheSpec ? [cacheSecretId] : [])]);
+    ...(cacheSpec ? [cacheSecretId] : []), ...s3SecretIds]);
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
   // Custom domain: Hypervibe verifies ownership and writes DNS before OpenTofu maps it.
@@ -680,6 +751,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
       databaseWired: databaseCredentialReady,
       cacheWired: cacheReady,
+      s3WiredStorage: s3Ready,
       secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
@@ -691,6 +763,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       network: cacheSpec.network ?? 'default', subnetwork: cacheSpec.subnetwork ?? cacheSpec.network ?? 'default', wireServices: cacheReady,
     } } : {}),
     ...(!cacheSpec && engineBinding.cache ? { retiredCache: true } : {}),
+    ...(!releaseCommandFor(environmentSpec!) && engineBinding.releaseJob ? { retiredReleaseJob: true } : {}),
     queues: Object.entries(environmentSpec!.queues ?? {}).map(([name, queue]) => ({
       name, topicId: pubsubQueueResourceIds({ name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, name, context.gcpProjectId).topicId,
       ...(queue.ackDeadlineSeconds ? { ackDeadlineSeconds: queue.ackDeadlineSeconds } : {}),
@@ -701,6 +774,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
+      ...(storage.access === 's3' ? { s3: { wired: s3Ready.includes(name) } } : {}),
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
@@ -757,6 +831,19 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     : [];
   if ('blocked' in credentialActions) return { blocked: [credentialActions.blocked] };
   const cacheAction = serviceActions.find((action) => action.id === 'cache:redis');
+  const s3CredentialActions: PlanAction[] = s3Storage.filter((name) => !s3Ready.includes(name)).map((storageName) => {
+    const bucketAction = serviceActions.find((action) => action.id === `storage:${storageName}`);
+    return {
+      id: `storage-s3-key:${storageName}`, type: 'create', verified: true,
+      resource: { kind: 'secret', name: `${storageName} S3 access key`, provider: 'gcp' },
+      reason: `Hypervibe will create an S3-compatible access key for the app's runtime identity and store it in Secret Manager, so code written for S3 can use the ${storageName} bucket unchanged.`,
+      ...(bucketAction && bucketAction.type !== 'noop' ? { dependsOn: [bucketAction.id] } : {}),
+      metadata: { operation: ENGINE_STORAGE_S3_KEY_OPERATION, gcpProjectId: context.gcpProjectId, storageName,
+        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+        secretIds: Object.fromEntries(S3_COMPATIBLE_SECRET_KEYS.map((key) => [key, engineSecretId(environmentName, `${storageName}_${key}`)])),
+        labels: { ...labels, 'hv-storage': storageName } },
+    };
+  });
   const cacheCredentialActions: PlanAction[] = cacheSpec && !cacheReady ? [{
     id: 'cache-credential:redis', type: 'create', verified: true,
     resource: { kind: 'secret', name: ENGINE_CACHE_URL_KEY, provider: 'gcp' },
@@ -766,7 +853,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // Array order matters: prerequisites precede the engine segment so it runs only once they complete.
-  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...cacheCredentialActions, ...domainAfter, ...deletes, ...domainRemovals];
+  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...deletes, ...domainRemovals];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -895,6 +982,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         return result;
       }
       if (operation === ENGINE_CACHE_CREDENTIAL_OPERATION) return ensureCacheCredential(token, action);
+      if (operation === ENGINE_STORAGE_S3_KEY_OPERATION) return ensureStorageS3Key(token, action);
       if (operation === ENGINE_DATABASE_CREDENTIAL_OPERATION) {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
           return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
@@ -966,6 +1054,10 @@ async function recordServiceBindings(
       const remaining = (engine.domains ?? []).filter((entry) => entry !== domain);
       // A removed mapping keeps the domain recorded until its DNS is removed too.
       if (member.type !== 'destroy') engine = { ...engine, domains: [...remaining, domain].sort() };
+      continue;
+    }
+    if (member.id === 'release-job:migrations') {
+      engine = member.type === 'destroy' ? { ...engine, releaseJob: undefined } : { ...engine, releaseJob: serviceResourceName(context, environmentName, 'release-command') };
       continue;
     }
     if (member.id === 'cache:redis') {
@@ -1044,14 +1136,26 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
 
   // A release is a recorded plan run executed under the same per-environment
   // lock as infrastructure applies, so the two can never interleave.
-  const actions: PlanAction[] = selected.map((name) => ({
+  const releaseCommand = releaseCommandFor(environmentSpec!);
+  const releaseJob = (context.environment.platformBindings as { engine?: EngineBinding }).engine?.releaseJob;
+  if (releaseCommand && !releaseJob) return { blocked: 'The release-command job does not exist yet. Run hv_plan scope="infrastructure" and hv_apply first.' };
+  const primaryService = selected.find((name) => environmentSpec!.services[name]?.workloadKind === 'web' || environmentSpec!.services[name]?.workloadKind === undefined) ?? selected[0]!;
+  const actions: PlanAction[] = [
+    ...(releaseCommand ? [{
+      id: 'release-command:migrations', type: 'update' as const, verified: true,
+      resource: { kind: 'service' as const, name: primaryService, provider: 'gcp' },
+      reason: `Run the release command (${releaseCommand}) with the new code before any service switches.`,
+      metadata: { operation: ENGINE_RELEASE_OPERATION, gcpProjectId: context.gcpProjectId, resource: releaseJob, workloadKind: 'release-command' },
+    }] : []),
+    ...selected.map((name): PlanAction => ({
     id: `release:${name}`,
     type: 'update',
     resource: { kind: 'service', name, provider: 'gcp' },
     verified: true,
     reason: `Build ${params.revision ?? 'main'} and release it to ${name}; only the running image changes.`,
     metadata: { operation: ENGINE_RELEASE_OPERATION, gcpProjectId: context.gcpProjectId, resource: workloads.get(name)!.resource, workloadKind: workloads.get(name)!.kind },
-  }));
+    ...(releaseCommand ? { dependsOn: ['release-command:migrations'] } : {}),
+  }))];
   const document = {
     kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
     observedFingerprint: null, actions, unmanaged: [], warnings: [],
@@ -1062,13 +1166,20 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   runRepo.updateStatus(planRun.id, 'succeeded');
 
   const results: EngineReleaseResult[] = [];
+  const builtImages = new Map<string, { imageUri: string; logsUrl?: string }>();
   const execution = await new ConvergeExecutor().execute({
     planRunId: planRun.id,
     currentSpecRevision: params.specRevision,
     handler: async (action) => {
       const name = action.resource.name;
+      if (action.metadata?.workloadKind === 'release-command') {
+        const outcome = await runReleaseCommand(context, params.project, spec, environmentName, name, String(action.metadata.resource), source, builtImages);
+        return outcome.status === 'released'
+          ? { success: true, message: outcome.message }
+          : { success: false, ...(outcome.status === 'unknown' ? { status: 'pending' as const } : {}), message: outcome.message, error: outcome.message };
+      }
       const result = await releaseOne(context, params.project, spec, environmentName, name, String(action.metadata?.resource), source,
-        action.metadata?.workloadKind === 'jobs' ? 'jobs' : 'services');
+        action.metadata?.workloadKind === 'jobs' ? 'jobs' : 'services', builtImages);
       results.push(result);
       const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}), ...(result.health ? { health: result.health } : {}) };
       if (result.status === 'released') return { success: true, message: result.message, data };
@@ -1110,16 +1221,13 @@ async function resolveReleaseSource(params: { project: Project; spec: ProjectSpe
   return { repoUrl, summary: { kind: 'git-remote', revision: params.revision ?? 'main' } };
 }
 
-async function releaseOne(
-  context: EngineContext,
-  project: Project,
-  spec: ProjectSpec,
-  environmentName: string,
-  name: string,
-  resource: string,
-  source: ReleaseSource,
-  kind: WorkloadKind = 'services'
-): Promise<EngineReleaseResult> {
+/** Builds (or reuses) the digest-pinned image for one service from the release source. */
+async function buildServiceImage(
+  context: EngineContext, project: Project, spec: ProjectSpec, environmentName: string, name: string,
+  source: ReleaseSource, builtImages: Map<string, { imageUri: string; logsUrl?: string }>
+): Promise<{ success: true; imageUri: string; logsUrl?: string } | { success: false; error: string; logsUrl?: string }> {
+  const cached = builtImages.get(name);
+  if (cached) return { success: true, ...cached };
   const serviceSpec = spec.environments[environmentName]!.services[name]!;
   const now = new Date();
   const service: Service = {
@@ -1134,8 +1242,62 @@ async function releaseOne(
     ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId) })
     : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
-    return { service: name, status: 'failed', message: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}) };
+    return { success: false, error: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   }
+  const built = { imageUri: build.imageUri, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
+  builtImages.set(name, built);
+  return { success: true, ...built };
+}
+
+/**
+ * Runs the reviewed release command in its job with the new image and waits for
+ * the execution. Services switch only after it succeeds.
+ */
+async function runReleaseCommand(
+  context: EngineContext, project: Project, spec: ProjectSpec, environmentName: string, primaryService: string,
+  job: string, source: ReleaseSource, builtImages: Map<string, { imageUri: string; logsUrl?: string }>
+): Promise<Pick<EngineReleaseResult, 'status' | 'message'>> {
+  const build = await buildServiceImage(context, project, spec, environmentName, primaryService, source, builtImages);
+  if (!build.success) return { status: 'failed', message: build.error };
+  const token = await context.adapter.engineAccessToken();
+  const updated = await releaseJobImage(token, context, job, build.imageUri);
+  if (updated.status !== 'released') return updated;
+  const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/jobs/${job}:run`;
+  let started: Response;
+  try {
+    started = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' });
+  } catch {
+    return { status: 'unknown', message: 'Starting the release command had an unknown outcome. Check hv_logs before retrying.' };
+  }
+  if (!started.ok) return { status: 'failed', message: `The release command could not start (HTTP ${started.status}): ${await googleErrorMessage(started)}` };
+  let operation = await started.json() as { name?: string; done?: boolean; error?: { message?: string }; response?: { succeededCount?: number; failedCount?: number } };
+  const deadline = Date.now() + 30 * 60 * 1000;
+  while (!operation.done && operation.name && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    const polled = await fetchWithRetry(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${await context.adapter.engineAccessToken()}` } });
+    if (polled.ok) operation = await polled.json() as typeof operation;
+  }
+  if (!operation.done) return { status: 'unknown', message: 'The release command is still running. Check hv_logs, then run hv_deploy again.' };
+  if (operation.error || (operation.response?.failedCount ?? 0) > 0) {
+    return { status: 'failed', message: `The release command failed: ${operation.error?.message ?? 'see hv_logs for the job output'}. No service was switched.` };
+  }
+  return { status: 'released', message: 'The release command finished successfully.' };
+}
+
+async function releaseOne(
+  context: EngineContext,
+  project: Project,
+  spec: ProjectSpec,
+  environmentName: string,
+  name: string,
+  resource: string,
+  source: ReleaseSource,
+  kind: WorkloadKind = 'services',
+  builtImages: Map<string, { imageUri: string; logsUrl?: string }> = new Map()
+): Promise<EngineReleaseResult> {
+  const serviceSpec = spec.environments[environmentName]!.services[name]!;
+  const build = await buildServiceImage(context, project, spec, environmentName, name, source, builtImages);
+  if (!build.success) return { service: name, status: 'failed', message: build.error, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}) };
   const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri, kind);
   const result: EngineReleaseResult = { service: name, imageUri: build.imageUri, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}), ...released };
   if (released.status === 'released' && released.url && serviceSpec.workloadKind !== 'worker') {
@@ -1156,6 +1318,16 @@ async function releaseOne(
   return result;
 }
 
+/** Google's error message (never request content), bounded for display. */
+async function googleErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = await response.json() as { error?: { message?: string } };
+    return (body.error?.message ?? 'no details').slice(0, 300);
+  } catch {
+    return 'no details';
+  }
+}
+
 /** Image-only, etag-guarded update of a scheduled job's task template; the next scheduled run uses it. */
 async function releaseJobImage(token: string, context: EngineContext, resource: string, imageUri: string): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
   const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/jobs/${resource}`;
@@ -1164,13 +1336,17 @@ async function releaseJobImage(token: string, context: EngineContext, resource: 
   const containers = workloadContainers('jobs', observed.value).map((container) => ({ ...container }));
   if (containers.length !== 1) return { status: 'failed', message: `Job ${resource} must have exactly one container for an image release.` };
   containers[0]!.image = imageUri;
-  const patch = await fetchWithRetry(`${url}?updateMask=template.template.containers`, {
+  // Jobs have no update mask: send the observed job back unchanged except for the image.
+  // The etag still makes a concurrent change fail this release instead of being overwritten.
+  const job = observed.value;
+  const body = { ...job, template: { ...job.template, template: { ...job.template?.template, containers } } };
+  const patch = await fetchWithRetry(url, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ etag: observed.value.etag, template: { template: { containers } } }),
+    body: JSON.stringify(body),
   });
   if (patch.status === 409 || patch.status === 412) return { status: 'failed', message: `Job ${resource} changed while releasing. Nothing was overwritten; retry hv_deploy.` };
-  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the job image release (HTTP ${patch.status}).` };
+  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the job image release (HTTP ${patch.status}): ${await googleErrorMessage(patch)}` };
   let operation = await patch.json() as { name?: string; done?: boolean; error?: { message?: string } };
   for (let attempt = 0; attempt < 100 && !operation.done && operation.name; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -1206,7 +1382,7 @@ async function releaseImage(token: string, context: EngineContext, resource: str
   if (patch.status === 409 || patch.status === 412) {
     return { status: 'failed', message: `Service ${resource} changed while releasing (concurrent update). Nothing was overwritten; retry hv_deploy.` };
   }
-  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the image release (HTTP ${patch.status}).` };
+  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the image release (HTTP ${patch.status}): ${await googleErrorMessage(patch)}` };
   const operation = await patch.json() as { name?: string; done?: boolean; error?: { message?: string } };
   const deadline = Date.now() + 10 * 60 * 1000;
   let done = operation.done === true;

@@ -23,7 +23,7 @@ describe('keyless release workflow', () => {
     expect(parsed.on.push.branches).toEqual(['main']);
     expect(parsed.concurrency).toEqual({ group: 'hypervibe-release-staging', 'cancel-in-progress': false });
     const release = parsed.jobs.release.steps.find((step: { name?: string }) => step.name === 'Release web');
-    expect(release.run).toContain("const mask = isJob ? 'template.template.containers' : 'template.containers';");
+    expect(release.run).toContain("base + '?updateMask=template.containers'");
     expect(release.run).toContain('{ etag: current.etag, template: { containers } }');
     expect(release.run).toContain('node release.mjs web-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} /health services');
   });

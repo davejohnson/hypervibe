@@ -131,7 +131,12 @@ export interface GcpCloudRunEngineInput {
   queues?: Array<{ name: string; topicId: string; ackDeadlineSeconds?: number }>;
   /** Queues this environment previously created that are no longer desired. */
   retiredQueues?: string[];
+  /** One-off job that runs the release (migration) command before services switch images. */
+  releaseJob?: GcpCloudRunServiceInput;
+  retiredReleaseJob?: boolean;
 }
+
+export const RELEASE_JOB_KEY = 'release_command';
 
 export function queueEngineKey(name: string): string {
   return `queue_${name.replace(/[^a-z0-9]/g, '_')}`;
@@ -154,7 +159,15 @@ export interface GcpStorageInput {
   location: string;
   /** Services that receive the gcs-native-adc-v1 runtime variables. */
   injectInto: string[];
+  /**
+   * S3-compatible access through Cloud Storage's XML API. The access key itself is a
+   * Hypervibe-owned secret referenced by services; only non-secret settings live here.
+   */
+  s3?: { wired: boolean };
 }
+
+/** Variables S3-SDK apps read, pointed at Cloud Storage's S3-compatible endpoint. */
+export const S3_COMPATIBLE_SECRET_KEYS = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const;
 
 export function storageEngineKey(name: string): string {
   return `storage_${name.replace(/[^a-z0-9]/g, '_')}`;
@@ -226,6 +239,12 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
     for (const [name, value] of Object.entries({
       OBJECT_STORAGE_PROVIDER: 'gcs', OBJECT_STORAGE_BUCKET: reference,
       GOOGLE_CLOUD_PROJECT: input.projectId, GOOGLE_CLOUD_STORAGE_BUCKET: reference,
+      ...(bucket.s3?.wired ? {
+        AWS_ENDPOINT_URL: 'https://storage.googleapis.com', AWS_DEFAULT_REGION: 'auto',
+        AWS_S3_BUCKET_NAME: reference, AWS_S3_URL_STYLE: 'path',
+        // Cloud Storage's S3 API does not accept the AWS SDK's newer default checksum headers.
+        AWS_REQUEST_CHECKSUM_CALCULATION: 'WHEN_REQUIRED', AWS_RESPONSE_CHECKSUM_VALIDATION: 'WHEN_REQUIRED',
+      } : {}),
     })) {
       if (env.some((entry) => entry.name === name)) throw new Error(`Environment variable ${name} conflicts with storage ${bucket.name}.`);
       env.push({ name, value });
@@ -301,7 +320,8 @@ function addScheduledJob(
   schedules: Record<string, unknown>,
   jobIam: Record<string, unknown>
 ): void {
-  if (!service.schedule || !/^(\S+\s+){4}\S+$/.test(service.schedule.trim())) throw new Error(`Scheduled job ${service.logicalName} needs a five-field cron schedule.`);
+  const scheduled = service.workload === 'job';
+  if (scheduled && (!service.schedule || !/^(\S+\s+){4}\S+$/.test(service.schedule.trim()))) throw new Error(`Scheduled job ${service.logicalName} needs a five-field cron schedule.`);
   if (!service.jobCommand?.trim()) throw new Error(`Scheduled job ${service.logicalName} needs an explicit command (startCommand).`);
   // Reuse the service builder for env, secrets and database wiring, then reshape it as a job.
   const base = serviceResource(input, { ...service, workload: 'worker' }) as { labels: unknown; template: Array<Record<string, unknown>> };
@@ -329,11 +349,12 @@ function addScheduledJob(
     }],
     lifecycle: [{ ignore_changes: ['template[0].template[0].containers[0].image', 'client', 'client_version'] }],
   };
+  if (!scheduled) return;
   schedules[`${key}_schedule`] = {
     name: `${service.resourceName}-schedule`.slice(0, 500),
     project: input.projectId,
     region: input.region,
-    schedule: service.schedule.trim(),
+    schedule: service.schedule!.trim(),
     time_zone: service.timeZone ?? 'UTC',
     attempt_deadline: '320s',
     http_target: [{
@@ -421,6 +442,12 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   if (input.database || input.retiredDatabase) {
     for (const address of DATABASE_ENGINE_ADDRESSES) resources[address] = databaseMapping;
   }
+  if (input.releaseJob) {
+    addScheduledJob(input, { ...input.releaseJob, workload: 'worker' }, RELEASE_JOB_KEY, jobs, schedules, jobIam);
+  }
+  if (input.releaseJob || input.retiredReleaseJob) {
+    resources[`google_cloud_run_v2_job.${RELEASE_JOB_KEY}`] = { actionId: 'release-job:migrations', kind: 'service', name: 'release command' };
+  }
   const redis: Record<string, unknown> = {};
   const cacheMapping: EngineResourceMapping = { actionId: 'cache:redis', kind: 'cache', name: 'redis', billable: true };
   if (input.cache) {
@@ -442,8 +469,6 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   if (input.cache || input.retiredCache) resources['google_redis_instance.cache'] = cacheMapping;
   const topics: Record<string, unknown> = {};
   const subscriptions: Record<string, unknown> = {};
-  const topicIam: Record<string, unknown> = {};
-  const subscriptionIam: Record<string, unknown> = {};
   for (const queue of input.queues ?? []) {
     if (!/^[a-z][a-z0-9-]{0,60}$/.test(queue.name) || !/^[A-Za-z][A-Za-z0-9._~%+-]{2,254}$/.test(queue.topicId)) throw new Error(`Queue ${queue.name} has an invalid name.`);
     if (!input.runtimeServiceAccountEmail) throw new Error('Queues require the runtime identity.');
@@ -454,15 +479,15 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       name: queue.topicId, project: input.projectId, topic: `\${google_pubsub_topic.${key}.id}`,
       ack_deadline_seconds: queue.ackDeadlineSeconds ?? 60, message_retention_duration: '604800s', labels,
     };
-    const member = `serviceAccount:${input.runtimeServiceAccountEmail}`;
-    topicIam[`${key}_publisher`] = { project: input.projectId, topic: `\${google_pubsub_topic.${key}.name}`, role: 'roles/pubsub.publisher', member };
-    subscriptionIam[`${key}_subscriber`] = { project: input.projectId, subscription: `\${google_pubsub_subscription.${key}.name}`, role: 'roles/pubsub.subscriber', member };
+    // Publish/subscribe access comes from the queue setup add-on's runtime grants. Per-queue
+    // bindings would require Pub/Sub admin for the deployment identity, which it does not get.
   }
   for (const name of [...(input.queues ?? []).map((queue) => queue.name), ...(input.retiredQueues ?? [])]) {
     const key = queueEngineKey(name);
     // Deleting a queue discards messages still waiting in it.
     const mapping: EngineResourceMapping = { actionId: `queue:${name}`, kind: 'queue', name, dataBearing: true, billable: true };
     for (const address of [`google_pubsub_topic.${key}`, `google_pubsub_subscription.${key}`,
+      // Older plans may still track these; mapping them lets their removal be reviewed.
       `google_pubsub_topic_iam_member.${key}_publisher`, `google_pubsub_subscription_iam_member.${key}_subscriber`]) resources[address] = mapping;
   }
   const buckets: Record<string, unknown> = {};
@@ -538,7 +563,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
       // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
       'jobs.tf.json': Object.keys(jobs).length ? {
-        resource: { google_cloud_run_v2_job: jobs, google_cloud_scheduler_job: schedules, google_cloud_run_v2_job_iam_member: jobIam },
+        resource: {
+          google_cloud_run_v2_job: jobs,
+          ...(Object.keys(schedules).length ? { google_cloud_scheduler_job: schedules } : {}),
+          ...(Object.keys(jobIam).length ? { google_cloud_run_v2_job_iam_member: jobIam } : {}),
+        },
       } : {},
       'cloudrun.tf.json': Object.keys(services).length ? {
         resource: {
@@ -549,10 +578,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       } : {},
       'cloudsql.tf.json': Object.keys(sql).length ? { resource: sql } : {},
       'memorystore.tf.json': Object.keys(redis).length ? { resource: { google_redis_instance: redis } } : {},
-      'pubsub.tf.json': Object.keys(topics).length ? { resource: {
-        google_pubsub_topic: topics, google_pubsub_subscription: subscriptions,
-        google_pubsub_topic_iam_member: topicIam, google_pubsub_subscription_iam_member: subscriptionIam,
-      } } : {},
+      'pubsub.tf.json': Object.keys(topics).length ? { resource: { google_pubsub_topic: topics, google_pubsub_subscription: subscriptions } } : {},
       'storage.tf.json': Object.keys(buckets).length ? {
         resource: { google_storage_bucket: buckets, google_storage_bucket_iam_member: bucketIam },
       } : {},

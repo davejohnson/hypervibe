@@ -117,7 +117,7 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
-  it('validates Pub/Sub queues with runtime-only access', async () => {
+  it('validates Pub/Sub queues (runtime access comes from the queue setup add-on)', async () => {
     const configuration = buildCloudRunConfiguration({
       projectId: 'demo-project', region: 'us-central1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
       queues: [{ name: 'emails', topicId: 'emails-abc123', ackDeadlineSeconds: 30 }],

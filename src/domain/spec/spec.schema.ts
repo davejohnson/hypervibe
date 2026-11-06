@@ -1169,6 +1169,8 @@ export const storageSpecSchema = z.object({
   injectInto: z.array(z.string().min(1)),
   /** A retained backup destination is never wired into application services. */
   purpose: z.literal('backup').optional(),
+  /** "s3": also give services S3-compatible variables (AWS_*), for apps written against S3 APIs. */
+  access: z.enum(['native', 's3']).optional(),
 }).strict().superRefine((storage, ctx) => {
   if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
     path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });

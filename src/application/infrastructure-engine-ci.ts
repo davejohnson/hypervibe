@@ -126,11 +126,18 @@ export async function grantCiReleaseAccess(params: {
     try { await addBinding(token, accountUrl, 'roles/iam.workloadIdentityUser', principal, 'POST'); break; }
     catch (error) { if (attempt >= 10) throw error; await new Promise((resolve) => setTimeout(resolve, 4000)); }
   }
+  // IAM can take a little while to recognize a brand-new service account as a policy member.
+  const withRetry = async (grant: () => Promise<void>) => {
+    for (let attempt = 0; ; attempt++) {
+      try { await grant(); return; }
+      catch (error) { if (attempt >= 10) throw error; await new Promise((resolve) => setTimeout(resolve, 4000)); }
+    }
+  };
   for (const role of CI_RELEASE_PROJECT_ROLES) {
-    await addBinding(token, `https://cloudresourcemanager.googleapis.com/v1/projects/${project}`, role, `serviceAccount:${releaseIdentity}`, 'POST');
+    await withRetry(() => addBinding(token, `https://cloudresourcemanager.googleapis.com/v1/projects/${project}`, role, `serviceAccount:${releaseIdentity}`, 'POST'));
   }
-  await addBinding(token, `https://iam.googleapis.com/v1/projects/${project}/serviceAccounts/${params.runtimeServiceAccountEmail}`,
-    'roles/iam.serviceAccountUser', `serviceAccount:${releaseIdentity}`, 'POST');
+  await withRetry(() => addBinding(token, `https://iam.googleapis.com/v1/projects/${project}/serviceAccounts/${params.runtimeServiceAccountEmail}`,
+    'roles/iam.serviceAccountUser', `serviceAccount:${releaseIdentity}`, 'POST'));
   return { projectNumber, provider: ciWorkloadIdentityProvider(projectNumber), releaseIdentity };
 }
 
@@ -157,11 +164,11 @@ const containers = ((isJob ? current.template?.template?.containers : current.te
 if (containers.length !== 1) throw new Error('Workload must have exactly one container.');
 containers[0].image = image;
 // Only the image changes; the etag makes a concurrent infrastructure change fail this release instead of being overwritten.
-const mask = isJob ? 'template.template.containers' : 'template.containers';
-const body = isJob ? { etag: current.etag, template: { template: { containers } } } : { etag: current.etag, template: { containers } };
-const patch = await call(base + '?updateMask=' + mask, { method: 'PATCH', body: JSON.stringify(body) });
+// Jobs take the whole resource back; services accept a mask limited to the containers.
+const body = isJob ? { ...current, template: { ...current.template, template: { ...current.template.template, containers } } } : { etag: current.etag, template: { containers } };
+const patch = await call(isJob ? base : base + '?updateMask=template.containers', { method: 'PATCH', body: JSON.stringify(body) });
 if (patch.status === 409 || patch.status === 412) throw new Error('The workload changed while releasing. Nothing was overwritten; re-run this workflow.');
-if (!patch.ok) throw new Error('Cloud Run rejected the release (HTTP ' + patch.status + ').');
+if (!patch.ok) throw new Error('Cloud Run rejected the release (HTTP ' + patch.status + '): ' + ((await patch.json().catch(() => ({}))).error?.message ?? 'no details'));
 let operation = await patch.json();
 for (let i = 0; i < 200 && !operation.done; i++) { await new Promise((r) => setTimeout(r, 3000)); operation = await (await call('https://run.googleapis.com/v2/' + operation.name)).json(); }
 if (!operation.done || operation.error) throw new Error('Rollout failed: ' + (operation.error?.message ?? 'did not finish'));
