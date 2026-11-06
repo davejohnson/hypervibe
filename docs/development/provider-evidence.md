@@ -15,7 +15,19 @@ for developing Hypervibe; the distributed user workflow lives in
 
 ## DG-017
 
-Before implementing a provider-facing capability, define or extend the shared contract and check it against every named supported provider in the affected registry category, using official contracts/source. Record the named provider matrix, native identity/completion/recovery differences, prerequisites, and explicit unsupported or unverified cases before adding an adapter. Do not let the first provider's API shape become the shared contract or implement a one-off provider path around it. Keep registry-completeness and shared conformance tests in normal CI so a new provider cannot silently escape that review; contract coverage does not imply implemented or live-verified support.
+Start with the smallest complete user journey on one target cloud, then extend
+it. Define the shared boundary from application intent, authorization and required
+outcomes; use official provider evidence for native identity, completion and
+failure semantics. Keep unsupported or unverified paths explicit rather than
+making the first provider's API shape the universal contract.
+
+For the OpenTofu path, verify the generated configuration, pinned provider versions,
+real engine plan/apply behavior and resulting app together. Use the real pinned
+binary for configuration and engine-boundary checks where meaningful; mocks or
+source-string assertions cannot prove generated configuration is executable.
+Do not rebuild provider schemas or custom resource CRUD for all clouds, or require
+all clouds to be live before delivering one proven path. Extend shared regression
+coverage as each capability becomes reachable.
 
 ## DG-018
 
@@ -51,8 +63,26 @@ Keep regression tests in the ordinary `npm test` acceptance gate, not only an op
 
 ## DG-069
 
-Require lifecycle contract tests for noop mutation freedom, action-scoped mutation authority, observation errors, duplicate identities, import round trips, billable/data-bearing confirmation, and idempotent deletion. Database lifecycle changes must run the same contract against Railway, Supabase, Cloud SQL, and RDS.
+Keep lifecycle boundary regressions in ordinary required CI: noop mutation
+freedom, exact action authority, stale plan rejection, present/absent/unknown
+observations, scoped identity, secret-safe results, billable/data-bearing
+confirmation, concurrency and confirmed deletion. Cover partial execution and
+uncertain retries across Hypervibe actions and the engine boundary.
+
+Run meaningful generated-configuration and real pinned-binary checks for the
+implemented engine path. Test affected retained Railway/integration clients through
+their actual transport boundary. Explicit adoption needs round-trip coverage only
+where that capability is supported and being changed; the unused GCP prototype
+does not require an import project. Do not impose an obsolete all-provider matrix
+or rewrite provider CRUD as a prerequisite for one complete cloud journey.
 
 ## DG-079
 
-Treat provider support as an evidence ladder. Schema or registry presence, adapter code, documentation, and mocked tests may establish `ready-for-live`, but they never substitute for a successful recent live lifecycle contract. Keep public docs, provider metadata, capability matrices, and live-evidence status aligned; when they disagree, preserve the lower proven status and report the gap rather than describing the feature as supported.
+Treat support as an evidence ladder for each exact capability and version.
+A schema, registry entry, generated file, adapter or mocked test does not prove
+an integrated engine path or a live deployment. Record the checks completed and
+the gaps before declaring a path ready for live validation; only successful,
+recent live evidence can establish supported behavior. Keep public documentation,
+capability metadata and evidence status aligned. When they disagree, report the
+lower proven status. Engine adoption does not carry old provider support claims
+forward automatically.

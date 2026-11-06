@@ -59,6 +59,7 @@ async function setup() {
   vi.spyOn(AdapterFactory.prototype, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: http.adapter });
   vi.spyOn(AdapterFactory.prototype, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: http.adapter as never });
   vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: database });
+  vi.spyOn(AdapterFactory.prototype, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: database });
   vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
   vi.spyOn(PlanService.prototype, 'preflight').mockReturnValue([]);
   const plan = async () => {

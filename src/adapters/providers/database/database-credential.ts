@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
-import type { IDatabaseAdapter } from '../../../domain/ports/database.port.js';
+import type { IDatabaseOperations } from '../../../domain/ports/database.port.js';
 import type { DatabaseCredentialLifecycle, DatabaseCredentialSelection, DatabaseCredentialTarget, DatabaseCredentialUpdate } from '../../../domain/ports/database-credential.port.js';
 import type { TemporaryDatabaseAccess } from '../../../domain/ports/provider.port.js';
 
@@ -54,7 +54,7 @@ function postgresScramVerifier(password: string): string {
 /** Common PostgreSQL proof/recovery boundary; providers own native reset APIs.
  * Inspection is read-only. Only apply/probe acquire existing operation-scoped
  * database access, with the provider's existing cleanup contract. */
-export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseAdapter, native: NativeOptions = {}): DatabaseCredentialLifecycle {
+export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseOperations, native: NativeOptions = {}): DatabaseCredentialLifecycle {
   async function inspect(environment: Environment, component: Component, selection: DatabaseCredentialSelection): Promise<DatabaseCredentialTarget> {
     const adapter = adapterFor();
     if (component.id !== selection.component || component.environmentId !== environment.id || environment.name !== selection.environment

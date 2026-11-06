@@ -22,11 +22,11 @@ function factory() {
   const volume = { observe: vi.fn().mockResolvedValue({ ...known, source: { ...source, provider: 'example-host', primaryExternalId: 'web-id', resourceIdentity: { volumeId: 'volume-1' } }, daily: false }), configureDaily: vi.fn() };
   const storage = { observe: vi.fn().mockResolvedValue({ ...known, source: { ...source, provider: 'example-storage', primaryExternalId: 'bucket-1' } }), configureDaily: vi.fn() };
   const adapters = {
-    getDatabaseAdapter: vi.fn().mockResolvedValue({ success: true, adapter: { name: 'example-db', dailyBackups: db } }),
+    getDatabaseOperations: vi.fn().mockResolvedValue({ success: true, adapter: { name: 'example-db', dailyBackups: db } }),
     getProviderAdapter: vi.fn().mockResolvedValue({ success: true, adapter: { name: 'example-host', serviceVolumes: { dailyBackups: volume } } }),
-    getStorageAdapter: vi.fn().mockResolvedValue({ success: true, adapter: { name: 'example-storage', dailyBackups: storage } }),
+    getStorageOperations: vi.fn().mockResolvedValue({ success: true, adapter: { name: 'example-storage', dailyBackups: storage } }),
   };
-  return { db, volume, storage, adapters: adapters as unknown as Pick<AdapterFactory, 'getDatabaseAdapter' | 'getProviderAdapter' | 'getStorageAdapter'> };
+  return { db, volume, storage, adapters: adapters as unknown as Pick<AdapterFactory, 'getDatabaseOperations' | 'getProviderAdapter' | 'getStorageOperations'> };
 }
 
 describe('default backup discovery and observation', () => {
@@ -114,15 +114,15 @@ describe('default backup discovery and observation', () => {
     const report = await observeBackupPolicy({ spec: { ...spec, backups: { mode: 'disabled', reason: 'Disposable fixtures' } }, environment, components: [component], adapterFactory: f.adapters });
     expect(report.policy).toMatchObject({ mode: 'disabled', source: 'explicit', reason: 'Disposable fixtures' });
     expect(report.resources.every(item => item.state === 'disabled')).toBe(true);
-    expect(f.adapters.getDatabaseAdapter).not.toHaveBeenCalled();
+    expect(f.adapters.getDatabaseOperations).not.toHaveBeenCalled();
     expect(f.adapters.getProviderAdapter).not.toHaveBeenCalled();
-    expect(f.adapters.getStorageAdapter).not.toHaveBeenCalled();
+    expect(f.adapters.getStorageOperations).not.toHaveBeenCalled();
   });
 
   it('distinguishes unavailable observation from unsupported capability', async () => {
     const f = factory();
     f.db.observe.mockRejectedValue(new Error('secret credential must-not-escape'));
-    vi.mocked(f.adapters.getStorageAdapter).mockResolvedValue({ success: true, adapter: { name: 'example-storage' } as never });
+    vi.mocked(f.adapters.getStorageOperations).mockResolvedValue({ success: true, adapter: { name: 'example-storage' } as never });
     const report = await observeBackupPolicy({ spec, environment, components: [component], adapterFactory: f.adapters });
     expect(report.resources.find(item => item.resource.kind === 'database')?.state).toBe('unknown');
     expect(report.resources.find(item => item.resource.kind === 'storage')?.state).toBe('unsupported');
@@ -157,9 +157,9 @@ describe('default backup discovery and observation', () => {
     const report = await observeBackupPolicy({ spec, components: [], adapterFactory: f.adapters });
     expect(report.resources).toHaveLength(3);
     expect(report.resources.every(item => item.state === 'unknown' && item.resource.bindingState === 'unbound')).toBe(true);
-    expect(f.adapters.getDatabaseAdapter).not.toHaveBeenCalled();
+    expect(f.adapters.getDatabaseOperations).not.toHaveBeenCalled();
     expect(f.adapters.getProviderAdapter).not.toHaveBeenCalled();
-    expect(f.adapters.getStorageAdapter).not.toHaveBeenCalled();
+    expect(f.adapters.getStorageOperations).not.toHaveBeenCalled();
   });
 
   it('keeps unbound and incomplete staged filesystems visible without observing wrong resources', async () => {

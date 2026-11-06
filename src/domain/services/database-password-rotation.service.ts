@@ -98,7 +98,7 @@ function current(project: Project, spec: ProjectSpec, descriptor: CredentialTrac
   return { environment, component, envSpec };
 }
 async function capability(project: Project, provider: string, persist?: () => void, desired?: ProjectSpec['environments'][string], retryUncertain = false, applicationDriver?: 'node-postgres') {
-  const result = await adapterFactory.getDatabaseAdapter(provider, project);
+  const result = await adapterFactory.getDatabaseOperations(provider, project);
   const native = result.success ? databaseCredentialLifecycle(result.adapter) : undefined;
   if (!native || !native.configuration && (!native.finalize || !native.inspectIssuer)) {
     throw new RotationError(`Native database-password rotation is unsupported for ${provider}: a complete SQL, issuer, reference and consumer recovery capability is required.`);

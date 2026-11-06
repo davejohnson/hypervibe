@@ -1,27 +1,18 @@
 import { z } from 'zod';
-import { resourceName } from '../../../domain/services/resource-names.js';
 import {
-  CreateBucketCommand,
-  DeleteBucketCommand,
-  DeleteObjectsCommand,
   GetBucketTaggingCommand,
   HeadBucketCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
-  ListObjectVersionsCommand,
-  PutBucketEncryptionCommand,
-  PutBucketTaggingCommand,
-  PutPublicAccessBlockCommand,
   S3Client,
-  type BucketLocationConstraint,
 } from '@aws-sdk/client-s3';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
-import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import type {
-  IStorageAdapter,
+  IStorageOperations,
   StorageContext,
   StorageCredentials,
   StorageEnsureResult,
@@ -39,7 +30,6 @@ import {
 
 const ENVIRONMENT_TAG = 'hypervibe-environment-id';
 const STORAGE_NAME_TAG = 'hypervibe-storage-name';
-const PROJECT_TAG = 'hypervibe-project';
 
 const S3StorageAuthenticationSchema = z.object({
   authMode: z.enum(['default', 'static']).default('static'),
@@ -83,29 +73,14 @@ function defaultClientFactory(credentials: S3StorageCredentials, region: string)
   return { s3: new S3Client(config), sts: new STSClient(config) };
 }
 
-function deterministicBucketName(context: StorageContext, environment: Environment, name: string): string {
-  return resourceName(name, { minLength: 3, scope: [context.accountId, environment.projectId, environment.name],
-    reservedPrefixes: ['sthree-', 'amzn-s3-demo-'] });
-}
 
-function statusCode(error: unknown): number | undefined {
-  if (!error || typeof error !== 'object') return undefined;
-  const metadata = '$metadata' in error && error.$metadata && typeof error.$metadata === 'object'
-    ? error.$metadata as { httpStatusCode?: number }
-    : undefined;
-  return metadata?.httpStatusCode;
-}
 
-function isNotFound(error: unknown): boolean {
-  const name = error instanceof Error ? error.name : '';
-  return statusCode(error) === 404 || name === 'NotFound' || name === 'NoSuchBucket';
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export class S3StorageAdapter implements IStorageAdapter {
+export class S3StorageAdapter implements IStorageOperations {
   readonly name = 's3';
   readonly capabilities = {
     kind: 'object' as const,
@@ -287,135 +262,6 @@ export class S3StorageAdapter implements IStorageAdapter {
     };
   }
 
-  async ensureBucket(
-    environment: Environment,
-    context: StorageContext,
-    name: string,
-    region: string
-  ): Promise<StorageEnsureResult> {
-    try {
-      this.assertContext(context);
-      if (region !== context.region) {
-        throw new Error(`Desired S3 region ${region} does not match connected region ${context.region}.`);
-      }
-      const bucket = deterministicBucketName(context, environment, name);
-      if (await this.bucketExists(bucket, context.accountId)) {
-        const tags = await this.bucketTags(bucket);
-        if (tags[ENVIRONMENT_TAG] !== environment.id || tags[STORAGE_NAME_TAG] !== name) {
-          throw new Error(`S3 bucket ${bucket} exists but is not owned by this Hypervibe storage binding.`);
-        }
-        try {
-          await this.configurePrivateBucket(bucket, environment, context, name, false);
-        } catch (error) {
-          return {
-            receipt: {
-              success: false,
-              message: `Failed to repair AWS S3 bucket "${bucket}" configuration`,
-              error: errorMessage(error),
-              data: {
-                externalId: bucket,
-                created: false,
-                configuration: 'unknown',
-                recoveryRequired: true,
-              },
-            },
-            externalId: bucket,
-            context,
-          };
-        }
-        return {
-          receipt: { success: true, message: `Using existing AWS S3 bucket "${bucket}"`, data: { created: false } },
-          externalId: bucket,
-          context,
-        };
-      }
-
-      await this.s3Client().send(new CreateBucketCommand({
-        Bucket: bucket,
-        ObjectOwnership: 'BucketOwnerEnforced',
-        ...(region === 'us-east-1'
-          ? {}
-          : { CreateBucketConfiguration: { LocationConstraint: region as BucketLocationConstraint } }),
-      }));
-      try {
-        await this.configurePrivateBucket(bucket, environment, context, name);
-      } catch (configurationError) {
-        try {
-          await this.s3Client().send(new DeleteBucketCommand({
-            Bucket: bucket,
-            ExpectedBucketOwner: context.accountId,
-          }));
-        } catch (rollbackError) {
-          return {
-            receipt: {
-              success: false,
-              message: `Failed to configure newly created AWS S3 bucket "${bucket}" and rollback failed`,
-              error: `${errorMessage(configurationError)}; rollback failed: ${errorMessage(rollbackError)}`,
-              data: {
-                externalId: bucket,
-                created: true,
-                rollback: 'failed',
-                recoveryRequired: true,
-              },
-            },
-            externalId: bucket,
-            context,
-          };
-        }
-        try {
-          if (await this.bucketExists(bucket, context.accountId)) {
-            return {
-              receipt: {
-                success: false,
-                message: `Failed to configure newly created AWS S3 bucket "${bucket}"; rollback is not yet confirmed`,
-                error: `${errorMessage(configurationError)}; the exact bucket still exists after rollback acknowledgement`,
-                data: {
-                  externalId: bucket,
-                  created: true,
-                  rollback: 'pending',
-                  recoveryRequired: true,
-                },
-              },
-              externalId: bucket,
-              context,
-            };
-          }
-        } catch (rollbackObservationError) {
-          return {
-            receipt: {
-              success: false,
-              message: `Failed to configure newly created AWS S3 bucket "${bucket}"; rollback state is unknown`,
-              error: `${errorMessage(configurationError)}; rollback observation failed: ${errorMessage(rollbackObservationError)}`,
-              data: {
-                externalId: bucket,
-                created: true,
-                rollback: 'unknown',
-                recoveryRequired: true,
-              },
-            },
-            externalId: bucket,
-            context,
-          };
-        }
-        return {
-          receipt: {
-            success: false,
-            message: `Failed to configure newly created AWS S3 bucket "${bucket}"; rollback was confirmed`,
-            error: errorMessage(configurationError),
-            data: { created: true, rollback: 'confirmed', recoveryRequired: false },
-          },
-        };
-      }
-      return {
-        receipt: { success: true, message: `Created private AWS S3 bucket "${bucket}"`, data: { created: true } },
-        externalId: bucket,
-        context,
-      };
-    } catch (error) {
-      return { receipt: { success: false, message: `Failed to ensure AWS S3 bucket "${name}"`, error: errorMessage(error) } };
-    }
-  }
-
   async getCredentials(
     _environment: Environment,
     context: StorageContext,
@@ -460,27 +306,6 @@ export class S3StorageAdapter implements IStorageAdapter {
     return createS3ObjectClient(await this.getCredentials(environment, context, externalId));
   }
 
-  async destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt> {
-    try {
-      this.assertContext(context);
-      if (!await this.bucketExists(externalId, context.accountId)) {
-        return { success: true, message: `AWS S3 bucket "${externalId}" is already absent` };
-      }
-      const tags = await this.bucketTags(externalId);
-      if (tags[ENVIRONMENT_TAG] !== environment.id) {
-        throw new Error(`AWS S3 bucket ${externalId} is not owned by this Hypervibe environment.`);
-      }
-      await this.emptyBucket(externalId);
-      await this.s3Client().send(new DeleteBucketCommand({ Bucket: externalId, ExpectedBucketOwner: context.accountId }));
-      if (await this.bucketExists(externalId, context.accountId)) {
-        throw new Error(`AWS S3 bucket ${externalId} deletion is not yet observable.`);
-      }
-      return { success: true, message: `Deleted AWS S3 bucket "${externalId}" and all objects` };
-    } catch (error) {
-      return { success: false, message: `Failed to delete AWS S3 bucket "${externalId}"`, error: errorMessage(error) };
-    }
-  }
-
   private connectedCredentials(): S3StorageCredentials {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     return this.credentials;
@@ -513,16 +338,6 @@ export class S3StorageAdapter implements IStorageAdapter {
     this.region = region;
   }
 
-  private async bucketExists(bucket: string, expectedOwner?: string): Promise<boolean> {
-    try {
-      await this.s3Client().send(new HeadBucketCommand({ Bucket: bucket, ...(expectedOwner ? { ExpectedBucketOwner: expectedOwner } : {}) }));
-      return true;
-    } catch (error) {
-      if (isNotFound(error)) return false;
-      throw error;
-    }
-  }
-
   private async bucketTags(bucket: string): Promise<Record<string, string>> {
     try {
       const response = await this.s3Client().send(new GetBucketTaggingCommand({ Bucket: bucket }));
@@ -533,40 +348,6 @@ export class S3StorageAdapter implements IStorageAdapter {
       if (error instanceof Error && error.name === 'NoSuchTagSet') return {};
       throw error;
     }
-  }
-
-  private async configurePrivateBucket(
-    bucket: string,
-    environment: Environment,
-    context: StorageContext,
-    name: string,
-    writeOwnershipTags = true
-  ): Promise<void> {
-    if (writeOwnershipTags) {
-      await this.s3Client().send(new PutBucketTaggingCommand({
-        Bucket: bucket,
-        Tagging: { TagSet: [
-          { Key: ENVIRONMENT_TAG, Value: environment.id },
-          { Key: STORAGE_NAME_TAG, Value: name },
-          { Key: PROJECT_TAG, Value: context.projectName ?? environment.projectId },
-        ] },
-      }));
-    }
-    await this.s3Client().send(new PutPublicAccessBlockCommand({
-      Bucket: bucket,
-      PublicAccessBlockConfiguration: {
-        BlockPublicAcls: true,
-        IgnorePublicAcls: true,
-        BlockPublicPolicy: true,
-        RestrictPublicBuckets: true,
-      },
-    }));
-    await this.s3Client().send(new PutBucketEncryptionCommand({
-      Bucket: bucket,
-      ServerSideEncryptionConfiguration: {
-        Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }],
-      },
-    }));
   }
 
   private async usage(bucket: string): Promise<{ objectCount: number; sizeBytes: number }> {
@@ -582,35 +363,6 @@ export class S3StorageAdapter implements IStorageAdapter {
       continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
     } while (continuationToken);
     return { objectCount, sizeBytes };
-  }
-
-  private async emptyBucket(bucket: string): Promise<void> {
-    let keyMarker: string | undefined;
-    let versionIdMarker: string | undefined;
-    do {
-      const response = await this.s3Client().send(new ListObjectVersionsCommand({ Bucket: bucket, KeyMarker: keyMarker, VersionIdMarker: versionIdMarker }));
-      const objects = [
-        ...(response.Versions ?? []),
-        ...(response.DeleteMarkers ?? []),
-      ].flatMap((item: { Key?: string; VersionId?: string }) => (
-        item.Key ? [{ Key: item.Key, ...(item.VersionId ? { VersionId: item.VersionId } : {}) }] : []
-      ));
-      if (objects.length > 0) {
-        await this.s3Client().send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects, Quiet: true } }));
-      }
-      keyMarker = response.IsTruncated ? response.NextKeyMarker : undefined;
-      versionIdMarker = response.IsTruncated ? response.NextVersionIdMarker : undefined;
-    } while (keyMarker);
-
-    let continuationToken: string | undefined;
-    do {
-      const response = await this.s3Client().send(new ListObjectsV2Command({ Bucket: bucket, ContinuationToken: continuationToken }));
-      const objects = (response.Contents ?? []).flatMap((item: { Key?: string }) => item.Key ? [{ Key: item.Key }] : []);
-      if (objects.length > 0) {
-        await this.s3Client().send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects, Quiet: true } }));
-      }
-      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
-    } while (continuationToken);
   }
 }
 
@@ -632,7 +384,7 @@ providerRegistry.register({
     connectionAliases: ['ecs'],
     maturity: {
       lifecycle: {
-        storage: { status: 'ready-for-live' },
+        storage: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
       },
     },
   },

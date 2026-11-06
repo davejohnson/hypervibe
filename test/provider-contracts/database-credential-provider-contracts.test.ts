@@ -7,7 +7,7 @@ import { AzurePostgresAdapter } from '../../src/adapters/providers/azure/azure-p
 import { RdsAdapter } from '../../src/adapters/providers/aws/rds.adapter.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../src/adapters/providers/railway/railway-database.factory.js';
-import type { IDatabaseAdapter } from '../../src/domain/ports/database.port.js';
+import type { IDatabaseOperations } from '../../src/domain/ports/database.port.js';
 import type { Environment } from '../../src/domain/entities/environment.entity.js';
 import type { Component } from '../../src/domain/entities/component.entity.js';
 import { RDSClient } from '@aws-sdk/client-rds';
@@ -18,13 +18,13 @@ const adapters = [new CloudSqlAdapter(), new AzurePostgresAdapter(), new RdsAdap
   createRailwayDatabaseAdapter({ hostingAdapter: new RailwayAdapter(), envRepo: { findById: () => null } as any })];
 
 it('every registered database provider has an actual database authentication rotation port', () => {
-  const registered = providerRegistry.all().filter(provider => provider.metadata.lifecycle?.databaseEngines?.includes('postgres')).map(provider => provider.metadata.name).sort();
+  const registered = providerRegistry.all().filter(provider => provider.metadata.maturity?.lifecycle?.database !== undefined).map(provider => provider.metadata.name).sort();
   expect(adapters.map(adapter => adapter.name).sort()).toEqual(registered);
   for (const adapter of adapters) expect(databaseCredentialLifecycle(adapter), adapter.name).toBeDefined();
 });
 
 const env = { id: 'local-env', name: 'production', projectId: 'project', platformBindings: {} } as Environment;
-function database(adapter: IDatabaseAdapter, externalId = 'native-db', username = 'postgres') {
+function database(adapter: IDatabaseOperations, externalId = 'native-db', username = 'postgres') {
   const component = { id: 'local-component', environmentId: env.id, externalId, type: 'postgres', bindings: { provider: adapter.name,
     providerScope: { accountId: 'account' }, username, database: 'appdb', connectionString: `postgresql://${username}:old@db.example/appdb` } } as Component;
   vi.spyOn(adapter, 'observeDatabase').mockResolvedValue({ provider: adapter.name, externalId, engine: 'postgres', status: 'running' });

@@ -175,6 +175,7 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         field: 'hosting.provider',
         provider: environmentSpec.hosting.provider,
         capability: 'hosting',
+        ...providerRegistry.lifecycleMaturity(environmentSpec.hosting.provider, 'hosting'),
         available: providerRegistry.namesForMutation('hosting'),
       });
     } else {
@@ -238,6 +239,7 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         field: 'database.provider',
         provider: environmentSpec.database.provider,
         capability: 'database',
+        ...providerRegistry.lifecycleMaturity(environmentSpec.database.provider, 'database'),
         available: providerRegistry.namesForMutation('database'),
       });
     } else if (

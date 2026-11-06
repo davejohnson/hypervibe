@@ -16,7 +16,6 @@ import { planDatabaseScopeBinding } from '../../domain/services/database-scope-b
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { resolvePlanActionAuthority } from '../../domain/plan/action-authority.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
-import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.js';
 import { projectRecoveryDatabases } from '../../domain/services/recovery-database-bindings.js';
 import { createUnresolvedDatabaseMutation } from '../../domain/ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -76,6 +75,7 @@ describe('reviewed legacy database scope binding', () => {
       buildConfig: { startCommand: 'npm start' }, envVarSpec: { required: ['PRESERVED'] } });
     const database = createRailwayDatabaseAdapter({ hostingAdapter: http.adapter, envRepo: ctx.repos.environments });
     vi.spyOn(AdapterFactory.prototype, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: http.adapter });
+    vi.spyOn(AdapterFactory.prototype, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: database });
     vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: database });
     vi.spyOn(AdapterFactory.prototype, 'getStorageAdapter').mockResolvedValue({ success: false, error: 'Unrelated archive is not configured' });
     vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
@@ -197,7 +197,7 @@ describe('reviewed legacy database scope binding', () => {
       ? Response.json({ errors: [{ message: 'synthetic unavailable scope' }] }, { status: 403 }) : undefined } : {}, true);
     if (state === 'conflicting-partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId: 'different-project' } });
     if (state === 'malformed') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
-    if (state === 'unsupported') vi.mocked(AdapterFactory.prototype.getDatabaseAdapter)
+    if (state === 'unsupported') vi.mocked(AdapterFactory.prototype.getDatabaseOperations)
       .mockResolvedValue({ success: true, adapter: { ...f.database, credentialAliases: undefined } });
     if (state === 'rotation') ctx.repos.components.updateBindings(f.component.id, { credentialRotation: { phase: 'attempted' } });
     const planned = await f.plan();
@@ -389,27 +389,21 @@ describe('reviewed legacy database scope binding', () => {
     const f = await fixture();
     f.spec.environments.staging.database!.provider = provider;
     ctx.repos.components.updateBindings(f.component.id, { provider });
-    if (provider === 'cloudsql') {
-      const cloudsql = new CloudSqlAdapter();
-      await cloudsql.connect({ projectId: 'gcp-project', credentials: JSON.stringify({ client_email: 'synthetic@example.invalid', private_key: 'synthetic-key' }) });
-      Object.assign(cloudsql, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60_000) });
-      vi.mocked(AdapterFactory.prototype.getDatabaseAdapter).mockResolvedValue({ success: true, adapter: cloudsql });
-    }
     const readsBefore = f.http.requests.length;
-    vi.mocked(AdapterFactory.prototype.getDatabaseAdapter).mockClear();
+    vi.mocked(AdapterFactory.prototype.getDatabaseOperations).mockClear();
     expect(providerRegistry.getMetadata(provider)?.lifecycle?.dailyBackups?.database === true)
-      .toBe(provider === 'railway' || provider === 'cloudsql');
+      .toBe(provider === 'railway');
     const result = await planDatabaseScopeBinding(f.context());
     expect(result.actions).toHaveLength(provider === 'railway' ? 1 : 0);
     if (provider !== 'railway') expect(result.warnings.join(' ')).toContain('could not be independently verified');
     if (provider !== 'railway') expect(f.http.requests).toHaveLength(readsBefore);
-    if (provider !== 'railway' && provider !== 'cloudsql') expect(AdapterFactory.prototype.getDatabaseAdapter).not.toHaveBeenCalled();
+    if (provider !== 'railway') expect(AdapterFactory.prototype.getDatabaseOperations).not.toHaveBeenCalled();
     expect(ctx.repos.components.findById(f.component.id)?.bindings).not.toHaveProperty('providerScope');
     expect(f.http.mutations).toEqual([]);
   });
 
   it('covers every registered database provider in the named repair review', () => {
     expect(providerRegistry.namesFor('database').sort())
-      .toEqual(['railway', 'cloudsql', 'rds', 'azure-postgres'].sort());
+      .toEqual(['railway']);
   });
 });

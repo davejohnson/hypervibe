@@ -14,7 +14,7 @@ describe('hosting maintenance provider support', () => {
   ])('%s exposes the provider-neutral reversible workload contract', (provider, adapter) => {
     expect(adapter.capabilities.supportsMaintenance).toBe(true);
     expect(supportsWorkloadMaintenance(adapter)).toBe(true);
-    expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.maintenance).toBe('managed');
+    expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.maintenance).toBe(provider === 'railway' ? 'managed' : undefined);
   });
 
   it.each([
@@ -22,6 +22,6 @@ describe('hosting maintenance provider support', () => {
   ])('%s fails closed until reversible suspension is implemented', (provider, adapter) => {
     expect(adapter.capabilities.supportsMaintenance).not.toBe(true);
     expect(supportsWorkloadMaintenance(adapter)).toBe(false);
-    expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.maintenance).toBe('unsupported');
+    expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.maintenance).toBeUndefined();
   });
 });

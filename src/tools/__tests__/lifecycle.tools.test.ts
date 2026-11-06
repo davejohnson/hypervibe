@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
@@ -17,7 +18,6 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.js';
-import { MemorystoreAdapter } from '../../adapters/providers/gcp/memorystore.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { AzurePostgresAdapter } from '../../adapters/providers/azure/azure-postgres.adapter.js';
@@ -32,6 +32,68 @@ import { databaseBootstrapRecoverySchema } from '../../domain/plan/database-boot
 import { databaseInitializationAttemptSchema } from '../../domain/plan/database-initialization.contract.js';
 import { DATABASE_INITIALIZATION_AUTH_COMMAND_HASH } from '../../domain/services/database-initialization-program.js';
 import '../../application/providers.js';
+
+// A synthetic lifecycle owner keeps generic import/cleanup safety independent of clouds.
+const fixtureDatabaseProvider = providerRegistry.get('cloudsql')!;
+providerRegistry.register({
+  ...fixtureDatabaseProvider,
+  metadata: {
+    ...fixtureDatabaseProvider.metadata, name: 'fixture-database', displayName: 'Fixture database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+  retainedCleanup: {
+    resources: ['backup'],
+    destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+  },
+});
+
+// Synthetic hosting supports only the generic lifecycle contracts under test.
+const fixtureHostingProvider = providerRegistry.get('cloudrun')!;
+for (const [name, workloadKinds] of [['fixture-hosting', ['web', 'worker', 'cron']], ['fixture-web-hosting', ['web']]] as const) {
+  providerRegistry.register({
+    ...fixtureHostingProvider,
+    metadata: {
+      ...fixtureHostingProvider.metadata, name, displayName: name,
+      lifecycle: { hosting: { workloadKinds, customDomains: 'unsupported', teardownBoundary: 'services' } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+  });
+}
+
+
+const fixtureAzureDatabaseProvider = providerRegistry.get('azure-postgres')!;
+providerRegistry.register({
+  ...fixtureAzureDatabaseProvider,
+  metadata: {
+    ...fixtureAzureDatabaseProvider.metadata, name: 'fixture-azure-database', displayName: 'Fixture scoped database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['azure-container-apps'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+});
+
+// Synthetic provider: these tests exercise generic inspection and ownership rules,
+// independently of the retired cloud cache implementation.
+class FixtureCacheAdapter {
+  async connect(_credentials: unknown): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async inspectCacheResources(_request: unknown): Promise<Record<string, unknown>> { return {}; }
+}
+providerRegistry.register({
+  metadata: {
+    name: 'fixture-cache', displayName: 'Fixture cache', category: 'cache',
+    credentialsSchema: z.object({ projectId: z.string(), credentials: z.string() }),
+    connectionAliases: ['cloudrun'],
+    lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: ['railway'] } },
+    maturity: { lifecycle: { cache: { status: 'ready-for-live', reason: 'Synthetic test provider.' } } },
+  },
+  factory: async credentials => { const adapter = new FixtureCacheAdapter(); await adapter.connect(credentials); return adapter; },
+  inspection: {
+    resources: ['cache'], defaultResource: 'cache',
+    selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'region', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId', 'region'] } },
+    inspect: (adapter, request) => (adapter as FixtureCacheAdapter).inspectCacheResources(request),
+  },
+});
 
 let tempDir: string;
 
@@ -549,7 +611,6 @@ describe('hv_inspect / hv_import', () => {
         provider: 'cloudrun',
         inspectionModes: expect.arrayContaining([
           expect.objectContaining({ resource: 'environment', mode: 'environment-forensics', acceptsLimit: true }),
-          expect.objectContaining({ resource: 'environment', mode: 'environment', acceptsLimit: false }),
         ]),
       }),
     ]));
@@ -571,7 +632,7 @@ describe('hv_inspect / hv_import', () => {
           queue: { backend: 'postgres', resources: 'application-managed' },
         }),
       });
-    expect(result.data.providers.find((entry: { provider: string }) => entry.provider === 'memorystore'))
+    expect(result.data.providers.find((entry: { provider: string }) => entry.provider === 'fixture-cache'))
       .toMatchObject({
         maturity: {
           lifecycle: {
@@ -689,16 +750,16 @@ describe('hv_inspect / hv_import', () => {
   it('hv_inspect accepts region when the provider-owned resource contract advertises it', async () => {
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         credentials: '{}',
       }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    const inspect = vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'present',
       resource: 'cache',
       caches: [{
@@ -713,7 +774,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       resource: 'cache',
       region: 'europe-west1',
       limit: 5,
@@ -728,7 +789,7 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
-  it('hv_inspect reuses a verified Cloud Run connection for Memorystore inventory', async () => {
+  it('hv_inspect reuses a verified Cloud Run connection for an aliased cache inventory', async () => {
     const connections = new ConnectionRepository();
     const connection = connections.create({
       provider: 'cloudrun',
@@ -743,9 +804,9 @@ describe('hv_inspect / hv_import', () => {
       }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    const inspect = vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'absent',
       resource: 'cache',
       caches: [],
@@ -755,13 +816,13 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       resource: 'cache',
     });
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       observation: 'absent',
       resource: 'cache',
       caches: [],
@@ -940,7 +1001,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'postgres',
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -953,7 +1014,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -974,7 +1035,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       mode: 'retained-database-cleanup',
       project: project.name,
       env: environment.name,
@@ -989,7 +1050,7 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousDatabase).toEqual({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       externalId: 'legacy-production-db',
       engine: 'postgres',
       name: 'legacy-production-db',
@@ -1134,7 +1195,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'postgres',
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope: { projectId: 'gcp-project', region: 'us-central1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -1147,7 +1208,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -1169,7 +1230,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       mode: 'retained-database-cleanup',
       project: project.name,
       env: environment.name,
@@ -1197,7 +1258,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -1210,13 +1271,13 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'present',
       resource: 'cache',
       caches: [{
@@ -1230,7 +1291,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       mode: 'retained-cache-cleanup',
       project: project.name,
       env: environment.name,
@@ -1245,7 +1306,7 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousCache).toEqual({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       externalId: 'legacy-production-cache-id',
       engine: 'redis',
       providerEngine: 'redis',
@@ -1271,7 +1332,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         providerScope: { projectId: 'gcp-project', region: 'us-central1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -1284,13 +1345,13 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'present',
       resource: 'cache',
       caches: [{
@@ -1305,7 +1366,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       mode: 'retained-cache-cleanup',
       project: project.name,
       env: environment.name,
@@ -1328,7 +1389,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -1348,7 +1409,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       mode: 'retained-resource-cleanup',
       resource: 'backup',
       project: project.name,
@@ -1364,7 +1425,7 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousResource).toEqual({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       resource: 'backup',
       externalId: 'projects/gcp-project/backups/backup-123',
       name: 'backup-123',
@@ -1421,7 +1482,7 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
-  it('hv_inspect passes only a sanitized compatible hosting scope to Azure database inventory', async () => {
+  it('hv_inspect passes only a sanitized compatible hosting scope to a compatible database inventory', async () => {
     const subscriptionId = '22222222-2222-4222-8222-222222222222';
     const resourceGroupId = `/subscriptions/${subscriptionId}/resourceGroups/hv-inspect-production`;
     const environmentId = `${resourceGroupId}/providers/Microsoft.App/managedEnvironments/hv-inspect`;
@@ -1473,7 +1534,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'azure-postgres',
+      provider: 'fixture-azure-database',
       project: project.name,
       env: 'production',
       resource: 'database',
@@ -1482,7 +1543,7 @@ describe('hv_inspect / hv_import', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
-      provider: 'azure-postgres',
+      provider: 'fixture-azure-database',
       mode: 'database',
       binding: 'missing',
       inventory: { databases: [{ name: 'selected-db' }] },
@@ -1501,7 +1562,7 @@ describe('hv_inspect / hv_import', () => {
     expect(forwardedRequest.binding).not.toHaveProperty('services');
 
     const defaultResult = await t.call('hv_inspect', {
-      provider: 'azure-postgres',
+      provider: 'fixture-azure-database',
       project: project.name,
       env: 'production',
     });
@@ -1531,7 +1592,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         credentials: '{}',
@@ -1557,7 +1618,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       project: project.name,
       env: 'production',
       region: 'europe-west1',
@@ -1565,7 +1626,7 @@ describe('hv_inspect / hv_import', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       mode: 'environment-forensics',
       project: project.name,
       environment: 'production',
@@ -1594,7 +1655,7 @@ describe('hv_inspect / hv_import', () => {
       platformBindings: { provider: 'railway' },
     });
     const connection = new ConnectionRepository().create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         credentials: '{}',
@@ -1614,7 +1675,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       project: project.name,
       env: 'production',
       limit: 1,
@@ -1643,7 +1704,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -1667,7 +1728,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       mode: 'retained-cleanup',
       project: project.name,
       env: environment.name,
@@ -1683,11 +1744,11 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(retained.data).toMatchObject({
-      retainedCleanup: { provider: 'cloudrun', project: project.name, environment: 'production' },
+      retainedCleanup: { provider: 'fixture-hosting', project: project.name, environment: 'production' },
     });
     expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as Record<string, unknown>)
       .previousHosting).toMatchObject({
-        provider: 'cloudrun',
+        provider: 'fixture-hosting',
         projectId: 'gcp-project',
         environmentId: 'us-central1',
         services: {

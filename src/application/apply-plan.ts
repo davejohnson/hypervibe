@@ -5,7 +5,7 @@ import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from 
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
 import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
-import { databaseBootstrapActionSchema, hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
+import { databaseBootstrapActionSchema, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
 import { applyDatabaseBootstrap } from '../domain/services/database-bootstrap.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
 import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
@@ -779,12 +779,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const providerValidation = firstProviderSpecValidationFailure(spec);
   const invalidSpec = providerValidation ? { kind: 'invalid_spec' as const, message: providerValidation.message,
     hint: providerValidation.hint, details: providerValidation.details } : undefined;
-  // Ordinary unsupported desired state must still stop before plan loading.
-  // Only a retained native execution warrants inspecting an exact recovery plan.
-  if (invalidSpec && !ctx.repos.environments.findByProjectId(project.id).some(candidate =>
-    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)))) {
-    return invalidSpec;
-  }
+  // Loading a plan is read-only. Inspect its scope before admitting isolated
+  // operations on existing credentials or retained execution recovery.
   const planService = new PlanService();
 
   const executor = new ConvergeExecutor();
@@ -833,7 +829,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     && ctx.repos.components.findByEnvironmentId(environment.id).some(component =>
       component.id === bootstrapAction.metadata?.componentId
       && matchesDatabaseBootstrapObservationOrCleanup(component.bindings, bootstrapAction));
-  if (invalidSpec && !observationOrCleanup) return invalidSpec;
+  if (invalidSpec && !observationOrCleanup && planScope !== 'credentials') return invalidSpec;
   if (loaded.document.inputRequired?.length) {
     return { kind: 'input_required', envName, requirements: loaded.document.inputRequired };
   }

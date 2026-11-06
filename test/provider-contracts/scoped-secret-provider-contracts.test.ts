@@ -1,7 +1,7 @@
+import { reviewedOperationProviders } from './operations-scope.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import '../../src/application/providers.js';
-import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../../src/adapters/providers/aws/ecs-express.adapter.js';
@@ -11,7 +11,7 @@ import { registryCredentialLifecycle } from '../../src/domain/ports/registry-cre
 
 // The named official-source review is in docs/scoped-secret-updates.md.
 // Native support alone does not establish implementation or live compatibility.
-const reviewed: Array<[string, Pick<IHostingAdapter, 'capabilities' | 'observe' | 'setEnvVars'>, string, boolean]> = [
+const reviewed: Array<[string, Pick<IHostingAdapter, 'capabilities'> & Partial<Pick<IHostingAdapter, 'observe' | 'setEnvVars'>>, string, boolean]> = [
   ['railway', new RailwayAdapter(), 'Railway', true],
   ['cloudrun', new CloudRunAdapter(), 'Cloud Run', false],
   ['ecs', new EcsExpressAdapter(), 'ECS Express', false],
@@ -29,8 +29,8 @@ const databaseEvidence: Record<string, [string, string]> = {
 
 describe('named-provider secret-only contract coverage', () => {
   it('requires a review for every hosting provider', () => {
-    expect(reviewed.map(([name]) => name).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
-    expect(Object.keys(databaseEvidence).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
+    expect(reviewed.map(([name]) => name).sort()).toEqual(reviewedOperationProviders('hosting'));
+    expect(Object.keys(databaseEvidence).sort()).toEqual(reviewedOperationProviders('hosting'));
   });
   it.each(reviewed)('%s explicitly admits only a verified deferred secret writer', (_name, adapter, label, implemented) => {
     expect(adapter.capabilities.supportsDeferredSecretUpdates === true).toBe(implemented);
@@ -48,7 +48,7 @@ describe('named-provider secret-only contract coverage', () => {
     const section = readFileSync('docs/runtime-credential-providers.md', 'utf8').split('## Database consumer activation evidence')[1]?.split('## Activation evidence')[0];
     const row = section?.split('\n').find(line => line.startsWith(`| ${label} |`));
     expect(typeof adapter.observe).toBe('function');
-    expect(typeof adapter.setEnvVars).toBe('function');
+    expect(typeof adapter.setEnvVars === 'function').toBe(name !== 'cloudrun');
     expect(row).toContain('https://');
     for (const boundary of databaseEvidence[name]) expect(row).toContain(boundary);
     expect(section).toContain('Both paths require complete active deployment');

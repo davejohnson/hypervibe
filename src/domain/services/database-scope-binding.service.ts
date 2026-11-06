@@ -64,7 +64,7 @@ export function currentDatabaseProvisionRecoveryComponent(context: BackupPolicyC
 export async function observeDatabaseProvisionRecovery(context: BackupPolicyContext, component: Component): Promise<DatabaseProvisionRecoveryObservation | undefined> {
   if (!context.environment) return undefined;
   try {
-    const result = await context.adapterFactory.getDatabaseAdapter(String(component.bindings.provider), context.project);
+    const result = await context.adapterFactory.getDatabaseOperations(String(component.bindings.provider), context.project);
     if (!result.success || !result.adapter || result.adapter.name !== component.bindings.provider
       || !result.adapter.provisionRecovery) return undefined;
     const observation = await result.adapter.provisionRecovery.inspect({ environment: context.environment, component });
@@ -139,7 +139,7 @@ export async function observeDatabaseRuntimeReference(context: BackupPolicyConte
   if (!registration?.metadata.lifecycle?.dailyBackups?.database
     || !registration.inspection?.selectors.database?.scopeKeys?.length) return { state: 'unsupported' as const };
   try {
-    const result = await context.adapterFactory.getDatabaseAdapter(String(component.bindings.provider), context.project);
+    const result = await context.adapterFactory.getDatabaseOperations(String(component.bindings.provider), context.project);
     if (!result.success || !result.adapter || result.adapter.name !== component.bindings.provider) return unknown;
     if (!result.adapter.observeRuntimeReferenceBinding) return { state: 'unsupported' as const };
     const observed = await result.adapter.observeRuntimeReferenceBinding(context.environment, component);

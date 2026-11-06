@@ -7,7 +7,7 @@ import { AzureBlobStorageAdapter, type AzureBlobDataPlane } from '../../../adapt
 import { createRailwayStorageAdapter } from '../../../adapters/providers/railway/railway-storage.factory.js';
 import { railwayHttpFixture, projectId, productionId, stagingId } from '../../../adapters/providers/railway/__tests__/railway-http.fixture.js';
 import type { Environment } from '../../entities/environment.entity.js';
-import type { IStorageAdapter, StorageContext } from '../../ports/storage.port.js';
+import type { IStorageOperations, StorageContext } from '../../ports/storage.port.js';
 import { openRecoveryStorage } from '../managed-backup-target.service.js';
 
 const environment: Environment = { id: 'production', name: 'production', projectId: 'app',
@@ -141,7 +141,7 @@ describe('recovery storage exact bound observation', () => {
 
   it('reads the exact Azure account/container without local UUID tags or credential reads during observation', async () => {
     const f = await azureFixture();
-    const observed = await (f.adapter as IStorageAdapter).observe(environment, f.scope, { externalId: containerId });
+    const observed = await (f.adapter as IStorageOperations).observe(environment, f.scope, { externalId: containerId });
     expect(observed).toMatchObject([{ provider: 'azureblob', externalId: containerId, instanceScope: f.scope, status: 'ready' }]);
     expect(f.requests.map(r => [r.method, r.url.pathname])).toEqual([['GET', accountId], ['GET', containerId]]);
     expect(f.dataPlaneFactory).not.toHaveBeenCalled();

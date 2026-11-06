@@ -16,7 +16,10 @@ const sources: RecoverySourceIdentity[] = [
 
 describe('shared recovery identity and point contract', () => {
   it('covers the native identity of every named database provider', () => {
-    expect(sources.map(source => source.provider).sort()).toEqual(providerRegistry.namesFor('database').sort());
+    const operationalDatabases = providerRegistry.all()
+      .filter(provider => provider.metadata.maturity?.lifecycle?.database)
+      .map(provider => provider.metadata.name).sort();
+    expect(sources.map(source => source.provider).sort()).toEqual(operationalDatabases);
   });
   it.each(sources)('represents $provider without fabricating another provider\'s coordinates', source => {
     expect(recoverySourceIdentitySchema.parse(source)).toEqual(source);

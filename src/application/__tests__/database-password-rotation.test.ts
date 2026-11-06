@@ -56,7 +56,7 @@ async function fixture(provider = 'railway') {
     probe: vi.fn(async (_e, _c, _t, replacement) => { const state = probeUnknown || skipProof ? 'unknown' : actual === replacement ? 'authenticated' : 'rejected'; skipProof = false; return { state, tested: 'synthetic fresh SQL identity proof' }; }),
     rotate: vi.fn(async (_e, _c, _t, replacement) => { actual = replacement; skipProof = sqlUnknown; return { state: sqlUnknown ? 'unknown' : 'acknowledged' }; }), configuration,
   };
-  vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: { name: provider, credentialLifecycle: lifecycle } as any });
+  vi.spyOn(adapterFactory, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: { name: provider, credentialLifecycle: lifecycle } as any });
   const observed = { projectExists: true, provider: hosting, projectId: 'project-1', environmentId: 'production-1', environmentName: environment.name, services: ['web', 'worker'].map(name => ({ name, externalId: `${name}-1`, status: 'running', envVarKeys: Object.keys(expectedHashes), envVarHashes: expectedHashes,
     deployment: { state: 'present', id: `${name}-old`, status: 'SUCCESS', activeDeploymentIds: [`${name}-old`] } })), databases: [], } as any;
   vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ observed } as any);
@@ -143,7 +143,7 @@ it('finishes remaining consumers after a committed write loses its acknowledgmen
 it('projects native authentication, exact consumers and accepted source evidence without values or fingerprints', async () => {
   const f = await composedFixture();
   const observeDatabase = vi.fn(async () => ({ provider: 'railway', externalId: f.component.externalId, engine: 'postgres', status: 'running' }));
-  vi.mocked(adapterFactory.getDatabaseAdapter).mockResolvedValue({ success: true, adapter: { name: 'railway', credentialLifecycle: f.lifecycle, observeDatabase } as any });
+  vi.mocked(adapterFactory.getDatabaseOperations).mockResolvedValue({ success: true, adapter: { name: 'railway', credentialLifecycle: f.lifecycle, observeDatabase } as any });
   const before = await credentialInventory(f.ctx, f.project, 'production');
   expect(before.roles.find(role => role.id === 'role:database-login')?.consumers).toHaveLength(5);
   expect(f.lifecycle.rotate).not.toHaveBeenCalled(); expect(f.synchronize).not.toHaveBeenCalled();

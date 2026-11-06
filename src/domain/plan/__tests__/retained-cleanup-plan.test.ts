@@ -17,6 +17,63 @@ import type { ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 import { PlanService } from '../plan.service.js';
 import { CACHE_OPERATIONS } from '../../services/cache-plan.service.js';
+import { providerRegistry, standardDatabaseRuntimeProjection } from '../../registry/provider.registry.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services'], ['fixture-project-hosting', 'project']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-database', 'fixture-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'database', credentialsSchema: z.object({}),
+      lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['database', 'backup'], defaultResource: 'database',
+      selectors: {
+        database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'databases' },
+        backup: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'backups' },
+      },
+      inspect: (adapter, request) => (adapter as { inspectBackupResources: (request: unknown) => Promise<Record<string, unknown>> }).inspectBackupResources(request),
+    },
+    databaseRuntime: standardDatabaseRuntimeProjection,
+    retainedCleanup: {
+      resources: ['backup'],
+      destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+    },
+    factory: () => { throw new Error('Synthetic database requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-cache', 'fixture-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'cache', credentialsSchema: z.object({}),
+      lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['cache'], defaultResource: 'cache',
+      selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'caches' } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic cache requires an explicit test adapter.'); },
+  });
+}
 
 const originalCwd = process.cwd();
 let project: Project;
@@ -159,9 +216,9 @@ describe('PlanService retained-cleanup scope', () => {
     ['delegated secret references', { secretRefs: { API_TOKEN: 'env:API_TOKEN' } }],
   ])('rejects incompatible %s instead of silently widening or changing the cleanup plan', async (_label, input) => {
     arrangeEnvironment('railway', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       projectId: 'old-gcp-project',
-      services: { web: { serviceId: 'old-cloudrun-web' } },
+      services: { web: { serviceId: 'old-fixture-hosting-web' } },
     });
 
     const result = await new PlanService().plan(project, 'production', {
@@ -189,7 +246,7 @@ describe('PlanService retained-cleanup scope', () => {
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       previousDatabase: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         externalId: 'legacy-production-db',
         engine: 'postgres',
         name: 'legacy-production-db',
@@ -200,7 +257,7 @@ describe('PlanService retained-cleanup scope', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'cloudsql',
+        name: 'fixture-database',
         capabilities: {
           supportedDatabases: ['postgres'],
           supportsPooling: false,
@@ -213,7 +270,7 @@ describe('PlanService retained-cleanup scope', () => {
         disconnect,
         provision: async () => { throw new Error('unused'); },
         observeDatabase: async () => ({
-          provider: 'cloudsql',
+          provider: 'fixture-database',
           engine: 'postgres',
           externalId: 'legacy-production-db',
           providerScope: { projectId: 'gcp-project', region: 'us-west1' },
@@ -229,9 +286,9 @@ describe('PlanService retained-cleanup scope', () => {
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.actions).toEqual([expect.objectContaining({
-      id: 'database:cloudsql:retained-destroy',
+      id: 'database:fixture-database:retained-destroy',
       type: 'destroy',
-      resource: { kind: 'database', name: 'postgres', provider: 'cloudsql' },
+      resource: { kind: 'database', name: 'postgres', provider: 'fixture-database' },
       verified: true,
       dataBearing: true,
       requiresConfirm: true,
@@ -335,7 +392,7 @@ describe('PlanService retained-cleanup scope', () => {
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       previousCache: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         externalId: 'projects/gcp/locations/us-west1/instances/legacy-cache',
         engine: 'redis',
         providerEngine: 'redis',
@@ -347,7 +404,7 @@ describe('PlanService retained-cleanup scope', () => {
     vi.spyOn(adapterFactory, 'getCacheAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'memorystore',
+        name: 'fixture-cache',
         capabilities: {
           supportedCaches: ['redis'],
           supportsTls: true,
@@ -360,7 +417,7 @@ describe('PlanService retained-cleanup scope', () => {
         disconnect,
         provision: async () => { throw new Error('unused'); },
         observeCache: async () => ({
-          provider: 'memorystore',
+          provider: 'fixture-cache',
           engine: 'redis',
           externalId: 'projects/gcp/locations/us-west1/instances/legacy-cache',
           providerScope: { projectId: 'gcp-project', region: 'us-west1' },
@@ -377,9 +434,9 @@ describe('PlanService retained-cleanup scope', () => {
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.actions).toEqual([expect.objectContaining({
-      id: 'cache:memorystore:retained-destroy',
+      id: 'cache:fixture-cache:retained-destroy',
       type: 'destroy',
-      resource: { kind: 'cache', name: 'redis', provider: 'memorystore' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-cache' },
       verified: true,
       dataBearing: true,
       requiresConfirm: true,
@@ -402,7 +459,7 @@ describe('PlanService retained-cleanup scope', () => {
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       previousResource: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         resource: 'backup',
         externalId: 'projects/gcp-project/backups/backup-123',
         name: 'backup-123',
@@ -411,7 +468,7 @@ describe('PlanService retained-cleanup scope', () => {
     });
     const currentObserved = await adapterFactory.getProviderAdapter('railway', project);
     const disconnect = vi.fn(async () => {});
-    vi.mocked(adapterFactory.getProviderAdapter).mockImplementation(async (provider) => provider === 'cloudsql'
+    vi.mocked(adapterFactory.getProviderAdapter).mockImplementation(async (provider) => provider === 'fixture-database'
       ? {
           success: true,
           adapter: {
@@ -436,9 +493,9 @@ describe('PlanService retained-cleanup scope', () => {
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.actions).toEqual([expect.objectContaining({
-      id: 'retained-resource:cloudsql:backup:destroy',
+      id: 'retained-resource:fixture-database:backup:destroy',
       type: 'destroy',
-      resource: { kind: 'retained-resource', name: 'backup', provider: 'cloudsql' },
+      resource: { kind: 'retained-resource', name: 'backup', provider: 'fixture-database' },
       verified: true,
       dataBearing: true,
       requiresConfirm: true,
@@ -458,7 +515,7 @@ describe('PlanService retained-cleanup scope', () => {
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       previousResource: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         resource: 'backup',
         externalId: 'projects/gcp-project/backups/backup-123',
         name: 'backup-123',
@@ -466,7 +523,7 @@ describe('PlanService retained-cleanup scope', () => {
       },
     });
     const currentObserved = await adapterFactory.getProviderAdapter('railway', project);
-    vi.mocked(adapterFactory.getProviderAdapter).mockImplementation(async (provider) => provider === 'cloudsql'
+    vi.mocked(adapterFactory.getProviderAdapter).mockImplementation(async (provider) => provider === 'fixture-database'
       ? {
           success: true,
           adapter: {
@@ -487,7 +544,7 @@ describe('PlanService retained-cleanup scope', () => {
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.actions).toEqual([expect.objectContaining({
-      id: 'retained-resource:cloudsql:backup:destroy',
+      id: 'retained-resource:fixture-database:backup:destroy',
       verified: false,
       metadata: expect.objectContaining({ blockedReason: 'retained_resource_observation_unknown' }),
     })]);
@@ -499,7 +556,7 @@ describe('PlanService retained-cleanup scope', () => {
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       previousDatabase: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         externalId: 'legacy-production-db',
         engine: 'postgres',
         name: 'legacy-production-db',
@@ -509,7 +566,7 @@ describe('PlanService retained-cleanup scope', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'cloudsql',
+        name: 'fixture-database',
         capabilities: {
           supportedDatabases: ['postgres'],
           supportsPooling: false,
@@ -522,7 +579,7 @@ describe('PlanService retained-cleanup scope', () => {
         disconnect: async () => {},
         provision: async () => { throw new Error('unused'); },
         observeDatabase: async () => ({
-          provider: 'cloudsql',
+          provider: 'fixture-database',
           engine: 'postgres',
           externalId: 'legacy-production-db',
           status: 'running',
@@ -538,7 +595,7 @@ describe('PlanService retained-cleanup scope', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.verified).toBe(false);
     expect(plan.actions).toEqual([expect.objectContaining({
-      id: 'database:cloudsql:retained-destroy',
+      id: 'database:fixture-database:retained-destroy',
       verified: false,
       metadata: expect.objectContaining({
         blockedReason: 'retained_database_observation_unknown',
@@ -548,10 +605,10 @@ describe('PlanService retained-cleanup scope', () => {
   });
 
   it.each([
-    ['service', 'railway', { provider: 'cloudrun', projectId: 'old-gcp-project', services: { web: {} } }],
-    ['services', 'railway', { provider: 'cloudrun', services: { web: { serviceId: 'old-cloudrun-web' } } }],
-    ['environment', 'cloudrun', { provider: 'railway', projectId: 'old-railway-project', services: {} }],
-    ['project', 'railway', { provider: 'ecs', services: { web: { serviceId: 'old-ecs-web' } } }],
+    ['service', 'railway', { provider: 'fixture-hosting', projectId: 'old-gcp-project', services: { web: {} } }],
+    ['services', 'railway', { provider: 'fixture-hosting', services: { web: { serviceId: 'old-fixture-hosting-web' } } }],
+    ['environment', 'fixture-hosting', { provider: 'railway', projectId: 'old-railway-project', services: {} }],
+    ['project', 'railway', { provider: 'fixture-project-hosting', services: { web: { serviceId: 'old-fixture-project-hosting-web' } } }],
   ])('rejects an incomplete retained %s-boundary identity before persisting', async (_boundary, currentProvider, previousHosting) => {
     arrangeEnvironment(currentProvider, previousHosting);
 
@@ -569,9 +626,9 @@ describe('PlanService retained-cleanup scope', () => {
     writeFileSync(path.join(root, '.env'), 'SESSION_SECRET=must-not-enter-cleanup-plan\n');
     const productionEnvPath = path.join(root, '.env.production');
     arrangeEnvironment('railway', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       projectId: 'old-gcp-project',
-      services: { web: { serviceId: 'old-cloudrun-web' } },
+      services: { web: { serviceId: 'old-fixture-hosting-web' } },
     });
 
     process.chdir(path.join(root, 'app'));
@@ -592,11 +649,11 @@ describe('PlanService retained-cleanup scope', () => {
       boundary: 'services',
       currentProvider: 'railway',
       previousHosting: {
-        provider: 'cloudrun',
+        provider: 'fixture-hosting',
         projectId: 'old-gcp-project',
         services: {
-          web: { serviceId: 'old-cloudrun-web' },
-          cron: { jobName: 'old-cloudrun-cron-job', resourceType: 'job' },
+          web: { serviceId: 'old-fixture-hosting-web' },
+          cron: { jobName: 'old-fixture-hosting-cron-job', resourceType: 'job' },
         },
       },
       expected: [
@@ -604,21 +661,21 @@ describe('PlanService retained-cleanup scope', () => {
           id: 'service:cron:previous-destroy',
           kind: 'service',
           name: 'cron',
-          provider: 'cloudrun',
-          metadata: { cleanupBoundary: 'services', serviceId: 'old-cloudrun-cron-job' },
+          provider: 'fixture-hosting',
+          metadata: { cleanupBoundary: 'services', serviceId: 'old-fixture-hosting-cron-job' },
         },
         {
           id: 'service:web:previous-destroy',
           kind: 'service',
           name: 'web',
-          provider: 'cloudrun',
-          metadata: { cleanupBoundary: 'services', serviceId: 'old-cloudrun-web' },
+          provider: 'fixture-hosting',
+          metadata: { cleanupBoundary: 'services', serviceId: 'old-fixture-hosting-web' },
         },
       ],
     },
     {
       boundary: 'environment',
-      currentProvider: 'cloudrun',
+      currentProvider: 'fixture-hosting',
       previousHosting: {
         provider: 'railway',
         projectId: 'old-railway-project',
@@ -641,11 +698,11 @@ describe('PlanService retained-cleanup scope', () => {
       boundary: 'project',
       currentProvider: 'railway',
       previousHosting: {
-        provider: 'ecs',
-        projectId: 'old-ecs-project',
+        provider: 'fixture-project-hosting',
+        projectId: 'old-fixture-project-hosting-project',
         services: {
-          web: { serviceId: 'old-ecs-web' },
-          worker: { serviceId: 'old-ecs-worker' },
+          web: { serviceId: 'old-fixture-project-hosting-web' },
+          worker: { serviceId: 'old-fixture-project-hosting-worker' },
         },
       },
       expected: [
@@ -653,22 +710,22 @@ describe('PlanService retained-cleanup scope', () => {
           id: 'service:web:previous-destroy',
           kind: 'service',
           name: 'web',
-          provider: 'ecs',
-          metadata: { cleanupBoundary: 'project', serviceId: 'old-ecs-web' },
+          provider: 'fixture-project-hosting',
+          metadata: { cleanupBoundary: 'project', serviceId: 'old-fixture-project-hosting-web' },
         },
         {
           id: 'service:worker:previous-destroy',
           kind: 'service',
           name: 'worker',
-          provider: 'ecs',
-          metadata: { cleanupBoundary: 'project', serviceId: 'old-ecs-worker' },
+          provider: 'fixture-project-hosting',
+          metadata: { cleanupBoundary: 'project', serviceId: 'old-fixture-project-hosting-worker' },
         },
         {
-          id: 'project:ecs:previous-destroy',
+          id: 'project:fixture-project-hosting:previous-destroy',
           kind: 'project',
           name: 'production',
-          provider: 'ecs',
-          metadata: { cleanupBoundary: 'project', projectId: 'old-ecs-project' },
+          provider: 'fixture-project-hosting',
+          metadata: { cleanupBoundary: 'project', projectId: 'old-fixture-project-hosting-project' },
           dependsOn: [
             'service:web:previous-destroy',
             'service:worker:previous-destroy',
@@ -728,9 +785,9 @@ describe('PlanService retained-cleanup scope', () => {
 
   it('leaves the default full plan behavior unchanged', async () => {
     arrangeEnvironment('railway', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       projectId: 'old-gcp-project',
-      services: { web: { serviceId: 'old-cloudrun-web' } },
+      services: { web: { serviceId: 'old-fixture-hosting-web' } },
     }, 'node stale.js');
 
     const result = await new PlanService().plan(project, 'production');
@@ -746,7 +803,7 @@ describe('PlanService retained-cleanup scope', () => {
     expect(plan.actions).toContainEqual(expect.objectContaining({
       id: 'service:web:previous-destroy',
       type: 'destroy',
-      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+      resource: { kind: 'service', name: 'web', provider: 'fixture-hosting' },
       metadata: expect.objectContaining({ operation: 'previousHostingDestroy' }),
     }));
   });

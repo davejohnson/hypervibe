@@ -115,6 +115,8 @@ describe('selected-environment repository reconciliation with unrelated incomple
     const configureDaily = vi.fn(() => { throw new Error('Production backup writes are not authorized'); });
     vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true,
       adapter: { name: 'railway', dailyBackups: { observe, configureDaily } } as unknown as IDatabaseAdapter });
+    vi.spyOn(AdapterFactory.prototype, 'getDatabaseOperations').mockResolvedValue({ success: true,
+      adapter: { name: 'railway', dailyBackups: { observe, configureDaily } } as unknown as IDatabaseAdapter });
     const previousBackups = previousProgram ? await compileManagedBackupFiles({ project, spec: stored.spec, environmentName: 'production' }) : { files: [], issues: [] };
     expect(previousBackups.issues).toEqual([]);
     const files = new Map(compileManagedGitHubFiles(stored.spec.github!, stored.spec.runtime, previousBackups.files)

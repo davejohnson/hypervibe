@@ -1,9 +1,10 @@
+import { reviewedOperationProviders } from './operations-scope.js';
 import { readFileSync } from 'node:fs';
 import { expect, it } from 'vitest';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { canComposeDatabasePasswordRotation, databaseCredentialLifecycle } from '../../src/domain/ports/database-credential.port.js';
-import type { IDatabaseAdapter } from '../../src/domain/ports/database.port.js';
+import type { IDatabaseOperations } from '../../src/domain/ports/database.port.js';
 import { CloudSqlAdapter } from '../../src/adapters/providers/gcp/cloudsql.adapter.js';
 import { AzurePostgresAdapter } from '../../src/adapters/providers/azure/azure-postgres.adapter.js';
 import { RdsAdapter } from '../../src/adapters/providers/aws/rds.adapter.js';
@@ -13,10 +14,10 @@ const review = JSON.parse(readFileSync(new URL('./database-password-provider-mat
 };
 
 it('reviews every registered database provider and requires complete composed rotation admission', async () => {
-  expect(review.providers.map(row => row.provider).sort()).toEqual(providerRegistry.namesFor('database').sort());
-  const railway = await providerRegistry.get('railway')!.derivedAdapters!.database!(new RailwayAdapter(), {}) as IDatabaseAdapter;
-  const adapters: Record<string, IDatabaseAdapter> = { railway, cloudsql: new CloudSqlAdapter(), rds: new RdsAdapter(), 'azure-postgres': new AzurePostgresAdapter() };
-  expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('database').sort());
+  expect(review.providers.map(row => row.provider).sort()).toEqual(reviewedOperationProviders('database'));
+  const railway = await providerRegistry.get('railway')!.derivedAdapters!.database!(new RailwayAdapter(), {}) as IDatabaseOperations;
+  const adapters: Record<string, IDatabaseOperations> = { railway, cloudsql: new CloudSqlAdapter(), rds: new RdsAdapter(), 'azure-postgres': new AzurePostgresAdapter() };
+  expect(Object.keys(adapters).sort()).toEqual(reviewedOperationProviders('database'));
   for (const row of review.providers) {
     expect(row.identity.length).toBeGreaterThan(20); expect(row.native.length).toBeGreaterThan(20); expect(row.recovery.length).toBeGreaterThan(20);
     expect(row.sources.length).toBeGreaterThanOrEqual(2);

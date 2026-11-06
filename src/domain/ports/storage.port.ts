@@ -237,6 +237,21 @@ export interface IStorageAdapter {
   destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt>;
 }
 
+/** Object access and inspection do not grant authority to create or delete buckets. */
+export type IStorageOperations = Omit<IStorageAdapter, 'ensureBucket' | 'destroyBucket'>;
+
+export function supportsStorageOperations(value: unknown): value is IStorageOperations {
+  if (!value || typeof value !== 'object') return false;
+  const adapter = value as Partial<IStorageOperations>;
+  return typeof adapter.name === 'string'
+    && typeof adapter.connect === 'function'
+    && typeof adapter.verify === 'function'
+    && typeof adapter.ensureContext === 'function'
+    && typeof adapter.observe === 'function'
+    && typeof adapter.getRuntimeEnv === 'function'
+    && (typeof adapter.openObjectTransfer === 'function' || typeof adapter.getCredentials === 'function');
+}
+
 /** Runtime proof for every method required by the production storage contract. */
 export function supportsStorageLifecycle(value: unknown): value is IStorageAdapter {
   const adapter = value as Partial<IStorageAdapter> | null;

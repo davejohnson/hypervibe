@@ -264,7 +264,7 @@ describe('generated deployment-contract safety gate', () => {
   });
 
   it('places the parsed contract and evidence steps around every build and provider mutation', () => {
-    for (const provider of ['railway', 'cloudrun'] as const) {
+    for (const provider of ['railway'] as const) {
       for (const environmentName of ['staging', 'production'] as const) {
         const generated = workflow(provider, environmentName);
         const steps = workflowStepIdentifiers(generated.content);
@@ -297,7 +297,7 @@ describe('generated deployment-contract safety gate', () => {
 
 describe('generated deployment failure evidence', () => {
   it('adds a bounded sanitized failure artifact job for every provider and environment', () => {
-    for (const provider of ['railway', 'cloudrun'] as const) {
+    for (const provider of ['railway'] as const) {
       for (const environmentName of ['staging', 'production'] as const) {
         const generated = workflow(provider, environmentName);
 

@@ -198,6 +198,7 @@ export interface VerifyResult {
   warning?: string;
 }
 
+/** Authentication, inspection and operational access do not imply infrastructure ownership. */
 export interface IProviderAdapter {
   readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
@@ -219,35 +220,11 @@ export interface IProviderAdapter {
   /** Grants exact Job invocation and creates its trigger after fresh workload/UID/image verification. */
   activateSchedule?(service: Service, environment: Environment, options: ScheduleActivationOptions): Promise<DeployResult>;
 
-  ensureProject(
-    projectName: string,
-    environment: Environment
-  ): Promise<Receipt>;
-
   /**
    * Ensure a distinct provider environment exists inside an already-bound
    * provider project. This method must never create or replace the project.
    */
   ensureEnvironment?(environment: Environment): Promise<Receipt>;
-
-  ensureComponent(
-    type: ComponentType,
-    environment: Environment
-  ): Promise<ComponentResult>;
-
-  deploy(
-    service: Service,
-    environment: Environment,
-    envVars: Record<string, string>,
-    options?: DeploymentMutationOptions
-  ): Promise<DeployResult>;
-
-  setEnvVars(
-    environment: Environment,
-    service: Service,
-    vars: Record<string, string>,
-    options?: DeploymentMutationOptions
-  ): Promise<Receipt>;
 
   /** Delete only explicitly retired environment variable names. */
   deleteEnvVars?(
@@ -321,4 +298,12 @@ export interface IProviderAdapter {
    * hashes, databases). Implemented when capabilities.supportsObserve is true.
    */
   observe?(environment: Environment, context?: import('./observe.port.js').HostingObservationContext): Promise<import('./observe.port.js').ObservedState>;
+}
+
+/** The retained imperative lifecycle, used by Railway. New cloud lifecycle belongs to OpenTofu. */
+export interface IProviderLifecycleAdapter extends IProviderAdapter {
+  ensureProject(projectName: string, environment: Environment): Promise<Receipt>;
+  ensureComponent(type: ComponentType, environment: Environment): Promise<ComponentResult>;
+  deploy(service: Service, environment: Environment, envVars: Record<string, string>, options?: DeploymentMutationOptions): Promise<DeployResult>;
+  setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options?: DeploymentMutationOptions): Promise<Receipt>;
 }

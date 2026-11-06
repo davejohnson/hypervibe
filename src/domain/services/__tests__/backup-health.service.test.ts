@@ -30,10 +30,10 @@ describe('completed backup health', () => {
     expect(evaluateRecoveryHealth(resource, source, proof, now)).toMatchObject({ state: 'verified', source, recoveryPointId: 'point-1', freshUntil: '2026-10-01T03:00:00.000Z', restore: { state: 'verified', freshUntil: '2026-10-07T04:00:00.000Z' } });
   });
   it('does not read or mutate providers for an explicitly excluded environment', async () => {
-    const getDatabaseAdapter = vi.fn();
+    const getDatabaseOperations = vi.fn();
     const result = await observeBackupHealth({ spec: { hosting: { provider: 'railway' }, services: {}, database: { provider: 'railway', engine: 'postgres' }, backups: { mode: 'disabled', reason: 'No customer data' } } as any,
-      environment: null, components: [], adapterFactory: { getDatabaseAdapter } as any });
+      environment: null, components: [], adapterFactory: { getDatabaseOperations } as any });
     expect(result.resources).toEqual([]);
-    expect(getDatabaseAdapter).not.toHaveBeenCalled();
+    expect(getDatabaseOperations).not.toHaveBeenCalled();
   });
 });

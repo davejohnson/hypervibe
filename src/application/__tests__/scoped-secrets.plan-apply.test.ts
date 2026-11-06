@@ -21,6 +21,25 @@ import { registerCommandRegistry, type McpToolResponse } from '../../interfaces/
 import { runCli } from '../../interfaces/cli/run.js';
 import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
 import '../providers.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
 
 // Real planner/apply and Railway GraphQL serialization. Synthetic provider
 // state executes against the pinned official schema. Additive variables and
@@ -73,7 +92,7 @@ describe('explicit secret-only plans', () => {
           services: { web: { workloadKind: 'web' }, worker: { workloadKind: 'worker' } },
           database: { provider: 'railway', engine: 'postgres' },
           deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
-        production: { hosting: { provider: 'cloudrun' }, services: { web: {}, worker: { workloadKind: 'worker' } } },
+        production: { hosting: { provider: 'fixture-hosting' }, services: { web: {}, worker: { workloadKind: 'worker' } } },
       },
     });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging', platformBindings: {
@@ -85,7 +104,7 @@ describe('explicit secret-only plans', () => {
       bindings: { provider: 'railway', resourceKind: 'service', serviceId: 'staging-postgres',
         providerScope: { projectId, environmentId: stagingId } } });
     const production = ctx.repos.environments.create({ projectId: project.id, name: 'production',
-      platformBindings: { provider: 'cloudrun', projectId: 'production-cloud-project', services: { web: { serviceId: 'production-web' } } } });
+      platformBindings: { provider: 'fixture-hosting', projectId: 'production-cloud-project', services: { web: { serviceId: 'production-web' } } } });
     for (const name of ['web', 'worker']) ctx.repos.services.create({ projectId: project.id, name, buildConfig: {}, envVarSpec: {} });
     const connection = ctx.repos.connections.create({ provider: 'railway',
       credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'synthetic-contract-token' }) });

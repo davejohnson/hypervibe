@@ -34,9 +34,9 @@ function fixture() {
   const observe = vi.fn(async () => observation), configureDaily = vi.fn();
   const getCredentials = vi.fn();
   const factory = {
-    getDatabaseAdapter: vi.fn(async (provider: string) => ({ success: true, adapter: { name: provider, dailyBackups: { observe, configureDaily } } })),
+    getDatabaseOperations: vi.fn(async (provider: string) => ({ success: true, adapter: { name: provider, dailyBackups: { observe, configureDaily } } })),
     getProviderAdapter: vi.fn(),
-    getStorageAdapter: vi.fn(async (provider: string) => ({ success: true, adapter: { name: provider,
+    getStorageOperations: vi.fn(async (provider: string) => ({ success: true, adapter: { name: provider,
       ...(provider === 'railway' ? { capabilities: { recoveryCredentialScope: 'bucket' }, getCredentials } : {}) } })),
   };
   const context: BackupPolicyContext = { spec, project, environment, components: [component], adapterFactory: factory as unknown as BackupPolicyContext['adapterFactory'] };
@@ -128,7 +128,7 @@ describe('managed backup target admission', () => {
     expect(result.state).toBe('blocked');
     if (result.state !== 'blocked') return;
     expect(result.issues).toContain(`${provider} has no reviewed private-worker credential handoff for combined SQL/files recovery.`);
-    expect(f.factory.getStorageAdapter).toHaveBeenCalledWith(provider, f.context.project);
+    expect(f.factory.getStorageOperations).toHaveBeenCalledWith(provider, f.context.project);
     expect(f.getCredentials).not.toHaveBeenCalled();
   });
 
@@ -144,7 +144,7 @@ describe('managed backup target admission', () => {
   it('does not hand a broad S3 account key to the private worker merely because getCredentials exists', async () => {
     const f = fixture();
     f.spec.storage!.documents.provider = 's3'; f.storage.documents.provider = 's3';
-    f.factory.getStorageAdapter.mockImplementation(async provider => ({ success: true, adapter: { name: provider,
+    f.factory.getStorageOperations.mockImplementation(async provider => ({ success: true, adapter: { name: provider,
       ...(provider === 'railway' ? { capabilities: { recoveryCredentialScope: 'bucket' } } : {}), getCredentials: f.getCredentials } }));
     const result = await resolveManagedBackupTarget(f.context);
     expect(result.state).toBe('blocked');
