@@ -39,7 +39,8 @@ export function engineStateKey(identity: EngineStateIdentity): string {
 }
 
 /** Engine actions as reported by the engine's machine-readable plan. */
-export type EngineChangeAction = 'create' | 'update' | 'replace' | 'delete' | 'noop' | 'read';
+/** `import` adopts an existing provider resource into engine state without creating it. */
+export type EngineChangeAction = 'create' | 'update' | 'replace' | 'delete' | 'noop' | 'read' | 'import';
 
 export interface EngineResourceChange {
   /** Engine address, e.g. `google_cloud_run_v2_service.web`. */
@@ -70,6 +71,8 @@ export interface EngineConfiguration {
   files: Record<string, unknown>;
   /** Every engine address this configuration may legitimately change. */
   resources: Record<string, EngineResourceMapping>;
+  /** Existing provider resources to adopt into state: engine address -> provider import id. */
+  imports?: Record<string, string>;
 }
 
 /** Process environment for the engine plus the exact secret values to redact. */
@@ -148,4 +151,5 @@ export const ENGINE_ACTION_TYPE: Record<Exclude<EngineChangeAction, 'read'>, Pla
   replace: 'replace',
   delete: 'destroy',
   noop: 'noop',
+  import: 'update',
 };

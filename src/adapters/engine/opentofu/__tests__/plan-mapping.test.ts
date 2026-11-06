@@ -139,3 +139,18 @@ describe('Cloud SQL wiring', () => {
     expect(configuration.resources['google_sql_database_instance.db']).toMatchObject({ dataBearing: true, billable: true });
   });
 });
+
+describe('adopting interrupted creates', () => {
+  it('turns an engine import into a confirm-gated adoption action', () => {
+    const parsed = parseEnginePlan(JSON.stringify({ resource_changes: [{
+      address: 'google_sql_database_instance.db', type: 'google_sql_database_instance', mode: 'managed',
+      change: { actions: ['no-op'], importing: { id: 'projects/p/instances/db' }, before: {}, after: {} },
+    }] }));
+    expect(parsed.changes[0]?.action).toBe('import');
+    const withDb = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [],
+      database: { instanceName: 'hv-launch-db-1', databaseName: 'app', wireServices: false }, adopt: { databaseInstance: 'hv-launch-db-1' } });
+    expect((withDb.files['imports.tf.json'] as any).import).toEqual([{ to: 'google_sql_database_instance.db', id: 'projects/demo-project/instances/hv-launch-db-1' }]);
+    const { actions } = translateEnginePlan({ provider: 'gcp', parsed, configuration: withDb, segment });
+    expect(actions[0]).toMatchObject({ id: 'database:postgres', type: 'update', requiresConfirm: true, metadata: { engineAdopt: true } });
+  });
+});

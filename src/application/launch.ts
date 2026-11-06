@@ -42,6 +42,17 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
   return lines;
 }
 
+/**
+ * What a person approves. Creating something is approved by its id; replacing,
+ * deleting or adopting needs a token naming that kind of change, so approval to
+ * create a database never authorizes replacing or deleting it later.
+ */
+export function approvalToken(action: PlanAction): string {
+  if (action.type === 'replace' || action.type === 'destroy') return `${action.type}:${action.id}`;
+  if (action.metadata?.engineAdopt === true) return `adopt:${action.id}`;
+  return action.id;
+}
+
 function summarize(action: PlanAction): { id: string; change: string } {
   return { id: action.id, change: action.reason };
 }
@@ -90,11 +101,12 @@ export async function launchEnvironment(ctx: CommandContext, params: {
     const pending = planned.actions.filter((action) => action.type !== 'noop');
     const onlyCertificate = pending.length > 0 && pending.every((action) => action.metadata?.operation === 'gcpDomainReady');
     if (pending.length === 0 || (onlyCertificate && certificatePending)) break;
-    const missing = planned.confirmActions.filter((id) => !approved.has(id));
+    const tokens = planned.actions.filter((action) => planned.confirmActions.includes(action.id)).map(approvalToken);
+    const missing = tokens.filter((token) => !approved.has(token));
     if (missing.length) {
       return {
         status: 'needs_confirmation',
-        confirmActions: planned.confirmActions,
+        confirmActions: tokens,
         changes: pending.map(summarize),
         estimatedMonthlyCost: estimateMonthlyCost(environmentSpec),
       };

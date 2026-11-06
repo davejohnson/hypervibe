@@ -19,6 +19,7 @@ interface RawResourceChange {
     after_unknown?: unknown;
     before_sensitive?: unknown;
     after_sensitive?: unknown;
+    importing?: unknown;
   };
 }
 
@@ -71,7 +72,9 @@ export function parseEnginePlan(json: string): ParsedEnginePlan {
     if (typeof raw.address !== 'string' || typeof raw.type !== 'string') {
       throw new Error('OpenTofu plan contains a resource change without an address.');
     }
-    const action = classify(raw.change?.actions);
+    const classified = classify(raw.change?.actions);
+    // An import with no other change is adoption, not a no-op: state gains a resource.
+    const action = raw.change?.importing && (classified === 'noop' || classified === 'update') ? 'import' : classified;
     if (action === 'unsupported') {
       unsupported.push(raw.address);
       continue;
@@ -90,7 +93,7 @@ export function parseEnginePlan(json: string): ParsedEnginePlan {
   return { changes, unsupported };
 }
 
-const ACTION_RANK: Record<EngineChangeAction, number> = { noop: 0, read: 0, update: 1, create: 2, replace: 3, delete: 4 };
+const ACTION_RANK: Record<EngineChangeAction, number> = { noop: 0, read: 0, update: 1, import: 2, create: 3, replace: 4, delete: 5 };
 
 export interface EnginePlanTranslation {
   actions: PlanAction[];
@@ -133,6 +136,7 @@ export function translateEnginePlan(params: {
       ACTION_RANK[change.action] > ACTION_RANK[best.action] ? change : best);
     const type = ENGINE_ACTION_TYPE[dominant.action as Exclude<EngineChangeAction, 'read'>];
     const destructive = changes.some((change) => change.action === 'delete' || change.action === 'replace');
+    const adopting = changes.some((change) => change.action === 'import');
     // Field lists help review changes to existing resources; for creates and deletes they are noise.
     const diff: PlanFieldDiff[] = changes
       .filter((change) => change.action === 'update' || change.action === 'replace')
@@ -145,14 +149,15 @@ export function translateEnginePlan(params: {
       verified: true,
       reason: type === 'noop'
         ? 'OpenTofu reports no changes.'
-        : `OpenTofu will ${changes.filter((c) => c.action !== 'noop').map((c) => `${c.action} ${c.address}`).join(', ')}.`,
+        : `OpenTofu will ${changes.filter((c) => c.action !== 'noop').map((c) => c.action === 'import'
+          ? `take over the existing ${c.address} (created by an interrupted earlier apply)` : `${c.action} ${c.address}`).join(', ')}.`,
       ...(diff.length ? { diff } : {}),
       ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
       ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace') ? { billable: true } : {}),
-      // Replacing or deleting anything is never implied by approving the plan as a whole.
-      ...(destructive ? { requiresConfirm: true } : {}),
+      // Replacing, deleting or adopting anything is never implied by approving the plan as a whole.
+      ...(destructive || adopting ? { requiresConfirm: true } : {}),
       ...(type === 'noop' ? {} : {
-        metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment },
+        metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}) },
       }),
     });
   }

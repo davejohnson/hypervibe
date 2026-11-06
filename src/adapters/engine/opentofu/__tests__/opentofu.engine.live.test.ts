@@ -73,6 +73,15 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates adoption of an interrupted Cloud SQL create', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1', services: [],
+      database: { instanceName: 'hv-launch-db-1', databaseName: 'app', wireServices: false },
+      adopt: { databaseInstance: 'hv-launch-db-1' },
+    });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates an environment with no services (teardown)', async () => {
     const empty = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [] });
     expect(await engine.validate(gcpEngineBackend, empty)).toEqual({ ok: true });

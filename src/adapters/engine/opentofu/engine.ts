@@ -53,8 +53,32 @@ function failure(stage: string, run: TofuRunResult): EngineStepFailure {
     : run.interrupted === 'cancelled'
       ? 'was cancelled'
       : `exited with ${run.exitCode}`;
-  const detail = redactSensitiveString((run.stderr || run.stdout).trim().split('\n').slice(-20).join('\n'));
+  // Machine-readable runs (apply -json) report errors as diagnostics; progress lines are noise.
+  const errors = run.stdout.split('\n').flatMap((line) => {
+    try {
+      const event = JSON.parse(line) as { type?: string; diagnostic?: { severity?: string; summary?: string; detail?: string; address?: string } };
+      return event.type === 'diagnostic' && event.diagnostic?.severity === 'error'
+        ? [`${event.diagnostic.address ? `${event.diagnostic.address}: ` : ''}${event.diagnostic.summary ?? ''}${event.diagnostic.detail ? ` (${event.diagnostic.detail})` : ''}`]
+        : [];
+    } catch { return []; }
+  });
+  const detail = redactSensitiveString(errors.length ? errors.join('\n') : (run.stderr || run.stdout).trim().split('\n').slice(-20).join('\n'));
   return { ok: false, stage, error: `OpenTofu ${stage} ${reason}.${detail ? `\n${detail}` : ''}` };
+}
+
+/** Managed resource addresses recorded in `tofu show -json` state, with taint markers. */
+export function stateAddresses(json: string): Map<string, { tainted: boolean }> {
+  const result = new Map<string, { tainted: boolean }>();
+  const visit = (module: { resources?: Array<{ address?: string; mode?: string; tainted?: boolean }>; child_modules?: unknown[] } | undefined) => {
+    for (const resource of module?.resources ?? []) {
+      if (resource.address && resource.mode !== 'data') result.set(resource.address, { tainted: resource.tainted === true });
+    }
+    for (const child of module?.child_modules ?? []) visit(child as never);
+  };
+  try {
+    visit((JSON.parse(json) as { values?: { root_module?: never } }).values?.root_module);
+  } catch { /* unreadable state yields no evidence */ }
+  return result;
 }
 
 export class OpenTofuEngine {
@@ -261,12 +285,37 @@ export class OpenTofuEngine {
         return notStarted('The saved engine plan does not match the approved changes. Re-run hv_plan.');
       }
       backupState(paths, params.planId);
+      const before = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
+      const inStateBefore = before.exitCode === 0 ? stateAddresses(before.stdout) : undefined;
       const applied = await this.run({ kind: 'apply', planFile: 'saved.tfplan' }, prepared.directory, prepared.env, prepared.redact);
       const outcomes = interpretApplyEvents(applied.stdout, params.approvedAddresses);
       const diagnostics: string[] = [];
-      if (applied.exitCode !== 0 || applied.interrupted) {
-        // Only explicit completion events prove success; started work stays unknown.
-        diagnostics.push(failure('apply', applied).error);
+      const succeeded = applied.exitCode === 0 && !applied.interrupted;
+      if (!succeeded) diagnostics.push(failure('apply', applied).error);
+      // State is the engine's own record of what exists. Use it to settle addresses the event
+      // stream left open (imports emit no completion event; interruptions lose events).
+      const settled = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
+      if (settled.exitCode === 0) {
+        const inState = stateAddresses(settled.stdout);
+        const planned = new Map(parsed.changes.map((change) => [change.address, change.action]));
+        for (const address of params.approvedAddresses) {
+          if (outcomes[address] === 'succeeded' || outcomes[address] === 'failed') continue;
+          const action = planned.get(address);
+          const after = inState.get(address);
+          const existedBefore = inStateBefore?.has(address);
+          if (after?.tainted && !inStateBefore?.get(address)?.tainted) {
+            outcomes[address] = 'failed';
+          } else if ((action === 'create' || action === 'import') && existedBefore === false && after) {
+            // Appeared in state during this apply: the engine created or adopted it.
+            outcomes[address] = 'succeeded';
+          } else if (action === 'delete' && existedBefore === true && !after) {
+            outcomes[address] = 'succeeded';
+          } else if (succeeded && action === 'update' && after) {
+            outcomes[address] = 'succeeded';
+          }
+        }
+      } else {
+        diagnostics.push('The engine state could not be read after apply; outcomes without explicit evidence remain unknown.');
       }
       return { outcomes, diagnostics };
     } finally {

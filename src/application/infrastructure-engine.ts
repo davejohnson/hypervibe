@@ -419,6 +419,61 @@ async function ensureDatabaseCredential(token: string, action: PlanAction): Prom
   return { success: true, message: `Database login ${user} is set and its connection URL is stored in ${secretId}.`, data: { connectionName: instance.connectionName } };
 }
 
+// ---------------------------------------------------------------- Interrupted creates
+
+/** Database identity of the most recent engine plan that an apply actually attempted. */
+function lastAttemptedDatabaseInstance(environmentId: string): string | undefined {
+  const runs = new RunRepository();
+  for (const run of runs.findByEnvironmentId(environmentId, 100)) {
+    if (run.type !== 'apply') continue;
+    const planRunId = (run.plan as { planRunId?: unknown } | undefined)?.planRunId;
+    if (typeof planRunId !== 'string') continue;
+    const name = (runs.findById(planRunId)?.plan as { engine?: { database?: { instanceName?: unknown } } } | undefined)?.engine?.database?.instanceName;
+    if (typeof name === 'string') return name;
+  }
+  return undefined;
+}
+
+/**
+ * Finds resources the engine is about to create that already exist on Google
+ * and carry Hypervibe's ownership evidence (recorded identity plus labels).
+ * Anything with the same name but without that evidence blocks the plan.
+ */
+async function findOwnLeftovers(
+  token: string,
+  context: EngineContext,
+  environmentName: string,
+  actions: PlanAction[],
+  instanceName: string | undefined,
+  storageNames: string[]
+): Promise<{ databaseInstance?: string; buckets: string[] } | { blocked: string }> {
+  const creating = new Set(actions.filter((action) => action.type === 'create').map((action) => action.id));
+  const result: { databaseInstance?: string; buckets: string[] } = { buckets: [] };
+  if (instanceName && creating.has('database:postgres')) {
+    const response = await sqlAdmin(token, context.gcpProjectId, `instances/${instanceName}`);
+    if (response.ok) {
+      const instance = await response.json() as { settings?: { userLabels?: Record<string, string> } };
+      if (instance.settings?.userLabels?.['managed-by'] !== 'hypervibe') {
+        return { blocked: `A Cloud SQL instance named ${instanceName} exists but is not managed by Hypervibe.` };
+      }
+      result.databaseInstance = instanceName;
+    } else if (response.status !== 404) {
+      return { blocked: `Cloud SQL returned HTTP ${response.status} while checking ${instanceName}; Hypervibe will not create a possible duplicate.` };
+    }
+  }
+  for (const name of storageNames) {
+    if (!creating.has(`storage:${name}`)) continue;
+    const bucket = engineBucketName(context.gcpProjectId, environmentName, name);
+    const response = await fetch(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (response.status === 404) continue;
+    if (!response.ok) return { blocked: `Bucket ${bucket} could not be checked (HTTP ${response.status}); it may belong to someone else.` };
+    const labels = (await response.json() as { labels?: Record<string, string> }).labels ?? {};
+    if (labels['managed-by'] !== 'hypervibe' || labels['hv-storage'] !== name) return { blocked: `Bucket ${bucket} exists but is not managed by Hypervibe.` };
+    result.buckets.push(name);
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------- Plan
 
 export interface InfrastructurePlanResult {
@@ -469,7 +524,9 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   // Database: OpenTofu owns the instance; Hypervibe owns the login and the URL secret.
   const databaseSpec = environmentSpec!.database;
   const engineBinding = (context.environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
+  // Reuse a recorded identity before inventing one: an interrupted create may have succeeded on Google.
   const instanceName = engineBinding.database?.instanceName
+    ?? lastAttemptedDatabaseInstance(context.environment.id)
     ?? `hv-${environmentName}-db-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const databaseSecretId = engineSecretId(environmentName, ENGINE_DATABASE_URL_KEY);
   let databaseCredentialReady = false;
@@ -502,7 +559,9 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if (!binary.ok) return { blocked: [binary.error] };
   const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
   const boundServices = Object.keys((context.environment.platformBindings as { services?: Record<string, unknown> }).services ?? {});
-  const configuration = buildCloudRunConfiguration({
+  const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
+    ...(adopt ? { adopt } : {}),
+    environmentId: context.environment.id,
     ...buildEngineInput(spec, environmentName, {
       ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
       databaseWired: databaseCredentialReady,
@@ -518,9 +577,21 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
-  const planId = crypto.randomUUID();
-  const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+  let configuration = configure();
+  let planId = crypto.randomUUID();
+  let planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
+  // A create for something that already exists means engine state lost track of it (for example,
+  // an apply interrupted mid-create). Adopt it only with proof it is ours; otherwise block.
+  const leftovers = await findOwnLeftovers(token, context, environmentName, planned.actions, databaseSpec ? instanceName : undefined,
+    Object.keys(environmentSpec!.storage ?? {}));
+  if ('blocked' in leftovers) return { blocked: [leftovers.blocked] };
+  if (leftovers.databaseInstance || leftovers.buckets.length) {
+    configuration = configure({ ...(leftovers.databaseInstance ? { databaseInstance: leftovers.databaseInstance } : {}), buckets: leftovers.buckets });
+    planId = crypto.randomUUID();
+    planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+    if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
+  }
   if (planned.blockers.length) return { blocked: planned.blockers };
 
   const secretIds = secretActions.filter((a) => a.type !== 'noop').map((a) => a.id);
@@ -678,6 +749,14 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
           outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])),
           diagnostics: ['blocked' in current ? current.blocked : 'A service changed since this plan (for example, a release). Nothing was applied; re-run hv_plan so the new state is kept.'],
         };
+      }
+      // Record the attempted database identity first, so an interrupted create is found, not duplicated.
+      if (reviewed.database?.instanceName && members.some((member) => member.id === 'database:postgres' && member.type !== 'destroy')) {
+        const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        const engineBinding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
+        ctx.repos.environments.updatePlatformBindings(current.id, {
+          engine: { ...engineBinding, kind: 'opentofu', database: { instanceName: reviewed.database.instanceName } },
+        });
       }
       const outcome = await engine.apply({
         backend: gcpEngineBackend, auth: context.auth, state: context.state, planId: reviewed.planId,

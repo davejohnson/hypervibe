@@ -110,6 +110,13 @@ export interface GcpCloudRunEngineInput {
   /** Buckets this environment previously created that are no longer desired. */
   retiredStorage?: string[];
   runtimeServiceAccountEmail?: string;
+  /**
+   * Existing resources Hypervibe itself attempted to create (exact recorded
+   * identity and ownership label) that engine state does not track yet.
+   */
+  adopt?: { databaseInstance?: string; buckets?: string[] };
+  /** Environment id stamped on owned resources so adoption can prove ownership. */
+  environmentId?: string;
 }
 
 export interface GcpStorageInput {
@@ -288,7 +295,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
         availability_type: 'ZONAL',
         ip_configuration: [{ ipv4_enabled: true }],
         backup_configuration: [{ enabled: true, point_in_time_recovery_enabled: true }],
-        user_labels: { 'managed-by': 'hypervibe' },
+        user_labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
       }],
     } };
     sql.google_sql_database = { app: {
@@ -318,7 +325,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       public_access_prevention: 'enforced',
       // Never delete objects implicitly: a non-empty bucket blocks deletion until the user empties it.
       force_destroy: false,
-      labels: { 'managed-by': 'hypervibe', 'hv-storage': bucket.name },
+      labels: { 'managed-by': 'hypervibe', 'hv-storage': bucket.name, ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
     };
     bucketIam[`${key}_runtime`] = {
       bucket: `\${google_storage_bucket.${key}.name}`,
@@ -357,8 +364,20 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     resources[`google_cloud_run_v2_service.${key}`] = mapping;
     resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
   }
+  const imports: Record<string, string> = {};
+  if (input.adopt?.databaseInstance) {
+    if (input.adopt.databaseInstance !== input.database?.instanceName) throw new Error('Only the desired database instance can be adopted.');
+    imports['google_sql_database_instance.db'] = `projects/${input.projectId}/instances/${input.adopt.databaseInstance}`;
+  }
+  for (const name of input.adopt?.buckets ?? []) {
+    const bucket = (input.storage ?? []).find((entry) => entry.name === name);
+    if (!bucket) throw new Error(`Only desired storage can be adopted (${name}).`);
+    imports[`google_storage_bucket.${storageEngineKey(name)}`] = bucket.bucketName;
+  }
   return {
+    ...(Object.keys(imports).length ? { imports } : {}),
     files: {
+      ...(Object.keys(imports).length ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id })) } } : {}),
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
       // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
       'cloudrun.tf.json': Object.keys(services).length ? {
