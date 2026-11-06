@@ -194,7 +194,9 @@ export async function applyCloudRetirement(input: { project: Project; environmen
     if (response.planDigest !== proof.response.planDigest
       || !isDeepStrictEqual(cloudRetirementActionIds(response), cloudRetirementActionIds(proof.response))) return failure(true);
     selected.save('observed', response);
-    return { success: cloudRetirementComplete(response), ...(!cloudRetirementComplete(response) ? { status: response.status === 'pending' ? 'pending' as const : 'blocked' as const } : {}),
-      message: cloudRetirementHint(response), data: { cloudRetirement: response } };
+    return { success: cloudRetirementComplete(response), ...(!cloudRetirementComplete(response) ? { status: ['ready', 'pending'].includes(response.status) ? 'pending' as const : 'blocked' as const } : {}),
+      message: response.status === 'ready'
+        ? 'Cleanup paused at a saved checkpoint. Inspect hv_status, then create a fresh hv_plan and apply its exact confirmed continuation. The same owner approval remains in effect.'
+        : cloudRetirementHint(response), data: { cloudRetirement: response } };
   } catch { return failure(sent); }
 }
