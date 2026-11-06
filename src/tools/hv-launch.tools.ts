@@ -1,5 +1,5 @@
-import path from 'path';
 import { z } from 'zod';
+import { localRepositoryFor } from '../application/local-repository.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import type { CommandContext } from '../application/context.js';
 import { launchEnvironment } from '../application/launch.js';
@@ -28,7 +28,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       const environmentName = env?.trim() || Object.keys(specResult.spec.environments)[0] || 'staging';
       const result = await launchEnvironment(ctx, {
         project, spec: specResult.spec, specRevision: specResult.revision, environmentName,
-        ...(specResult.source?.kind === 'repo' ? { sourceDirectory: path.dirname(path.dirname(specResult.source.path)) } : {}),
+        ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
         ...(billingAccountName ? { billingAccountName } : {}),
         ...(confirmActions ? { confirmActions } : {}),
         ...(approveAccess ? { approveAccess } : {}),
@@ -41,6 +41,8 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             agentInstruction: { action: 'ask_user', message: 'Show the billing accounts by display name and ask the user to pick one. Never choose a billing account for them.' },
             next: ['hv_launch'],
           });
+        case 'ready':
+          return commandSuccess(result, { next: ['hv_launch'] });
         case 'needs_connection':
           return commandSuccess(result, {
             hint: 'A connect page is open in the user\'s browser. Share the link in case it did not open, then call hv_launch again once they finish.',

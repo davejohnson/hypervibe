@@ -1,7 +1,7 @@
-import path from 'path';
 import { isEngineManaged, releaseEngineServices } from '../application/infrastructure-engine.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
+import { localRepositoryFor } from '../application/local-repository.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -127,7 +127,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         if (supplied) {
           return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
         }
-        const sourceDirectory = specResult.source?.kind === 'repo' ? path.dirname(path.dirname(specResult.source.path)) : undefined;
+        const sourceDirectory = localRepositoryFor(project, specResult.source);
         const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });
         if ('blocked' in released) {
           return commandError('VALIDATION', released.blocked, {

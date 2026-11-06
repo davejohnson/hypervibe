@@ -38,6 +38,8 @@ export type LaunchResult =
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
+  /** Returned only when a caller asked to stop after a phase (for example migration). */
+  | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
   | { status: 'pending'; message: string; receipts: ActionReceipt[] }
   | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
@@ -95,6 +97,8 @@ async function runLaunch(ctx: CommandContext, params: {
   confirmActions?: string[];
   /** Access ids from needs_access results the user approved (for example "storage", "ci-release"). */
   approveAccess?: string[];
+  /** Stop after connecting and granting access, or after infrastructure, instead of releasing code. */
+  stopAfter?: 'prepare' | 'infrastructure';
   revision?: string;
   sourceDirectory?: string;
 }): Promise<LaunchResult> {
@@ -178,6 +182,8 @@ async function runLaunch(ctx: CommandContext, params: {
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting queue access failed.'), details: granted };
   }
 
+  if (params.stopAfter === 'prepare') return { status: 'ready', phase: 'prepare', infrastructureRounds: 0 };
+
   // 2. Infrastructure, in as many reviewed rounds as staging requires.
   const approved = new Set(params.confirmActions ?? []);
   let rounds = 0;
@@ -213,6 +219,8 @@ async function runLaunch(ctx: CommandContext, params: {
     }
     certificatePending = stillPending.length > 0;
   }
+
+  if (params.stopAfter === 'infrastructure') return { status: 'ready', phase: 'infrastructure', infrastructureRounds: rounds };
 
   // 3. Release the current code and verify it.
   const released = await releaseEngineServices(ctx, {

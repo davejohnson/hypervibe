@@ -207,14 +207,14 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     '  release:',
     '    runs-on: ubuntu-latest',
     '    steps:',
-    '      - uses: actions/checkout@v4',
+    '      - uses: actions/checkout@v7',
     '      - id: auth',
-    '        uses: google-github-actions/auth@v2',
+    '        uses: google-github-actions/auth@v3',
     '        with:',
     `          workload_identity_provider: ${input.provider}`,
     `          service_account: ${input.releaseIdentity}`,
     '          token_format: access_token',
-    '      - uses: google-github-actions/setup-gcloud@v2',
+    '      - uses: google-github-actions/setup-gcloud@v3',
     `      - run: gcloud auth configure-docker ${input.region}-docker.pkg.dev --quiet`,
   ];
   if (input.generatedDockerfile) {
