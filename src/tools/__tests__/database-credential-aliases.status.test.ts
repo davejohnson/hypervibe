@@ -70,6 +70,8 @@ async function statusFixture(state: 'drift' | 'unknown' | 'verified', declared =
   const repair = vi.fn();
   vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true,
     adapter: { credentialAliases: { inspect, repair } } as unknown as IDatabaseAdapter });
+  vi.spyOn(adapterFactory, 'getDatabaseOperations').mockResolvedValue({ success: true,
+    adapter: { credentialAliases: { inspect, repair } } as unknown as IDatabaseAdapter });
   const before = { runs: getDb().prepare('SELECT COUNT(*) AS count FROM runs').get(),
     bindings: ctx.repos.components.findById(component.id)!.bindings };
   const server = createServer();

@@ -97,6 +97,13 @@ Provider setup connections are never implicit application runtime secrets. Model
 
 ## DG-115
 
-Do not introduce dependencies on provider CLIs for infrastructure operations. Use provider adapters and recorded Hypervibe connections so state, audit history, and drift detection stay coherent.
+Do not require users to install provider CLIs, OpenTofu, Terraform or Docker for
+cloud deployment. Hypervibe may provision its own pinned, integrity-verified,
+private OpenTofu runtime and provider plugins; these execute inside the shared
+spec/plan/apply, state, approval and audit boundaries. They are not an arbitrary
+`PATH` executable or a bypass of a blocked plan. Retain supported SDK/browser
+authentication, bootstrap and operational clients with verified scoped connections.
+The current npm installation still requires Node.js/npm; keep unproven packaged
+installation claims explicit.
 
 The DG-034 operator-managed Railway private SSH exception is not a runtime dependency or automatic fallback. Private-only database automation remains unsupported without a verified connection; it must not create a public TCP proxy to proceed. Preserve exact-identity cleanup of access recorded by earlier operations.

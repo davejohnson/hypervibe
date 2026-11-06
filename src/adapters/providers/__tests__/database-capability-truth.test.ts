@@ -5,64 +5,36 @@ import { AzurePostgresAdapter } from '../azure/azure-postgres.adapter.js';
 import { CloudSqlAdapter } from '../gcp/cloudsql.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../railway/railway-database.factory.js';
-import { supportsDatabaseLifecycle } from '../../../domain/ports/database.port.js';
+import { supportsDatabaseLifecycle, supportsDatabaseOperations } from '../../../domain/ports/database.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 describe('database capability truth', () => {
-  it('keeps every registered database provider aligned with the complete runtime port', () => {
-    const railway = new RailwayAdapter();
+  it('preserves existing database operations without advertising cloud provisioning', () => {
     const adapters = new Map<string, unknown>([
-      ['railway', createRailwayDatabaseAdapter({ hostingAdapter: railway, envRepo: {} as never })],
-      ['cloudsql', new CloudSqlAdapter()],
-      ['rds', new RdsAdapter()],
-      ['azure-postgres', new AzurePostgresAdapter()],
+      ['railway', createRailwayDatabaseAdapter({ hostingAdapter: new RailwayAdapter(), envRepo: {} as never })],
+      ['cloudsql', new CloudSqlAdapter()], ['rds', new RdsAdapter()], ['azure-postgres', new AzurePostgresAdapter()],
     ]);
-
-    expect([...adapters.keys()].sort()).toEqual(providerRegistry.namesFor('database').sort());
-    expect(providerRegistry.namesForMutation('database').sort())
-      .toEqual(providerRegistry.namesFor('database').sort());
+    expect(providerRegistry.namesFor('database')).toEqual(['railway']);
+    expect(providerRegistry.namesForMutation('database')).toEqual(['railway']);
     for (const [provider, adapter] of adapters) {
-      expect(supportsDatabaseLifecycle(adapter), provider).toBe(true);
+      expect(supportsDatabaseOperations(adapter), provider).toBe(true);
+      expect(supportsDatabaseLifecycle(adapter), provider).toBe(provider === 'railway');
       expect(providerRegistry.get(provider)?.databaseRuntime, provider).toBeDefined();
     }
-    expect(
-      providerRegistry.all()
-        .filter((provider) => provider.databaseRuntime)
-        .map((provider) => provider.metadata.name)
-        .sort()
-    ).toEqual(providerRegistry.namesFor('database').sort());
+    expect(providerRegistry.all().filter(provider => provider.databaseRuntime).map(provider => provider.metadata.name).sort())
+      .toEqual([...adapters.keys()].sort());
   });
 
-  it('advertises declarative resilience only where the lifecycle is implemented', () => {
-    const cloudSql = new CloudSqlAdapter();
-    expect(cloudSql.capabilities.supportsReadReplicas).toBe(true);
-    expect(cloudSql.capabilities.supportsPointInTimeRecovery).toBe(true);
-
-    const adapters = [
-      new RdsAdapter(),
-      new AzurePostgresAdapter(),
-    ];
-    for (const adapter of adapters) {
+  it('keeps existing Cloud SQL recovery operations separate from planned resource provisioning', () => {
+    for (const adapter of [new CloudSqlAdapter(), new RdsAdapter(), new AzurePostgresAdapter()]) {
       expect(adapter.capabilities.supportsReadReplicas, adapter.name).toBe(false);
-      expect(adapter.capabilities.supportsPointInTimeRecovery, adapter.name).toBe(false);
+      expect(adapter.capabilities.supportsPointInTimeRecovery, adapter.name).toBe(adapter.name === 'cloudsql');
+      expect(providerRegistry.lifecycleMaturity(adapter.name, 'database')?.status).toBe('planned');
     }
   });
 
-  it('declares every provider-specific database network boundary explicitly', () => {
-    const expected = new Map<string, string[] | undefined>([
-      ['railway', ['railway']],
-      ['cloudsql', ['cloudrun']],
-      ['rds', ['ecs']],
-      ['azure-postgres', ['azure-container-apps']],
-    ]);
-
-    expect([...expected.keys()].sort()).toEqual(providerRegistry.namesFor('database').sort());
-    for (const [provider, compatibleHostingProviders] of expected) {
-      expect(
-        providerRegistry.getMetadata(provider)?.lifecycle?.databaseConnectivity
-          ?.compatibleHostingProviders,
-        provider
-      ).toEqual(compatibleHostingProviders);
-    }
+  it('preserves the Railway database network boundary', () => {
+    expect(providerRegistry.getMetadata('railway')?.lifecycle?.databaseConnectivity?.compatibleHostingProviders).toEqual(['railway']);
+    for (const provider of ['cloudsql', 'rds', 'azure-postgres']) expect(providerRegistry.getMetadata(provider)?.lifecycle?.databaseConnectivity).toBeUndefined();
   });
 });

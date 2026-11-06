@@ -1,15 +1,13 @@
+import { reviewedOperationProviders } from './operations-scope.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { RdsAdapter } from '../../src/adapters/providers/aws/rds.adapter.js';
-import { EcsExpressAdapter } from '../../src/adapters/providers/aws/ecs-express.adapter.js';
 import { S3StorageAdapter } from '../../src/adapters/providers/aws/s3.adapter.js';
 import { AzurePostgresAdapter } from '../../src/adapters/providers/azure/azure-postgres.adapter.js';
-import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
 import { AzureBlobStorageAdapter } from '../../src/adapters/providers/azure/azure-blob.adapter.js';
 import { CloudSqlAdapter } from '../../src/adapters/providers/gcp/cloudsql.adapter.js';
-import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { GcsStorageAdapter } from '../../src/adapters/providers/gcp/gcs.adapter.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../src/adapters/providers/railway/railway-database.factory.js';
@@ -40,8 +38,7 @@ const adapters: Record<Resource, Map<string, object>> = {
     ['azure-postgres', new AzurePostgresAdapter()],
   ]),
   volume: new Map<string, object>([
-    ['railway', railway], ['cloudrun', new CloudRunAdapter()],
-    ['ecs', new EcsExpressAdapter()], ['azure-container-apps', new AzureContainerAppsAdapter()],
+    ['railway', railway],
   ]),
   storage: new Map<string, object>([
     ['railway', createRailwayStorageAdapter(railway)], ['s3', new S3StorageAdapter()],
@@ -52,7 +49,7 @@ const adapters: Record<Resource, Map<string, object>> = {
 describe('named-provider daily backup implementation coverage', () => {
   it.each(['database', 'volume', 'storage'] as const)('reviews every named %s provider, including unsupported adapters', resource => {
     const rows = evidence.resources.filter(row => row.resource === resource);
-    const names = providerRegistry.namesFor(resource === 'volume' ? 'hosting' : resource).sort();
+    const names = resource === 'volume' ? providerRegistry.namesFor('hosting').sort() : reviewedOperationProviders(resource);
     expect(rows.map(row => row.provider).sort()).toEqual(names);
     expect([...adapters[resource].keys()].sort()).toEqual(names);
   });

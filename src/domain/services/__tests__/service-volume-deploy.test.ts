@@ -4,7 +4,7 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { DeployOrchestrator } from '../deploy.orchestrator.js';
-import type { IProviderAdapter } from '../../ports/provider.port.js';
+import type { IProviderLifecycleAdapter } from '../../ports/provider.port.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 
 beforeEach(() => { SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(':memory:').migrate(); vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true'); });
@@ -21,7 +21,7 @@ function setup(withDisk: boolean) {
   const deploy = vi.fn(async () => ({ serviceId: service.id, externalId: 'empty-app', status: 'ready', receipt: { success: true, message: 'fixture', data: { deploymentDeferred: true } } }));
   const adapter = { name: 'fly', capabilities: { supportsDeferredDeploy: true }, deploy,
     serviceVolumes: { staged: { runtimeMount: (t: typeof target, bindings: Record<string, { externalId: string }>) => ({ externalId: bindings.filesystem.externalId, mountPath: t.mountPath, target: t }) } },
-  } as unknown as IProviderAdapter;
+  } as unknown as IProviderLifecycleAdapter;
   vi.spyOn(providerRegistry, 'getMetadata').mockReturnValue({ lifecycle: { hosting: { serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only', attachmentTiming: 'workload-create' } } } } as never);
   return { project, environment, service, adapter, deploy, target };
 }

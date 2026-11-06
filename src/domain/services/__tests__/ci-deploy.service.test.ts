@@ -1,3 +1,4 @@
+import '../../../application/providers.js';
 import * as githubCredentialActivation from '../../../adapters/providers/github/github-credential-activation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
@@ -46,6 +47,26 @@ import {
 import type { PlanAction } from '../../plan/plan.types.js';
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { credentialActionId, type CredentialTarget } from '../../plan/credential-plan.contract.js';
+
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { ...fixtureHostingMetadata.orchestration, ci: {
+      ...fixtureHostingMetadata.orchestration!.ci!,
+      requiredSecrets: ['FIXTURE_CREDENTIALS', 'FIXTURE_PROJECT'],
+      secretCredentialKeys: { FIXTURE_CREDENTIALS: 'credentials', FIXTURE_PROJECT: 'projectId' },
+    } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -421,13 +442,6 @@ describe('ci-deploy.service', () => {
       ]);
     });
 
-    it('returns GCP credentials for cloudrun', () => {
-      expect(requiredProviderSecretNamesForGitHubActions('cloudrun')).toEqual([
-        'GCP_SERVICE_ACCOUNT_JSON',
-        'GCP_PROJECT_ID',
-      ]);
-    });
-
     it('returns no secrets for unknown providers', () => {
       expect(requiredProviderSecretNamesForGitHubActions('vercel')).toEqual([]);
     });
@@ -439,7 +453,7 @@ describe('ci-deploy.service', () => {
       const secretStore = getSecretStore();
       const add = (scope: string | undefined, projectId: string) => {
         const connection = connectionRepo.create({
-          provider: 'cloudrun',
+          provider: "fixture-hosting",
           scope,
           credentialsEncrypted: secretStore.encryptObject({
             credentials: `credentials-for-${projectId}`,
@@ -452,11 +466,11 @@ describe('ci-deploy.service', () => {
       add('davejohnson/other-app', 'other-project');
       add('davejohnson/billforge', 'billforge-project');
 
-      expect(providerSecretsForGitHubActions('cloudrun', {
+      expect(providerSecretsForGitHubActions("fixture-hosting", {
         githubRepo: 'davejohnson/billforge',
       })).toEqual([
-        { name: 'GCP_SERVICE_ACCOUNT_JSON', value: 'credentials-for-billforge-project' },
-        { name: 'GCP_PROJECT_ID', value: 'billforge-project' },
+        { name: "FIXTURE_CREDENTIALS", value: 'credentials-for-billforge-project' },
+        { name: "FIXTURE_PROJECT", value: 'billforge-project' },
       ]);
     });
 
@@ -464,7 +478,7 @@ describe('ci-deploy.service', () => {
       const connectionRepo = new ConnectionRepository();
       const secretStore = getSecretStore();
       const connection = connectionRepo.create({
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         scope: 'davejohnson/other-app',
         credentialsEncrypted: secretStore.encryptObject({
           credentials: 'other-credentials',
@@ -473,7 +487,7 @@ describe('ci-deploy.service', () => {
       });
       connectionRepo.updateStatus(connection.id, 'verified');
 
-      expect(providerSecretsForGitHubActions('cloudrun', {
+      expect(providerSecretsForGitHubActions("fixture-hosting", {
         githubRepo: 'davejohnson/billforge',
       })).toEqual([]);
     });
@@ -1043,55 +1057,6 @@ describe('ci-deploy.service', () => {
       const firstTag = 'registry.digitalocean.com/acme-reg/davejohnson/billforge:sha-one';
       const nextTag = 'registry.digitalocean.com/acme-reg/davejohnson/billforge:sha-two';
       expect(hash(nextTag)).toBe(hash(firstTag));
-    });
-
-    it('compiles a Cloud Run workflow from converged hosting bindings', async () => {
-      const projectRepo = new ProjectRepository();
-      const envRepo = new EnvironmentRepository();
-      const project = projectRepo.create({
-        name: 'cloud-app',
-        defaultPlatform: 'cloudrun',
-        gitRemoteUrl: 'https://github.com/davejohnson/cloud-app',
-      });
-      const environmentSpec = environmentSpecSchema.parse({
-        hosting: { provider: 'cloudrun', region: 'us-west1' },
-        services: { web: { workloadKind: 'web' } },
-        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-      });
-      const environment = envRepo.create({
-        projectId: project.id,
-        name: 'staging',
-        platformBindings: {
-          provider: 'cloudrun',
-          projectId: 'cloud-app-staging',
-          providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-          services: {
-            web: {
-              serviceId: 'cloud-app-staging-web',
-              workloadKind: 'web',
-              resourceType: 'service',
-            },
-          },
-        },
-      });
-      new SpecStore().replace(project, {
-        version: 1,
-        project: project.name,
-        environments: { staging: environmentSpec },
-      });
-
-      const converged = await planGitHubActionsDeploy({
-        project: projectRepo.findById(project.id)!,
-        environmentName: 'staging',
-        environmentSpec,
-        environment: envRepo.findById(environment.id),
-      });
-
-      expect(converged.error).toBeUndefined();
-      expect(converged.action?.metadata?.workflow).toMatchObject({
-        aggregateContentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
-        requiredVariables: [],
-      });
     });
 
     it('refuses to compile a workflow with a missing desired service binding', async () => {
@@ -2562,7 +2527,7 @@ describe('ci-deploy.service', () => {
       expect(trigger).not.toHaveBeenCalled();
     });
   });
-  it.each(['railway', 'cloudrun'].flatMap(provider => [
+  it.each(['railway', "fixture-hosting"].flatMap(provider => [
     { provider, order: ['production', 'staging'] },
     { provider, order: ['staging', 'production'] },
   ]))('isolates $provider migration secrets applied in $order order', async ({ provider, order }) => {

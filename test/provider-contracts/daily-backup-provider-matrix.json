@@ -27,8 +27,8 @@
     {
       "resource": "database",
       "provider": "cloudsql",
-      "implementation": "implemented",
-      "reason": "Policy observation and additive configuration adapter implemented; no live certification or recovery-point inventory.",
+      "implementation": "unsupported",
+      "reason": "Cloud SQL backup policy provisioning is moving to OpenTofu; retained database operations do not configure resource policies.",
       "nativeCapability": "Standard backup option is daily; Enhanced Backup and DR plans are a different control plane",
       "retentionEvidence": {
         "kind": "count",
@@ -106,57 +106,6 @@
       "officialSources": [
         "https://docs.railway.com/volumes/backups",
         "https://docs.railway.com/integrations/api/manage-volumes"
-      ]
-    },
-    {
-      "resource": "volume",
-      "provider": "ecs",
-      "implementation": "unsupported",
-      "reason": "Add backing-filesystem backup observation/convergence and recovery-point receipts.",
-      "nativeCapability": "AWS Backup supports EFS scheduling, retention, full/item restore. Default EFS automatic backup plan is daily with 35-day retention.",
-      "limitations": [
-        "API/CLI creation defaults backups on only for One Zone; Hypervibe creates regional EFS, so creation success is not evidence of backup enablement.",
-        "Custom vault/plan IAM and charges need reviewed actions."
-      ],
-      "officialSources": [
-        "https://docs.aws.amazon.com/efs/latest/ug/awsbackup.html",
-        "https://docs.aws.amazon.com/efs/latest/ug/automatic-backups.html",
-        "https://docs.aws.amazon.com/efs/latest/APIReference/API_BackupPolicy.html"
-      ]
-    },
-    {
-      "resource": "volume",
-      "provider": "cloudrun",
-      "implementation": "unsupported",
-      "reason": "No Filestore backup schedule, backup inventory, or retention lifecycle currently exists.",
-      "nativeCapability": "Basic Filestore supports standard differential backups. Standard backups have no native scheduling or expiry. Official automation uses Cloud Scheduler and Cloud Run functions. Enhanced Backup and DR scheduling supports Zonal/Regional/Enterprise, not Basic.",
-      "limitations": [
-        "Standard backup survives source share deletion but not source-project deletion.",
-        "Cross-region storage is supported.",
-        "Application-consistent backup requires stopping writers and unmounting according to official guidance.",
-        "Enhanced support/access must be checked per region and tier."
-      ],
-      "officialSources": [
-        "https://docs.cloud.google.com/filestore/docs/backups",
-        "https://docs.cloud.google.com/filestore/docs/schedule-backups-cloud-scheduler"
-      ]
-    },
-    {
-      "resource": "volume",
-      "provider": "azure-container-apps",
-      "implementation": "unsupported",
-      "reason": "No Recovery Services backup policy/protection registration or latest backup observation is implemented.",
-      "nativeCapability": "Azure Backup supports scheduled Azure Files snapshots and vaulted backups; custom daily retention. Vaulted backup transfers the last daily snapshot into a Recovery Services vault.",
-      "limitations": [
-        "Azure Backup Files support is SMB, not NFS.",
-        "Snapshot-only backups stay in the source storage account.",
-        "Vault tier and regional support must be verified.",
-        "Snapshot retention/count limits differ from vaulted retention."
-      ],
-      "officialSources": [
-        "https://learn.microsoft.com/en-us/azure/backup/azure-file-share-support-matrix",
-        "https://learn.microsoft.com/en-us/azure/backup/quick-backup-azure-files-vault-tier-portal",
-        "https://learn.microsoft.com/en-us/azure/backup/backup-azure-files-faq"
       ]
     },
     {

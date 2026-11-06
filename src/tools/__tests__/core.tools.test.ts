@@ -1,3 +1,7 @@
+import type { IProviderLifecycleAdapter } from '../../domain/ports/provider.port.js';
+import '../../application/providers.js';
+import { z } from 'zod';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
@@ -35,6 +39,50 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
+
+// A synthetic lifecycle owner keeps generic import/cleanup safety independent of clouds.
+const fixtureDatabaseProvider = providerRegistry.get('cloudsql')!;
+providerRegistry.register({
+  ...fixtureDatabaseProvider,
+  metadata: {
+    ...fixtureDatabaseProvider.metadata, name: 'fixture-database', displayName: 'Fixture database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+  retainedCleanup: {
+    resources: ['backup'],
+    destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+  },
+});
+
+// Synthetic hosting supports only the generic lifecycle contracts under test.
+const fixtureHostingProvider = providerRegistry.get('cloudrun')!;
+for (const [name, workloadKinds] of [['fixture-hosting', ['web', 'worker', 'cron']], ['fixture-web-hosting', ['web']]] as const) {
+  providerRegistry.register({
+    ...fixtureHostingProvider,
+    metadata: {
+      ...fixtureHostingProvider.metadata, name, displayName: name,
+      lifecycle: { hosting: { workloadKinds, customDomains: 'unsupported', teardownBoundary: 'services' } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+  });
+}
+
+providerRegistry.register({
+  metadata: {
+    name: 'fixture-cache', displayName: 'Fixture cache', category: 'cache',
+    credentialsSchema: z.object({ projectId: z.string().optional(), credentials: z.string().optional() }),
+    lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+  },
+  factory: () => ({}),
+  inspection: {
+    resources: ['cache'], defaultResource: 'cache',
+    selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] } },
+    inspect: async () => ({ observation: 'absent', resource: 'cache', caches: [], partial: false, truncated: false }),
+  },
+});
+
 
 let tempDir: string;
 
@@ -168,7 +216,7 @@ describe('bootstrap action receipt mapping', () => {
 });
 
 describe('hv_spec', () => {
-  it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])(
+  it.each(['railway', 'fixture-hosting'])(
     'warns about resource differences on spec write/read without copying them for %s', async (provider) => {
       const t = await makeClient();
       try {
@@ -1074,7 +1122,7 @@ describe('hv_spec', () => {
     await t.close();
   });
 
-  it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])(
+  it.each(['railway', 'fixture-hosting'])(
     'allows a staging-only service rename on %s without taking ownership of production configuration', async (provider) => {
       const t = await makeClient();
       const project = `rename-coverage-${provider}`;
@@ -1142,7 +1190,7 @@ describe('hv_spec', () => {
         project: 'unsupported-workload-app',
         environments: {
           staging: {
-            hosting: { provider: 'ecs' },
+            hosting: { provider: 'fixture-web-hosting' },
             services: {
               processor: { workloadKind: 'worker', startCommand: 'npm run worker' },
             },
@@ -1161,8 +1209,8 @@ describe('hv_spec', () => {
         },
       },
     });
-    expect(bad.error.message).toContain('ecs hosting does not support workload kind "worker"');
-    expect(bad.hint).toContain('Supported workload kinds for ecs: web');
+    expect(bad.error.message).toContain('fixture-web-hosting hosting does not support workload kind "worker"');
+    expect(bad.hint).toContain('Supported workload kinds for fixture-web-hosting: web');
     expect(new ProjectRepository().findByName('unsupported-workload-app')).toBeNull();
     await t.close();
   });
@@ -1640,7 +1688,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       normalizedObserved
         ? {
           success: true,
-          adapter: {
+          adapter: ({
             name: 'railway',
             capabilities: {
               supportedBuilders: ['nixpacks'], supportedComponents: ['postgres'],
@@ -1654,7 +1702,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
             deploy: async () => { throw new Error('unused'); },
             setEnvVars: async () => ({ success: true, message: 'ok' }),
             observe: async () => normalizedObserved,
-          },
+          } as IProviderLifecycleAdapter),
         }
         : { success: false, error: 'no adapter' }
     );
@@ -1736,7 +1784,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'ecs' },
+          hosting: { provider: 'fixture-web-hosting' },
           services: {
             scheduled: {
               workloadKind: 'cron',
@@ -3376,39 +3424,6 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it.each([true, false])('reports pending cron activation without claiming configuration convergence (observed=%s)', async observedPending => {
-    const t = await makeClient();
-    try {
-      const project = new ProjectRepository().create({ name: 'pending-cron-status', defaultPlatform: 'cloudrun' });
-      new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
-        hosting: { provider: 'cloudrun', region: 'us-central1' },
-        services: { cron: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 * * * *' } },
-        email: { enabled: false }, envVars: {}, envFile: { mode: 'off' },
-      } } });
-      new ServiceRepository().create({ projectId: project.id, name: 'cron', buildConfig: { workloadKind: 'cron' } });
-      const pending = { version: 1, state: 'pending', jobName: 'cron-staging', jobUid: 'uid-staging', holdingImage: `registry.example/holding@sha256:${'d'.repeat(64)}` };
-      const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
-        provider: 'cloudrun', projectId: 'gcp-test', providerScope: { projectId: 'gcp-test', region: 'us-central1' },
-        services: { cron: { serviceId: pending.jobName, jobName: pending.jobName, resourceUid: pending.jobUid,
-          resourceType: 'scheduledJob', workloadKind: 'cron', scheduleActivation: pending } },
-      } });
-      verifyConnection('cloudrun', { projectId: 'gcp-test', region: 'us-central1', credentials: '{}' });
-      mockObserved({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'gcp-test',
-        services: [{ name: 'cron', externalId: pending.jobName, workloadKind: 'cron', customDomains: [],
-          ...(observedPending ? { scheduleActivationPending: true } : {}),
-          config: { startCommand: 'npm run cron', public: false }, envVarKeys: [], envVarHashes: {}, status: 'empty' }],
-        databases: [], partial: false, warnings: [],
-      });
-      const before = new EnvironmentRepository().findById(environment.id)!.platformBindings;
-      const status = await t.call('hv_status', { project: project.name, env: 'staging' });
-      expect(status.ok).toBe(true);
-      expect(status.data.inSync).toBe(false);
-      expect(status.data.pendingScheduleActivations).toEqual([{ service: 'cron', state: 'pending', observed: observedPending }]);
-      expect(status.data.drift).toContainEqual(expect.objectContaining({ id: 'service:cron:activate-schedule', verified: observedPending }));
-      expect(new EnvironmentRepository().findById(environment.id)!.platformBindings).toEqual(before);
-    } finally { await t.close(); }
-  });
-
   it('reports restart_required when a synced CI service still runs its pre-configuration deployment', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {
@@ -4246,15 +4261,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    const cloudrunConnection = new ConnectionRepository().create({
-      provider: 'cloudrun',
+    const fixtureHostingConnection = new ConnectionRepository().create({
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         region: 'us-central1',
         credentials: '{}',
       }),
     });
-    new ConnectionRepository().updateStatus(cloudrunConnection.id, 'verified');
+    new ConnectionRepository().updateStatus(fixtureHostingConnection.id, 'verified');
     const project = new ProjectRepository().findByName('previous-teardown-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4265,7 +4280,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'rail-env-1',
         services: { web: { serviceId: 'svc-1' } },
         previousHosting: {
-          provider: 'cloudrun',
+          provider: 'fixture-hosting',
           projectId: 'gcp-project',
           services: { web: { serviceId: 'gcp-project-web' } },
         },
@@ -4306,8 +4321,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
       observe: async () => observedState,
     };
     const deleteService = vi.fn(async () => ({ success: true }));
-    const cloudrunAdapter = {
-      name: 'cloudrun',
+    const fixtureHostingAdapter = {
+      name: 'fixture-hosting',
       capabilities: {
         supportedBuilders: ['dockerfile'], supportedComponents: [],
         supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
@@ -4319,8 +4334,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
     // The teardown must resolve the PREVIOUS provider's adapter, so dispatch
     // on the provider name instead of returning a single adapter.
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider: string) => (
-      provider === 'cloudrun'
-        ? { success: true, adapter: cloudrunAdapter }
+      provider === 'fixture-hosting'
+        ? { success: true, adapter: fixtureHostingAdapter }
         : { success: true, adapter: railwayAdapter }
     ) as any);
 
@@ -4336,7 +4351,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       id: 'service:web:previous-destroy',
       type: 'destroy',
       requiresConfirm: true,
-      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+      resource: { kind: 'service', name: 'web', provider: 'fixture-hosting' },
     })]);
     const persistedPlan = new RunRepository().findById(plan.data.planId)?.plan;
     expect(persistedPlan).toMatchObject({ scope: 'retained-cleanup' });
@@ -4405,7 +4420,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       } },
     } });
     verifyRailwayConnection();
-    verifyConnection('cloudsql', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-database', { projectId: 'gcp-project', credentials: '{}' });
     const project = new ProjectRepository().findByName('retained-database-apply-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4416,7 +4431,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'railway-environment',
         services: { web: { serviceId: 'railway-web' } },
         previousDatabase: {
-          provider: 'cloudsql',
+          provider: 'fixture-database',
           externalId: 'legacy-production-db',
           engine: 'postgres',
           name: 'legacy-production-db',
@@ -4429,7 +4444,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       type: 'postgres',
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -4482,7 +4497,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'cloudsql',
+        name: 'fixture-database',
         capabilities: {
           supportedDatabases: ['postgres'], supportsPooling: false, supportsReadReplicas: false,
           supportsPointInTimeRecovery: false, serverlessOptimized: false,
@@ -4490,7 +4505,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         connect: async () => {}, verify: async () => ({ success: true }), disconnect: async () => {},
         provision: async () => { throw new Error('unused'); }, getConnectionUrl: async () => null,
         observeDatabase: async () => databasePresent ? ({
-          provider: 'cloudsql', engine: 'postgres', externalId: 'legacy-production-db', status: 'running',
+          provider: 'fixture-database', engine: 'postgres', externalId: 'legacy-production-db', status: 'running',
           providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         }) : null,
         destroy,
@@ -4504,7 +4519,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toEqual([expect.objectContaining({
-      id: 'database:cloudsql:retained-destroy',
+      id: 'database:fixture-database:retained-destroy',
       dataBearing: true,
       requiresConfirm: true,
     })]);
@@ -4512,7 +4527,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
     expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'database:cloudsql:retained-destroy',
+      actionId: 'database:fixture-database:retained-destroy',
       status: 'skipped_requires_confirm',
     }));
     expect(destroy).not.toHaveBeenCalled();
@@ -4525,11 +4540,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const confirmed = await t.call('hv_apply', {
       project: project.name,
       planId: confirmedPlan.data.planId,
-      confirmActions: ['database:cloudsql:retained-destroy'],
+      confirmActions: ['database:fixture-database:retained-destroy'],
     });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'database:cloudsql:retained-destroy',
+      actionId: 'database:fixture-database:retained-destroy',
       status: 'succeeded',
     }));
     expect(destroy).toHaveBeenCalledOnce();
@@ -4548,7 +4563,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       } },
     } });
     verifyRailwayConnection();
-    verifyConnection('memorystore', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-cache', { projectId: 'gcp-project', credentials: '{}' });
     const project = new ProjectRepository().findByName('retained-cache-apply-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4559,7 +4574,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'railway-environment',
         services: { web: { serviceId: 'railway-web' } },
         previousCache: {
-          provider: 'memorystore',
+          provider: 'fixture-cache',
           externalId: 'projects/gcp-project/locations/us-west1/instances/legacy-cache',
           engine: 'redis',
           providerEngine: 'redis',
@@ -4573,7 +4588,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -4627,7 +4642,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     vi.spyOn(adapterFactory, 'getCacheAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'memorystore',
+        name: 'fixture-cache',
         capabilities: {
           supportedCaches: ['redis'], supportsTls: true, supportsHighAvailability: true,
           supportsPersistence: true, serverlessOptimized: false,
@@ -4635,7 +4650,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         connect: async () => {}, verify: async () => ({ success: true }), disconnect: async () => {},
         provision: async () => { throw new Error('unused'); }, getConnectionUrl: async () => null,
         observeCache: async () => cachePresent ? ({
-          provider: 'memorystore', engine: 'redis',
+          provider: 'fixture-cache', engine: 'redis',
           externalId: 'projects/gcp-project/locations/us-west1/instances/legacy-cache',
           name: 'legacy-production-cache', status: 'running',
           providerScope: { projectId: 'gcp-project', region: 'us-west1' },
@@ -4651,7 +4666,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toEqual([expect.objectContaining({
-      id: 'cache:memorystore:retained-destroy',
+      id: 'cache:fixture-cache:retained-destroy',
       dataBearing: true,
       requiresConfirm: true,
     })]);
@@ -4659,7 +4674,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
     expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'cache:memorystore:retained-destroy',
+      actionId: 'cache:fixture-cache:retained-destroy',
       status: 'skipped_requires_confirm',
     }));
     expect(destroy).not.toHaveBeenCalled();
@@ -4672,11 +4687,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const confirmed = await t.call('hv_apply', {
       project: project.name,
       planId: confirmedPlan.data.planId,
-      confirmActions: ['cache:memorystore:retained-destroy'],
+      confirmActions: ['cache:fixture-cache:retained-destroy'],
     });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'cache:memorystore:retained-destroy',
+      actionId: 'cache:fixture-cache:retained-destroy',
       status: 'succeeded',
     }));
     expect(destroy).toHaveBeenCalledOnce();
@@ -4695,7 +4710,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       } },
     } });
     verifyRailwayConnection();
-    verifyConnection('cloudsql', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-database', { projectId: 'gcp-project', credentials: '{}' });
     const project = new ProjectRepository().findByName('retained-backup-apply-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4706,7 +4721,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'railway-environment',
         services: { web: { serviceId: 'railway-web' } },
         previousResource: {
-          provider: 'cloudsql',
+          provider: 'fixture-database',
           resource: 'backup',
           externalId: 'projects/gcp-project/backups/backup-123',
           name: 'backup-123',
@@ -4757,7 +4772,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     };
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider) => ({
       success: true,
-      adapter: provider === 'cloudsql' ? cleanupAdapter : hostingAdapter,
+      adapter: provider === 'fixture-database' ? cleanupAdapter : hostingAdapter,
     } as any));
 
     const plan = await t.call('hv_plan', {
@@ -4767,7 +4782,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toEqual([expect.objectContaining({
-      id: 'retained-resource:cloudsql:backup:destroy',
+      id: 'retained-resource:fixture-database:backup:destroy',
       dataBearing: true,
       requiresConfirm: true,
     })]);
@@ -4775,7 +4790,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
     expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'retained-resource:cloudsql:backup:destroy',
+      actionId: 'retained-resource:fixture-database:backup:destroy',
       status: 'skipped_requires_confirm',
     }));
     expect(destroy).not.toHaveBeenCalled();
@@ -4788,11 +4803,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const confirmed = await t.call('hv_apply', {
       project: project.name,
       planId: confirmedPlan.data.planId,
-      confirmActions: ['retained-resource:cloudsql:backup:destroy'],
+      confirmActions: ['retained-resource:fixture-database:backup:destroy'],
     });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'retained-resource:cloudsql:backup:destroy',
+      actionId: 'retained-resource:fixture-database:backup:destroy',
       status: 'succeeded',
     }));
     expect(destroy).toHaveBeenCalledOnce();
@@ -4805,18 +4820,18 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.call('hv_spec', { spec: {
       project: 'previous-railway-environment-app',
       environments: { production: {
-        hosting: { provider: 'cloudrun' },
+        hosting: { provider: 'fixture-hosting' },
         services: { web: { startCommand: 'npm start' } },
       } },
     } });
-    verifyConnection('cloudrun', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-hosting', { projectId: 'gcp-project', credentials: '{}' });
     verifyRailwayConnection();
     const project = new ProjectRepository().findByName('previous-railway-environment-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-central1',
+        provider: 'fixture-hosting', projectId: 'gcp-project', environmentId: 'us-central1',
         services: { web: { serviceId: 'gcp-web' } },
         previousHosting: {
           provider: 'railway', projectId: 'railway-project', environmentId: 'railway-production',
@@ -4826,7 +4841,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
 
     const observedState: ObservedState = {
-      provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true,
+      provider: 'fixture-hosting', observedAt: new Date().toISOString(), projectExists: true,
       projectId: 'gcp-project', environmentId: 'us-central1', databases: [], partial: false, warnings: [],
       services: [{
         name: 'web', externalId: 'gcp-web', workloadKind: 'web', customDomains: [],
@@ -4840,7 +4855,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       .mockResolvedValueOnce({ success: true });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider: string) => provider === 'railway'
       ? { success: true, adapter: { name: 'railway', deleteEnvironment } } as any
-      : { success: true, adapter: { name: 'cloudrun', capabilities: { supportsObserve: true }, observe: async () => observedState } } as any);
+      : { success: true, adapter: { name: 'fixture-hosting', capabilities: { supportsObserve: true }, observe: async () => observedState } } as any);
 
     const plan = await t.call('hv_plan', { project: project.name, env: 'production' });
     const cleanupId = 'environment:production:railway:previous-destroy';
@@ -4876,7 +4891,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     verifyRailwayConnection();
     const project = new ProjectRepository().findByName('provider-switch-stash-app')!;
     const previousConnection = new ConnectionRepository().create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     new ConnectionRepository().updateStatus(previousConnection.id, 'verified');
@@ -4884,7 +4899,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun',
+        provider: 'fixture-hosting',
         projectId: 'gcp-project',
         services: { web: { serviceId: 'gcp-project-web' } },
       },
@@ -4960,7 +4975,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     let apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
     const previousHosting = {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       projectId: 'gcp-project',
       services: { web: { serviceId: 'gcp-project-web' } },
     };
@@ -4998,11 +5013,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(servicePlan.data.actions).toContainEqual(expect.objectContaining({ id: 'service:web', type: 'create' }));
     expect(servicePlan.data.actions).toContainEqual(expect.objectContaining({
       id: 'service:web:previous-destroy', type: 'destroy', requiresConfirm: true,
-      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+      resource: { kind: 'service', name: 'web', provider: 'fixture-hosting' },
     }));
     const persistedServicePlan = new RunRepository().findById(servicePlan.data.planId)!.plan as { actions: PlanAction[] };
     expect(persistedServicePlan.actions.find(action => action.id === 'service:web:previous-destroy')?.metadata)
-      .toMatchObject({ serviceId: 'gcp-project-web', previousProvider: 'cloudrun' });
+      .toMatchObject({ serviceId: 'gcp-project-web', previousProvider: 'fixture-hosting' });
     const serviceApply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: servicePlan.data.planId });
     expect(serviceApply.error).toBeUndefined();
     expect(serviceApply).toMatchObject({ ok: true });

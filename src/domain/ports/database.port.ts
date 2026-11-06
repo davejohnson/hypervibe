@@ -314,6 +314,20 @@ export interface IDatabaseAdapter {
   ): Promise<void>;
 }
 
+/** Existing database operations remain useful when an engine owns resource lifecycle. */
+export type IDatabaseOperations = Omit<IDatabaseAdapter, 'provision' | 'destroy'>;
+
+export function supportsDatabaseOperations(value: unknown): value is IDatabaseOperations {
+  if (!value || typeof value !== 'object') return false;
+  const adapter = value as Partial<IDatabaseOperations>;
+  return typeof adapter.name === 'string'
+    && Array.isArray(adapter.capabilities?.supportedDatabases)
+    && typeof adapter.connect === 'function'
+    && typeof adapter.verify === 'function'
+    && typeof adapter.observeDatabase === 'function'
+    && typeof adapter.getConnectionUrl === 'function';
+}
+
 /** Runtime proof for every method required by the database lifecycle contract. */
 export function supportsDatabaseLifecycle(value: unknown): value is IDatabaseAdapter {
   if (!value || typeof value !== 'object') return false;

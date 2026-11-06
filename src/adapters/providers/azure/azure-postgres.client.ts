@@ -116,53 +116,6 @@ export class AzurePostgresClient {
       { properties: { administratorLoginPassword: password } });
   }
 
-  async createServer(
-    name: string,
-    body: Record<string, unknown>
-  ): Promise<void> {
-    await this.arm.request(
-      'PUT',
-      this.serverResourceId(name),
-      AZURE_POSTGRES_API_VERSION,
-      body
-    );
-  }
-
-  async createDatabase(
-    serverResourceId: string,
-    databaseName: string
-  ): Promise<void> {
-    const identity = this.parseServerId(serverResourceId);
-    await this.arm.request(
-      'PUT',
-      `${this.serverResourceIdForIdentity(identity)}/databases/${encodeURIComponent(databaseName)}`,
-      AZURE_POSTGRES_API_VERSION,
-      {
-        properties: {
-          charset: 'UTF8',
-          collation: 'en_US.utf8',
-        },
-      }
-    );
-  }
-
-  async createAzureServicesFirewallRule(
-    serverResourceId: string
-  ): Promise<void> {
-    const identity = this.parseServerId(serverResourceId);
-    await this.arm.request(
-      'PUT',
-      `${this.serverResourceIdForIdentity(identity)}/firewallRules/hypervibe-azure-services`,
-      AZURE_POSTGRES_API_VERSION,
-      {
-        properties: {
-          startIpAddress: '0.0.0.0',
-          endIpAddress: '0.0.0.0',
-        },
-      }
-    );
-  }
-
   async upsertFirewallRule(
     serverResourceId: string,
     ruleName: string,
@@ -238,24 +191,6 @@ export class AzurePostgresClient {
       throw new Error(`Azure PostgreSQL returned database ${database.id ?? 'without an ID'} for ${resourceId}.`);
     }
     return database;
-  }
-
-  async deleteServer(resourceId: string): Promise<void> {
-    const identity = this.parseServerId(resourceId);
-    try {
-      await this.arm.request(
-        'DELETE',
-        this.serverResourceIdForIdentity(identity),
-        AZURE_POSTGRES_API_VERSION
-      );
-    } catch (error) {
-      if (
-        !(error instanceof AzureResourceManagerError)
-        || error.status !== 404
-      ) {
-        throw error;
-      }
-    }
   }
 
   private serverResourceIdForIdentity(identity: AzureArmResourceIdentity): string {

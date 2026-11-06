@@ -58,7 +58,7 @@ async function fixture(generated = false, runtime = true) {
     },
   };
   if (runtime) (lifecycle as any).runtimeConfiguration = lifecycle.configuration;
-  vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: { name: 'railway', credentialLifecycle: lifecycle } as any });
+  vi.spyOn(adapterFactory, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: { name: 'railway', credentialLifecycle: lifecycle } as any });
   vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ observed: { provider: 'railway', projectExists: true,
     projectId: 'provider-project', environmentId: 'provider-environment', environmentName: 'production', databases: [],
     services: [{ name: 'web', externalId: 'provider-web', status: 'running', envVarKeys: [], envVarHashes: {},

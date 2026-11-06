@@ -1721,7 +1721,10 @@ export class PlanService {
       .filter(environment => scope === 'credentials' || environment.name === environmentName);
     const observationOrCleanup = scope === 'full' && lifecycleEnvironments.some(environment =>
       this.componentRepo.findByEnvironmentId(environment.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
-    const providerValidation = observationOrCleanup ? undefined : firstProviderSpecValidationFailure(specResult.spec);
+    // Existing credential operations have their own exact-target capability checks;
+    // they do not require permission to create the desired infrastructure.
+    const providerValidation = observationOrCleanup || scope === 'credentials'
+      ? undefined : firstProviderSpecValidationFailure(specResult.spec);
     if (providerValidation) return { error: providerValidation.message };
     const pendingBootstrap = lifecycleEnvironments.some(environment =>
       this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseBootstrap(component.bindings)));

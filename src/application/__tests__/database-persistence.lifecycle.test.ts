@@ -57,6 +57,7 @@ async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, w
   const database = createRailwayDatabaseAdapter({ hostingAdapter: http.adapter, envRepo: ctx.repos.environments });
   vi.spyOn(AdapterFactory.prototype, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: http.adapter });
   vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: database });
+  vi.spyOn(AdapterFactory.prototype, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: database });
   vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
   vi.spyOn(PlanService.prototype, 'preflight').mockReturnValue([]);
   const registry = createCommandRegistry(ctx);

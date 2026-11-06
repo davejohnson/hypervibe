@@ -324,7 +324,7 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
         let presence: Presence = 'unknown';
         if (component?.externalId && component.environmentId === environment.id && nativeProvider === desired?.database?.provider) {
           try {
-            const connection = await adapterFactory.getDatabaseAdapter(nativeProvider, project);
+            const connection = await adapterFactory.getDatabaseOperations(nativeProvider, project);
             if (connection.success && connection.adapter && typeof connection.adapter.observeDatabase === 'function') {
               const native = await connection.adapter.observeDatabase(environment, component);
               if (native === null) presence = 'absent';

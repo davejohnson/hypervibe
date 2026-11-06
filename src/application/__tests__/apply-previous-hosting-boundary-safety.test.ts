@@ -12,6 +12,63 @@ import { projectSpecSchema, type ProjectSpec } from '../../domain/spec/spec.sche
 import type { Project } from '../../domain/entities/project.entity.js';
 import type { Environment } from '../../domain/entities/environment.entity.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
+import { providerRegistry, standardDatabaseRuntimeProjection } from '../../domain/registry/provider.registry.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services'], ['fixture-project-hosting', 'project']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-database', 'fixture-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'database', credentialsSchema: z.object({}),
+      lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['database', 'backup'], defaultResource: 'database',
+      selectors: {
+        database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'databases' },
+        backup: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'backups' },
+      },
+      inspect: (adapter, request) => (adapter as { inspectBackupResources: (request: unknown) => Promise<Record<string, unknown>> }).inspectBackupResources(request),
+    },
+    databaseRuntime: standardDatabaseRuntimeProjection,
+    retainedCleanup: {
+      resources: ['backup'],
+      destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+    },
+    factory: () => { throw new Error('Synthetic database requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-cache', 'fixture-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'cache', credentialsSchema: z.object({}),
+      lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['cache'], defaultResource: 'cache',
+      selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'caches' } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic cache requires an explicit test adapter.'); },
+  });
+}
 
 const environmentTarget = {
   provider: 'railway',
@@ -20,8 +77,8 @@ const environmentTarget = {
 };
 
 const projectTarget = {
-  provider: 'ecs',
-  projectId: 'ecs-shared-project',
+  provider: 'fixture-project-hosting',
+  projectId: 'fixture-project-hosting-shared-project',
 };
 
 type Boundary = 'environment' | 'project';
@@ -33,7 +90,7 @@ function projectSpec(): ProjectSpec {
     project: 'previous-hosting-boundary-safety',
     environments: {
       production: {
-        hosting: { provider: 'cloudrun' },
+        hosting: { provider: 'fixture-hosting' },
         services: {},
       },
     },
@@ -81,14 +138,14 @@ describe('previous hosting boundary destroy safety', () => {
     ctx = createCommandContext();
     project = ctx.repos.projects.create({
       name: 'previous-hosting-boundary-safety',
-      defaultPlatform: 'cloudrun',
+      defaultPlatform: 'fixture-hosting',
     });
     environment = ctx.repos.environments.create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun',
-        projectId: 'cloudrun-project',
+        provider: 'fixture-hosting',
+        projectId: 'fixture-hosting-project',
         environmentId: 'us-central1',
         services: {},
         previousHosting: {
@@ -126,7 +183,7 @@ describe('previous hosting boundary destroy safety', () => {
   function createSibling(platformBindings: Record<string, unknown>): Environment {
     const siblingProject = ctx.repos.projects.create({
       name: `sibling-${ctx.repos.projects.findAll().length}`,
-      defaultPlatform: 'cloudrun',
+      defaultPlatform: 'fixture-hosting',
     });
     return ctx.repos.environments.create({
       projectId: siblingProject.id,
@@ -196,8 +253,8 @@ describe('previous hosting boundary destroy safety', () => {
       createSibling(source === 'current'
         ? { ...environmentTarget, services: {} }
         : {
-            provider: 'cloudrun',
-            projectId: 'other-cloudrun-project',
+            provider: 'fixture-hosting',
+            projectId: 'other-fixture-hosting-project',
             environmentId: 'us-east1',
             services: {},
             previousHosting: { ...environmentTarget, services: {} },
@@ -219,8 +276,8 @@ describe('previous hosting boundary destroy safety', () => {
     'blocks environment deletion when an exact %s binding remains',
     async (_label, type, source) => {
       const sibling = createSibling({
-        provider: 'cloudrun',
-        projectId: 'other-cloudrun-project',
+        provider: 'fixture-hosting',
+        projectId: 'other-fixture-hosting-project',
         environmentId: 'us-east1',
         services: {},
         ...(source === 'previous' && type === 'postgres'
@@ -284,8 +341,8 @@ describe('previous hosting boundary destroy safety', () => {
     async (boundary, type) => {
       const target = boundary === 'environment' ? environmentTarget : projectTarget;
       const sibling = createSibling({
-        provider: 'cloudrun',
-        projectId: 'other-cloudrun-project',
+        provider: 'fixture-hosting',
+        projectId: 'other-fixture-hosting-project',
         environmentId: 'us-east1',
         services: {},
       });
@@ -294,7 +351,7 @@ describe('previous hosting boundary destroy safety', () => {
         type,
         externalId: `active-${type}`,
         bindings: {
-          provider: type === 'postgres' ? 'cloudsql' : 'memorystore',
+          provider: type === 'postgres' ? 'fixture-database' : 'fixture-cache',
           previousProvider: target.provider,
           previousExternalId: `previous-${type}`,
           previousBindings: {
@@ -303,7 +360,7 @@ describe('previous hosting boundary destroy safety', () => {
               projectId: target.projectId,
               environmentId: boundary === 'environment'
                 ? environmentTarget.environmentId
-                : 'ecs-staging',
+                : 'fixture-project-hosting-staging',
             },
           },
         },
@@ -325,8 +382,8 @@ describe('previous hosting boundary destroy safety', () => {
     async (boundary, type) => {
       const target = boundary === 'environment' ? environmentTarget : projectTarget;
       const sibling = createSibling({
-        provider: 'cloudrun',
-        projectId: 'other-cloudrun-project',
+        provider: 'fixture-hosting',
+        projectId: 'other-fixture-hosting-project',
         environmentId: 'us-east1',
         services: {},
       });
@@ -335,7 +392,7 @@ describe('previous hosting boundary destroy safety', () => {
         type,
         externalId: `active-${type}`,
         bindings: {
-          provider: type === 'postgres' ? 'cloudsql' : 'memorystore',
+          provider: type === 'postgres' ? 'fixture-database' : 'fixture-cache',
           previousProvider: target.provider,
           previousExternalId: `previous-${type}`,
           previousBindings: {
@@ -352,8 +409,8 @@ describe('previous hosting boundary destroy safety', () => {
 
   it('blocks environment deletion when an identified service-create recovery retains it', async () => {
     createSibling({
-      provider: 'cloudrun',
-      projectId: 'other-cloudrun-project',
+      provider: 'fixture-hosting',
+      projectId: 'other-fixture-hosting-project',
       environmentId: 'us-east1',
       services: {},
       serviceCreateRecovery: {
@@ -381,7 +438,7 @@ describe('previous hosting boundary destroy safety', () => {
     createSibling({
       provider: projectTarget.provider,
       projectId: projectTarget.projectId,
-      environmentId: 'ecs-staging',
+      environmentId: 'fixture-project-hosting-staging',
       services: {},
     });
 
@@ -392,8 +449,8 @@ describe('previous hosting boundary destroy safety', () => {
 
   it('blocks project deletion when a retained provider resource uses the same project', async () => {
     createSibling({
-      provider: 'cloudrun',
-      projectId: 'other-cloudrun-project',
+      provider: 'fixture-hosting',
+      projectId: 'other-fixture-hosting-project',
       environmentId: 'us-east1',
       services: {},
       previousResource: {
@@ -403,7 +460,7 @@ describe('previous hosting boundary destroy safety', () => {
         name: 'railway-backup',
         providerScope: {
           projectId: projectTarget.projectId,
-          environmentId: 'ecs-staging',
+          environmentId: 'fixture-project-hosting-staging',
         },
       },
     });
@@ -423,8 +480,8 @@ describe('previous hosting boundary destroy safety', () => {
             services: {},
           }
         : {
-            provider: 'cloudrun',
-            projectId: 'other-cloudrun-project',
+            provider: 'fixture-hosting',
+            projectId: 'other-fixture-hosting-project',
             environmentId: 'us-east1',
             services: {},
           });

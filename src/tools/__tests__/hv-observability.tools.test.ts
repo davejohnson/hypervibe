@@ -742,7 +742,7 @@ describe('hv_health', () => {
         },
       ])),
     }));
-    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',

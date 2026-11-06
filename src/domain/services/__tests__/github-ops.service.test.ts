@@ -20,7 +20,6 @@ import { resolveReviewedBranchDeployTargets } from '../managed-ci-targets.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { managedCiReleaseTarget } from '../managed-ci-targets.js';
-import { cloudRunContainerBuildStartCommand } from '../../../adapters/providers/gcp/cloudrun-ci.release-runtime.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
@@ -951,29 +950,6 @@ describe('github tools', () => {
       providerServiceIds: [],
     };
 
-    const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', reviewedTarget('cloudrun', {
-      ...baseTarget,
-      providerServiceIds: ['cloudrun-web'],
-      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-      providerRegion: 'us-west1',
-    }), { includeStep: false });
-    expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
-    expect(cloudRunWorkflow.requiredVariables).toEqual([]);
-    expect(cloudRunWorkflow.content).toContain('GCP_REGION: "us-west1"');
-    expect(cloudRunWorkflow.content).toContain('GCP_BOUND_PROJECT_ID: "gcp-project"');
-    expect(cloudRunWorkflow.content).toContain('process.env.GCP_PROJECT_ID !== process.env.GCP_BOUND_PROJECT_ID');
-    expect(cloudRunWorkflow.content).not.toContain('secrets.GCP_REGION');
-    expect(cloudRunWorkflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudrun-web'");
-    expect(cloudRunWorkflow.content).toContain("CLOUDRUN_JOB_NAMES: ''");
-    expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
-    expect(cloudRunWorkflow.content).toContain('docker/build-push-action@v6');
-    expect(cloudRunWorkflow.content).toContain(
-      'Artifact Registry repository is not bound; run Hypervibe plan and apply before CI deployment'
-    );
-    expect(cloudRunWorkflow.content).not.toContain("base + '?repositoryId='");
-    expect(cloudRunWorkflow.content).toContain('await waitOperation(operation, \'service \' + serviceName + \' deployment\')');
-    expect(cloudRunWorkflow.content).toContain("await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource, filesystem)");
-
     const railwayWorkflow = buildBranchDeployWorkflow('railway', reviewedTarget('railway', {
       ...baseTarget,
       providerServiceIds: ['srv-railway'],
@@ -983,148 +959,10 @@ describe('github tools', () => {
     expect(railwayWorkflow.content).toContain('packages: write');
 
     const combinedContent = [
-      cloudRunWorkflow.content,
       railwayWorkflow.content,
     ].join('\n');
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud /);
 
-    expect(() => buildBranchDeployWorkflow('cloudrun', reviewedTarget('cloudrun', {
-      ...baseTarget,
-      providerScope: { projectId: 'gcp-project' },
-      providerEnvironmentId: 'not-a-region',
-      providerServiceIds: ['cloudrun-web'],
-    }), { includeStep: false })).toThrow('has no bound provider project or region');
-  });
-
-  it('separates Cloud Run service and scheduled job deploy targets', () => {
-    const projectRepo = new ProjectRepository();
-    const envRepo = new EnvironmentRepository();
-    const project = projectRepo.create({
-      name: 'cloudapp',
-      defaultPlatform: 'cloudrun',
-      gitRemoteUrl: 'https://github.com/davejohnson/cloudapp',
-    });
-    envRepo.create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'cloudrun',
-        projectId: 'cloudapp-production',
-        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-        services: {
-          web: {
-            serviceId: 'cloudapp-production-web',
-            releaseJobName: 'cloudapp-production-web-migration',
-          },
-          worker: { serviceId: 'cloudapp-production-worker' },
-          daily: { serviceId: 'cloudapp-production-daily-schedule', jobName: 'cloudapp-production-daily', resourceType: 'scheduledJob' },
-        },
-      },
-    });
-    new SpecStore().replace(project, {
-      version: 1,
-      project: project.name,
-      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
-      environments: {
-        production: {
-          hosting: { provider: 'cloudrun', region: 'us-west1' },
-          services: {
-            web: { workloadKind: 'web', startCommand: 'npm run web', healthCheckPath: '/healthz' },
-            worker: { workloadKind: 'worker', startCommand: 'npm run worker', healthCheckPath: '/ready' },
-            daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *', startCommand: 'npm run daily' },
-          },
-          migrations: { mode: 'releaseCommand', command: 'npm run db:migrate' },
-          deploy: { strategy: 'branch', branch: 'main' },
-        },
-      },
-    });
-
-    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
-    expect(targets[0]).toMatchObject({
-      providerServiceIds: ['cloudapp-production-web', 'cloudapp-production-worker'],
-      providerJobNames: ['cloudapp-production-daily'],
-      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-      releaseCommands: [{
-        serviceName: 'web',
-        providerServiceId: 'cloudapp-production-web',
-        jobName: 'cloudapp-production-web-migration',
-        command: 'npm run db:migrate',
-      }],
-      needsServiceNames: true,
-      needsJobNames: true,
-      providerRegion: 'us-west1',
-      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
-      containerStartCommand: 'npm run web',
-      runtimeResources: [
-        {
-          logicalName: 'daily',
-          workloadKind: 'cron',
-          providerResourceType: 'job',
-          providerResourceId: 'cloudapp-production-daily',
-          startCommand: 'npm run daily',
-          healthCheckPath: null,
-        },
-        {
-          logicalName: 'web',
-          workloadKind: 'web',
-          providerResourceType: 'service',
-          providerResourceId: 'cloudapp-production-web',
-          startCommand: 'npm run web',
-          healthCheckPath: '/healthz',
-        },
-        {
-          logicalName: 'worker',
-          workloadKind: 'worker',
-          providerResourceType: 'service',
-          providerResourceId: 'cloudapp-production-worker',
-          startCommand: 'npm run worker',
-          healthCheckPath: '/ready',
-        },
-      ],
-    });
-    expect(cloudRunContainerBuildStartCommand(targets[0])).toBe('npm run web');
-
-    const workflow = buildBranchDeployWorkflow('cloudrun', targets[0], { includeStep: false });
-    expect(workflow.requiredVariables).toEqual([]);
-    expect(workflow.content).toContain('GCP_REGION: "us-west1"');
-    expect(workflow.content).toContain('GCP_BOUND_PROJECT_ID: "gcp-project"');
-    expect(workflow.content).toContain("process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe'");
-    expect(workflow.content).not.toContain("process.env.GCP_ARTIFACT_REPOSITORY || 'infraprint'");
-    expect(workflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-worker'");
-    expect(workflow.content).toContain("CLOUDRUN_JOB_NAMES: 'cloudapp-production-daily'");
-    expect(workflow.content).toContain('CLOUDRUN_RELEASE_COMMANDS_B64:');
-    expect(workflow.content).toContain('CLOUDRUN_RUNTIME_RESOURCES_B64:');
-    expect(workflow.content).toContain('cloudRunContainerWithRuntime');
-    expect(executeDockerfileStep(workflow.content, tempDir)).toContain(
-      'CMD ["sh", "-lc", "npm run web"]'
-    );
-    expect(workflow.content).toContain('await runCloudRunReleaseCommands({');
-    expect(workflow.content.indexOf('await runCloudRunReleaseCommands({')).toBeLessThan(
-      workflow.content.indexOf('for (const serviceName of serviceNames)')
-    );
-    expect(workflow.content).toContain(
-      "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}"
-    );
-    expect(workflow.content).toContain('id: release_image');
-    expect(workflow.content).toContain("id: image\n        if: steps.deploy.outputs.operation != 'rollback'");
-    expect(workflow.content).toContain("id: gcp\n        if: steps.deploy.outputs.operation != 'rollback'");
-    expect(workflow.content).toContain("id: build\n        if: steps.deploy.outputs.operation != 'rollback'");
-    expect(workflow.content).toContain("if (process.env.DEPLOY_OPERATION !== 'rollback') {\n              await runCloudRunReleaseCommands({");
-    expect(workflow.content).toContain('version: 4,');
-    expect(workflow.content).toContain('HYPERVIBE_RELEASE_IMAGE_URI: ${{ steps.deploy.outputs.operation ==');
-    expect(workflow.content).toContain('Download rollback release evidence');
-    expect(workflow.content.match(/^\s+HYPERVIBE_SOURCE_ARTIFACT_ID:/gm)).toHaveLength(1);
-    expect(() => new AsyncFunction(
-      'require',
-      'process',
-      'core',
-      'fetch',
-      extractGitHubScript(workflow.content, 'Deploy image to Cloud Run')
-    )).not.toThrow();
-    expect(workflow.content).toContain('/jobs/\' + encodeURIComponent(jobName)');
-    expect(workflow.content).toContain('await waitOperation(operation, \'job \' + jobName + \' deployment\')');
-    expect(workflow.content).toContain("await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource, filesystem)");
-    expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-daily-schedule'");
   });
 
   it('generates from an explicit runtime and never invents Node for custom apps', () => {
@@ -1142,7 +980,7 @@ describe('github tools', () => {
       containerStartCommand: 'npm run serve',
       runtime: { kind: 'node' as const, version: '24', installCommand: 'npm ci' },
     };
-    for (const provider of ['railway', 'cloudrun'] as const) {
+    for (const provider of ['railway'] as const) {
       const workflow = buildBranchDeployWorkflow(
         provider,
         reviewedTarget(provider, baseTarget),

@@ -17,6 +17,10 @@ import {
   runHttpCheck,
 } from '../health.service.js';
 import { adapterFactory } from '../adapter.factory.js';
+import '../../../application/providers.js';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { CloudRunAdapter } from '../../../adapters/providers/gcp/cloudrun.adapter.js';
 
 const DEFAULT_CHECK = {
   method: 'GET' as const,
@@ -41,6 +45,25 @@ describe('health.service', () => {
     vi.unstubAllGlobals();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('observes an existing cloud deployment while resource provisioning is unavailable', async () => {
+    const project = new ProjectRepository().create({ name: 'cloud-health', defaultPlatform: 'cloudrun' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+      provider: 'cloudrun', projectId: 'cloud-project', environmentId: 'us-central1', services: { web: { serviceId: 'bound-web' } },
+    } });
+    const connections = new ConnectionRepository();
+    const connection = connections.create({ provider: 'cloudrun', credentialsEncrypted: getSecretStore().encryptObject({
+      projectId: 'cloud-project', credentials: JSON.stringify({ client_email: 'synthetic@example.invalid', private_key: 'synthetic-key' }),
+    }) });
+    connections.updateStatus(connection.id, 'verified');
+    const observe = vi.spyOn(CloudRunAdapter.prototype, 'getDeployStatus').mockResolvedValue({ status: 'ready' });
+    const provisioning = await adapterFactory.getHostingAdapterByName('cloudrun', project);
+    expect(provisioning.success).toBe(false);
+
+    const result = await collectProjectDeploymentHealth({ project, environments: [environment], desiredServiceNamesByEnvironment: { production: ['web'] } });
+    expect(result.state).toBe('healthy');
+    expect(observe).toHaveBeenCalledWith(environment, 'bound-web');
   });
 
   function createCloudRunProject(url = 'https://web.example.run.app') {
@@ -216,7 +239,7 @@ describe('health.service', () => {
         },
       }),
     ];
-    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockImplementation(async (provider) => ({
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider) => ({
       success: true,
       adapter: {
         name: provider,
@@ -249,8 +272,8 @@ describe('health.service', () => {
       provider: 'vercel',
       state: 'healthy',
     }));
-    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project);
-    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('vercel', project);
+    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('railway', project);
+    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('vercel', project);
   });
 
   it('checks only services in current desired state when bindings contain a renamed service', async () => {
@@ -274,7 +297,7 @@ describe('health.service', () => {
     const getDeployStatus = vi.fn(async (_environment: unknown, serviceId: string) => ({
       status: serviceId === 'production-events-worker' ? 'unknown' : 'deployed',
     }));
-    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: { name: 'railway', getDeployStatus } as never,
     });
@@ -309,7 +332,7 @@ describe('health.service', () => {
         services: { web: { serviceId: 'production-web' } },
       },
     });
-    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',
@@ -351,7 +374,7 @@ describe('health.service', () => {
         services: { web: { serviceId: 'vercel-web' } },
       },
     });
-    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: false,
       error: 'permission denied',
     });

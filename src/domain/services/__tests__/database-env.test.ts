@@ -23,7 +23,7 @@ function component(
 describe('database runtime projection registry', () => {
   it('projects the shared PostgreSQL contract for every registered database provider', () => {
     const connectionUrl = 'postgresql://app:secret@db.internal:5433/app';
-    const providers = providerRegistry.namesFor('database').sort();
+    const providers = providerRegistry.all().filter(provider => provider.databaseRuntime).map(provider => provider.metadata.name).sort();
 
     expect(providers).toEqual([
       'azure-postgres',

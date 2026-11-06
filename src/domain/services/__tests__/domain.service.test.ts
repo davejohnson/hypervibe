@@ -8,7 +8,7 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../../adapters/providers/cloudflare/cloudflare.adapter.js';
-import type { IProviderAdapter } from '../../ports/provider.port.js';
+import type { IProviderLifecycleAdapter } from '../../ports/provider.port.js';
 import { adapterFactory } from '../adapter.factory.js';
 import { setupCustomDomain, teardownCustomDomain } from '../domain.service.js';
 
@@ -33,7 +33,7 @@ function seedCloudflareConnection(credentials: Record<string, unknown> = { apiTo
   repo.updateStatus(conn.id, 'verified');
 }
 
-function createBaseAdapter(name: string): IProviderAdapter {
+function createBaseAdapter(name: string): IProviderLifecycleAdapter {
   return {
     name,
     capabilities: {
@@ -114,7 +114,7 @@ describe('setupCustomDomain', () => {
     const fakeHostingAdapter = {
       ...createBaseAdapter('railway'),
       attachCustomDomain,
-    } satisfies IProviderAdapter & { attachCustomDomain: typeof attachCustomDomain };
+    } satisfies IProviderLifecycleAdapter & { attachCustomDomain: typeof attachCustomDomain };
 
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
@@ -198,7 +198,7 @@ describe('setupCustomDomain', () => {
     const fakeHostingAdapter = {
       ...createBaseAdapter('railway'),
       attachCustomDomain,
-    } satisfies IProviderAdapter & { attachCustomDomain: typeof attachCustomDomain };
+    } satisfies IProviderLifecycleAdapter & { attachCustomDomain: typeof attachCustomDomain };
 
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
@@ -306,7 +306,7 @@ describe('setupCustomDomain', () => {
     const fakeHostingAdapter = {
       ...createBaseAdapter('cloudrun'),
       attachCustomDomain,
-    } satisfies IProviderAdapter & { attachCustomDomain: typeof attachCustomDomain };
+    } satisfies IProviderLifecycleAdapter & { attachCustomDomain: typeof attachCustomDomain };
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: fakeHostingAdapter,
@@ -422,7 +422,7 @@ describe('setupCustomDomain', () => {
       ...createBaseAdapter('railway'),
       attachCustomDomain,
       recreateCustomDomain,
-    } satisfies IProviderAdapter & {
+    } satisfies IProviderLifecycleAdapter & {
       attachCustomDomain: typeof attachCustomDomain;
       recreateCustomDomain: typeof recreateCustomDomain;
     };
@@ -577,7 +577,7 @@ describe('teardownCustomDomain', () => {
     const fakeHostingAdapter = {
       ...createBaseAdapter('railway'),
       detachCustomDomain,
-    } satisfies IProviderAdapter & { detachCustomDomain: typeof detachCustomDomain };
+    } satisfies IProviderLifecycleAdapter & { detachCustomDomain: typeof detachCustomDomain };
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: fakeHostingAdapter,
@@ -623,7 +623,7 @@ describe('teardownCustomDomain', () => {
     const fakeHostingAdapter = {
       ...createBaseAdapter('railway'),
       detachCustomDomain,
-    } satisfies IProviderAdapter & { detachCustomDomain: typeof detachCustomDomain };
+    } satisfies IProviderLifecycleAdapter & { detachCustomDomain: typeof detachCustomDomain };
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: fakeHostingAdapter,

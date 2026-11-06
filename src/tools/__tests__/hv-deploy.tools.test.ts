@@ -1,3 +1,5 @@
+import '../../application/providers.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
 import { createRequire } from 'node:module';
@@ -40,6 +42,31 @@ import { CommandRegistry } from '../../application/commands.js';
 import { parseCliInvocation } from '../../interfaces/cli/parser.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
+
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { environment: { separateResource: false } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
+const fixtureDatabase = providerRegistry.get('cloudsql')!;
+providerRegistry.register({
+  ...fixtureDatabase,
+  metadata: { ...fixtureDatabase.metadata, name: 'fixture-database', displayName: 'Fixture database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['fixture-hosting'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+});
+
 
 let tempDir: string;
 
@@ -274,7 +301,7 @@ describe('hv_deploy', () => {
     await t.close();
   });
 
-  it.each([['railway', 'production'], ['railway', 'staging'], ['cloudrun', 'staging']])('routes %s %s deploy guidance through the reviewed branch default', async (provider, environmentName) => {
+  it.each([['railway', 'production'], ['railway', 'staging']])('routes %s %s deploy guidance through the reviewed branch default', async (provider, environmentName) => {
     const project = new ProjectRepository().create({
       name: 'rail-ci-app',
       defaultPlatform: provider,
@@ -547,7 +574,7 @@ describe('hv_deploy database env injection', () => {
     const cloudrunPrepared = {
       cloudPreparation: {
         cloudrun: {
-          provider: 'cloudrun',
+          provider: "fixture-hosting",
           version: CLOUD_PREPARE_PROFILES.cloudrun.version,
           preparedAt: new Date().toISOString(),
           requiredApis: CLOUD_PREPARE_PROFILES.cloudrun.requiredApis,
@@ -555,12 +582,12 @@ describe('hv_deploy database env injection', () => {
         },
       },
     };
-    const project = new ProjectRepository().create({ name: 'dbenv-app', defaultPlatform: 'cloudrun', policies: cloudrunPrepared });
+    const project = new ProjectRepository().create({ name: 'dbenv-app', defaultPlatform: "fixture-hosting", policies: cloudrunPrepared });
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         projectId: 'gcp-project',
         services: {
           web: { serviceId: 'gcp-project-web' },
@@ -579,7 +606,7 @@ describe('hv_deploy database env injection', () => {
       environmentId: environment.id,
       type: 'postgres',
       bindings: {
-        provider: 'cloudsql',
+        provider: "fixture-database",
         connectionUrl: 'postgresql://app:pw@34.44.202.227:5432/app',
       },
       externalId: 'production-postgres',
@@ -587,7 +614,7 @@ describe('hv_deploy database env injection', () => {
 
     const deployCalls: Array<{ service: string; envVars: Record<string, string> }> = [];
     const fakeAdapter: IHostingAdapter = {
-      name: 'cloudrun',
+      name: "fixture-hosting",
       capabilities: {
         supportedBuilders: ['dockerfile'],
         supportsAutoWiring: false,
@@ -615,7 +642,7 @@ describe('hv_deploy database env injection', () => {
       async getDeployStatus() { return { status: 'deployed' }; },
       async observe() {
         return {
-          provider: 'cloudrun',
+          provider: "fixture-hosting",
           observedAt: new Date().toISOString(),
           projectExists: true,
           projectId: 'gcp-project',
@@ -664,7 +691,7 @@ describe('hv_deploy database env injection', () => {
       project: project.name,
       environments: {
         production: {
-          hosting: { provider: 'cloudrun' },
+          hosting: { provider: "fixture-hosting" },
           services: {
             web: {},
             'events-worker': {
@@ -674,31 +701,32 @@ describe('hv_deploy database env injection', () => {
               },
             },
           },
-          database: { provider: 'cloudsql' },
+          database: { provider: "fixture-database" },
         },
       },
     });
-    seedVerifiedConnection('cloudrun');
-    seedVerifiedConnection('cloudsql');
+    seedVerifiedConnection("fixture-hosting");
+    seedVerifiedConnection("fixture-database");
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeAdapter });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: fakeAdapter as never,
     });
+    vi.spyOn(adapterFactory, 'getDatabaseOperations').mockImplementation((...args) => adapterFactory.getDatabaseAdapter(...args));
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'cloudsql',
+        name: "fixture-database",
         // Deployment now requires backup/restore evidence. This fixture supplies
         // that prerequisite without changing the database-env injection assertions.
         dailyBackups: {
           observe: async () => ({ state: 'known', daily: true, mechanism: 'snapshot',
             policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64),
-            source: { provider: 'cloudsql', primaryExternalId: 'production-postgres',
+            source: { provider: "fixture-database", primaryExternalId: 'production-postgres',
               providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: { instanceId: 'production-postgres' } } }),
           configureDaily: async () => { throw new Error('The established daily schedule must not be mutated during deployment'); },
           observeRecovery: async () => {
-            const source = { provider: 'cloudsql', primaryExternalId: 'production-postgres',
+            const source = { provider: "fixture-database", primaryExternalId: 'production-postgres',
               providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: { instanceId: 'production-postgres' } };
             const timestamp = new Date(Date.now() - 1000).toISOString();
             return { state: 'complete', source, recoveryPointId: 'completed-point', dataTime: timestamp, completedAt: timestamp,
@@ -707,7 +735,7 @@ describe('hv_deploy database env injection', () => {
           },
         },
         observeDatabase: async () => ({
-          provider: 'cloudsql',
+          provider: "fixture-database",
           engine: 'postgres',
           externalId: 'production-postgres',
           name: 'dbenv-app-production-postgres',
@@ -718,7 +746,7 @@ describe('hv_deploy database env injection', () => {
 
     const t = await makeClient();
     const result = await t.call('hv_deploy', { project: 'dbenv-app', env: 'production' });
-    expect(result.ok).toBe(true);
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
 
     expect(deployCalls).toHaveLength(2);
     // The managed database URL is injected even though the caller passed no envVars.

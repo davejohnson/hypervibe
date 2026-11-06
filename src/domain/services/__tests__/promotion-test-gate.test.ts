@@ -1,3 +1,5 @@
+import '../../../application/providers.js';
+import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,6 +22,26 @@ import {
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
 import { extractGitHubScript } from './managed-ci-workflow.test-utils.js';
 
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { ...fixtureHostingMetadata.orchestration, ci: {
+      ...fixtureHostingMetadata.orchestration!.ci!,
+      requiredSecrets: ['FIXTURE_CREDENTIALS', 'FIXTURE_PROJECT'],
+      secretCredentialKeys: { FIXTURE_CREDENTIALS: 'credentials', FIXTURE_PROJECT: 'projectId' },
+    } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
+
 const workflowPath = '.github/workflows/test.yml';
 const candidate = 'a'.repeat(40);
 const branchHead = 'b'.repeat(40);
@@ -41,7 +63,7 @@ function desiredState(tests = true, packageReadToken?: boolean) {
     environments: {
       staging: { hosting: { provider: 'railway' }, services, deploy: { strategy: 'branch', trigger: 'ci' } },
       production: {
-        hosting: { provider: 'cloudrun', region: 'us-central1' }, services,
+        hosting: { provider: "fixture-hosting", region: 'us-central1' }, services,
         deploy: { strategy: 'branch', trigger: 'ci', promoteFrom: 'staging',
           ...(tests ? { promotionTests: { workflow: workflowPath,
             ...(packageReadToken === undefined ? {} : { packageReadToken }) } } : {}) },
@@ -75,7 +97,7 @@ describe('production promotion full-test gate', () => {
       services: { web: { serviceId: 'rail-web' }, worker: { serviceId: 'rail-worker' } },
     } });
     environments.create({ projectId: project.id, name: 'production', platformBindings: {
-      provider: 'cloudrun', projectId: 'gcp-project',
+      provider: "fixture-hosting", projectId: 'gcp-project',
       providerScope: { projectId: 'gcp-project', region: 'us-central1' },
       services: { web: { serviceId: 'production-web' }, worker: { serviceId: 'production-worker' } },
     } });
@@ -83,7 +105,7 @@ describe('production promotion full-test gate', () => {
     new SpecStore().replace(project, spec);
     const { targets, migration } = resolveBranchDeployTargets(project);
     const target = targets.find((entry) => entry.environmentName === 'production')!;
-    const workflow = buildBranchDeployWorkflow('cloudrun', target, migration);
+    const workflow = buildBranchDeployWorkflow("fixture-hosting", target, migration);
     const document = parseDocument(workflow.content, { uniqueKeys: true });
     expect(document.errors).toEqual([]);
     return { spec, target, migration, workflow, jobs: document.toJS().jobs };
@@ -148,19 +170,19 @@ describe('production promotion full-test gate', () => {
   it('changes workflow and deployment locks without changing the immutable application program', () => {
     const { spec, target, migration } = compile();
     const original = { ...target, promotionTests: undefined };
-    expect(githubActionsWorkflowInputHash({ provider: 'cloudrun', target, migration }))
-      .not.toBe(githubActionsWorkflowInputHash({ provider: 'cloudrun', target: original, migration }));
-    expect(githubActionsServerProgramFingerprint({ provider: 'cloudrun', target, migration }))
-      .toBe(githubActionsServerProgramFingerprint({ provider: 'cloudrun', target: original, migration }));
+    expect(githubActionsWorkflowInputHash({ provider: "fixture-hosting", target, migration }))
+      .not.toBe(githubActionsWorkflowInputHash({ provider: "fixture-hosting", target: original, migration }));
+    expect(githubActionsServerProgramFingerprint({ provider: "fixture-hosting", target, migration }))
+      .toBe(githubActionsServerProgramFingerprint({ provider: "fixture-hosting", target: original, migration }));
     expect(environmentDeploymentContractHash(spec, 'production'))
       .not.toBe(environmentDeploymentContractHash(projectSpecSchema.parse(desiredState(false)), 'production'));
     expect(environmentDeploymentContractHash(spec, 'staging'))
       .toBe(environmentDeploymentContractHash(projectSpecSchema.parse(desiredState(false)), 'staging'));
     const privateTarget = { ...target, promotionTests: { workflow: workflowPath, packageReadToken: true } };
-    expect(githubActionsWorkflowInputHash({ provider: 'cloudrun', target: privateTarget, migration }))
-      .not.toBe(githubActionsWorkflowInputHash({ provider: 'cloudrun', target, migration }));
-    expect(githubActionsServerProgramFingerprint({ provider: 'cloudrun', target: privateTarget, migration }))
-      .toBe(githubActionsServerProgramFingerprint({ provider: 'cloudrun', target, migration }));
+    expect(githubActionsWorkflowInputHash({ provider: "fixture-hosting", target: privateTarget, migration }))
+      .not.toBe(githubActionsWorkflowInputHash({ provider: "fixture-hosting", target, migration }));
+    expect(githubActionsServerProgramFingerprint({ provider: "fixture-hosting", target: privateTarget, migration }))
+      .toBe(githubActionsServerProgramFingerprint({ provider: "fixture-hosting", target, migration }));
     expect(environmentDeploymentContractHash(projectSpecSchema.parse(desiredState(true, true)), 'production'))
       .not.toBe(environmentDeploymentContractHash(spec, 'production'));
   });

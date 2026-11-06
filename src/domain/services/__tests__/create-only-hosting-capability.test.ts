@@ -8,7 +8,7 @@ import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adap
 import { CloudRunAdapter } from '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { EcsExpressAdapter } from '../../../adapters/providers/aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../../../adapters/providers/azure/azure-container-apps.adapter.js';
-import type { IProviderAdapter, ProviderCapabilities } from '../../ports/provider.port.js';
+import type { IProviderAdapter, IProviderLifecycleAdapter, ProviderCapabilities } from '../../ports/provider.port.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { adapterFactory } from '../adapter.factory.js';
 import { executeBootstrap } from '../bootstrap.service.js';
@@ -37,18 +37,17 @@ function fixture(provider: string, capabilities: ProviderCapabilities = adapters
   const setEnvVars = vi.fn(async () => ({ success: true, message: 'Unexpected environment mutation' }));
   const deploy = vi.fn(async () => ({ serviceId: service.id, externalId: 'new-workload', status: 'configured' as const,
     receipt: { success: true, message: 'Unexpected workload mutation' } }));
-  const adapter = { name: provider, capabilities, ensureProject, setEnvVars, deploy } as unknown as IProviderAdapter;
+  const adapter = { name: provider, capabilities, ensureProject, setEnvVars, deploy } as unknown as IProviderLifecycleAdapter;
   return { project, environment, service, adapter, ensureProject, setEnvVars, deploy };
 }
 
 describe('creation-only hosting admission', () => {
   it('checks deferred cron activation against every registered hosting workload contract', () => {
-    expect(Object.keys(adapters).sort()).toEqual(providerRegistry.namesFor('hosting').sort());
-    const cronProviders = ['railway', 'cloudrun'];
+    expect(providerRegistry.namesFor('hosting')).toEqual(['railway']);
     for (const [provider, adapter] of Object.entries(adapters)) {
-      expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.workloadKinds.includes('cron'), provider).toBe(cronProviders.includes(provider));
-      expect(adapter.capabilities.supportsDeferredCronActivation === true, provider).toBe(provider === 'cloudrun');
-      expect(typeof adapter.activateSchedule === 'function', provider).toBe(provider === 'cloudrun');
+      expect(providerRegistry.supportsWorkloadKind(provider, 'cron'), provider).toBe(provider === 'railway');
+      expect(adapter.capabilities.supportsDeferredCronActivation === true, provider).toBe(false);
+      expect(typeof adapter.activateSchedule === 'function', provider).toBe(false);
     }
   });
 
