@@ -317,9 +317,33 @@ export class OpenTofuEngine {
       } else {
         diagnostics.push('The engine state could not be read after apply; outcomes without explicit evidence remain unknown.');
       }
+      // A dropped connection while the provider waits on Google says nothing about the
+      // resource itself; Google usually finishes. Report it as unknown so the next plan
+      // observes (and if needed adopts) instead of calling it a failure.
+      for (const address of networkInterruptedAddresses(applied.stdout)) {
+        if (outcomes[address] === 'failed') outcomes[address] = 'unknown';
+      }
+      if (Object.values(outcomes).includes('unknown') && networkInterruptedAddresses(applied.stdout).size) {
+        diagnostics.unshift('The network connection to Google dropped during the apply. Nothing was duplicated; run the same command again once the connection is stable.');
+      }
       return { outcomes, diagnostics };
     } finally {
       fs.rmSync(prepared.directory, { recursive: true, force: true });
     }
   }
+}
+
+const NETWORK_ERROR = /no such host|can't assign requested address|connection reset|connection refused|i\/o timeout|TLS handshake timeout|network is unreachable|EOF$|broken pipe|context deadline exceeded/i;
+
+/** Addresses whose apply error is a local network failure rather than a provider decision. */
+export function networkInterruptedAddresses(stdout: string): Set<string> {
+  const result = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    try {
+      const event = JSON.parse(line) as { type?: string; diagnostic?: { severity?: string; summary?: string; address?: string } };
+      if (event.type === 'diagnostic' && event.diagnostic?.severity === 'error' && event.diagnostic.address
+        && NETWORK_ERROR.test(event.diagnostic.summary ?? '')) result.add(event.diagnostic.address);
+    } catch { /* not an event line */ }
+  }
+  return result;
 }

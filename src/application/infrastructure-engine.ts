@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
+import { isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
@@ -48,6 +49,7 @@ export const ENGINE_SECRET_OPERATION = 'gcpSecretManagerEnsure';
 export const ENGINE_SECRET_DELETE_OPERATION = 'gcpSecretManagerDelete';
 export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export const ENGINE_RELEASE_OPERATION = 'engineImageRelease';
+export const ENGINE_STORAGE_ACCESS_BLOCKER = 'Storage buckets need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=true, or run hv_connections provider="cloudrun" action="prepare" gcsAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure';
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
 export const ENGINE_DATABASE_URL_KEY = 'DATABASE_URL';
@@ -498,6 +500,9 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
+  if (Object.keys(environmentSpec!.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(project.id) ?? project)) {
+    return { blocked: [ENGINE_STORAGE_ACCESS_BLOCKER] };
+  }
 
   // Hypervibe-owned secrets: explicit, observed, tri-state.
   const token = await context.adapter.engineAccessToken();

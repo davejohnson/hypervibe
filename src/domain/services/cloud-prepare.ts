@@ -208,6 +208,13 @@ export function isCloudPreparedForQueues(
   );
 }
 
+/** Whether GCP setup granted bucket lifecycle access (the explicit gcsAccess="lifecycle" add-on). */
+export function isCloudPreparedForStorage(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record && GCS_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
+}
+
 export function withCloudPreparationRecord(
   policies: Record<string, unknown>,
   provider: CloudPrepareProvider,

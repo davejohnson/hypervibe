@@ -5,6 +5,8 @@ import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionReceipt } from '../domain/plan/converge.executor.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
+import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
+import { isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
   isEngineManaged,
@@ -22,6 +24,7 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[] }
+  | { status: 'needs_access'; access: string; grants: Record<string, unknown> }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
   | { status: 'pending'; message: string; receipts: ActionReceipt[] }
@@ -64,6 +67,8 @@ export async function launchEnvironment(ctx: CommandContext, params: {
   environmentName: string;
   billingAccountName?: string;
   confirmActions?: string[];
+  /** The user approved the extra Google Cloud access a needs_access result described. */
+  approveAccess?: boolean;
   revision?: string;
   sourceDirectory?: string;
 }): Promise<LaunchResult> {
@@ -89,6 +94,22 @@ export async function launchEnvironment(ctx: CommandContext, params: {
     }
     const confirmed = await runGcpBootstrap({ project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: true });
     if (!confirmed.success) return { status: 'blocked', message: String(confirmed.error ?? 'GCP setup failed.'), details: confirmed };
+  }
+
+  // 1b. Extra access some resources need (bucket lifecycle), shown before it is granted.
+  if (Object.keys(environmentSpec.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle' });
+    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The storage access preview failed.'), details: preview };
+    if (!params.approveAccess) {
+      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
+      return {
+        status: 'needs_access',
+        access: 'Let Hypervibe create and manage Cloud Storage buckets in this project, and let the app read and write their files.',
+        grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
+      };
+    }
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting storage access failed.'), details: granted };
   }
 
   // 2. Infrastructure, in as many reviewed rounds as staging requires.

@@ -16,10 +16,12 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       env: envField,
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
+      approveAccess: z.boolean().optional()
+        .describe('true only after the user approved the extra Google Cloud access a needs_access result described.'),
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, confirmActions }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, confirmActions, approveAccess }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
@@ -29,12 +31,19 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
         ...(specResult.source?.kind === 'repo' ? { sourceDirectory: path.dirname(path.dirname(specResult.source.path)) } : {}),
         ...(billingAccountName ? { billingAccountName } : {}),
         ...(confirmActions ? { confirmActions } : {}),
+        ...(approveAccess ? { approveAccess } : {}),
       });
       switch (result.status) {
         case 'needs_billing_choice':
           return commandSuccess(result, {
             hint: 'Ask the user which billing account should pay for this app, then call hv_launch again with billingAccountName.',
             agentInstruction: { action: 'ask_user', message: 'Show the billing accounts by display name and ask the user to pick one. Never choose a billing account for them.' },
+            next: ['hv_launch'],
+          });
+        case 'needs_access':
+          return commandSuccess(result, {
+            hint: 'Explain the access in plain language. After the user approves, call hv_launch again with approveAccess=true.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to approve this Google Cloud access. Do not approve it for them.' },
             next: ['hv_launch'],
           });
         case 'needs_confirmation':

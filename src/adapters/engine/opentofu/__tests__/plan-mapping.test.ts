@@ -154,3 +154,15 @@ describe('adopting interrupted creates', () => {
     expect(actions[0]).toMatchObject({ id: 'database:postgres', type: 'update', requiresConfirm: true, metadata: { engineAdopt: true } });
   });
 });
+
+describe('network interruptions', () => {
+  it('distinguishes a dropped connection from a provider rejection', async () => {
+    const { networkInterruptedAddresses } = await import('../engine.js');
+    const line = (address: string, summary: string) => JSON.stringify({ type: 'diagnostic', diagnostic: { severity: 'error', address, summary } });
+    const stdout = [
+      line('google_sql_database_instance.db', 'Error waiting for Update Instance: read tcp 1.2.3.4:5->6.7.8.9:443: read: can\'t assign requested address'),
+      line('google_storage_bucket.b', 'googleapi: Error 403: does not have storage.buckets.create access'),
+    ].join('\n');
+    expect([...networkInterruptedAddresses(stdout)]).toEqual(['google_sql_database_instance.db']);
+  });
+});
