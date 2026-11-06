@@ -229,6 +229,8 @@ export const databaseSpecSchema = z.object({
   credentialAliases: z.object({ mode: z.literal('issuer-references') }).strict().optional(),
   /** One-use destructive initialization of empty persistence on an exact existing database. */
   freshInitialization: databaseFreshInitializationIntentSchema.optional(),
+  /** OpenTofu-managed databases: increment to rotate the Hypervibe-owned password with no downtime. */
+  passwordGeneration: z.number().int().positive().optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({

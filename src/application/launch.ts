@@ -6,6 +6,8 @@ import type { ActionReceipt } from '../domain/plan/converge.executor.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
+import { cloudflareFor } from './infrastructure-engine-domain.js';
+import { connectCloudflareInBrowser } from './local-connect-page.js';
 import { isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
@@ -25,6 +27,7 @@ import {
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[] }
   | { status: 'needs_access'; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
   | { status: 'pending'; message: string; receipts: ActionReceipt[] }
@@ -96,6 +99,15 @@ export async function launchEnvironment(ctx: CommandContext, params: {
     if (!confirmed.success) return { status: 'blocked', message: String(confirmed.error ?? 'GCP setup failed.'), details: confirmed };
   }
 
+  // 1a. DNS access for a custom domain: open the one-step connect page instead of explaining tokens.
+  const domainName = environmentSpec.domain?.trim().toLowerCase();
+  if (domainName && 'error' in await cloudflareFor(domainName)) {
+    const connected = await connectCloudflareInBrowser({ domain: domainName, waitMs: 3 * 60 * 1000 });
+    if (connected.status !== 'connected') {
+      return { status: 'needs_connection', provider: 'cloudflare', ...(connected.url ? { url: connected.url } : {}), message: connected.message };
+    }
+  }
+
   // 1b. Extra access some resources need (bucket lifecycle), shown before it is granted.
   if (Object.keys(environmentSpec.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
     const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle' });
@@ -116,7 +128,7 @@ export async function launchEnvironment(ctx: CommandContext, params: {
   const approved = new Set(params.confirmActions ?? []);
   let rounds = 0;
   let certificatePending = false;
-  for (; rounds < 4; rounds++) {
+  for (; rounds < 6; rounds++) {
     const planned = await planInfrastructureEngine(ctx, params);
     if ('blocked' in planned) return { status: 'blocked', message: planned.blocked.join('\n') };
     const pending = planned.actions.filter((action) => action.type !== 'noop');

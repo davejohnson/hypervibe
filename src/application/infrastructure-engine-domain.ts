@@ -48,10 +48,10 @@ export function expectedTrafficRecords(domain: string, zoneName: string): Array<
     : [{ type: 'CNAME', content: SUBDOMAIN_TARGET }];
 }
 
-async function cloudflareFor(domain: string): Promise<{ adapter: CloudflareAdapter; zoneId: string; zoneName: string } | { error: string }> {
+export async function cloudflareFor(domain: string): Promise<{ adapter: CloudflareAdapter; zoneId: string; zoneName: string } | { error: string }> {
   // A connection scoped to the zone (example.com) covers its hostnames (app.example.com).
   const resolved = getCloudflareAdapterFromHints([...new Set([domain, dnsZoneScopeForDomain(domain)])]);
-  if ('error' in resolved) return { error: `Connect Cloudflare for ${domain} so Hypervibe can manage its DNS. ${resolved.error}` };
+  if ('error' in resolved) return { error: `Hypervibe needs access to Cloudflare to manage DNS for ${domain}. Connect it with hv_connections provider="cloudflare" action="connect" scope="${domain}" (opens a one-step page in the browser).` };
   const zone = await findCloudflareZone(resolved.adapter, domain);
   if (!zone) return { error: `No Cloudflare zone visible to the connection contains ${domain}.` };
   return { adapter: resolved.adapter, zoneId: zone.id, zoneName: zone.name };

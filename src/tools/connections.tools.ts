@@ -8,6 +8,7 @@ import {
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
+import { connectCloudflareInBrowser } from '../application/local-connect-page.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
 import {
@@ -104,7 +105,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
-      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup.'),
+      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat.'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like aws-secrets://name#key, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. GitHub packageReadToken alone updates an existing verified exact-scope connection while preserving its primary API credential. Optional for common single-token providers.'),
@@ -206,6 +207,19 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
 
       const requestedAction = action ?? 'add';
+      if (requestedAction === 'connect') {
+        if (provider !== 'cloudflare' || !scope?.trim()) {
+          return commandError('VALIDATION', 'action="connect" currently supports provider="cloudflare" with scope set to the domain to manage.', { next: ['hv_connections'] });
+        }
+        const result = await connectCloudflareInBrowser({ domain: scope });
+        return result.status === 'connected'
+          ? commandSuccess(result, { next: ['hv_launch', 'hv_plan'] })
+          : commandSuccess(result, {
+            hint: 'Tell the user a Cloudflare page is open in their browser and give them the link in case it did not open. Call action="connect" again after they finish.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to finish connecting Cloudflare in the browser tab that opened, then continue.' },
+            next: ['hv_connections'],
+          });
+      }
       // Stale connections for unregistered providers must stay removable.
       if (requestedAction !== 'remove' && !providerNames.includes(provider)) {
         return commandError('VALIDATION', `Unknown provider: ${provider}.`, {

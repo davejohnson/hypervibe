@@ -40,6 +40,12 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             agentInstruction: { action: 'ask_user', message: 'Show the billing accounts by display name and ask the user to pick one. Never choose a billing account for them.' },
             next: ['hv_launch'],
           });
+        case 'needs_connection':
+          return commandSuccess(result, {
+            hint: 'A connect page is open in the user\'s browser. Share the link in case it did not open, then call hv_launch again once they finish.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to finish the one-step connect page in their browser (create a token in Cloudflare, paste it, click Connect).' },
+            next: ['hv_launch'],
+          });
         case 'needs_access':
           return commandSuccess(result, {
             hint: 'Explain the access in plain language. After the user approves, call hv_launch again with approveAccess=true.',

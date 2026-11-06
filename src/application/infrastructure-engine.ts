@@ -31,6 +31,10 @@ import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js
 import { normalizeGitRemoteForBuild } from '../lib/git-remote.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import {
+  executeDatabaseCredential, observeDatabaseCredential, otherLogin,
+  type DatabaseCredentialMetadata, type DatabaseCredentialObservation, type DatabaseLogin,
+} from './infrastructure-engine-database.js';
+import {
   DOMAIN_DNS_OPERATION, DOMAIN_DNS_REMOVE_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_VERIFY_OPERATION,
   executeDomainAction, planDomain, planDomainDnsRemoval, type DomainPlanActions,
 } from './infrastructure-engine-domain.js';
@@ -54,7 +58,6 @@ export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
 export const ENGINE_DATABASE_URL_KEY = 'DATABASE_URL';
 const ENGINE_DATABASE_NAME = 'app';
-const ENGINE_DATABASE_USER = 'app';
 /** Google's public sample container, pinned by digest; serves until the first release. */
 export const ENGINE_HOLDING_IMAGE = 'us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7';
 const DEFAULT_REGION = 'us-central1';
@@ -211,11 +214,16 @@ function serviceResourceName(context: EngineContext, environmentName: string, se
   return bound ?? resourceName(serviceName, { maxLength: 49, scope: [context.gcpProjectId, environmentName] });
 }
 
-export function buildEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'runtimeServiceAccountEmail'> & { resourceNameFor: (service: string) => string; databaseWired?: boolean }): GcpCloudRunEngineInput {
+export function buildEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'runtimeServiceAccountEmail'> & {
+  resourceNameFor: (service: string) => string;
+  databaseWired?: boolean;
+  /** Exact secret versions to pin; a new version then rolls services through a reviewed update. */
+  secretVersions?: Record<string, string>;
+}): GcpCloudRunEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : [])];
   const secretEnv = Object.fromEntries(secretKeys
-    .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: 'latest' }]));
+    .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: context.secretVersions?.[key] ?? 'latest' }]));
   return {
     projectId: context.gcpProjectId,
     region: context.region,
@@ -240,13 +248,13 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
 
 type Observed<T> = { state: 'present'; value: T } | { state: 'absent' } | { state: 'unknown'; reason: string };
 
-async function secretManagerFetch(token: string, url: string, init: RequestInit = {}): Promise<Response> {
+export async function secretManagerFetch(token: string, url: string, init: RequestInit = {}): Promise<Response> {
   return fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
 }
 
-interface ObservedSecret { labels: Record<string, string>; hasEnabledVersion: boolean }
+interface ObservedSecret { labels: Record<string, string>; hasEnabledVersion: boolean; latestVersion?: string }
 
-async function observeSecret(token: string, gcpProjectId: string, secretId: string): Promise<Observed<ObservedSecret>> {
+export async function observeSecret(token: string, gcpProjectId: string, secretId: string): Promise<Observed<ObservedSecret>> {
   const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}`;
   const secret = await secretManagerFetch(token, base);
   if (secret.status === 404) return { state: 'absent' };
@@ -255,8 +263,10 @@ async function observeSecret(token: string, gcpProjectId: string, secretId: stri
   const version = await secretManagerFetch(token, `${base}/versions/latest`);
   if (version.status === 404) return { state: 'present', value: { labels: body.labels ?? {}, hasEnabledVersion: false } };
   if (!version.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${version.status} for ${secretId} versions.` };
-  const versionBody = await version.json() as { state?: string };
-  return { state: 'present', value: { labels: body.labels ?? {}, hasEnabledVersion: versionBody.state === 'ENABLED' } };
+  const versionBody = await version.json() as { state?: string; name?: string };
+  const latestVersion = versionBody.name?.split('/').pop();
+  return { state: 'present', value: { labels: body.labels ?? {}, hasEnabledVersion: versionBody.state === 'ENABLED',
+    ...(latestVersion && /^[1-9][0-9]*$/.test(latestVersion) ? { latestVersion } : {}) } };
 }
 
 async function listEngineSecrets(token: string, gcpProjectId: string, environmentId: string): Promise<Observed<string[]>> {
@@ -329,13 +339,13 @@ async function deleteSecret(token: string, action: PlanAction): Promise<ActionRe
 
 // ---------------------------------------------------------------- Database login (Hypervibe-owned)
 
-async function sqlAdmin(token: string, gcpProjectId: string, path: string, init: RequestInit = {}): Promise<Response> {
+export async function sqlAdmin(token: string, gcpProjectId: string, path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(`https://sqladmin.googleapis.com/v1/projects/${gcpProjectId}/${path}`, {
     ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
   });
 }
 
-async function waitForSqlOperation(token: string, gcpProjectId: string, operation: { name?: string; status?: string; error?: unknown }): Promise<'done' | 'failed' | 'unknown'> {
+export async function waitForSqlOperation(token: string, gcpProjectId: string, operation: { name?: string; status?: string; error?: unknown }): Promise<'done' | 'failed' | 'unknown'> {
   if (operation.status === 'DONE') return operation.error ? 'failed' : 'done';
   if (!operation.name) return 'unknown';
   const deadline = Date.now() + 5 * 60 * 1000;
@@ -350,7 +360,7 @@ async function waitForSqlOperation(token: string, gcpProjectId: string, operatio
 }
 
 /** Creates or updates a Hypervibe-labelled secret and adds one version. The value is never returned. */
-async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
+export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
   const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets`;
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
@@ -376,49 +386,69 @@ async function writeSecretVersion(token: string, gcpProjectId: string, secretId:
   return undefined;
 }
 
-/**
- * Sets a freshly generated password for the application login and stores the
- * complete connection URL in Secret Manager. OpenTofu never sees it, so later
- * infrastructure applies cannot restore an old password. Safe to repeat: a
- * partial failure leaves the secret unready and the next plan rotates again.
- */
-async function ensureDatabaseCredential(token: string, action: PlanAction): Promise<ActionResult> {
-  const { gcpProjectId, instanceName, secretId, labels, databaseName, user } = action.metadata as {
-    gcpProjectId: string; instanceName: string; secretId: string; labels: Record<string, string>; databaseName: string; user: string;
+// ---------------------------------------------------------------- Database login lifecycle
+
+async function planDatabaseCredential(params: {
+  token: string;
+  context: EngineContext;
+  environmentName: string;
+  instanceName: string;
+  databaseSecretId: string;
+  labels: Record<string, string>;
+  observation: DatabaseCredentialObservation;
+  desiredGeneration: number;
+  dependsOn: string[];
+  servicesUpdating: boolean;
+}): Promise<PlanAction[] | { blocked: string }> {
+  const { observation } = params;
+  const base = {
+    id: 'database-credential:postgres',
+    resource: { kind: 'secret' as const, name: ENGINE_DATABASE_URL_KEY, provider: 'gcp' },
+    verified: true,
   };
-  const instanceResponse = await sqlAdmin(token, gcpProjectId, `instances/${instanceName}`);
-  if (instanceResponse.status === 404) return { success: false, status: 'blocked', message: `Database instance ${instanceName} does not exist yet.` };
-  if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Cloud SQL returned HTTP ${instanceResponse.status} for ${instanceName}.` };
-  const instance = await instanceResponse.json() as { state?: string; connectionName?: string; settings?: { userLabels?: Record<string, string> } };
-  if (instance.state !== 'RUNNABLE' || !instance.connectionName) return { success: false, status: 'pending', message: `Database instance ${instanceName} is not ready yet.` };
-  if (instance.settings?.userLabels?.['managed-by'] !== 'hypervibe') return { success: false, status: 'blocked', message: `Database instance ${instanceName} is not managed by Hypervibe.` };
-
-  const usersResponse = await sqlAdmin(token, gcpProjectId, `instances/${instanceName}/users`);
-  if (!usersResponse.ok) return { success: false, status: 'blocked', message: `Listing database logins returned HTTP ${usersResponse.status}.` };
-  const users = await usersResponse.json() as { items?: Array<{ name?: string }> };
-  const exists = (users.items ?? []).some((item) => item.name === user);
-  const password = crypto.randomBytes(24).toString('base64url');
-  let written: Response;
-  try {
-    written = exists
-      ? await sqlAdmin(token, gcpProjectId, `instances/${instanceName}/users?name=${encodeURIComponent(user)}`, { method: 'PUT', body: JSON.stringify({ name: user, password }) })
-      : await sqlAdmin(token, gcpProjectId, `instances/${instanceName}/users`, { method: 'POST', body: JSON.stringify({ name: user, password }) });
-  } catch {
-    return { success: false, status: 'pending', message: 'The database login change has an unknown outcome. Run hv_plan again; Hypervibe will set a new password.' };
+  const metadata = (mode: DatabaseCredentialMetadata['mode'], login?: DatabaseLogin): DatabaseCredentialMetadata => ({
+    operation: ENGINE_DATABASE_CREDENTIAL_OPERATION, mode, gcpProjectId: params.context.gcpProjectId, instanceName: params.instanceName,
+    secretId: params.databaseSecretId, labels: params.labels, databaseName: ENGINE_DATABASE_NAME, generation: params.desiredGeneration,
+    ...(login ? { login } : {}),
+  });
+  if (!observation.ready) {
+    return [{ ...base, type: 'create', ...(params.dependsOn.length ? { dependsOn: params.dependsOn } : {}),
+      reason: `Hypervibe will create two database logins that take turns, generate their passwords and store the connection URL in Secret Manager (${params.databaseSecretId}). Passwords never enter OpenTofu.`,
+      metadata: metadata('initialize') as unknown as Record<string, unknown> }];
   }
-  if (!written.ok) return { success: false, message: `Setting the database login failed (HTTP ${written.status}).`, error: `HTTP ${written.status}` };
-  const outcome = await waitForSqlOperation(token, gcpProjectId, await written.json() as { name?: string; status?: string; error?: unknown });
-  if (outcome === 'failed') return { success: false, message: 'Cloud SQL could not set the database login.', error: 'operation failed' };
-  if (outcome === 'unknown') return { success: false, status: 'pending', message: 'The database login change has not finished. Run hv_plan again before retrying.' };
-
-  const url = `postgresql://${user}:${encodeURIComponent(password)}@localhost/${databaseName}?host=/cloudsql/${instance.connectionName}`;
-  const failure = await writeSecretVersion(token, gcpProjectId, secretId, labels, url);
-  if (failure) return failure;
-  const verified = await observeSecret(token, gcpProjectId, secretId);
-  if (verified.state !== 'present' || !verified.value.hasEnabledVersion || verified.value.labels['hv-db-instance'] !== instanceName) {
-    return { success: false, status: 'pending', message: `The connection URL in ${secretId} could not be verified yet.` };
+  if (observation.retirePending) {
+    // Revoke only once every service runs the published version; otherwise wait for the rollout.
+    if (params.servicesUpdating) return [];
+    const pinned = await pinnedDatabaseVersions(params.token, params.context);
+    if ('blocked' in pinned) return pinned;
+    if (pinned.versions.some((version) => version !== observation.latestVersion)) return [];
+    return [{ ...base, type: 'update',
+      reason: `Every service now uses the new database password; Hypervibe will revoke the previous password (${observation.retirePending}).`,
+      metadata: metadata('revoke', observation.retirePending) as unknown as Record<string, unknown> }];
   }
-  return { success: true, message: `Database login ${user} is set and its connection URL is stored in ${secretId}.`, data: { connectionName: instance.connectionName } };
+  if (observation.generation < params.desiredGeneration) {
+    const next = otherLogin(observation.login!);
+    return [{ ...base, type: 'update',
+      reason: `Hypervibe will rotate the database password with no downtime: set a new password on the idle login (${next}), then move services to it before revoking the old one.`,
+      metadata: metadata('rotate', next) as unknown as Record<string, unknown> }];
+  }
+  return [];
+}
+
+/** The DATABASE_URL secret version each bound service currently runs. */
+async function pinnedDatabaseVersions(token: string, context: EngineContext): Promise<{ versions: string[] } | { blocked: string }> {
+  const bound = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services ?? {};
+  const versions: string[] = [];
+  for (const binding of Object.values(bound)) {
+    if (!binding.serviceId) continue;
+    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, binding.serviceId);
+    if (observed.state === 'unknown') return { blocked: observed.reason };
+    if (observed.state === 'absent') continue;
+    const env = (observed.value.template?.containers?.[0]?.env ?? []) as Array<{ name?: string; valueSource?: { secretKeyRef?: { version?: string } } }>;
+    const entry = env.find((item) => item.name === ENGINE_DATABASE_URL_KEY);
+    if (entry) versions.push(entry.valueSource?.secretKeyRef?.version ?? 'unknown');
+  }
+  return { versions };
 }
 
 // ---------------------------------------------------------------- Interrupted creates
@@ -527,6 +557,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const desiredKeys = engineSecretKeys(spec, environmentName);
   const labels = { 'managed-by': 'hypervibe', 'hv-environment': labelValue(context.environment.id) };
   const secretActions: PlanAction[] = [];
+  const secretVersions: Record<string, string> = {};
   for (const key of desiredKeys) {
     const secretId = engineSecretId(environmentName, key);
     const observed = await observeSecret(token, context.gcpProjectId, secretId);
@@ -535,6 +566,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       return { blocked: [`Secret Manager already has ${secretId}, but it is not owned by this Hypervibe environment.`] };
     }
     const ready = observed.state === 'present' && observed.value.hasEnabledVersion;
+    if (ready && observed.value.latestVersion) secretVersions[key] = observed.value.latestVersion;
     secretActions.push({
       id: `secret:${key}`,
       type: ready ? 'noop' : observed.state === 'absent' ? 'create' : 'update',
@@ -552,16 +584,14 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     ?? lastAttemptedDatabaseInstance(context.environment.id)
     ?? `hv-${environmentName}-db-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const databaseSecretId = engineSecretId(environmentName, ENGINE_DATABASE_URL_KEY);
-  let databaseCredentialReady = false;
+  let databaseCredential: DatabaseCredentialObservation = { ready: false, generation: 0 };
   if (databaseSpec) {
-    const observed = await observeSecret(token, context.gcpProjectId, databaseSecretId);
-    if (observed.state === 'unknown') return { blocked: [observed.reason] };
-    if (observed.state === 'present' && observed.value.labels['hv-environment'] !== labels['hv-environment']) {
-      return { blocked: [`Secret Manager already has ${databaseSecretId}, but it is not owned by this Hypervibe environment.`] };
-    }
-    databaseCredentialReady = observed.state === 'present' && observed.value.hasEnabledVersion
-      && observed.value.labels['hv-db-instance'] === instanceName;
+    const observed = await observeDatabaseCredential(token, context.gcpProjectId, databaseSecretId, instanceName, labels['hv-environment']);
+    if ('blocked' in observed) return { blocked: [observed.blocked] };
+    databaseCredential = observed;
+    if (observed.ready && observed.latestVersion) secretVersions[ENGINE_DATABASE_URL_KEY] = observed.latestVersion;
   }
+  const databaseCredentialReady = databaseCredential.ready;
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : [])]);
@@ -589,6 +619,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     ...buildEngineInput(spec, environmentName, {
       ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
       databaseWired: databaseCredentialReady,
+      secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
     ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady } } : {}),
@@ -644,19 +675,15 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     metadata: { operation: ENGINE_SECRET_DELETE_OPERATION, gcpProjectId: context.gcpProjectId, secretId, labels },
   }));
   const databaseAction = serviceActions.find((action) => action.id === 'database:postgres');
-  const credentialActions: PlanAction[] = databaseSpec && !databaseCredentialReady ? [{
-    id: 'database-credential:postgres',
-    type: engineBinding.database?.instanceName === instanceName ? 'update' : 'create',
-    resource: { kind: 'secret', name: ENGINE_DATABASE_URL_KEY, provider: 'gcp' },
-    verified: true,
-    reason: `Hypervibe will create the database login, generate its password and store the connection URL in Secret Manager (${databaseSecretId}). The password never enters OpenTofu.`,
-    ...(databaseAction && databaseAction.type !== 'noop' ? { dependsOn: [databaseAction.id] } : {}),
-    metadata: {
-      operation: ENGINE_DATABASE_CREDENTIAL_OPERATION, gcpProjectId: context.gcpProjectId, instanceName,
-      secretId: databaseSecretId, labels: { ...labels, 'hv-db-instance': instanceName },
-      databaseName: ENGINE_DATABASE_NAME, user: ENGINE_DATABASE_USER,
-    },
-  }] : [];
+  const credentialActions = databaseSpec
+    ? await planDatabaseCredential({
+      token, context, environmentName, instanceName, databaseSecretId, labels, observation: databaseCredential,
+      desiredGeneration: databaseSpec.passwordGeneration ?? 1,
+      dependsOn: databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : [],
+      servicesUpdating: serviceActions.some((action) => action.id.startsWith('service:') && action.type !== 'noop'),
+    })
+    : [];
+  if ('blocked' in credentialActions) return { blocked: [credentialActions.blocked] };
   // Array order matters: prerequisites precede the engine segment so it runs only once they complete.
   const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...domainAfter, ...deletes, ...domainRemovals];
   const warnings = [
@@ -770,7 +797,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
           return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
         }
-        return ensureDatabaseCredential(token, action);
+        return executeDatabaseCredential(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action);
       }
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };
     },
