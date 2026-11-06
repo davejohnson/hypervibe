@@ -97,7 +97,26 @@ export interface GcpCloudRunEngineInput {
    * instead of being reported as an unmanaged change.
    */
   retiredServices?: string[];
+  /** Cloud SQL Postgres owned by the engine. Users and passwords stay with Hypervibe. */
+  database?: GcpCloudSqlInput;
+  /** A database this environment previously created that is no longer desired. */
+  retiredDatabase?: boolean;
 }
+
+export interface GcpCloudSqlInput {
+  /** Physical instance name; unique per project for a week after deletion, so Hypervibe picks and records it. */
+  instanceName: string;
+  databaseName: string;
+  tier?: string;
+  /**
+   * Wire services to the database (socket volume + CLOUD_SQL_CONNECTION_NAME).
+   * False until Hypervibe's credential exists, so a first deployment never
+   * points services at a database they cannot log in to.
+   */
+  wireServices: boolean;
+}
+
+export const DATABASE_ENGINE_ADDRESSES = ['google_sql_database_instance.db', 'google_sql_database.app'] as const;
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_ENV = new Set(['PORT', 'K_SERVICE', 'K_REVISION', 'K_CONFIGURATION']);
@@ -137,6 +156,11 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
     }),
   ];
   const isWorker = service.workload === 'worker';
+  const wired = input.database?.wireServices === true;
+  if (wired) {
+    // The socket path and connection name are infrastructure facts; the credential is a secret reference.
+    env.push({ name: 'CLOUD_SQL_CONNECTION_NAME', value: '${google_sql_database_instance.db.connection_name}' });
+  }
   const container: Record<string, unknown> = {
     image: service.initialImage,
     ...(service.command ? { command: service.command } : {}),
@@ -147,6 +171,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
       cpu_idle: !isWorker,
     }],
     ...(env.length ? { env } : {}),
+    ...(wired ? { volume_mounts: [{ name: 'cloudsql', mount_path: '/cloudsql' }] } : {}),
     ...(!isWorker && service.healthCheckPath ? {
       startup_probe: [{ http_get: [{ path: service.healthCheckPath }], failure_threshold: 10, period_seconds: 3 }],
     } : {}),
@@ -166,6 +191,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
         ...(service.maxInstances !== undefined ? { max_instance_count: service.maxInstances } : {}),
       }],
       containers: [container],
+      ...(wired ? { volumes: [{ name: 'cloudsql', cloud_sql_instance: [{ instances: ['${google_sql_database_instance.db.connection_name}'] }] }] } : {}),
     }],
     lifecycle: [{
       // Narrow release ownership: only the running image (and the client
@@ -204,6 +230,39 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
     }
   }
+  const sql: Record<string, Record<string, unknown>> = {};
+  const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true };
+  if (input.database) {
+    if (!/^[a-z][a-z0-9-]{0,96}[a-z0-9]$/.test(input.database.instanceName)) throw new Error('Cloud SQL instance name is invalid.');
+    if (!/^[a-z][a-z0-9_]{0,62}$/.test(input.database.databaseName)) throw new Error('Database name is invalid.');
+    sql.google_sql_database_instance = { db: {
+      name: input.database.instanceName,
+      project: input.projectId,
+      region: input.region,
+      database_version: 'POSTGRES_16',
+      // Hypervibe's confirmation gate governs deletion (data-bearing, explicit confirmation).
+      deletion_protection: false,
+      settings: [{
+        // Shared-core tiers require the Enterprise edition.
+        edition: 'ENTERPRISE',
+        tier: input.database.tier ?? 'db-f1-micro',
+        availability_type: 'ZONAL',
+        ip_configuration: [{ ipv4_enabled: true }],
+        backup_configuration: [{ enabled: true, point_in_time_recovery_enabled: true }],
+        user_labels: { 'managed-by': 'hypervibe' },
+      }],
+    } };
+    sql.google_sql_database = { app: {
+      name: input.database.databaseName,
+      project: input.projectId,
+      instance: '${google_sql_database_instance.db.name}',
+      // Deleting the instance removes its databases; dropping one first fails while connections exist.
+      deletion_policy: 'ABANDON',
+    } };
+  }
+  if (input.database || input.retiredDatabase) {
+    for (const address of DATABASE_ENGINE_ADDRESSES) resources[address] = databaseMapping;
+  }
   for (const retired of input.retiredServices ?? []) {
     const key = engineKey(retired);
     if (seen.has(key)) continue;
@@ -221,6 +280,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
           ...(Object.keys(iam).length ? { google_cloud_run_v2_service_iam_member: iam } : {}),
         },
       } : {},
+      'cloudsql.tf.json': Object.keys(sql).length ? { resource: sql } : {},
     },
     resources,
   };

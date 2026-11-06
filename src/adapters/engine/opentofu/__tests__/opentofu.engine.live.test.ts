@@ -59,6 +59,20 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates Cloud Run wired to engine-managed Cloud SQL', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1',
+      database: { instanceName: 'pilot-db-ab12', databaseName: 'app', wireServices: true },
+      services: [{
+        logicalName: 'web', resourceName: 'web-staging', workload: 'web',
+        initialImage: `us-docker.pkg.dev/demo-project/app/web@sha256:${'a'.repeat(64)}`,
+        runtimeServiceAccountEmail: 'web-runtime@demo-project.iam.gserviceaccount.com', public: true,
+        secretEnv: { DATABASE_URL: { secretId: 'hv-pilot-database-url', version: 'latest' } },
+      }],
+    });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates an environment with no services (teardown)', async () => {
     const empty = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [] });
     expect(await engine.validate(gcpEngineBackend, empty)).toEqual({ ok: true });

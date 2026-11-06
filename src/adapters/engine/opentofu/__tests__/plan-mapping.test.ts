@@ -117,3 +117,25 @@ describe('teardown mapping', () => {
     expect(retired.files['cloudrun.tf.json']).toEqual({});
   });
 });
+
+describe('Cloud SQL wiring', () => {
+  const base = {
+    projectId: 'demo-project', region: 'us-central1',
+    services: [{ logicalName: 'web', resourceName: 'web', workload: 'web' as const, initialImage: IMAGE,
+      runtimeServiceAccountEmail: 'r@demo-project.iam.gserviceaccount.com', public: false }],
+  };
+  const web = (wireServices: boolean) => (buildCloudRunConfiguration({ ...base, database: { instanceName: 'hv-pilot-db-a1', databaseName: 'app', wireServices } })
+    .files['cloudrun.tf.json'] as any).resource.google_cloud_run_v2_service.web.template[0];
+
+  it('connects services only once Hypervibe has created the login', () => {
+    expect(web(false).volumes).toBeUndefined();
+    expect(web(true).volumes[0].cloud_sql_instance[0].instances).toEqual(['${google_sql_database_instance.db.connection_name}']);
+    expect(web(true).containers[0].volume_mounts).toEqual([{ name: 'cloudsql', mount_path: '/cloudsql' }]);
+  });
+
+  it('never puts a database password in engine configuration and marks the instance data-bearing', () => {
+    const configuration = buildCloudRunConfiguration({ ...base, database: { instanceName: 'hv-pilot-db-a1', databaseName: 'app', wireServices: true } });
+    expect(JSON.stringify(configuration.files)).not.toMatch(/password|root_password/i);
+    expect(configuration.resources['google_sql_database_instance.db']).toMatchObject({ dataBearing: true, billable: true });
+  });
+});
