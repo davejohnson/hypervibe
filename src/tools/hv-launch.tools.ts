@@ -16,8 +16,8 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       env: envField,
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
-      approveAccess: z.boolean().optional()
-        .describe('true only after the user approved the extra Google Cloud access a needs_access result described.'),
+      approveAccess: z.array(z.enum(['storage', 'ci-release'])).optional()
+        .describe('accessId values from needs_access results, passed only after the user approved that exact access.'),
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
@@ -48,7 +48,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
           });
         case 'needs_access':
           return commandSuccess(result, {
-            hint: 'Explain the access in plain language. After the user approves, call hv_launch again with approveAccess=true.',
+            hint: `Explain the access in plain language. After the user approves, call hv_launch again with approveAccess including "${result.accessId}" (keep any earlier approvals).`,
             agentInstruction: { action: 'ask_user', message: 'Ask the user to approve this Google Cloud access. Do not approve it for them.' },
             next: ['hv_launch'],
           });
@@ -72,6 +72,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
           });
         case 'live':
           return commandSuccess(result, {
+            ...(result.ciWorkflow?.changed ? { warnings: [`Hypervibe wrote ${result.ciWorkflow.path}. Commit and push it to ${result.ciWorkflow.branch} to turn on automatic releases.`] } : {}),
             hint: result.domain?.status === 'certificate_pending'
               ? `The app is live. Google is still issuing the certificate for ${result.domain.name}; call hv_launch again later to confirm https://${result.domain.name}.`
               : 'The app is live.',

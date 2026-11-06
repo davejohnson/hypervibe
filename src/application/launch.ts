@@ -8,12 +8,19 @@ import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { cloudflareFor } from './infrastructure-engine-domain.js';
 import { connectCloudflareInBrowser } from './local-connect-page.js';
+import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
+import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
+import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import { isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
   isEngineManaged,
   planInfrastructureEngine,
   releaseEngineServices,
+  resolveEngineContext,
+  type EngineBinding,
   type EngineReleaseResult,
 } from './infrastructure-engine.js';
 
@@ -26,12 +33,13 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[] }
-  | { status: 'needs_access'; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_access'; accessId: 'storage' | 'ci-release'; access: string; grants: Record<string, unknown> }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
   | { status: 'pending'; message: string; receipts: ActionReceipt[] }
-  | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; infrastructureRounds: number };
+  | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; infrastructureRounds: number;
+      ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
 export interface CostLine { item: string; estimate: string }
 
@@ -70,8 +78,8 @@ export async function launchEnvironment(ctx: CommandContext, params: {
   environmentName: string;
   billingAccountName?: string;
   confirmActions?: string[];
-  /** The user approved the extra Google Cloud access a needs_access result described. */
-  approveAccess?: boolean;
+  /** Access ids from needs_access results the user approved (for example "storage", "ci-release"). */
+  approveAccess?: string[];
   revision?: string;
   sourceDirectory?: string;
 }): Promise<LaunchResult> {
@@ -112,10 +120,11 @@ export async function launchEnvironment(ctx: CommandContext, params: {
   if (Object.keys(environmentSpec.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
     const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcsAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The storage access preview failed.'), details: preview };
-    if (!params.approveAccess) {
+    if (!params.approveAccess?.includes('storage')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
       return {
         status: 'needs_access',
+        accessId: 'storage',
         access: 'Let Hypervibe create and manage Cloud Storage buckets in this project, and let the app read and write their files.',
         grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
       };
@@ -170,6 +179,14 @@ export async function launchEnvironment(ctx: CommandContext, params: {
   const failedRelease = released.results.find((result) => result.status !== 'released');
   if (failedRelease) return { status: 'blocked', message: failedRelease.message, details: released.results };
   const urls: Record<string, string> = Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url!]));
+
+  // 4. Keyless CI releases on push, when the spec asks for branch deploys.
+  let ciWorkflow: { path: string; changed: boolean; branch: string } | undefined;
+  if (environmentSpec.deploy?.strategy === 'branch') {
+    const ci = await ensureCiRelease(ctx, params, environmentSpec);
+    if ('status' in ci) return ci;
+    ciWorkflow = ci;
+  }
   const domain = environmentSpec.domain?.trim().toLowerCase();
   if (domain && !certificatePending) urls.custom = `https://${domain}`;
   return {
@@ -178,5 +195,54 @@ export async function launchEnvironment(ctx: CommandContext, params: {
     releases: released.results,
     ...(domain ? { domain: { name: domain, status: certificatePending ? 'certificate_pending' as const : 'serving' as const } } : {}),
     infrastructureRounds: rounds,
+    ...(ciWorkflow ? { ciWorkflow } : {}),
   };
+}
+
+async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof launchEnvironment>[1], environmentSpec: EnvironmentSpec): Promise<{ path: string; changed: boolean; branch: string } | LaunchResult> {
+  const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
+  if (!repository) return { status: 'blocked', message: 'CI releases need this project on GitHub (set gitRemoteUrl with hv_spec).' };
+  if (!params.sourceDirectory) return { status: 'blocked', message: 'CI releases need the local repository so Hypervibe can add the workflow file.' };
+  const context = await resolveEngineContext(ctx, params.project, params.spec, params.environmentName);
+  if ('blocked' in context) return { status: 'blocked', message: context.blocked };
+  const environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const binding = (environment.platformBindings as { engine?: EngineBinding; services?: Record<string, { serviceId?: string }> });
+  let ci = binding.engine?.ci;
+  if (ci?.repository !== repository) {
+    if (!params.approveAccess?.includes('ci-release')) {
+      return {
+        status: 'needs_access',
+        accessId: 'ci-release',
+        access: `Let GitHub Actions in ${repository} release new versions of this app on every push, without storing any key in GitHub. It can only push images and update the running app.`,
+        grants: previewCiReleaseAccess(context.gcpProjectId, repository, context.runtimeServiceAccountEmail) as unknown as Record<string, unknown>,
+      };
+    }
+    try {
+      const granted = await grantCiReleaseAccess({
+        adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository,
+        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+      });
+      ci = { repository, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
+    } catch (error) {
+      return { status: 'blocked', message: error instanceof Error ? error.message : String(error) };
+    }
+    ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...(binding.engine ?? {}), kind: 'opentofu', ci } });
+  }
+  const services = Object.entries(environmentSpec.services).flatMap(([name, service]) => {
+    const resource = binding.services?.[name]?.serviceId;
+    return resource ? [{
+      name, resource, ...(service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/' } : {}),
+      image: `${context.region}-docker.pkg.dev/${context.gcpProjectId}/hypervibe/${params.environmentName}-${name}`.toLowerCase(),
+    }] : [];
+  });
+  const runtime = params.spec.runtime as ProjectRuntime | undefined;
+  let generatedDockerfile: string | undefined;
+  try { generatedDockerfile = runtime ? generatedContainerDockerfile(runtime, undefined) : undefined; } catch { generatedDockerfile = undefined; }
+  const branch = environmentSpec.deploy?.branch ?? 'main';
+  const content = renderReleaseWorkflow({
+    environmentName: params.environmentName, branch, gcpProjectId: context.gcpProjectId, region: context.region,
+    provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,
+    ...(generatedDockerfile ? { generatedDockerfile } : {}),
+  });
+  return { ...writeReleaseWorkflow(params.sourceDirectory, params.environmentName, content), branch };
 }

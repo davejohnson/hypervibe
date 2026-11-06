@@ -79,7 +79,8 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
     ['email', environment.email?.enabled ? environment.email : undefined],
-    ['deploy (managed CI)', environment.deploy?.strategy === 'branch' ? environment.deploy : undefined],
+    ['deploy.trigger="native"', environment.deploy?.trigger === 'native' ? environment.deploy : undefined],
+    ['deploy.promoteFrom', environment.deploy?.promoteFrom], ['deploy.promotionTests', environment.deploy?.promotionTests],
   ];
   for (const [field, value] of unsupported) {
     if (value !== undefined && value !== null && !(typeof value === 'object' && Object.keys(value as object).length === 0)) {
@@ -141,11 +142,13 @@ function labelValue(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 63);
 }
 
-interface EngineBinding {
+export interface EngineBinding {
   kind?: 'opentofu';
   database?: { instanceName: string; connectionName?: string };
   domains?: string[];
   storage?: string[];
+  /** Keyless CI release trust granted for this exact repository. */
+  ci?: { repository: string; provider: string; releaseIdentity: string };
 }
 
 /** Globally unique, stable bucket name; bucket names can be reused after deletion. */
@@ -154,7 +157,7 @@ export function engineBucketName(gcpProjectId: string, environmentName: string, 
   return `hv-${hash}-${environmentName}-${storageName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
 }
 
-interface EngineContext {
+export interface EngineContext {
   adapter: CloudRunAdapter;
   environment: Environment;
   gcpProjectId: string;
@@ -164,7 +167,7 @@ interface EngineContext {
   state: EngineStateIdentity;
 }
 
-async function resolveEngineContext(
+export async function resolveEngineContext(
   ctx: CommandContext,
   project: Project,
   spec: ProjectSpec,
