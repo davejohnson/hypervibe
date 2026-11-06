@@ -48,7 +48,7 @@ describe('named-provider secret-only contract coverage', () => {
     const section = readFileSync('docs/runtime-credential-providers.md', 'utf8').split('## Database consumer activation evidence')[1]?.split('## Activation evidence')[0];
     const row = section?.split('\n').find(line => line.startsWith(`| ${label} |`));
     expect(typeof adapter.observe).toBe('function');
-    expect(typeof adapter.setEnvVars === 'function').toBe(name !== 'cloudrun');
+    expect(typeof adapter.setEnvVars).toBe('function');
     expect(row).toContain('https://');
     for (const boundary of databaseEvidence[name]) expect(row).toContain(boundary);
     expect(section).toContain('Both paths require complete active deployment');
