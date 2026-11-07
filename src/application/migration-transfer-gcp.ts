@@ -99,11 +99,16 @@ export function databaseRestoreScript(): string {
     `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
     'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
     'curl -sf -o /tmp/source.dump "$DUMP_URL"',
-    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE;"',
+    // Hand public to the app owner role (as the login itself); harmless when it already is.
+    'OWNER=$(psql "$DATABASE_URL" -At -c "SELECT current_user")',
+    'psql "$DATABASE_URL" -q -c "SET ROLE NONE; ALTER SCHEMA public OWNER TO \\"$OWNER\\";" >/dev/null 2>&1 || true',
+    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE; CREATE SCHEMA IF NOT EXISTS public;"',
     'set +e',
     'pg_restore --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
+    // A few error lines (object names only) explain a failed restore without exposing data.
+    'grep "error:" /tmp/restore.log | head -5 | sed "s/^/HV_RESTORE_ERROR /" || true',
     'DST=$(manifest "$DATABASE_URL" | json_manifest)',
     `printf '${RESULT_MARKER}{"ok":true,"target":{"tables":%s,"totalRows":"%s","version":"%s"},"restoreWarnings":%s}\\n' "\${DST%|*}" "\${DST##*|}" "$(psql "$DATABASE_URL" -At -c "SHOW server_version_num")" "\${WARNINGS:-0}"`,
   ].join('\n');
@@ -130,7 +135,7 @@ export function databaseTransferScript(): string {
     'SRC_VERSION=$(version "$SOURCE_DATABASE_URL")',
     'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
     // Clear only what the app's owner role created; the restore recreates it owned by that role.
-    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE;"',
+    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE; CREATE SCHEMA IF NOT EXISTS public;"',
     'set +e',
     'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
     'DUMP=$?',
@@ -272,7 +277,14 @@ async function readResultLine(context: TransferContext, jobName: string, executi
       const entries = (await response.json() as { entries?: Array<{ textPayload?: string }> }).entries ?? [];
       const line = entries.map((entry) => entry.textPayload ?? '').find((text) => text.includes(RESULT_MARKER));
       if (line) {
-        try { return JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
+        let parsed: Record<string, unknown>;
+        try { parsed = JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
+        const errors = await google(context, 'https://logging.googleapis.com/v2/entries:list', {
+          method: 'POST',
+          body: JSON.stringify({ resourceNames: [`projects/${context.gcpProjectId}`], filter: filter.replace(`textPayload:"${RESULT_MARKER.trim()}"`, 'textPayload:"HV_RESTORE_ERROR"'), pageSize: 5 }),
+        }).then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ textPayload?: string }> }> : { entries: [] }).catch(() => ({ entries: [] }));
+        const sample = (errors.entries ?? []).map((entry) => (entry.textPayload ?? '').replace('HV_RESTORE_ERROR ', '').replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 200));
+        return sample.length ? { ...parsed, restoreErrors: sample } : parsed;
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));

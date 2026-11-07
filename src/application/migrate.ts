@@ -321,7 +321,8 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   const compared = manifestsMatch(exportResult.source, restored.target);
   const result = { tables: Object.keys(exportResult.source.tables).length, rows: exportResult.source.totalRows, match: compared.match,
     differences: compared.differences, restoreWarnings: restored.restoreWarnings ?? 0 };
-  if (!compared.match) return { blocked: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}`, details: result };
+  const errors = (restored as { restoreErrors?: string[] }).restoreErrors ?? [];
+  if (!compared.match) return { blocked: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}${errors.length ? `. Restore errors: ${errors.join(' | ')}` : ''}`, details: result };
   return result;
 }
 

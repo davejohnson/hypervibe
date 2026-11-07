@@ -164,6 +164,8 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
         await client.query(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${DATABASE_OWNER_ROLE}') THEN CREATE ROLE ${DATABASE_OWNER_ROLE} NOLOGIN; END IF; END $$`);
         await client.query(`GRANT ${DATABASE_OWNER_ROLE} TO app_a, app_b`);
         await client.query(`ALTER DATABASE ${meta.databaseName} OWNER TO ${DATABASE_OWNER_ROLE}`);
+        // Cloud SQL leaves public to its admin role; the app's tables belong to the owner role.
+        await client.query(`ALTER SCHEMA public OWNER TO ${DATABASE_OWNER_ROLE}`);
       });
       for (const login of DATABASE_LOGINS) {
         if (!await verifyLogin(serviceAccount, instance.connectionName, login, secrets[login], meta.databaseName)) {
