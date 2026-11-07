@@ -1483,6 +1483,79 @@
         }
       ],
       "retainedReferenceSha256": "cf3a9fd9ed73bee99df03aa11008d279365bcd70b194e3f8322014d7a490aea0"
+    },
+    {
+      "id": "2026-11-06-reconcile-preserved-guidance",
+      "date": "2026-11-06",
+      "authority": "Owner request to reconcile the preserved November 5 agent-overhead edits with current OpenTofu main and clean the original checkout.",
+      "historicalRecords": "Preserve previous migration records and the OpenTofu reset entry. Record the surviving changes here instead of replacing the new architecture or rewriting historical rule hashes.",
+      "changes": [
+        {
+          "area": "Root guidance",
+          "destination": "AGENTS.md",
+          "decision": "Keep the current OpenTofu root unchanged. Its complete-journey focus, bounded agents, integration owner, repeated-failure reassessment, scoped reading and handoff rules already carry the useful intent of the preserved root rewrite."
+        },
+        {
+          "area": "Provider evidence",
+          "rules": [
+            "DG-017",
+            "DG-020",
+            "DG-025"
+          ],
+          "destination": "docs/development/provider-evidence.md",
+          "decision": "Preserve the OpenTofu evidence model and one complete cloud path. Reuse verified evidence for adapter-local fixes, review affected implementations when shared boundaries change, scope schema variants to the changed decoder or support claim, and centralize CI wiring guidance."
+        },
+        {
+          "area": "Verification and communication",
+          "rules": [
+            "DG-122",
+            "DG-134",
+            "DG-135"
+          ],
+          "destination": "docs/development/workflow.md",
+          "decision": "Provide PR links without an unsolicited browser-opening exchange. Reuse passing verification and unchanged CI wiring; preserve focused tests, required checks, independent evidence, a failing regression before bug fixes and generated-program execution. Keep the repository method self-contained when optional personal guidance is unavailable. Record detailed evidence once and reassess repeated failures before expanding work."
+        },
+        {
+          "area": "Product clarity review",
+          "rules": [
+            "DG-137"
+          ],
+          "destination": "docs/development/product.md#who-we-build-and-write-for",
+          "decision": "Use one bounded independent clarity review for a substantial flow; repeat it only for changed behavior or unresolved findings. Preserve real-screen inspection and the first-time-user clarity check."
+        },
+        {
+          "area": "Checkout housekeeping",
+          "destination": ".gitignore",
+          "decision": "Ignore Finder .DS_Store metadata so cleanup does not recur as an untracked repository change."
+        }
+      ],
+      "documentRevisions": [
+        {
+          "path": "AGENTS.md",
+          "beforeSha256": "1f47a3bd434fa667be910828043bb6e741dde1a10522219caf85e63fd73d4419",
+          "afterSha256": "1f47a3bd434fa667be910828043bb6e741dde1a10522219caf85e63fd73d4419",
+          "preservedEditSha256": "9b6415d99ef0fc5e4cc296a93866b3c4be4df115faf98151f20b80cee89a4654"
+        },
+        {
+          "path": "docs/development/product.md",
+          "beforeSha256": "1dffff2d8f6497c9c71b91d44c3bbcd96f011285ca375e26303b6bab15d5f5bb",
+          "afterSha256": "040dc668ebb8d9e0d25b203fd56aa8d1682a8bae0a2aa040447e2002af553cbf",
+          "preservedEditSha256": "a9854949a020ae255018b3edaf1a23cd6327329f8674c8c1a24760c6840a4ff5"
+        },
+        {
+          "path": "docs/development/provider-evidence.md",
+          "beforeSha256": "170b1b91f57ef02906149921ab0ef0a129e58816cec092910231b93528501da2",
+          "afterSha256": "7fdf8c3d94e81ec439de083152183281f646845d0d3acd0686d0d9cc410ae6c3",
+          "preservedEditSha256": "deb0d6692d3b5c2af8c3ca13674298df801bda6ad2f830a1bed3a8b363106291"
+        },
+        {
+          "path": "docs/development/workflow.md",
+          "beforeSha256": "c3c89dc5e2ecfac4ce2dd4ecfa248a32ac902cb06e1d49cbb269fb91a12db04f",
+          "afterSha256": "9820bbd326c52cfbd1208391f512994804d361f26f4372c6db81855dfcf8b241",
+          "preservedEditSha256": "83efe0a6aa37c4a02ac233c4559998a3a9dddfacf7b4a494027558f1cc508b4f"
+        }
+      ],
+      "preserved": "OpenTofu ownership, GCP/AWS/Azure focus, existing Railway support, minimal user installs, exact authorization, unknown-state handling, secret boundaries, regression obligations, required CI/reviews, and merge-stop/runtime rules."
     }
   ]
 }
