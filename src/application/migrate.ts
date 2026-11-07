@@ -17,7 +17,15 @@ import {
   writeSecretVersion,
   type EngineBinding,
 } from './infrastructure-engine.js';
+import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
+import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
+import type { Environment } from '../domain/entities/environment.entity.js';
 import {
+  databaseExportScript,
+  databaseRestoreScript,
+  parseTransferResult,
+  signedObjectUrl,
+  type DatabaseManifest,
   manifestsMatch,
   runTransferJob,
   s3SourceRemote,
@@ -177,16 +185,20 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   // 5. Copy the data inside the target cloud, after the user approves replacing target data.
   const targetSpec = spec.environments[params.to]!;
   const storageNames = Object.keys(targetSpec.storage ?? {}).filter((name) => parseStorageBindings(sourceEnvironment)[name]);
-  const sourceAccess = sourceSpec.database ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
+  // Railway databases are private: export from inside Railway rather than opening a public port.
+  const privateRailwaySource = sourceSpec.database?.provider === 'railway';
+  const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
     const summary = sourceAccess ? await sourceAccess.lease.withConnection(summarizeDatabase) : undefined;
     if (!params.copyData) {
+      const what = summary ? `the ${params.from} database (${summary.tables} tables, about ${summary.rows} rows)`
+        : privateRailwaySource ? `the whole ${params.from} database (exported privately inside Railway by a temporary task that is deleted afterwards)` : 'no database';
       return {
         status: 'needs_copy_approval',
         ...(summary ? { database: { tables: summary.tables, rows: summary.rows, version: summary.version } } : {}),
         storage: storageNames,
-        message: `Hypervibe will copy ${summary ? `the ${params.from} database (${summary.tables} tables, ${summary.rows} rows)` : 'no database'}${storageNames.length ? ` and every file in ${storageNames.join(', ')}` : ''} into ${params.to}, replacing anything there now. ${params.from} is only read.`,
+        message: `Hypervibe will copy ${what}${storageNames.length ? ` and every file in ${storageNames.join(', ')}` : ''} into ${params.to}, replacing anything there now. ${params.from}'s app, data and settings are not changed.`,
       };
     }
     const transfer: TransferContext = {
@@ -194,7 +206,11 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, environmentLabel,
     };
     let database: Extract<MigrateResult, { status: 'migrated' }>['database'];
-    if (sourceAccess && summary) {
+    if (privateRailwaySource) {
+      const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer, instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName });
+      if ('blocked' in copied) return { status: 'blocked', message: copied.blocked, ...(copied.details ? { details: copied.details } : {}) };
+      database = copied;
+    } else if (sourceAccess && summary) {
       const major = Math.floor(Number(summary.version) / 10000);
       if (major > 16) return { status: 'blocked', message: `The source runs PostgreSQL ${major}; the target database runs 16. Hypervibe will not copy into an older major version.` };
       const instance = (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName;
@@ -243,6 +259,60 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   } finally {
     if (sourceAccess?.ok) await sourceAccess.lease.release().catch(() => undefined);
   }
+}
+
+/**
+ * Private-network database copy for Railway: a temporary task inside the
+ * source environment dumps over Railway's private network and uploads one
+ * object through a single-use signed URL; a Google Cloud job restores it next
+ * to the target database. No public database port is opened and no Google
+ * credential enters Railway.
+ */
+async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
+  project: Project; sourceEnvironment: Environment; to: string;
+  context: Awaited<ReturnType<typeof resolveEngineContext>> & { gcpProjectId: string };
+  transfer: TransferContext; instance?: string;
+}): Promise<NonNullable<Extract<MigrateResult, { status: 'migrated' }>['database']> | { blocked: string; details?: unknown }> {
+  const { context, transfer } = params;
+  if (!('adapter' in context)) return { blocked: 'The target environment is not ready.' };
+  const component = ctx.repos.components.findByEnvironmentAndType(params.sourceEnvironment.id, 'postgres');
+  const bindings = params.sourceEnvironment.platformBindings as { projectId?: string; environmentId?: string };
+  if (!component?.externalId || !bindings.projectId || !bindings.environmentId) return { blocked: 'The source Railway database is not tracked by Hypervibe.' };
+  const railway = await adapterFactory.getProviderAdapter('railway', params.project);
+  if (!railway.success || !(railway.adapter instanceof RailwayAdapter)) return { blocked: 'Hypervibe needs its Railway connection to export the database.' };
+  const databaseServiceName = await railway.adapter.serviceName(component.externalId);
+  if (!databaseServiceName) return { blocked: 'The source Railway database service could not be found.' };
+  const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
+  if (!params.instance || secret.state !== 'present' || !secret.value.latestVersion) return { blocked: 'The target database is not ready yet. Run hv_migrate again.' };
+
+  const key = JSON.parse(context.adapter.engineConnection().credentials) as { client_email: string; private_key: string };
+  const bucket = buildSourceBucketName(context.gcpProjectId);
+  const object = `migrations/${params.to}/${Date.now()}.dump`;
+  const sign = (method: 'PUT' | 'GET') => signedObjectUrl({ clientEmail: key.client_email, privateKey: key.private_key, bucket, object, method, expiresSeconds: 3600 });
+  // pg_dump 17 reads PostgreSQL 13–17 servers.
+  const exported = await railway.adapter.runPrivateTask({
+    projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:17-alpine', command: databaseExportScript(),
+    variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: sign('PUT') }, timeoutMs: 30 * 60 * 1000,
+  });
+  const cleanedUp = railway.adapter.lastPrivateTaskCleanup;
+  const exportResult = parseTransferResult(exported.output) as { ok?: boolean; source?: DatabaseManifest } | undefined;
+  if (exported.exitCode !== 0 || !exportResult?.ok || !exportResult.source) {
+    return { blocked: `The private export inside Railway did not complete (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
+  }
+  const major = Math.floor(Number(exportResult.source.version) / 10000);
+  if (major > 16) return { blocked: `The source runs PostgreSQL ${major}; the target database runs 16. Hypervibe will not copy into an older major version.` };
+  const restored = await runTransferJob<{ ok: boolean; error?: string; target?: DatabaseManifest; restoreWarnings?: number }>(transfer, {
+    purpose: 'database', image: 'postgres:17-alpine', script: databaseRestoreScript(), env: {},
+    sourceSecrets: { DUMP_URL: sign('GET') },
+    secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion } },
+    cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 3600,
+  });
+  if (!restored.ok) return { blocked: restored.error ?? 'Restoring the database in Google Cloud failed.' };
+  const compared = manifestsMatch(exportResult.source, restored.target);
+  const result = { tables: Object.keys(exportResult.source.tables).length, rows: exportResult.source.totalRows, match: compared.match,
+    differences: compared.differences, restoreWarnings: restored.restoreWarnings ?? 0 };
+  if (!compared.match) return { blocked: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}`, details: result };
+  return result;
 }
 
 async function summarizeDatabase(url: string): Promise<{ tables: number; rows: string; version: string }> {

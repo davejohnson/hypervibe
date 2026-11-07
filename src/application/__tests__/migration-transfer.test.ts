@@ -53,3 +53,59 @@ describe.skipIf(!bin || !admin)('database copy script (live PostgreSQL)', () => 
     }
   });
 });
+
+describe.skipIf(!bin || !admin)('private-network export and restore scripts (live PostgreSQL)', () => {
+  it('export uploads a dump through a URL; restore replaces the target with matching counts', async () => {
+    const http = await import('http');
+    const { databaseExportScript, databaseRestoreScript, parseTransferResult } = await import('../migration-transfer-gcp.js');
+    const { execFile } = await import('child_process');
+    const run = (script: string, env: Record<string, string>) => new Promise<string>((resolve, reject) =>
+      execFile('sh', ['-c', script], { env: { PATH: `${bin}:/usr/bin:/bin`, ...env }, maxBuffer: 1 << 24 }, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(stdout)));
+    let stored: Buffer | undefined;
+    const server = http.createServer((request, response) => {
+      if (request.method === 'PUT') {
+        const chunks: Buffer[] = [];
+        request.on('data', (chunk: Buffer) => chunks.push(chunk));
+        request.on('end', () => { stored = Buffer.concat(chunks); response.writeHead(200).end(); });
+      } else if (request.method === 'GET' && stored) response.writeHead(200).end(stored);
+      else response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const psql = (url: string, sql: string) => execFileSync(`${bin}/psql`, [url, '-v', 'ON_ERROR_STOP=1', '-qAt', '-c', sql], { encoding: 'utf8' });
+    const suffix = Date.now();
+    const url = (db: string) => admin!.replace(/\/[^/?]*(\?|$)/, `/${db}$1`);
+    psql(admin!, `CREATE DATABASE hv_esrc_${suffix}`);
+    psql(admin!, `CREATE DATABASE hv_edst_${suffix}`);
+    try {
+      psql(url(`hv_esrc_${suffix}`), 'CREATE TABLE "Invoices" (id serial PRIMARY KEY, total numeric); INSERT INTO "Invoices" (total) SELECT g FROM generate_series(1, 42) g;');
+      psql(url(`hv_edst_${suffix}`), 'CREATE TABLE stale (id int);');
+      const exported = parseTransferResult(await run(databaseExportScript(), { SOURCE_DATABASE_URL: url(`hv_esrc_${suffix}`), UPLOAD_URL: `${base}/upload` })) as any;
+      expect(exported).toMatchObject({ ok: true, source: { tables: { 'public.Invoices': '42' }, totalRows: '42' } });
+      expect(stored?.length).toBeGreaterThan(0);
+      const restored = parseTransferResult(await run(databaseRestoreScript(), { DATABASE_URL: url(`hv_edst_${suffix}`), DUMP_URL: `${base}/dump` })) as any;
+      expect(restored).toMatchObject({ ok: true, target: { tables: { 'public.Invoices': '42' } } });
+      expect(manifestsMatch(exported.source, restored.target)).toEqual({ match: true, differences: [] });
+      expect(psql(url(`hv_edst_${suffix}`), "SELECT count(*) FROM information_schema.tables WHERE table_name = 'stale'").trim()).toBe('0');
+    } finally {
+      server.close();
+      psql(admin!, `DROP DATABASE IF EXISTS hv_esrc_${suffix}`);
+      psql(admin!, `DROP DATABASE IF EXISTS hv_edst_${suffix}`);
+    }
+  });
+});
+
+describe('signed object URLs', () => {
+  it('produce a GOOG4 V4 URL for exactly one object and method', async () => {
+    const { signedObjectUrl } = await import('../migration-transfer-gcp.js');
+    const { generateKeyPairSync, createVerify } = await import('crypto');
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const url = new URL(signedObjectUrl({ clientEmail: 'deploy@p.iam.gserviceaccount.com', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      bucket: 'b', object: 'migrations/db 1.dump', method: 'PUT', expiresSeconds: 3600, now: new Date('2026-11-07T00:00:00Z') }));
+    expect(url.pathname).toBe('/b/migrations/db%201.dump');
+    expect(url.searchParams.get('X-Goog-Expires')).toBe('3600');
+    expect(url.searchParams.get('X-Goog-Credential')).toBe('deploy@p.iam.gserviceaccount.com/20261107/auto/storage/goog4_request');
+    expect(url.searchParams.get('X-Goog-Signature')).toMatch(/^[0-9a-f]{512}$/);
+    void publicKey; void createVerify;
+  });
+});

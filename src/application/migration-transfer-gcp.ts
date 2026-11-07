@@ -48,6 +48,75 @@ const RESULT_MARKER = 'HV_TRANSFER_RESULT ';
 const MANIFEST_SQL = `SELECT table_schema || '.' || table_name || '|' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%' ORDER BY 1`;
 
 /**
+ * V4 signed URL for one Cloud Storage object, signed locally with the
+ * deployment identity's key. It grants exactly one method on one object and
+ * expires; it carries no reusable credential.
+ */
+export function signedObjectUrl(params: { clientEmail: string; privateKey: string; bucket: string; object: string; method: 'PUT' | 'GET'; expiresSeconds: number; now?: Date }): string {
+  const now = params.now ?? new Date();
+  const datetime = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const date = datetime.slice(0, 8);
+  const scope = `${date}/auto/storage/goog4_request`;
+  const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  const path = `/${params.bucket}/${params.object.split('/').map(encode).join('/')}`;
+  const query = Object.entries({
+    'X-Goog-Algorithm': 'GOOG4-RSA-SHA256',
+    'X-Goog-Credential': `${params.clientEmail}/${scope}`,
+    'X-Goog-Date': datetime,
+    'X-Goog-Expires': String(params.expiresSeconds),
+    'X-Goog-SignedHeaders': 'host',
+  }).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
+  const canonical = [params.method, path, query, 'host:storage.googleapis.com', '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const toSign = ['GOOG4-RSA-SHA256', datetime, scope, crypto.createHash('sha256').update(canonical).digest('hex')].join('\n');
+  const signature = crypto.createSign('RSA-SHA256').update(toSign).sign(params.privateKey, 'hex');
+  return `https://storage.googleapis.com${path}?${query}&X-Goog-Signature=${signature}`;
+}
+
+/**
+ * Export half of a private-network copy (runs inside the source provider,
+ * next to its database): records the source manifest, dumps, and uploads the
+ * dump through a single-object signed URL.
+ */
+export function databaseExportScript(): string {
+  return [
+    'set -eu',
+    'apk add --no-cache curl >/dev/null 2>&1 || true',
+    `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
+    'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
+    'VERSION=$(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")',
+    'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
+    'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
+    'curl -sf -X PUT -H "Content-Type: application/octet-stream" --upload-file /tmp/source.dump "$UPLOAD_URL"',
+    `printf '${RESULT_MARKER}{"ok":true,"source":{"tables":%s,"totalRows":"%s","version":"%s"},"bytes":%s}\\n' "\${SRC%|*}" "\${SRC##*|}" "$VERSION" "$(wc -c < /tmp/source.dump)"`,
+  ].join('\n');
+}
+
+/** Restore half (runs in the target cloud): downloads the dump, replaces the target schema, restores, reports the target manifest. */
+export function databaseRestoreScript(): string {
+  return [
+    'set -eu',
+    'apk add --no-cache curl >/dev/null 2>&1 || true',
+    `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
+    'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
+    'curl -sf -o /tmp/source.dump "$DUMP_URL"',
+    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"',
+    'set +e',
+    'pg_restore --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
+    'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
+    'set -e',
+    'DST=$(manifest "$DATABASE_URL" | json_manifest)',
+    `printf '${RESULT_MARKER}{"ok":true,"target":{"tables":%s,"totalRows":"%s","version":"%s"},"restoreWarnings":%s}\\n' "\${DST%|*}" "\${DST##*|}" "$(psql "$DATABASE_URL" -At -c "SHOW server_version_num")" "\${WARNINGS:-0}"`,
+  ].join('\n');
+}
+
+/** Parses the single result line a transfer task printed. */
+export function parseTransferResult(text: string): Record<string, unknown> | undefined {
+  const line = text.split('\n').find((entry) => entry.includes(RESULT_MARKER));
+  if (!line) return undefined;
+  try { return JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
+}
+
+/**
  * Database copy script (runs in the official postgres image). The target is
  * the Hypervibe-created database; its contents are replaced, so the caller
  * must have that replacement approved.
