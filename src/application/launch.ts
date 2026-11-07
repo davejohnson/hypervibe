@@ -70,6 +70,7 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
 export function approvalToken(action: PlanAction): string {
   if (action.type === 'replace' || action.type === 'destroy') return `${action.type}:${action.id}`;
   if (action.metadata?.engineAdopt === true) return `adopt:${action.id}`;
+  if (action.metadata?.engineMajorUpgrade === true) return `upgrade:${action.id}`;
   return action.id;
 }
 

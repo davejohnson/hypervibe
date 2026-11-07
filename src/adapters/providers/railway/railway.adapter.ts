@@ -4,6 +4,7 @@ import { railwayDeploySource } from './railway-deploy-source.js';
 import { runRailwayDatabaseTask } from './railway-database-task.js';
 import { createRailwayDatabaseInitializationInspection } from './railway-database-initialization-inspection.js';
 import { GraphQLClient, gql } from 'graphql-request';
+import { redactSensitiveString } from '../../../utils/redact-sensitive-string.js';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { resourceName } from '../../../domain/services/resource-names.js';
@@ -4183,9 +4184,10 @@ export class RailwayAdapter implements
     const name = `hv-export-${Date.now().toString(36)}`;
     let serviceId: string | undefined;
     try {
+      // The program travels as a variable: Railway mishandles long multi-line start commands.
       const created = await client.request<{ serviceCreate?: { id?: string; name?: string } }>(gql`
         mutation CreatePrivateTask($input: ServiceCreateInput!) { serviceCreate(input: $input) { id name } }
-      `, { input: { projectId: params.projectId, environmentId: params.environmentId, name, variables: params.variables } });
+      `, { input: { projectId: params.projectId, environmentId: params.environmentId, name, variables: { ...params.variables, HV_TASK_SCRIPT: params.command } } });
       if (!created.serviceCreate?.id || created.serviceCreate.name !== name) {
         return { exitCode: undefined, output: '', cleanedUp: false, error: 'Railway returned an ambiguous task identity.' };
       }
@@ -4195,7 +4197,7 @@ export class RailwayAdapter implements
           serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
         }
       `, { serviceId, environmentId: params.environmentId, input: {
-        source: { image: params.image }, startCommand: buildTaskStartCommand(params.command), restartPolicyType: 'NEVER', restartPolicyMaxRetries: 0,
+        source: { image: params.image }, startCommand: buildTaskStartCommand('sh -c "$HV_TASK_SCRIPT"'), restartPolicyType: 'NEVER', restartPolicyMaxRetries: 0,
       } });
       const deployed = await client.request<{ serviceInstanceDeployV2?: string }>(gql`
         mutation DeployPrivateTask($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }
@@ -4203,18 +4205,32 @@ export class RailwayAdapter implements
       const deploymentId = deployed.serviceInstanceDeployV2;
       if (!deploymentId) return { exitCode: undefined, output: '', cleanedUp: false, error: 'Railway did not start the task.' };
       const deadline = Date.now() + params.timeoutMs;
+      let lastLogs: RailwayLogEntry[] = [];
+      let lastLogError: string | undefined;
+      let lastStatus = 'UNKNOWN';
       // The exit sentinel is the completion signal; NEVER-restart services have no "finished" status.
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 5000));
+        try {
+          const status = await client.request<{ deployment?: { status?: string } }>(gql`query PrivateTaskStatus($id: String!) { deployment(id: $id) { status } }`, { id: deploymentId });
+          lastStatus = status.deployment?.status ?? lastStatus;
+        } catch { /* keep the last known status */ }
+        if (['FAILED', 'CRASHED', 'REMOVED'].includes(lastStatus) && !lastLogs.length) {
+          try { lastLogs = await this.getDeploymentLogs(deploymentId, 500); } catch { /* reported below */ }
+          if (!lastLogs.some((entry) => entry.message.includes(TASK_EXIT_SENTINEL_PREFIX))) break;
+        }
         let logs: RailwayLogEntry[] = [];
-        try { logs = await this.getDeploymentLogs(deploymentId, 500); } catch { continue; }
+        try { logs = await this.getDeploymentLogs(deploymentId, 500); lastLogs = logs; lastLogError = undefined; }
+        catch (error) { lastLogError = error instanceof Error ? error.message : String(error); continue; }
         const exit = logs.map((entry) => entry.message.trim().match(/^__HYPERVIBE_TASK_EXIT:(\d+)__$/)).find(Boolean);
         if (exit) {
           const output = logs.map((entry) => entry.message).filter((message) => !message.includes(TASK_EXIT_SENTINEL_PREFIX)).slice(-40).join('\n');
           return { exitCode: Number(exit[1]), output, cleanedUp: false };
         }
       }
-      return { exitCode: undefined, output: '', cleanedUp: false, error: 'The Railway task did not finish in time.' };
+      const tail = redactSensitiveString(lastLogs.slice(-15).map((entry) => entry.message).join('\n')).slice(-2000);
+      return { exitCode: undefined, output: tail, cleanedUp: false,
+        error: `The Railway task did not finish (deployment ${lastStatus}${lastLogError ? `; reading its logs failed: ${lastLogError.slice(0, 200)}` : ''}).` };
     } catch (error) {
       return { exitCode: undefined, output: '', cleanedUp: false, error: error instanceof Error ? error.message : String(error) };
     } finally {

@@ -137,6 +137,8 @@ export function translateEnginePlan(params: {
     const type = ENGINE_ACTION_TYPE[dominant.action as Exclude<EngineChangeAction, 'read'>];
     const destructive = changes.some((change) => change.action === 'delete' || change.action === 'replace');
     const adopting = changes.some((change) => change.action === 'import');
+    // A database major-version change is irreversible and needs its own explicit approval.
+    const majorUpgrade = changes.some((change) => change.action === 'update' && change.changedAttributes.includes('database_version'));
     // Field lists help review changes to existing resources; for creates and deletes they are noise.
     const diff: PlanFieldDiff[] = changes
       .filter((change) => change.action === 'update' || change.action === 'replace')
@@ -155,9 +157,9 @@ export function translateEnginePlan(params: {
       ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
       ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace') ? { billable: true } : {}),
       // Replacing, deleting or adopting anything is never implied by approving the plan as a whole.
-      ...(destructive || adopting ? { requiresConfirm: true } : {}),
+      ...(destructive || adopting || majorUpgrade ? { requiresConfirm: true } : {}),
       ...(type === 'noop' ? {} : {
-        metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}) },
+        metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}), ...(majorUpgrade ? { engineMajorUpgrade: true } : {}) },
       }),
     });
   }

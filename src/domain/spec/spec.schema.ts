@@ -231,6 +231,8 @@ export const databaseSpecSchema = z.object({
   freshInitialization: databaseFreshInitializationIntentSchema.optional(),
   /** OpenTofu-managed databases: increment to rotate the Hypervibe-owned password with no downtime. */
   passwordGeneration: z.number().int().positive().optional(),
+  /** OpenTofu-managed databases: PostgreSQL major version (default 16). Never lower than a migration source. */
+  version: z.number().int().min(13).max(18).optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({

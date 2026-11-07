@@ -166,3 +166,14 @@ describe('network interruptions', () => {
     expect([...networkInterruptedAddresses(stdout)]).toEqual(['google_sql_database_instance.db']);
   });
 });
+
+describe('database major-version changes', () => {
+  it('require their own approval even as an in-place update', () => {
+    const withDb = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [],
+      database: { instanceName: 'hv-db-1', databaseName: 'app', wireServices: false, majorVersion: 18 } });
+    const { actions } = translateEnginePlan({ provider: 'gcp', configuration: withDb, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_sql_database_instance.db', type: 'google_sql_database_instance', actions: ['update'], before: { database_version: 'POSTGRES_16' }, after: { database_version: 'POSTGRES_18' } },
+    ])) });
+    expect(actions[0]).toMatchObject({ type: 'update', requiresConfirm: true, metadata: { engineMajorUpgrade: true } });
+  });
+});

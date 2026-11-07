@@ -132,7 +132,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     const proposed = proposeTargetEnvironment(sourceSpec, { region: params.region, domain: params.domain });
     specResult = store.merge(params.project, { environments: { [params.to]: proposed } });
   }
-  const spec = specResult.spec;
+  let spec = specResult.spec;
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
@@ -178,6 +178,19 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, kind: 'opentofu', importedSecrets: keys } });
   }
 
+  // 3b. The target database runs at least the source's PostgreSQL major version.
+  if (sourceSpec.database && spec.environments[params.to]!.database) {
+    const sourceMajor = await sourceDatabaseMajor(ctx, params.project, sourceEnvironment, sourceSpec);
+    if ('blocked' in sourceMajor) return { status: 'blocked', message: sourceMajor.blocked };
+    const targetMajor = spec.environments[params.to]!.database!.version ?? 16;
+    if (sourceMajor.major > targetMajor) {
+      if (sourceMajor.major > 18) return { status: 'blocked', message: `The source runs PostgreSQL ${sourceMajor.major}, which Cloud SQL does not offer yet.` };
+      specResult = store.merge(params.project, { environments: { [params.to]: { database: { version: sourceMajor.major } } } });
+      spec = specResult.spec;
+      Object.assign(launchParams, { spec: specResult.spec, specRevision: specResult.revision });
+    }
+  }
+
   // 4. Infrastructure for the target, without releasing code yet.
   const built = await launchEnvironment(ctx, { ...launchParams, stopAfter: 'infrastructure' });
   if (built.status !== 'ready') return built;
@@ -211,8 +224,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       if ('blocked' in copied) return { status: 'blocked', message: copied.blocked, ...(copied.details ? { details: copied.details } : {}) };
       database = copied;
     } else if (sourceAccess && summary) {
-      const major = Math.floor(Number(summary.version) / 10000);
-      if (major > 16) return { status: 'blocked', message: `The source runs PostgreSQL ${major}; the target database runs 16. Hypervibe will not copy into an older major version.` };
+      const major = Math.max(16, Math.floor(Number(summary.version) / 10000));
       const instance = (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName;
       const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
       if (!instance || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready yet. Run hv_migrate again.' };
@@ -289,9 +301,9 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   const bucket = buildSourceBucketName(context.gcpProjectId);
   const object = `migrations/${params.to}/${Date.now()}.dump`;
   const sign = (method: 'PUT' | 'GET') => signedObjectUrl({ clientEmail: key.client_email, privateKey: key.private_key, bucket, object, method, expiresSeconds: 3600 });
-  // pg_dump 17 reads PostgreSQL 13–17 servers.
+  // The newest client reads every supported older server.
   const exported = await railway.adapter.runPrivateTask({
-    projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:17-alpine', command: databaseExportScript(),
+    projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:18-alpine', command: databaseExportScript(),
     variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: sign('PUT') }, timeoutMs: 30 * 60 * 1000,
   });
   const cleanedUp = railway.adapter.lastPrivateTaskCleanup;
@@ -299,10 +311,8 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   if (exported.exitCode !== 0 || !exportResult?.ok || !exportResult.source) {
     return { blocked: `The private export inside Railway did not complete (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
   }
-  const major = Math.floor(Number(exportResult.source.version) / 10000);
-  if (major > 16) return { blocked: `The source runs PostgreSQL ${major}; the target database runs 16. Hypervibe will not copy into an older major version.` };
   const restored = await runTransferJob<{ ok: boolean; error?: string; target?: DatabaseManifest; restoreWarnings?: number }>(transfer, {
-    purpose: 'database', image: 'postgres:17-alpine', script: databaseRestoreScript(), env: {},
+    purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: {},
     sourceSecrets: { DUMP_URL: sign('GET') },
     secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion } },
     cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 3600,
@@ -313,6 +323,35 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
     differences: compared.differences, restoreWarnings: restored.restoreWarnings ?? 0 };
   if (!compared.match) return { blocked: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}`, details: result };
   return result;
+}
+
+/** The source database's PostgreSQL major version, read privately when the source is Railway. */
+async function sourceDatabaseMajor(ctx: CommandContext, project: Project, sourceEnvironment: Environment, sourceSpec: EnvironmentSpec): Promise<{ major: number } | { blocked: string }> {
+  if (sourceSpec.database?.provider === 'railway') {
+    const component = ctx.repos.components.findByEnvironmentAndType(sourceEnvironment.id, 'postgres');
+    const bindings = sourceEnvironment.platformBindings as { projectId?: string; environmentId?: string };
+    const railway = await adapterFactory.getProviderAdapter('railway', project);
+    if (!component?.externalId || !bindings.projectId || !bindings.environmentId || !railway.success || !(railway.adapter instanceof RailwayAdapter)) {
+      return { blocked: 'The source Railway database is not reachable through Hypervibe.' };
+    }
+    const name = await railway.adapter.serviceName(component.externalId);
+    const probe = await railway.adapter.runPrivateTask({
+      projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:18-alpine', timeoutMs: 6 * 60 * 1000,
+      command: 'echo "HV_SERVER_VERSION $(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")"',
+      variables: { SOURCE_DATABASE_URL: `\${{${name}.DATABASE_URL}}` },
+    });
+    const version = probe.output.match(/HV_SERVER_VERSION (\d+)/)?.[1];
+    if (probe.exitCode !== 0 || !version) return { blocked: `Could not read the source database version (${probe.error ?? 'no output'}).` };
+    return { major: Math.floor(Number(version) / 10000) };
+  }
+  const access = await acquireManagedDatabaseAccess(project, sourceEnvironment);
+  if (!access.ok) return { blocked: `Could not open the source database: ${access.error}` };
+  try {
+    const summary = await access.lease.withConnection(summarizeDatabase);
+    return { major: Math.floor(Number(summary.version) / 10000) };
+  } finally {
+    await access.lease.release().catch(() => undefined);
+  }
 }
 
 async function summarizeDatabase(url: string): Promise<{ tables: number; rows: string; version: string }> {

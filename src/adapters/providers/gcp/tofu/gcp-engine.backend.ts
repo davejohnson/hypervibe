@@ -184,6 +184,8 @@ export interface GcpCloudSqlInput {
   instanceName: string;
   databaseName: string;
   tier?: string;
+  /** PostgreSQL major version (default 16). */
+  majorVersion?: number;
   /**
    * Wire services to the database (socket volume + CLOUD_SQL_CONNECTION_NAME).
    * False until Hypervibe's credential exists, so a first deployment never
@@ -418,7 +420,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       name: input.database.instanceName,
       project: input.projectId,
       region: input.region,
-      database_version: 'POSTGRES_16',
+      database_version: `POSTGRES_${input.database.majorVersion ?? 16}`,
       // Hypervibe's confirmation gate governs deletion (data-bearing, explicit confirmation).
       deletion_protection: false,
       settings: [{

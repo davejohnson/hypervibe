@@ -785,7 +785,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
-    ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady } } : {}),
+    ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady,
+      ...(databaseSpec.version ? { majorVersion: databaseSpec.version } : {}) } } : {}),
     ...(!databaseSpec && engineBinding.database ? { retiredDatabase: true } : {}),
     ...(cacheSpec ? { cache: {
       instanceName: cacheInstanceName, tier: (cacheSpec.tier === 'STANDARD_HA' ? 'STANDARD_HA' : 'BASIC') as 'BASIC' | 'STANDARD_HA',
