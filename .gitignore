@@ -139,6 +139,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
 # Project-specific
+.DS_Store
 .devbox/
 **/.build/
 /build/macos/

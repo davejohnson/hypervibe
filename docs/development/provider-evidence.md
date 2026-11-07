@@ -29,6 +29,10 @@ Do not rebuild provider schemas or custom resource CRUD for all clouds, or requi
 all clouds to be live before delivering one proven path. Extend shared regression
 coverage as each capability becomes reachable.
 
+Review affected implementations when a shared boundary changes. For an
+adapter-local fix that preserves the shared contract, reuse verified evidence and
+investigate only the affected assumptions; do not restart a full provider review.
+
 ## DG-018
 
 Treat existing code, comments, mocks, and previous agent conclusions as hypotheses, not independent proof of provider behavior. Before fixing a provider bug, state the assumption being challenged, cite independent evidence, and identify a concrete counterexample that would falsify it. If evidence is unavailable, label the gap; do not present a guess as a verified fix.
@@ -39,7 +43,7 @@ Follow `test/provider-contracts/README.md`. Reproduce the counterexample in a fa
 
 ## DG-020
 
-Check what the pinned schema actually constrains. Opaque JSON/scalars do not validate nested fields or their semantics. Source those expectations independently, exercise valid omitted/null/defaulted fields where the contract permits them, and keep malformed shapes in negative tests. Exercise every discriminator/union variant from the specific endpoint's published schema; a related webhook or summary API does not establish its full event vocabulary. Update schema pins only in reviewed changes, never by fetching upstream schemas during tests.
+Check what the pinned schema actually constrains; opaque fields do not establish nested semantics. Source expectations independently and test affected variants, documented omitted/null/defaulted fields and malformed responses. Cover all variants when changing a shared decoder or claiming full endpoint coverage, not for an unrelated adapter fix. Use the specific endpoint's contract, not a related API's vocabulary. Update pins in reviewed changes; never fetch upstream schemas during tests.
 
 ## DG-021
 
@@ -59,7 +63,7 @@ Complete the PR template's assumption/evidence/counterexample/test record, inclu
 
 ## DG-025
 
-Keep regression tests in the ordinary `npm test` acceptance gate, not only an opt-in or scheduled suite. Verify both the committed workflow and desired required-check configuration before claiming CI coverage; do not claim live branch-protection enforcement from repository files alone.
+Keep regressions in ordinary `npm test`, not only an opt-in or scheduled suite. Follow [DG-134](workflow.md#dg-134) for CI wiring and reuse of verified evidence.
 
 ## DG-069
 

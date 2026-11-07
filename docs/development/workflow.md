@@ -57,7 +57,7 @@ Release macOS advisory instance locks explicitly with `flock(LOCK_UN)` before cl
 
 ## DG-122
 
-After creating a pull request, always provide its URL and explicitly offer to open it in the user's browser. Open it only after the user accepts.
+After creating a pull request, provide its URL. Open it in the browser when the user asks; do not add a confirmation exchange merely to offer to open it.
 
 ## DG-123
 
@@ -65,20 +65,17 @@ When the complete, nonempty pull-request diff is limited to Hypervibe specs or f
 
 ## DG-134
 
-Match verification to the affected behavior. Documentation-only and editorial
-changes that do not affect runtime behavior need content and link review, not
-automated tests. For code, configuration, workflow or runtime-prompt changes, use
-the smallest relevant tests or evaluations. Preserve meaningful bug regression
-coverage and required CI checks. Run broader suites only for broad changes or
-unresolved uncertainty; do not repeat completed checks without new changes,
-failures or another concrete reason.
+Review content and links for documentation-only changes; no automated suite is
+needed. For behavior changes, run focused `npm test -- <test paths>` checks and
+`npm run typecheck` for TypeScript. Expand only for affected shared behavior or an
+unresolved failure. Reuse passing evidence until relevant code or conditions change.
 
-Run focused `npm test -- <test paths>` checks for the changed behavior and
-`npm run typecheck` for TypeScript changes. Regression checks must remain in the
-ordinary `npm test` acceptance path; verify both committed CI and desired required
-check configuration before claiming CI coverage. Repository files do not prove
-live branch-protection enforcement. Execute generated operational programs where
-those programs are the boundary; source-string checks alone cannot prove effects.
+Keep regressions in ordinary `npm test` and preserve required CI. Check the
+committed workflow and desired required-check configuration when adding tests or
+changing workflows; reuse established wiring for later fixes.
+Do not claim live branch protection from repository files alone. Execute generated
+operational programs when they are the changed boundary; string checks cannot
+prove their effects. A full release gate belongs to a release, not every patch.
 
 Test runs show a final summary and failure details, suppressing passing-test logs.
 For individual test results and all console output, run
@@ -86,46 +83,28 @@ For individual test results and all console output, run
 
 ## DG-135
 
-Use a direct path for small, reversible development tasks. A formal plan,
-delegation or a long report is justified by complexity or risk, not by the fact
-that a file changed. Delegate substantial independent work only when it improves
-the result; preserve required independent review. Resolve routine reversible
-choices from context, ask only for materially consequential missing decisions,
-and reuse existing authorization within its agreed scope.
+Follow the global bug-fix guidance in `~/.codex/guidance/bug-fixes.md` when
+available. The repository method remains self-contained: establish expected
+behavior independently, challenge the failure assumption with a counterexample,
+observe a boundary regression fail before the fix, then verify it passes. Record
+that evidence and remaining gaps once in the PR. Do not duplicate the record in
+chat, separate reports and each agent handoff.
 
-Read only the contract and setup sections relevant to the task. Search likely
-files first and batch independent reads. Keep verbose command logs in a file;
-show relevant results and failures without discarding the underlying evidence.
-Consult existing runtime/setup guidance and pinned versions before running checks.
-Do not repeat an unchanged environment failure without evidence that conditions
-have changed. Finish when the requested outcome and proportional verification are
-complete; expand scope only for a concrete defect or unmet requirement.
+Trace callers and other paths that interpret the changed state. Fix affected
+contradictions within scope; do not audit every lifecycle stage for every patch.
+Preserve identities, bindings and recovery state. Provider work also uses the
+[provider evidence rules](provider-evidence.md); review affected implementations
+when the shared contract changes, not every provider for an adapter-local fix with
+unchanged semantics. Label synthetic evidence honestly; passing offline checks
+do not establish live support or prove the cause of a customer incident.
 
-The following method applies to behavior changes and bug fixes. It retains the
-original evidence requirements; small editorial tasks do not need a bug-fix report.
-
-- Keep changes scoped to the requested outcome. Prefer extending or deleting an
-  existing path over new layers, speculative configuration, or compatibility
-  branches. Preserve unrelated edits and explicit user choices.
-- Establish concrete success criteria. State material assumptions and uncertainty;
-  resolve routine choices from evidence and ask only when missing information or
-  consequential ambiguity prevents a sound decision.
-- Existing code, comments, types, mocks, and prior agent conclusions are hypotheses.
-  Before a bug fix, identify the affected behavior, the assumption being challenged,
-  independent evidence for expected behavior, and a counterexample. Write a boundary
-  regression and observe it fail before changing runtime code.
-- For provider-facing work, read the [provider evidence rules](provider-evidence.md)
-  and [pinned-contract guide](../../test/provider-contracts/README.md). Review the shared
-  contract against every named provider in the affected category before implementing
-  an adapter. Use official source or redacted observations; label reconstructed and
-  synthetic evidence. Test real clients and serialized transport where applicable.
-- Inspect every affected interpretation across spec, plan, apply, observation,
-  retries, generated CI, import, and teardown. Fix contradictions within scope and
-  reuse existing logic. Preserve accepted identities, bindings, and recovery state.
-- At completion, report the challenged assumption, independent evidence,
-  counterexample, observed failing/passing checks, and remaining gaps. A reproduced
-  bug is not necessarily the cause of a customer incident. Keep this record in the
-  PR when applicable; passing offline contracts do not establish live support.
+Define success as observable user behavior. For a feature across repositories or
+providers, integrate one complete path early and extend from that evidence. When
+two attempts leave the same step blocked, reassess the diagnosis, identify what
+new evidence the next attempt will obtain, and report the actual blocker. Continue
+authorized work with a changed approach; do not restart tests or add parallel work
+without new evidence. A missing capability is a dependency to resolve within scope,
+not automatic permission to start another product project.
 
 ## DG-136
 

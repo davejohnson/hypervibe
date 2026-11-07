@@ -76,9 +76,10 @@ CLI/MCP explanations, approvals and errors:
   neither friendly copy nor a hidden engine step authorizes additional spending.
 
 Before shipping a substantial flow, sketch the user's task, choices and next
-action, inspect the real mobile and desktop screens, and get a separate clarity
-review. Check whether a first-time person understands the purpose, decision and
-next step. Passing render tests alone does not establish that.
+action, inspect the real mobile and desktop screens, and get one bounded,
+separate clarity review. Re-review only changed behavior or unresolved findings.
+Check whether a first-time person understands the purpose, decision and next
+step. Passing render tests alone does not establish that.
 
 ## DG-001
 
