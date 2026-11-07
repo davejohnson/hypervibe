@@ -99,7 +99,7 @@ export function databaseRestoreScript(): string {
     `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
     'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
     'curl -sf -o /tmp/source.dump "$DUMP_URL"',
-    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"',
+    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE;"',
     'set +e',
     'pg_restore --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
@@ -129,8 +129,8 @@ export function databaseTransferScript(): string {
     'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
     'SRC_VERSION=$(version "$SOURCE_DATABASE_URL")',
     'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
-    // Replace the target schema; objects are recreated owned by the app's owner role.
-    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"',
+    // Clear only what the app's owner role created; the restore recreates it owned by that role.
+    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE;"',
     'set +e',
     'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
     'DUMP=$?',
