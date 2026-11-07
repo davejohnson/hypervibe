@@ -74,6 +74,10 @@ export const serviceSpecSchema = z.object({
   cronSchedule: z.string().min(1).optional(),
   timeZone: z.string().min(1).optional(),
   public: z.boolean().optional(),
+  /** vCPU per instance, for example "0.5" or "1" (provider limits apply). */
+  cpu: z.string().regex(/^(0\.\d{1,2}|[1-8])$/, 'Use a vCPU count such as "0.5", "1" or "2".').optional(),
+  /** Memory per instance, for example "512Mi" or "1Gi". */
+  memory: z.string().regex(/^[1-9]\d*(Mi|Gi)$/, 'Use a memory size such as "512Mi" or "1Gi".').optional(),
   /**
    * Per-service compatibility aliases for Hypervibe-managed database URLs.
    * Only names and canonical sources are persisted; resolved values remain

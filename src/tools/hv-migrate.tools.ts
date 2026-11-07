@@ -10,7 +10,7 @@ import { projectField } from './schemas.js';
 export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_migrate',
-    'Move an app from one environment (for example Railway staging) to a new OpenTofu-managed Google Cloud environment in one guided command. The source is only read and keeps serving. Hypervibe proposes the target from the source, connects Google Cloud, copies runtime secrets into Secret Manager, builds the infrastructure, copies the database and files inside Google Cloud, verifies row counts and file totals, then releases the app. It stops for: needs_billing_choice, needs_access, needs_confirmation (as hv_launch), needs_secret_import (show the setting names, then call again with importSecrets=true), and needs_copy_approval (show what will be copied and that target data is replaced, then call again with copyData=true). Call it again after pending. Pausing the source and moving its existing hostname is a separate step.',
+    'Move an app from one environment (for example Railway staging) to a new OpenTofu-managed Google Cloud environment in one guided command. The source is only read and keeps serving. Hypervibe proposes the target from the source, connects Google Cloud, copies runtime secrets into Secret Manager, builds the infrastructure, copies the database and files inside Google Cloud, verifies row counts and file totals, then releases the app. It stops for: needs_billing_choice, needs_access, needs_confirmation (as hv_launch), needs_secret_import (show the setting names, then call again with importSecrets=true), and needs_copy_approval (show what will be copied and that target data is replaced, then call again with copyData=true). Call it again after pending. A re-run after a verified copy releases without copying again unless refreshData=true. Pausing the source and moving its existing hostname is a separate step.',
     {
       project: projectField,
       from: z.string().min(1).describe('Source environment name, for example "staging".'),
@@ -22,8 +22,9 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       confirmActions: z.array(z.string().min(1)).optional(),
       importSecrets: z.boolean().optional().describe('true only after the user approved copying the listed runtime settings.'),
       copyData: z.boolean().optional().describe('true only after the user approved copying the data, replacing anything in the target.'),
+      refreshData: z.boolean().optional().describe('true only after the user approved copying the data again over an earlier verified copy. Without it, a re-run releases using the existing copy.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, from, to, region, domain, billingAccountName, approveAccess, confirmActions, importSecrets, copyData }) => {
+    wrapCommandHandler(async ({ project: projectRef, from, to, region, domain, billingAccountName, approveAccess, confirmActions, importSecrets, copyData, refreshData }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
@@ -31,7 +32,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         project, from, to,
         ...(region ? { region } : {}), ...(domain ? { domain } : {}),
         ...(billingAccountName ? { billingAccountName } : {}), ...(approveAccess ? { approveAccess } : {}),
-        ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}),
+        ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}), ...(refreshData ? { refreshData } : {}),
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
       });
       const ask = (message: string) => ({ agentInstruction: { action: 'ask_user' as const, message }, next: ['hv_migrate'] });

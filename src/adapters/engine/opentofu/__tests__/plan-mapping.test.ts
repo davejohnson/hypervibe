@@ -116,6 +116,18 @@ describe('teardown mapping', () => {
     expect(actions).toEqual([expect.objectContaining({ id: 'service:web', type: 'destroy', requiresConfirm: true })]);
     expect(retired.files['cloudrun.tf.json']).toEqual({});
   });
+
+  it('shows a worker moving from a service to a worker pool as one confirm-gated replacement', () => {
+    const moved = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [{
+      logicalName: 'worker', resourceName: 'worker', workload: 'worker', initialImage: IMAGE,
+      runtimeServiceAccountEmail: 'r@demo-project.iam.gserviceaccount.com', public: false }] });
+    const { actions, blockers } = translateEnginePlan({ provider: 'gcp', configuration: moved, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_cloud_run_v2_service.worker', type: 'google_cloud_run_v2_service', actions: ['delete'], before: { name: 'worker' } },
+      { address: 'google_cloud_run_v2_worker_pool.worker', type: 'google_cloud_run_v2_worker_pool', actions: ['create'] },
+    ])) });
+    expect(blockers).toEqual([]);
+    expect(actions).toEqual([expect.objectContaining({ id: 'service:worker', type: 'replace', requiresConfirm: true })]);
+  });
 });
 
 describe('Cloud SQL wiring', () => {

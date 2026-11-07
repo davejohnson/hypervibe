@@ -49,7 +49,7 @@ import {
  */
 export type MigrateResult =
   | LaunchResult
-  | { status: 'needs_secret_import'; keys: string[]; message: string }
+  | { status: 'needs_secret_import'; keys: string[]; leftOut?: string[]; message: string }
   | { status: 'needs_copy_approval'; database?: { tables: number; rows: string; version: string }; storage: string[]; message: string }
   | {
       status: 'migrated';
@@ -58,6 +58,8 @@ export type MigrateResult =
       secretsImported: number;
       database?: { tables: number; rows: string; match: boolean; differences: string[]; restoreWarnings: number };
       storage: Array<{ name: string; files: number; bytes: number; match: boolean }>;
+      /** Set when this run released an earlier verified copy instead of copying again. */
+      dataCopiedAt?: string;
       next: string;
     };
 
@@ -70,6 +72,16 @@ const MANAGED_KEY = /^(DATABASE_URL|DATABASE_PUBLIC_URL|DATABASE_PRIVATE_URL|PG[
  */
 export function pointsAtSourceData(value: string): boolean {
   return /^(postgres(ql)?|mysql|redis|rediss|mongodb(\+srv)?|amqps?):\/\//i.test(value.trim());
+}
+
+/**
+ * A setting named for the source environment (STAGING_* when moving staging) is
+ * that environment's own credential, often guarded to its hostname. It is left
+ * out and listed, never copied.
+ */
+export function scopedToEnvironment(key: string, environmentName: string): boolean {
+  const prefix = environmentName.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  return prefix.length > 0 && key.startsWith(`${prefix}_`);
 }
 
 /** A target environment equivalent to the source on OpenTofu-managed Google Cloud. */
@@ -117,6 +129,8 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   confirmActions?: string[];
   importSecrets?: boolean;
   copyData?: boolean;
+  /** Copy the data again even though a verified copy exists (refresh before cutover). */
+  refreshData?: boolean;
   sourceDirectory?: string;
 }): Promise<MigrateResult> {
   const store = new SpecStore();
@@ -150,6 +164,12 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
 
   // 3. Runtime secrets, copied from the running source after the user sees their names.
   const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const recorded = (environment().platformBindings as { engine?: EngineBinding }).engine;
+  if (recorded?.importedSecrets?.some((key) => scopedToEnvironment(key, params.from))) {
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, {
+      engine: { ...recorded, importedSecrets: recorded.importedSecrets.filter((key) => !scopedToEnvironment(key, params.from)) },
+    });
+  }
   if (!(environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets) {
     const values: Record<string, string> = {};
     for (const serviceName of Object.keys(sourceSpec.services)) {
@@ -161,11 +181,14 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     }
     const declared = new Set([...Object.keys(spec.environments[params.to]!.envVars), ...Object.entries(spec.secrets)
       .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key)]);
-    const keys = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
+    const candidates = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
+    const leftOut = candidates.filter((key) => scopedToEnvironment(key, params.from));
+    const keys = candidates.filter((key) => !leftOut.includes(key));
     if (!params.importSecrets) {
       return {
-        status: 'needs_secret_import', keys,
-        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into Google Secret Manager for ${params.to}. Values are copied directly and never shown.`,
+        status: 'needs_secret_import', keys, ...(leftOut.length ? { leftOut } : {}),
+        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into Google Secret Manager for ${params.to}. Values are copied directly and never shown.`
+          + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
       };
     }
     const token = await context.adapter.engineAccessToken();
@@ -178,10 +201,22 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, kind: 'opentofu', importedSecrets: keys } });
   }
 
+  const migration = () => {
+    const recorded = (environment().platformBindings as { engine?: EngineBinding }).engine?.migration;
+    return recorded?.from === params.from ? recorded : undefined;
+  };
+  const recordMigration = (update: Partial<NonNullable<EngineBinding['migration']>>) => {
+    const engine = (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, migration: { ...migration(), from: params.from, ...update } } });
+  };
+  const reuseCopy = Boolean(migration()?.copiedAt) && !params.refreshData;
+
   // 3b. The target database runs at least the source's PostgreSQL major version.
   if (sourceSpec.database && spec.environments[params.to]!.database) {
-    const sourceMajor = await sourceDatabaseMajor(ctx, params.project, sourceEnvironment, sourceSpec);
+    const known = reuseCopy ? migration()?.sourceMajor : undefined;
+    const sourceMajor = known ? { major: known } : await sourceDatabaseMajor(ctx, params.project, sourceEnvironment, sourceSpec);
     if ('blocked' in sourceMajor) return { status: 'blocked', message: sourceMajor.blocked };
+    recordMigration({ sourceMajor: sourceMajor.major });
     const targetMajor = spec.environments[params.to]!.database!.version ?? 16;
     if (sourceMajor.major > targetMajor) {
       if (sourceMajor.major > 18) return { status: 'blocked', message: `The source runs PostgreSQL ${sourceMajor.major}, which Cloud SQL does not offer yet.` };
@@ -200,6 +235,17 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   const storageNames = Object.keys(targetSpec.storage ?? {}).filter((name) => parseStorageBindings(sourceEnvironment)[name]);
   // Railway databases are private: export from inside Railway rather than opening a public port.
   const privateRailwaySource = sourceSpec.database?.provider === 'railway';
+  if (reuseCopy) {
+    const copy = migration()!;
+    const released = await launchEnvironment(ctx, launchParams);
+    if (released.status !== 'live') return released;
+    return {
+      status: 'migrated', target: params.to, urls: released.urls,
+      secretsImported: ((environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets ?? []).length,
+      ...(copy.database ? { database: copy.database } : {}), storage: copy.storage ?? [], dataCopiedAt: copy.copiedAt,
+      next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. The data was copied at ${copy.copiedAt}; run hv_migrate again with refreshData=true to copy it again before the final cutover.`,
+    };
+  }
   const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
@@ -259,6 +305,8 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       if (!match) return { status: 'blocked', message: `The copied files in ${name} do not match the source (${result.differences} difference(s)).`, details: result };
     }
 
+    recordMigration({ copiedAt: new Date().toISOString(), ...(database ? { database } : {}), storage });
+
     // 6. Release the app on the target and verify it.
     const released = await launchEnvironment(ctx, launchParams);
     if (released.status !== 'live') return released;
@@ -266,7 +314,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       status: 'migrated', target: params.to, urls: released.urls,
       secretsImported: ((environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets ?? []).length,
       ...(database ? { database } : {}), storage,
-      next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. Run hv_migrate again with copyData to refresh the copy before the final cutover.`,
+      next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. Run hv_migrate again with refreshData=true to copy the data again before the final cutover.`,
     };
   } finally {
     if (sourceAccess?.ok) await sourceAccess.lease.release().catch(() => undefined);
@@ -336,11 +384,14 @@ async function sourceDatabaseMajor(ctx: CommandContext, project: Project, source
       return { blocked: 'The source Railway database is not reachable through Hypervibe.' };
     }
     const name = await railway.adapter.serviceName(component.externalId);
-    const probe = await railway.adapter.runPrivateTask({
-      projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:18-alpine', timeoutMs: 6 * 60 * 1000,
+    const runProbe = () => (railway.adapter as RailwayAdapter).runPrivateTask({
+      projectId: bindings.projectId!, environmentId: bindings.environmentId!, image: 'postgres:18-alpine', timeoutMs: 6 * 60 * 1000,
       command: 'echo "HV_SERVER_VERSION $(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")"',
       variables: { SOURCE_DATABASE_URL: `\${{${name}.DATABASE_URL}}` },
     });
+    // A read-only probe; one retry absorbs Railway's occasional late logs.
+    let probe = await runProbe();
+    if (probe.exitCode === undefined) probe = await runProbe();
     const version = probe.output.match(/HV_SERVER_VERSION (\d+)/)?.[1];
     if (probe.exitCode !== 0 || !version) return { blocked: `Could not read the source database version (${probe.error ?? 'no output'}).` };
     return { major: Math.floor(Number(version) / 10000) };

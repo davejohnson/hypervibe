@@ -5350,6 +5350,8 @@ export class CloudRunAdapter implements
 
     return [
       'set -euo pipefail',
+      // Generated Dockerfiles mount the optional package token as a build secret.
+      'export DOCKER_BUILDKIT=1',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
       `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,

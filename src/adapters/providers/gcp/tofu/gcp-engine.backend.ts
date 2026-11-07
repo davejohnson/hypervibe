@@ -256,6 +256,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
   if (wired) {
     // The socket path and connection name are infrastructure facts; the credential is a secret reference.
     env.push({ name: 'CLOUD_SQL_CONNECTION_NAME', value: '${google_sql_database_instance.db.connection_name}' });
+    env.push({ name: 'PGHOST', value: '/cloudsql/${google_sql_database_instance.db.connection_name}' });
   }
   const container: Record<string, unknown> = {
     image: service.initialImage,
@@ -301,6 +302,33 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
       // changes keep the currently deployed image instead of rolling back.
       ignore_changes: ['template[0].containers[0].image', 'client', 'client_version'],
     }],
+  };
+}
+
+/**
+ * An always-on background worker: a Cloud Run worker pool. Unlike a service it
+ * receives no requests and needs no listening port or startup probe.
+ */
+function workerPoolResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput): Record<string, unknown> {
+  const base = serviceResource(input, service) as { labels: unknown; template: Array<Record<string, unknown>>; lifecycle: unknown };
+  const template = base.template[0]!;
+  const container = { ...(template.containers as Array<Record<string, unknown>>)[0] };
+  const resources = (container.resources as Array<Record<string, unknown>>)[0]!;
+  container.resources = [{ limits: resources.limits }];
+  return {
+    name: service.resourceName,
+    project: input.projectId,
+    location: input.region,
+    deletion_protection: false,
+    labels: base.labels,
+    scaling: [{ scaling_mode: 'MANUAL', manual_instance_count: service.minInstances ?? 1 }],
+    template: [{
+      service_account: template.service_account,
+      containers: [container],
+      ...(template.volumes ? { volumes: template.volumes } : {}),
+      ...(template.vpc_access ? { vpc_access: template.vpc_access } : {}),
+    }],
+    lifecycle: base.lifecycle,
   };
 }
 
@@ -386,6 +414,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   const jobs: Record<string, unknown> = {};
   const schedules: Record<string, unknown> = {};
   const jobIam: Record<string, unknown> = {};
+  const workerPools: Record<string, unknown> = {};
   for (const service of input.services) {
     const key = engineKey(service.logicalName);
     if (seen.has(key)) throw new Error(`Duplicate engine address for service ${service.logicalName}.`);
@@ -396,6 +425,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     if (service.workload === 'job') {
       addScheduledJob(input, service, key, jobs, schedules, jobIam);
       for (const address of jobAddresses(key)) resources[address] = mapping;
+      continue;
+    }
+    if (service.workload === 'worker') {
+      workerPools[key] = workerPoolResource(input, service);
+      resources[`google_cloud_run_v2_worker_pool.${key}`] = mapping;
       continue;
     }
     services[key] = serviceResource(input, service);
@@ -546,7 +580,14 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     const mapping: EngineResourceMapping = { actionId: `service:${retired}`, kind: 'service', name: retired };
     resources[`google_cloud_run_v2_service.${key}`] = mapping;
     resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
+    resources[`google_cloud_run_v2_worker_pool.${key}`] = mapping;
     for (const address of jobAddresses(key)) resources[address] = mapping;
+  }
+  // A worker that used to be a service moves to a worker pool; the old service is retired.
+  for (const service of input.services) {
+    if (service.workload !== 'worker') continue;
+    const key = engineKey(service.logicalName);
+    resources[`google_cloud_run_v2_service.${key}`] ??= { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true };
   }
   const imports: Record<string, string> = {};
   if (input.adopt?.databaseInstance) {
@@ -571,6 +612,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
           ...(Object.keys(jobIam).length ? { google_cloud_run_v2_job_iam_member: jobIam } : {}),
         },
       } : {},
+      'workerpools.tf.json': Object.keys(workerPools).length ? { resource: { google_cloud_run_v2_worker_pool: workerPools } } : {},
       'cloudrun.tf.json': Object.keys(services).length ? {
         resource: {
           google_cloud_run_v2_service: services,

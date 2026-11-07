@@ -80,8 +80,13 @@ function password(): string {
   return crypto.randomBytes(24).toString('base64url');
 }
 
+/**
+ * An empty URL host with the socket in `?host=`: libpq, node-pg and ORMs read the
+ * query; tools that parse only the URL host (sequelize-cli) fall back to PGHOST,
+ * which services also receive. A `localhost` host would send those tools to TCP.
+ */
 export function connectionUrl(login: DatabaseLogin, secret: string, databaseName: string, connectionName: string): string {
-  return `postgresql://${login}:${encodeURIComponent(secret)}@localhost/${databaseName}?host=/cloudsql/${connectionName}`;
+  return `postgresql://${login}:${encodeURIComponent(secret)}@/${databaseName}?host=/cloudsql/${connectionName}`;
 }
 
 /** Runs statements in one session through the Cloud SQL connector as the deployment identity. */

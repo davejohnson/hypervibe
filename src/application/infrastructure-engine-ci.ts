@@ -148,7 +148,7 @@ export interface ReleaseWorkflowInput {
   region: string;
   provider: string;
   releaseIdentity: string;
-  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' }>;
+  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools' }>;
   /** Used only when the repository has no Dockerfile of its own. */
   generatedDockerfile?: string;
 }
@@ -180,7 +180,7 @@ if (!isJob && healthPath) {
   if (response.status >= 500) throw new Error(healthPath + ' returned HTTP ' + response.status);
   console.log('Health ' + healthPath + ': HTTP ' + response.status);
 }
-console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled run)' : ' at ' + after.uri));
+console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled run)' : after.uri ? ' at ' + after.uri : ''));
 `.trim();
 
 /** A GitHub Actions workflow with no stored credentials; every value is non-secret. */

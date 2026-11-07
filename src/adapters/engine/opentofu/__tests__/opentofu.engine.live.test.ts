@@ -117,6 +117,25 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates a background worker as a worker pool with no port or probe', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1',
+      cache: { instanceName: 'hv-staging-cache-1', tier: 'BASIC', memorySizeGb: 1, network: 'default', subnetwork: 'default', wireServices: true },
+      services: [{
+        logicalName: 'worker', resourceName: 'worker-staging', workload: 'worker',
+        initialImage: `us-docker.pkg.dev/demo-project/app/worker@sha256:${'a'.repeat(64)}`,
+        runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', public: false,
+      }],
+    });
+    const pool = (configuration.files['workerpools.tf.json'] as any).resource.google_cloud_run_v2_worker_pool.worker;
+    expect(pool.scaling).toEqual([{ scaling_mode: 'MANUAL', manual_instance_count: 1 }]);
+    expect(pool.template[0].containers[0].ports).toBeUndefined();
+    expect(configuration.files['cloudrun.tf.json']).toEqual({});
+    // A worker that was once a service has that service retired, not left unmanaged.
+    expect(configuration.resources['google_cloud_run_v2_service.worker']).toMatchObject({ actionId: 'service:worker' });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates Pub/Sub queues (runtime access comes from the queue setup add-on)', async () => {
     const configuration = buildCloudRunConfiguration({
       projectId: 'demo-project', region: 'us-central1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',

@@ -134,7 +134,9 @@ export function translateEnginePlan(params: {
     const mapping = params.configuration.resources[changes[0]!.address]!;
     const dominant = changes.reduce((best, change) =>
       ACTION_RANK[change.action] > ACTION_RANK[best.action] ? change : best);
-    const type = ENGINE_ACTION_TYPE[dominant.action as Exclude<EngineChangeAction, 'read'>];
+    // Deleting one resource while creating its successor (a service becoming a worker pool) is a replacement.
+    const succession = changes.some((change) => change.action === 'delete') && changes.some((change) => change.action === 'create');
+    const type = succession ? ENGINE_ACTION_TYPE.replace : ENGINE_ACTION_TYPE[dominant.action as Exclude<EngineChangeAction, 'read'>];
     const destructive = changes.some((change) => change.action === 'delete' || change.action === 'replace');
     const adopting = changes.some((change) => change.action === 'import');
     // A database major-version change is irreversible and needs its own explicit approval.

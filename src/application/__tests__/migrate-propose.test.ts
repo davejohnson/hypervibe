@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pointsAtSourceData, proposeTargetEnvironment } from '../migrate.js';
+import { pointsAtSourceData, proposeTargetEnvironment, scopedToEnvironment } from '../migrate.js';
 import type { EnvironmentSpec } from '../../domain/spec/spec.schema.js';
 
 describe('proposed migration target', () => {
@@ -36,5 +36,13 @@ describe('migrated settings', () => {
     expect(pointsAtSourceData('rediss://default:pw@host:6379')).toBe(true);
     expect(pointsAtSourceData('https://api.anthropic.com')).toBe(false);
     expect(pointsAtSourceData('sk-ant-abc')).toBe(false);
+  });
+
+  it('leaves settings named for the source environment behind', () => {
+    expect(scopedToEnvironment('STAGING_AUTH_TEST_INBOX_TOKEN', 'staging')).toBe(true);
+    expect(scopedToEnvironment('PREVIEW_APP_TOKEN', 'preview-app')).toBe(true);
+    expect(scopedToEnvironment('PRODUCTION_KEY', 'staging')).toBe(false);
+    expect(scopedToEnvironment('PREVIEW_APP_TOKEN', 'preview')).toBe(true);
+    expect(scopedToEnvironment('SESSION_SECRET', 'staging')).toBe(false);
   });
 });

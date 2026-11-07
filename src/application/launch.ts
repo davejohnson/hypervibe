@@ -49,8 +49,17 @@ export interface CostLine { item: string; estimate: string }
 /** Approximate list prices for the resources this path creates (us-central1). Never a quote. */
 export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
   const lines: CostLine[] = [];
-  const services = Object.keys(environment.services).length;
+  const services = Object.values(environment.services).filter((service) => service.workloadKind !== 'worker').length;
   if (services) lines.push({ item: `${services} Cloud Run service(s)`, estimate: '$0 while idle; roughly $0.40 per million requests plus CPU time while serving' });
+  // Workers run one always-on instance (us-central1 instance pricing: ~$0.0000180/vCPU-s, ~$0.0000020/GiB-s).
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (service.workloadKind !== 'worker') continue;
+    const cpu = Number(service.cpu ?? '1');
+    const memory = service.memory ?? '512Mi';
+    const memoryGiB = memory.endsWith('Gi') ? parseInt(memory, 10) : parseInt(memory, 10) / 1024;
+    const monthly = Math.round((cpu * 0.000018 + memoryGiB * 0.000002) * 2_628_000);
+    lines.push({ item: `Worker ${name} (always on, ${cpu} vCPU, ${memory})`, estimate: `about $${monthly} per month` });
+  }
   if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
   if (environment.cache) lines.push({ item: `Memorystore Redis (${environment.cache.tier ?? 'BASIC'}, ${environment.cache.size ?? '1gb'})`, estimate: environment.cache.tier === 'STANDARD_HA' ? 'about $90 per month' : 'about $35 per month' });
   const queues = Object.keys(environment.queues ?? {}).length;
