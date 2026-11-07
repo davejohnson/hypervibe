@@ -18,7 +18,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       region: z.string().min(1).optional().describe('Google Cloud region for a new target (default us-central1).'),
       domain: z.string().min(1).optional().describe('Hostname for the new target, for example gcp.example.com.'),
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional(),
-      approveAccess: z.array(z.enum(['storage', 'memorystore', 'queues', 'ci-release'])).optional(),
+      approveAccess: z.array(z.enum(['storage', 'storage-s3', 'memorystore', 'queues', 'ci-release'])).optional(),
       confirmActions: z.array(z.string().min(1)).optional(),
       importSecrets: z.boolean().optional().describe('true only after the user approved copying the listed runtime settings.'),
       copyData: z.boolean().optional().describe('true only after the user approved copying the data, replacing anything in the target.'),

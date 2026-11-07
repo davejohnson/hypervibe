@@ -174,6 +174,11 @@ export const GCS_PREPARE_ADDONS = {
     requiredApis: ['storage.googleapis.com'],
     requiredRoles: ['roles/storage.admin'],
   },
+  /** S3-compatible bucket access: lets Hypervibe create S3-style access keys for the runtime identity. */
+  s3: {
+    requiredApis: ['storage.googleapis.com'],
+    requiredRoles: ['roles/storage.hmacKeyAdmin'],
+  },
 } as const;
 
 export type GcsPrepareAccess = keyof typeof GCS_PREPARE_ADDONS;
@@ -220,6 +225,13 @@ export function isCloudPreparedForCache(project: Pick<Project, 'policies'> | nul
   if (!project) return false;
   const record = getCloudPreparation(project, 'cloudrun');
   return Boolean(record && MEMORYSTORE_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
+}
+
+/** Whether GCP setup granted S3-compatible key management (the gcsAccess="s3" add-on). */
+export function isCloudPreparedForStorageS3(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record && GCS_PREPARE_ADDONS.s3.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
 export function withCloudPreparationRecord(

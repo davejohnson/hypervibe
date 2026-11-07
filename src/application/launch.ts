@@ -13,7 +13,7 @@ import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.exe
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
-import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3 } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
   isEngineManaged,
@@ -34,7 +34,7 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[] }
-  | { status: 'needs_access'; accessId: 'storage' | 'memorystore' | 'queues' | 'ci-release'; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_access'; accessId: 'storage' | 'storage-s3' | 'memorystore' | 'queues' | 'ci-release'; access: string; grants: Record<string, unknown> }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
@@ -152,6 +152,19 @@ async function runLaunch(ctx: CommandContext, params: {
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting storage access failed.'), details: granted };
   }
 
+  if (Object.values(environmentSpec.storage ?? {}).some((storage) => storage.access === 's3')
+    && !isCloudPreparedForStorageS3(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
+    const gcpProjectId = await scopedGcpProjectId(params.project);
+    if (!params.approveAccess?.includes('storage-s3')) {
+      return {
+        status: 'needs_access', accessId: 'storage-s3',
+        access: 'Let Hypervibe create S3-style access keys for your app, so code written for S3 or Railway buckets works with Google Cloud Storage unchanged.',
+        grants: { deploymentIdentity: ['roles/storage.hmacKeyAdmin'] },
+      };
+    }
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId, gcsAccess: 's3', adminAuth: 'default', confirm: true });
+    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting S3-compatible access failed.'), details: granted };
+  }
   if (environmentSpec.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
     const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), memorystoreAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The Redis access preview failed.'), details: preview };
