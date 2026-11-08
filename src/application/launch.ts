@@ -165,7 +165,11 @@ async function runLaunch(ctx: CommandContext, params: {
   // 1a. DNS access for a custom domain: open the one-step connect page instead of explaining tokens.
   const domainName = environmentSpec.domain?.trim().toLowerCase();
   if (domainName && 'error' in await cloudflareFor(domainName)) {
-    const connected = await connectCloudflareInBrowser({ domain: domainName, waitMs: 3 * 60 * 1000 });
+    const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
+    const connected = await connectCloudflareInBrowser({ domain: domainName, waitMs: 3 * 60 * 1000, context: {
+      project: params.project.name, ...(repository ? { repository } : {}), environment: params.environmentName,
+      purpose: `serve the ${params.environmentName} environment at ${domainName}`,
+    } });
     if (connected.status !== 'connected') {
       return { status: 'needs_connection', provider: 'cloudflare', ...(connected.url ? { url: connected.url } : {}), message: connected.message };
     }

@@ -1,4 +1,5 @@
 import { InitializeRequestSchema, type RequestId } from '@modelcontextprotocol/sdk/types.js';
+import { recordMcpClient } from '../../application/requesting-agent.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 // Claude Code's documented defaults are 4,096 characters since 2.1.296 and
@@ -41,6 +42,7 @@ export function withClientInstructions(transport: Transport, fullInstructions: s
       transport.onmessage = (message, extra) => {
         if ('method' in message && message.method === 'initialize') {
           const parsed = InitializeRequestSchema.safeParse(message);
+          if (parsed.success) recordMcpClient(parsed.data.params.clientInfo);
           if (parsed.success && 'id' in message) {
             initialization = { id: message.id, instructions: instructionsForClient(parsed.data.params.clientInfo, fullInstructions) };
           }

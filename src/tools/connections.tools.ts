@@ -1,4 +1,5 @@
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
@@ -119,6 +120,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
+      purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
+      environment: z.string().optional().describe('action="connect": the environment this access is for, shown on the connect page.'),
       workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
       adminAuth: z.literal('default').optional().describe('Required for action="bootstrap" and confirmed action="prepare": use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
@@ -144,6 +147,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       memorystoreAccess,
       queueAccess,
       workerAccess,
+      purpose,
+      environment,
       adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
@@ -214,7 +219,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (provider !== 'cloudflare' || !scope?.trim()) {
           return commandError('VALIDATION', 'action="connect" currently supports provider="cloudflare" with scope set to the domain to manage.', { next: ['hv_connections'] });
         }
-        const result = await connectCloudflareInBrowser({ domain: scope });
+        const { project: contextProject } = await resolveGuidanceContext().catch(() => ({ project: undefined }));
+        const repository = contextProject?.gitRemoteUrl ? parseGitHubRepoFromRemote(contextProject.gitRemoteUrl) : undefined;
+        const result = await connectCloudflareInBrowser({ domain: scope, context: {
+          ...(contextProject?.name ? { project: contextProject.name } : {}), ...(repository ? { repository } : {}),
+          ...(environment ? { environment } : {}), ...(purpose ? { purpose } : {}),
+        } });
         return result.status === 'connected'
           ? commandSuccess(result, { next: ['hv_launch', 'hv_plan'] })
           : commandSuccess(result, {

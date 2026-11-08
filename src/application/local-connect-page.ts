@@ -7,6 +7,7 @@ import { findCloudflareZone } from '../domain/services/cloudflare-ops.service.js
 import { CLOUDFLARE_TOKEN_URLS } from '../domain/services/connection-guidance.js';
 import { saveConnection, verifyConnection } from '../domain/services/connection-ops.service.js';
 import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
+import { requestingAgent } from './requesting-agent.js';
 
 /**
  * A one-page local connect flow for providers that only offer API tokens.
@@ -46,14 +47,41 @@ const CLOUDFLARE_PERMISSIONS: Array<{ name: string; why: string }> = [
   { name: 'Account Settings: Read', why: 'find the Cloudflare account the domain belongs to' },
 ];
 
-function page(params: { domain: string; nonce: string; error?: string; connected?: string }): string {
+/** Who asked and why, so the person knows exactly what they are approving. */
+export interface ConnectContext {
+  /** Coding agent product name, for example "Claude Code" or "Codex". */
+  agent: string;
+  project?: string;
+  repository?: string;
+  environment?: string;
+  /** What Hypervibe will do with the access, as a phrase after "so it can", for example "move staging.usebillforge.com to Google Cloud". */
+  purpose?: string;
+}
+
+function contextRows(domain: string, context: ConnectContext): string {
+  const rows: Array<[string, string]> = [
+    ['Requested by', context.agent],
+    ...(context.project ? [['Project', context.project] as [string, string]] : []),
+    ...(context.repository ? [['Repository', context.repository] as [string, string]] : []),
+    ...(context.environment ? [['Environment', context.environment] as [string, string]] : []),
+    ['Domain', domain],
+    ...(context.purpose ? [['Why', `to ${context.purpose}`] as [string, string]] : []),
+  ];
+  return `<dl class="context">${rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`;
+}
+
+function page(params: { domain: string; nonce: string; context: ConnectContext; error?: string; connected?: string }): string {
   const zone = escapeHtml(dnsZoneScopeForDomain(params.domain));
+  const agent = escapeHtml(params.context.agent);
+  const subject = params.context.project ? `<strong>${escapeHtml(params.context.project)}</strong>` : `<strong>${escapeHtml(params.domain)}</strong>`;
+  const purpose = escapeHtml(params.context.purpose ?? `manage DNS and traffic for ${params.domain}`);
   const body = params.connected
     ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>Cloudflare is connected</h1><p>${escapeHtml(params.connected)}</p>
-<p class="muted">The token is stored encrypted on this computer. You can close this tab and go back to your assistant.</p></section>`
-    : `<p class="eyebrow">Connect a service</p>
+<p class="muted">The token is stored encrypted on this computer. You can close this tab; ${agent} continues from here.</p></section>`
+    : `<p class="eyebrow">Connect Cloudflare</p>
 <h1>Let Hypervibe manage <span class="nowrap">${zone}</span> on Cloudflare</h1>
-<p class="lead">Your assistant asked Hypervibe to set up <strong>${escapeHtml(params.domain)}</strong>. Create a Cloudflare token for it and paste it below. This takes about a minute.</p>
+<p class="lead">${agent} is working on ${subject} and needs Hypervibe to ${purpose}. ${zone} is on Cloudflare, so Hypervibe needs a Cloudflare API token for it. Create one below and paste it here; ${agent} continues once it is connected.</p>
+${contextRows(params.domain, params.context)}
 <ol class="steps">
   <li><span class="num">1</span><div><a class="button" href="${CLOUDFLARE_TOKEN_URLS.user}" target="_blank" rel="noopener noreferrer">Open Cloudflare's token form ↗</a>
     <p class="muted">The permissions below are already selected. Under <em>Zone Resources</em> choose <strong>${zone}</strong>, then click <em>Continue to summary</em> and <em>Create Token</em>.</p></div></li>
@@ -101,13 +129,15 @@ input[type=password]:focus{outline:none;border-color:var(--signal-300);box-shado
 details{border-top:1px solid var(--frame);padding-top:.85rem}summary{cursor:pointer;color:#fff}.perms{margin:.6rem 0;padding-left:1.1rem}.perms li{margin:.25rem 0}
 .trust{margin-top:1rem;border:1px solid var(--frame);border-radius:2px;background:var(--ink-800);padding:.8rem 1rem;font-size:.8rem;color:var(--cloud-300)}.trust ul{margin:.35rem 0 0;padding-left:1.1rem}.trust li{margin:.2rem 0}.trust strong{font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--signal-300);font-weight:500}
 .done{text-align:center}.tick{width:2.75rem;height:2.75rem;margin:0 auto .6rem;border:1px solid var(--signal-700);border-radius:2px;background:var(--signal-950);color:var(--signal-300);font-size:1.4rem;display:grid;place-items:center}
+.context{display:grid;grid-template-columns:max-content 1fr;gap:.3rem 1rem;margin:0 0 1.25rem;padding:.75rem .9rem;border:1px solid var(--frame);border-radius:2px;background:var(--ink-950);font-size:.82rem}
+.context dt{font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--cloud-300);padding-top:.12rem}.context dd{margin:0;color:#fff;overflow-wrap:anywhere}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 </style></head><body><div class="wrap">
 <header><div class="wordmark" aria-label="Hypervibe">hyper<span>vibe</span></div><div class="local" title="Served by Hypervibe on 127.0.0.1">${LOCK}<span>Running on this computer</span></div></header>
 <main>${body}</main>
 <section class="trust" aria-label="How your token is handled"><strong>How your token is handled</strong><ul>
 <li>This page is served by Hypervibe on this computer only (127.0.0.1). It loads nothing from the internet.</li>
-<li>Your token goes straight from this page into Hypervibe's encrypted store on this computer. It never passes through chat, your AI assistant or any Hypervibe server.</li>
+<li>Your token goes straight from this page into Hypervibe's encrypted store on this computer. It never passes through chat, ${agent} or any Hypervibe server.</li>
 <li>Hypervibe checks the token against ${zone} before saving it. This link works once and expires in 30 minutes.</li>
 </ul></section>
 </div></body></html>`;
@@ -148,6 +178,8 @@ function openInBrowser(url: string): void {
  */
 export async function connectCloudflareInBrowser(params: {
   domain: string;
+  /** Who asked and why; shown on the page. Defaults to the detected coding agent. */
+  context?: Partial<ConnectContext>;
   waitMs?: number;
   openBrowser?: (url: string) => void;
   /** Overrides the token check and save, for tests. */
@@ -155,6 +187,7 @@ export async function connectCloudflareInBrowser(params: {
 }): Promise<LocalConnectResult> {
   const domain = params.domain.trim().toLowerCase();
   const scope = dnsZoneScopeForDomain(domain);
+  const context: ConnectContext = { ...params.context, agent: params.context?.agent ?? requestingAgent() };
   const key = `cloudflare:${scope}`;
   let entry = active.get(key);
   if (entry?.settled?.status === 'connected') return entry.settled;
@@ -182,19 +215,19 @@ export async function connectCloudflareInBrowser(params: {
         'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
         'Referrer-Policy': 'no-referrer',
       }).end(body);
-      if (request.method === 'GET') { html(page({ domain, nonce, ...(entry?.settled?.status === 'connected' ? { connected: entry.settled.message } : {}) })); return; }
+      if (request.method === 'GET') { html(page({ domain, nonce, context, ...(entry?.settled?.status === 'connected' ? { connected: entry.settled.message } : {}) })); return; }
       if (request.method !== 'POST' || request.headers.origin !== `http://127.0.0.1:${port}`) { response.writeHead(403).end(); return; }
       let raw = '';
       request.on('data', (chunk: Buffer) => { raw += chunk.toString('utf8'); if (raw.length > 8192) request.destroy(); });
       request.on('end', async () => {
         const form = new URLSearchParams(raw);
         const token = form.get('token')?.trim() ?? '';
-        if (form.get('nonce') !== nonce || !token) { html(page({ domain, nonce, error: 'Paste the token Cloudflare showed you.' }), 400); return; }
+        if (form.get('nonce') !== nonce || !token) { html(page({ domain, nonce, context, error: 'Paste the token Cloudflare showed you.' }), 400); return; }
         const outcome = await complete(token, domain);
-        if (!outcome.ok) { html(page({ domain, nonce, error: outcome.error }), 400); return; }
+        if (!outcome.ok) { html(page({ domain, nonce, context, error: outcome.error }), 400); return; }
         const settled: LocalConnectResult = { status: 'connected', provider: 'cloudflare', scope, message: outcome.message };
         entry!.settled = settled;
-        html(page({ domain, nonce, connected: outcome.message }));
+        html(page({ domain, nonce, context, connected: outcome.message }));
         resolve(settled);
         setTimeout(() => { server.close(); active.delete(key); }, 2000).unref();
       });
