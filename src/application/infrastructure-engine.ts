@@ -1,10 +1,13 @@
+import { createCommandContext } from './context.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
+import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
-import { S3_COMPATIBLE_SECRET_KEYS } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { S3_COMPATIBLE_SECRET_KEYS, iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
-import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
 import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/queue-env.js';
 
 const execFileAsync = promisify(execFile);
@@ -34,7 +37,7 @@ import { normalizeGitRemoteForBuild, parseGitHubRepoFromRemote } from '../lib/gi
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import {
-  executeDatabaseCredential, observeDatabaseCredential, otherLogin,
+  executeDatabaseCredential, grantWorkerWakeRead, observeDatabaseCredential, otherLogin,
   type DatabaseCredentialMetadata, type DatabaseCredentialObservation, type DatabaseLogin,
 } from './infrastructure-engine-database.js';
 import {
@@ -62,6 +65,8 @@ export const ENGINE_STORAGE_S3_KEY_OPERATION = 'gcpStorageS3KeyEnsure';
 export const ENGINE_CACHE_URL_KEY = 'REDIS_URL';
 export const ENGINE_CACHE_ACCESS_BLOCKER = 'Redis needs one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["memorystore"], or run hv_connections provider="cloudrun" action="prepare" memorystoreAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure';
+export const ENGINE_WORKER_WAKE_GRANT_OPERATION = 'gcpWorkerWakeGrant';
+export const ENGINE_WORKER_ACCESS_BLOCKER = 'On-demand workers need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["workers"], or run hv_connections provider="cloudrun" action="prepare" workerAccess="lifecycle" (preview, then confirm).';
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
 export const ENGINE_DATABASE_URL_KEY = 'DATABASE_URL';
 const ENGINE_DATABASE_NAME = 'app';
@@ -72,6 +77,23 @@ const DEFAULT_REGION = 'us-central1';
 export function isEngineManaged(environmentSpec: EnvironmentSpec | undefined): boolean {
   return environmentSpec?.hosting.engine === 'opentofu';
 }
+
+// Traffic handoffs (domainTarget) to an engine-managed environment verify its exact live web service.
+registerEngineWebServiceResolver(async ({ project, environment, environmentName, service }) => {
+  const spec = new SpecStore().getForInspection(project)?.spec;
+  if (!spec) return { unknown: 'The project has no spec.' };
+  const context = await resolveEngineContext(createCommandContext(), project, spec, environmentName);
+  if ('blocked' in context) return { unknown: context.blocked };
+  const binding = ((environment.platformBindings as { services?: Record<string, { serviceId?: string }> }).services ?? {})[service];
+  if (!binding?.serviceId) return { unknown: `The target service ${service} has not been created yet.` };
+  const observed = await cloudRunGet(await context.adapter.engineAccessToken(), context.gcpProjectId, context.region, binding.serviceId);
+  if (observed.state !== 'present') return { unknown: `The target service ${service} could not be read from Cloud Run.` };
+  const value = observed.value;
+  if (!value.uri || !value.uid || value.terminalCondition?.state !== 'CONDITION_SUCCEEDED' || value.latestReadyRevision !== value.latestCreatedRevision) {
+    return { unknown: `The target service ${service} is not serving its latest revision.` };
+  }
+  return { provider: 'cloudrun', providerProjectId: context.gcpProjectId, providerEnvironmentId: context.region, serviceId: binding.serviceId, resourceUid: value.uid, url: value.uri };
+});
 
 /** Desired state the pilot cannot yet manage. Anything listed blocks planning instead of being ignored. */
 export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
@@ -124,6 +146,9 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
       // Worker pools and jobs keep CPU always allocated, which Cloud Run allows only from 1 vCPU.
       problems.push(`Service ${name}: background workers and scheduled jobs on Cloud Run need at least 1 vCPU (cpu "${service.cpu}" is rejected by Google).`);
     }
+    if (service.onDemand && !environment.database) {
+      problems.push(`Service ${name}: an on-demand worker counts pending work in the app database, so the environment needs a database.`);
+    }
     if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
     if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
   }
@@ -168,6 +193,8 @@ export interface EngineBinding {
   queues?: string[];
   /** Cloud Run job that runs the release command. */
   releaseJob?: string;
+  /** IAM database user that was granted read access for on-demand worker wakers. */
+  workerWakeGrant?: string;
   /** Runtime secrets copied from a migration source into Secret Manager. */
   importedSecrets?: string[];
   /** Keyless CI release trust granted for this exact repository. */
@@ -301,6 +328,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
+        ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
     });
@@ -675,6 +703,9 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if (environmentSpec!.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(project.id) ?? project)) {
     return { blocked: [ENGINE_CACHE_ACCESS_BLOCKER] };
   }
+  if (Object.values(environmentSpec!.services).some((service) => service.onDemand) && !isCloudPreparedForWorkerWake(ctx.repos.projects.findById(project.id) ?? project)) {
+    return { blocked: [ENGINE_WORKER_ACCESS_BLOCKER] };
+  }
   if (Object.keys(environmentSpec!.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(project.id) ?? project, 'cloudrun')) {
     return { blocked: ['Queues need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["queues"], or run hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle" (preview, then confirm).'] };
   }
@@ -875,6 +906,17 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     })
     : [];
   if ('blocked' in credentialActions) return { blocked: [credentialActions.blocked] };
+  const onDemandWorkers = Object.entries(environmentSpec!.services).filter(([, service]) => service.workloadKind === 'worker' && service.onDemand).map(([name]) => name);
+  const wakeUser = context.runtimeServiceAccountEmail ? iamDatabaseUser(context.runtimeServiceAccountEmail) : undefined;
+  const wakeGrantActions: PlanAction[] = databaseSpec && wakeUser && onDemandWorkers.length && engineBinding.workerWakeGrant !== wakeUser ? [{
+    id: 'worker-wake-grant:postgres', type: 'update', verified: true,
+    resource: { kind: 'database', name: 'postgres', provider: 'gcp' },
+    reason: `Hypervibe will let the on-demand worker waker read pending work: read-only access to the app's tables for ${wakeUser}.`,
+    dependsOn: [databaseAction, ...credentialActions, ...serviceActions.filter((action) => onDemandWorkers.some((name) => action.id === `service:${name}`))]
+      .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
+    metadata: { operation: ENGINE_WORKER_WAKE_GRANT_OPERATION, gcpProjectId: context.gcpProjectId, instanceName, databaseName: ENGINE_DATABASE_NAME,
+      secretId: databaseSecretId, iamUser: wakeUser },
+  }] : [];
   const cacheAction = serviceActions.find((action) => action.id === 'cache:redis');
   const s3CredentialActions: PlanAction[] = s3Storage.filter((name) => !s3Ready.includes(name)).map((storageName) => {
     const bucketAction = serviceActions.find((action) => action.id === `storage:${storageName}`);
@@ -898,7 +940,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // Array order matters: prerequisites precede the engine segment so it runs only once they complete.
-  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...deletes, ...domainRemovals];
+  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...deletes, ...domainRemovals];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -1035,6 +1077,18 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         }
         return executeDatabaseCredential(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action);
       }
+      if (operation === ENGINE_WORKER_WAKE_GRANT_OPERATION) {
+        if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
+          return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
+        }
+        const granted = await grantWorkerWakeRead(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action);
+        if (granted.success) {
+          const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+          const binding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
+          ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...binding, kind: 'opentofu', workerWakeGrant: (action.metadata as { iamUser: string }).iamUser } });
+        }
+        return granted;
+      }
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };
     },
     segmentHandler: async (segment, members) => {
@@ -1128,6 +1182,8 @@ async function recordServiceBindings(
       services[name] = { workerPoolName: resource };
       continue;
     }
+    // A change to only a workload's companions (for example a worker's waker) keeps its binding.
+    if (!addresses.some((address) => address.startsWith('google_cloud_run_v2_service.'))) continue;
     const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource);
     services[name] = {
       serviceId: resource,
@@ -1179,6 +1235,15 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);
   if ('blocked' in source) return source;
+  // The engine runs every background worker as a worker pool; repair a binding recorded as a service.
+  const stale = boundWorkloads(context.environment).filter((workload) => workload.kind === 'services' && environmentSpec!.services[workload.name]?.workloadKind === 'worker');
+  if (stale.length) {
+    const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+    const services = { ...((current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {}) };
+    for (const workload of stale) services[workload.name] = { workerPoolName: workload.resource };
+    ctx.repos.environments.updatePlatformBindings(current.id, { services });
+    context.environment = ctx.repos.environments.findById(current.id) ?? context.environment;
+  }
   const workloads = new Map(boundWorkloads(context.environment).map((workload) => [workload.name, workload]));
   const selected = params.services?.length ? params.services : Object.keys(environmentSpec!.services);
   const missing = selected.filter((name) => !environmentSpec!.services[name] || !workloads.get(name));

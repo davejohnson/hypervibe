@@ -10,7 +10,7 @@ import { projectField } from './schemas.js';
 export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_migrate',
-    'Move an app from one environment (for example Railway staging) to a new OpenTofu-managed Google Cloud environment in one guided command. The source is only read and keeps serving. Hypervibe proposes the target from the source, connects Google Cloud, copies runtime secrets into Secret Manager, builds the infrastructure, copies the database and files inside Google Cloud, verifies row counts and file totals, then releases the app. It stops for: needs_billing_choice, needs_access, needs_confirmation (as hv_launch), needs_secret_import (show the setting names, then call again with importSecrets=true), and needs_copy_approval (show what will be copied and that target data is replaced, then call again with copyData=true). Call it again after pending. A re-run after a verified copy releases without copying again unless refreshData=true. Pausing the source and moving its existing hostname is a separate step.',
+    'Move an app from one environment (for example a staging environment on another hosting provider) to a new OpenTofu-managed Google Cloud environment in one guided command. The source is only read and keeps serving. Hypervibe proposes the target from the source, connects Google Cloud, copies runtime secrets into Secret Manager, builds the infrastructure, copies the database and files inside Google Cloud, verifies per-table row counts and content checksums plus file totals, then releases the app. It stops for: needs_billing_choice, needs_access, needs_confirmation (as hv_launch), needs_secret_import (show the setting names, then call again with importSecrets=true), and needs_copy_approval (show what will be copied and that target data is replaced, then call again with copyData=true). Call it again after pending. A re-run after a verified copy releases without copying again unless refreshData=true; verifyOnly=true compares source and copy without changing anything. cutover=true is the final move: it pauses the source behind its maintenance page, copies and verifies the data again, then forwards the source domain to the target.',
     {
       project: projectField,
       from: z.string().min(1).describe('Source environment name, for example "staging".'),
@@ -18,13 +18,16 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       region: z.string().min(1).optional().describe('Google Cloud region for a new target (default us-central1).'),
       domain: z.string().min(1).optional().describe('Hostname for the new target, for example gcp.example.com.'),
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional(),
-      approveAccess: z.array(z.enum(['storage', 'storage-s3', 'memorystore', 'queues', 'ci-release'])).optional(),
+      approveAccess: z.array(z.enum(['storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional(),
       confirmActions: z.array(z.string().min(1)).optional(),
       importSecrets: z.boolean().optional().describe('true only after the user approved copying the listed runtime settings.'),
       copyData: z.boolean().optional().describe('true only after the user approved copying the data, replacing anything in the target.'),
+      cutover: z.boolean().optional().describe('Final move after the copy was checked: pause the source behind its maintenance page, copy and verify the data again, then forward its domain to the target. Returns needs_cutover_approval first.'),
+      confirmCutover: z.boolean().optional().describe('true only after the user approved the steps from needs_cutover_approval, including the short maintenance window.'),
+      verifyOnly: z.boolean().optional().describe('Read-only: compare the source and the copy (row counts, per-table content checksums and file hashes) without copying or releasing anything. Returns verified or differs.'),
       refreshData: z.boolean().optional().describe('true only after the user approved copying the data again over an earlier verified copy. Without it, a re-run releases using the existing copy.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, from, to, region, domain, billingAccountName, approveAccess, confirmActions, importSecrets, copyData, refreshData }) => {
+    wrapCommandHandler(async ({ project: projectRef, from, to, region, domain, billingAccountName, approveAccess, confirmActions, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
@@ -32,19 +35,26 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         project, from, to,
         ...(region ? { region } : {}), ...(domain ? { domain } : {}),
         ...(billingAccountName ? { billingAccountName } : {}), ...(approveAccess ? { approveAccess } : {}),
-        ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}), ...(refreshData ? { refreshData } : {}),
+        ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}), ...(refreshData ? { refreshData } : {}), ...(verifyOnly ? { verifyOnly } : {}), ...(cutover ? { cutover } : {}), ...(confirmCutover ? { confirmCutover } : {}),
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
       });
       const ask = (message: string) => ({ agentInstruction: { action: 'ask_user' as const, message }, next: ['hv_migrate'] });
       switch (result.status) {
         case 'migrated':
           return commandSuccess(result, { hint: result.next, next: ['hv_health', 'hv_logs'] });
+        case 'needs_cutover_approval':
+          return commandSuccess(result, ask('Show each step and the maintenance window, and ask the user to approve the cutover, then call again with cutover=true and confirmCutover=true.'));
+        case 'cut_over':
+          return commandSuccess(result, { hint: result.message, next: ['hv_health', 'hv_logs'] });
+        case 'verified':
+        case 'differs':
+          return commandSuccess(result, { hint: result.message, next: ['hv_migrate'] });
         case 'needs_secret_import':
           return commandSuccess(result, ask('List the setting names (not values) and ask the user to approve copying them, then call again with importSecrets=true.'));
         case 'needs_copy_approval':
           return commandSuccess(result, ask('Explain what will be copied and that existing target data is replaced, then call again with copyData=true after approval.'));
         case 'needs_billing_choice':
-          return commandSuccess(result, ask('Ask which billing account should pay for the new environment, then call again with billingAccountName.'));
+          return commandSuccess(result, ask('Show plannedSteps (including any access the app needs) and ask which billing account should pay for the new environment; choosing one approves those steps. Then call again with billingAccountName.'));
         case 'needs_access':
           return commandSuccess(result, ask(`Explain this Google Cloud access, then call again with approveAccess including "${result.accessId}".`));
         case 'needs_confirmation':

@@ -44,8 +44,50 @@ export interface StorageTransferResult {
 
 const RESULT_MARKER = 'HV_TRANSFER_RESULT ';
 
-/** One row per table, "schema.table|rows", from a single psql query. */
-const MANIFEST_SQL = `SELECT table_schema || '.' || table_name || '|' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%' ORDER BY 1`;
+/**
+ * One row per table, "schema.table|rows:checksum", from a single psql query.
+ * The checksum sums a hash of every row's text, so it is independent of row
+ * order and needs constant memory on large tables. Run with PGTZ=UTC so
+ * timestamps render the same on both sides.
+ */
+const MANIFEST_SQL = `SELECT table_schema || '.' || table_name || '|' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) || '':'' || coalesce(sum((''x'' || substr(md5(t::text), 1, 15))::bit(60)::bigint::numeric), 0) AS c FROM %I.%I t', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%' ORDER BY 1`;
+
+const MANIFEST_FUNCTIONS = [
+  // A failed read must fail the task, never report an empty manifest.
+  'set -o pipefail',
+  `manifest() { PGTZ=UTC psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
+  'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
+];
+
+/**
+ * Verify-only database manifest (no copy): reports the manifest of
+ * $SOURCE_DATABASE_URL and/or $DATABASE_URL, whichever this task can reach.
+ */
+export function databaseManifestScript(): string {
+  return [
+    'set -eu',
+    ...MANIFEST_FUNCTIONS,
+    'emit() { M=$(manifest "$2" | json_manifest); printf \'"%s":{"tables":%s,"totalRows":"%s"}\' "$1" "${M%|*}" "${M##*|}"; }',
+    'OUT=""',
+    'if [ -n "${SOURCE_DATABASE_URL:-}" ]; then OUT=$(emit source "$SOURCE_DATABASE_URL"); fi',
+    'if [ -n "${DATABASE_URL:-}" ]; then T=$(emit target "$DATABASE_URL"); OUT="${OUT:+$OUT,}$T"; fi',
+    `printf '${RESULT_MARKER}{"ok":true,%s}\\n' "$OUT"`,
+  ].join('\n');
+}
+
+/** Verify-only file check (no copy): compares every object, by hash where both stores provide one. */
+export function storageCheckScript(): string {
+  return [
+    'set -eu',
+    'set +e',
+    'rclone check "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --one-way 2> /tmp/check.log',
+    'set -e',
+    'DIFFS=$(grep -cE "ERROR|not in" /tmp/check.log || true)',
+    'S=$(rclone size --json "src:$SOURCE_BUCKET")',
+    'T=$(rclone size --json "dst:$TARGET_BUCKET")',
+    `printf '${RESULT_MARKER}{"ok":true,"source":%s,"target":%s,"differences":%s}\\n' "$S" "$T" "\${DIFFS:-0}"`,
+  ].join('\n');
+}
 
 /**
  * V4 signed URL for one Cloud Storage object, signed locally with the
@@ -81,8 +123,7 @@ export function databaseExportScript(): string {
   return [
     'set -eu',
     'apk add --no-cache curl >/dev/null 2>&1 || true',
-    `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
-    'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
+    ...MANIFEST_FUNCTIONS,
     'VERSION=$(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")',
     'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
     'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
@@ -96,8 +137,7 @@ export function databaseRestoreScript(): string {
   return [
     'set -eu',
     'apk add --no-cache curl >/dev/null 2>&1 || true',
-    `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
-    'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
+    ...MANIFEST_FUNCTIONS,
     'curl -sf -o /tmp/source.dump "$DUMP_URL"',
     // Hand public to the app owner role (as the login itself); harmless when it already is.
     'OWNER=$(psql "$DATABASE_URL" -At -c "SELECT current_user")',
@@ -129,9 +169,8 @@ export function parseTransferResult(text: string): Record<string, unknown> | und
 export function databaseTransferScript(): string {
   return [
     'set -eu',
-    `manifest() { psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
+    ...MANIFEST_FUNCTIONS,
     'version() { psql "$1" -At -c "SHOW server_version_num"; }',
-    'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
     'SRC_VERSION=$(version "$SOURCE_DATABASE_URL")',
     'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
     // Clear only what the app's owner role created; the restore recreates it owned by that role.
@@ -165,7 +204,7 @@ export function storageTransferScript(): string {
     'set -eu',
     'rclone sync "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --transfers 16 --checkers 16 --s3-no-check-bucket --stats-one-line --stats 30s',
     'set +e',
-    'rclone check "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --one-way --size-only 2> /tmp/check.log',
+    'rclone check "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --one-way 2> /tmp/check.log',
     'set -e',
     'DIFFS=$(grep -cE "ERROR|not in" /tmp/check.log || true)',
     'S=$(rclone size --json "src:$SOURCE_BUCKET")',
@@ -296,8 +335,12 @@ async function readResultLine(context: TransferContext, jobName: string, executi
 export function manifestsMatch(source: DatabaseManifest | undefined, target: DatabaseManifest | undefined): { match: boolean; differences: string[] } {
   if (!source || !target) return { match: false, differences: ['missing manifest'] };
   const differences: string[] = [];
+  if (!Object.keys(source.tables).length) differences.push('the source reported no tables');
   for (const [table, rows] of Object.entries(source.tables)) {
     if (target.tables[table] !== rows) differences.push(`${table}: ${rows} → ${target.tables[table] ?? 'missing'}`);
+  }
+  for (const table of Object.keys(target.tables)) {
+    if (!(table in source.tables)) differences.push(`${table}: only in the target`);
   }
   return { match: differences.length === 0, differences };
 }

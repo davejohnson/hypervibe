@@ -79,6 +79,16 @@ export const serviceSpecSchema = z.object({
   /** Memory per instance, for example "512Mi" or "1Gi". */
   memory: z.string().regex(/^[1-9]\d*(Mi|Gi)$/, 'Use a memory size such as "512Mi" or "1Gi".').optional(),
   /**
+   * Run a background worker only while it has work: it scales to zero when
+   * idle and starts within about a minute of new work. pendingWorkQuery is one
+   * read-only SELECT against the app database that returns a single count of
+   * queued plus in-progress work.
+   */
+  onDemand: z.object({
+    pendingWorkQuery: z.string().min(1).max(2000)
+      .regex(/^\s*(select|with)\b[^;]*;?\s*$/i, 'Use one SELECT statement that returns a single count, for example SELECT count(*) FROM jobs WHERE status IN (\'queued\', \'running\').'),
+  }).strict().optional(),
+  /**
    * Per-service compatibility aliases for Hypervibe-managed database URLs.
    * Only names and canonical sources are persisted; resolved values remain
    * inside the encrypted plan/provider boundary.
@@ -93,6 +103,13 @@ export const serviceSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'cron services require cronSchedule',
       path: ['cronSchedule'],
+    });
+  }
+  if (service.onDemand && service.workloadKind !== 'worker') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'onDemand applies only to background workers (workloadKind "worker")',
+      path: ['onDemand'],
     });
   }
   if (service.workloadKind === 'cron' && !service.startCommand) {

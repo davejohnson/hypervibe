@@ -13,7 +13,7 @@ import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.exe
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
-import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3 } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
   isEngineManaged,
@@ -33,8 +33,8 @@ import {
  * certificate checks) runs without further input.
  */
 export type LaunchResult =
-  | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[] }
-  | { status: 'needs_access'; accessId: 'storage' | 'storage-s3' | 'memorystore' | 'queues' | 'ci-release'; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[]; includedAccess: string[] }
+  | { status: 'needs_access'; accessId: 'storage' | 'storage-s3' | 'memorystore' | 'queues' | 'workers' | 'ci-release'; access: string; grants: Record<string, unknown> }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
@@ -58,6 +58,11 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
     const memory = service.memory ?? '512Mi';
     const memoryGiB = memory.endsWith('Gi') ? parseInt(memory, 10) : parseInt(memory, 10) / 1024;
     const monthly = Math.round((cpu * 0.000018 + memoryGiB * 0.000002) * 2_628_000);
+    if (service.onDemand) {
+      // Workflows: ~43,200 checks a month at ~4 steps, $0.01 per 1,000 steps after 5,000 free.
+      lines.push({ item: `Worker ${name} (on demand, ${cpu} vCPU, ${memory}; checks for work every minute)`, estimate: `about $2 per month for the checks, plus about $${(monthly / 730).toFixed(2)} per hour while working` });
+      continue;
+    }
     lines.push({ item: `Worker ${name} (always on, ${cpu} vCPU, ${memory})`, estimate: `about $${monthly} per month` });
   }
   if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
@@ -85,6 +90,17 @@ export function approvalToken(action: PlanAction): string {
 
 function summarize(action: PlanAction): { id: string; change: string } {
   return { id: action.id, change: action.reason };
+}
+
+/** Add-on access the environment's resources need, in the order hv_launch grants it. */
+export function neededResourceAccess(environment: EnvironmentSpec): Array<{ id: string; label: string }> {
+  const needed: Array<{ id: string; label: string }> = [];
+  if (Object.keys(environment.storage ?? {}).length) needed.push({ id: 'storage', label: 'create and manage the app\'s storage buckets' });
+  if (Object.values(environment.storage ?? {}).some((storage) => storage.access === 's3')) needed.push({ id: 'storage-s3', label: 'create S3-style access keys for the app' });
+  if (environment.cache) needed.push({ id: 'memorystore', label: 'create a private Redis cache' });
+  if (Object.values(environment.services).some((service) => service.onDemand)) needed.push({ id: 'workers', label: 'start and stop background workers when they have work' });
+  if (Object.keys(environment.queues ?? {}).length) needed.push({ id: 'queues', label: 'create Pub/Sub queues the app can use' });
+  return needed;
 }
 
 export async function launchEnvironment(ctx: CommandContext, params: Parameters<typeof runLaunch>[1]): Promise<LaunchResult> {
@@ -118,6 +134,11 @@ async function runLaunch(ctx: CommandContext, params: {
     return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Set hosting.engine="opentofu" with hv_spec first.' };
   }
 
+  // Extra Google Cloud access the app's resources need. A new project lists it with the billing
+  // choice, so choosing the billing account approves it once instead of one prompt per resource.
+  const resourceAccess = neededResourceAccess(environmentSpec);
+  const approvedAccess = new Set<string>([...(params.approveAccess ?? []), ...(params.billingAccountName ? resourceAccess.map((entry) => entry.id) : [])]);
+
   // 1. Connect GCP, asking only for the billing account.
   // Only a connection scoped to this repository counts; global ones point at other projects.
   if (!await engineGcpAdapter(params.project)) {
@@ -130,7 +151,12 @@ async function runLaunch(ctx: CommandContext, params: {
       if (accounts.length === 0) {
         return { status: 'blocked', message: 'Your Google login cannot see any open billing account. Open https://console.cloud.google.com/billing to create one or get access, then run hv_launch again.' };
       }
-      return { status: 'needs_billing_choice', gcpProjectId: target, openBillingAccounts: accounts, plannedSteps: (preview as { plannedSteps?: string[] }).plannedSteps ?? [] };
+      return {
+        status: 'needs_billing_choice', gcpProjectId: target, openBillingAccounts: accounts,
+        plannedSteps: [...((preview as { plannedSteps?: string[] }).plannedSteps ?? []),
+          ...(resourceAccess.length ? [`Grant the access the app's resources need: ${resourceAccess.map((entry) => entry.label).join('; ')}`] : [])],
+        includedAccess: resourceAccess.map((entry) => entry.id),
+      };
     }
     const confirmed = await runGcpBootstrap({ project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: true });
     if (!confirmed.success) return { status: 'blocked', message: String(confirmed.error ?? 'GCP setup failed.'), details: confirmed };
@@ -149,7 +175,7 @@ async function runLaunch(ctx: CommandContext, params: {
   if (Object.keys(environmentSpec.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
     const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), gcsAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The storage access preview failed.'), details: preview };
-    if (!params.approveAccess?.includes('storage')) {
+    if (!approvedAccess.has('storage')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
       return {
         status: 'needs_access',
@@ -165,7 +191,7 @@ async function runLaunch(ctx: CommandContext, params: {
   if (Object.values(environmentSpec.storage ?? {}).some((storage) => storage.access === 's3')
     && !isCloudPreparedForStorageS3(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
     const gcpProjectId = await scopedGcpProjectId(params.project);
-    if (!params.approveAccess?.includes('storage-s3')) {
+    if (!approvedAccess.has('storage-s3')) {
       return {
         status: 'needs_access', accessId: 'storage-s3',
         access: 'Let Hypervibe create S3-style access keys for your app, so code written for S3 or Railway buckets works with Google Cloud Storage unchanged.',
@@ -178,7 +204,7 @@ async function runLaunch(ctx: CommandContext, params: {
   if (environmentSpec.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
     const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), memorystoreAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The Redis access preview failed.'), details: preview };
-    if (!params.approveAccess?.includes('memorystore')) {
+    if (!approvedAccess.has('memorystore')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
       return {
         status: 'needs_access', accessId: 'memorystore',
@@ -190,10 +216,25 @@ async function runLaunch(ctx: CommandContext, params: {
     if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting Redis access failed.'), details: granted };
   }
 
+  if (Object.values(environmentSpec.services).some((service) => service.onDemand) && !isCloudPreparedForWorkerWake(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
+    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), workerAccess: 'lifecycle' });
+    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The on-demand worker access preview failed.'), details: preview };
+    if (!approvedAccess.has('workers')) {
+      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
+      return {
+        status: 'needs_access', accessId: 'workers',
+        access: 'Let Hypervibe run background workers only while they have work: a small scheduled Google Workflow checks for pending work every minute and starts or stops the worker. Your app identity gets read-only access to the database for that check.',
+        grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles, appRuntimeOnItself: plan.runtimeSelfGrantRoles, apis: plan.enableApis },
+      };
+    }
+    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), workerAccess: 'lifecycle', adminAuth: 'default', confirm: true });
+    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting on-demand worker access failed.'), details: granted };
+  }
+
   if (Object.keys(environmentSpec.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(params.project.id) ?? params.project, 'cloudrun')) {
     const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), queueAccess: 'lifecycle' });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The queue access preview failed.'), details: preview };
-    if (!params.approveAccess?.includes('queues')) {
+    if (!approvedAccess.has('queues')) {
       const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
       return {
         status: 'needs_access', accessId: 'queues',
@@ -280,6 +321,20 @@ async function scopedGcpProjectId(project: Project): Promise<string | undefined>
   return (await engineGcpAdapter(project))?.engineConnection().projectId;
 }
 
+/** What the release workflow updates: every bound service, scheduled job and worker pool. */
+export function ciReleaseTargets(environmentSpec: EnvironmentSpec, bindings: Record<string, { serviceId?: string; jobName?: string; workerPoolName?: string }> | undefined,
+  target: { region: string; gcpProjectId: string; environmentName: string }) {
+  return Object.entries(environmentSpec.services).flatMap(([name, service]) => {
+    const bound = bindings?.[name];
+    const resource = bound?.serviceId ?? bound?.jobName ?? bound?.workerPoolName;
+    const kind = bound?.serviceId ? 'services' as const : bound?.jobName ? 'jobs' as const : 'workerPools' as const;
+    return resource ? [{
+      name, resource, kind, ...(kind === 'services' && service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/' } : {}),
+      image: `${target.region}-docker.pkg.dev/${target.gcpProjectId}/hypervibe/${target.environmentName}-${name}`.toLowerCase(),
+    }] : [];
+  });
+}
+
 async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec): Promise<{ path: string; changed: boolean; branch: string } | LaunchResult> {
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
   if (!repository) return { status: 'blocked', message: 'CI releases need this project on GitHub (set gitRemoteUrl with hv_spec).' };
@@ -309,23 +364,17 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
     }
     ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...(binding.engine ?? {}), kind: 'opentofu', ci } });
   }
-  const services = Object.entries(environmentSpec.services).flatMap(([name, service]) => {
-    const bound = (binding.services as Record<string, { serviceId?: string; jobName?: string }> | undefined)?.[name];
-    const resource = bound?.serviceId ?? bound?.jobName;
-    const kind = bound?.jobName && !bound.serviceId ? 'jobs' as const : 'services' as const;
-    return resource ? [{
-      name, resource, kind, ...(kind === 'services' && service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/' } : {}),
-      image: `${context.region}-docker.pkg.dev/${context.gcpProjectId}/hypervibe/${params.environmentName}-${name}`.toLowerCase(),
-    }] : [];
-  });
   const runtime = params.spec.runtime as ProjectRuntime | undefined;
-  let generatedDockerfile: string | undefined;
-  try { generatedDockerfile = runtime ? generatedContainerDockerfile(runtime, undefined) : undefined; } catch { generatedDockerfile = undefined; }
+  // Each service gets its own generated Dockerfile, since web and workers start differently.
+  const services = ciReleaseTargets(environmentSpec, binding.services, { region: context.region, gcpProjectId: context.gcpProjectId, environmentName: params.environmentName })
+    .map((target) => {
+      if (!runtime) return target;
+      try { return { ...target, generatedDockerfile: generatedContainerDockerfile(runtime, environmentSpec.services[target.name]?.startCommand) }; } catch { return target; }
+    });
   const branch = environmentSpec.deploy?.branch ?? 'main';
   const content = renderReleaseWorkflow({
     environmentName: params.environmentName, branch, gcpProjectId: context.gcpProjectId, region: context.region,
     provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,
-    ...(generatedDockerfile ? { generatedDockerfile } : {}),
   });
   return { ...writeReleaseWorkflow(params.sourceDirectory, params.environmentName, content), branch };
 }

@@ -1,10 +1,10 @@
 import { execFileSync } from 'child_process';
 import { describe, expect, it } from 'vitest';
-import { databaseTransferScript, manifestsMatch, storageTransferScript } from '../migration-transfer-gcp.js';
+import { databaseManifestScript, databaseTransferScript, manifestsMatch, storageCheckScript, storageTransferScript } from '../migration-transfer-gcp.js';
 
 describe('transfer scripts', () => {
   it('are valid POSIX shell', () => {
-    for (const script of [databaseTransferScript(), storageTransferScript()]) {
+    for (const script of [databaseTransferScript(), storageTransferScript(), databaseManifestScript(), storageCheckScript()]) {
       expect(() => execFileSync('sh', ['-n'], { input: script })).not.toThrow();
     }
   });
@@ -13,6 +13,9 @@ describe('transfer scripts', () => {
     const source = { tables: { 'public.a': '3', 'public.b': '0' }, totalRows: '3', version: '160004' };
     expect(manifestsMatch(source, { ...source })).toEqual({ match: true, differences: [] });
     expect(manifestsMatch(source, { ...source, tables: { 'public.a': '2' } }).differences).toEqual(['public.a: 3 → 2', 'public.b: 0 → missing']);
+    // A source that reported nothing never matches, and extra target tables count.
+    expect(manifestsMatch({ ...source, tables: {} }, source).match).toBe(false);
+    expect(manifestsMatch(source, { ...source, tables: { ...source.tables, 'public.c': '1' } }).differences).toEqual(['public.c: only in the target']);
   });
 });
 
@@ -44,7 +47,7 @@ describe.skipIf(!bin || !admin)('database copy script (live PostgreSQL)', () => 
       const line = output.split('\n').find((entry) => entry.startsWith('HV_TRANSFER_RESULT '))!;
       const result = JSON.parse(line.slice('HV_TRANSFER_RESULT '.length));
       expect(result.ok).toBe(true);
-      expect(result.source.tables).toEqual({ 'billing.Customers': '2', 'public.invoices': '250' });
+      expect(result.source.tables).toEqual({ 'billing.Customers': expect.stringMatching(/^2:\d+$/), 'public.invoices': expect.stringMatching(/^250:\d+$/) });
       expect(manifestsMatch(result.source, result.target)).toEqual({ match: true, differences: [] });
       expect(psql(url(targetDb), "SELECT count(*) FROM information_schema.tables WHERE table_name = 'stale'").trim()).toBe('0');
     } finally {
@@ -81,10 +84,10 @@ describe.skipIf(!bin || !admin)('private-network export and restore scripts (liv
       psql(url(`hv_esrc_${suffix}`), 'CREATE TABLE "Invoices" (id serial PRIMARY KEY, total numeric); INSERT INTO "Invoices" (total) SELECT g FROM generate_series(1, 42) g;');
       psql(url(`hv_edst_${suffix}`), 'CREATE TABLE stale (id int);');
       const exported = parseTransferResult(await run(databaseExportScript(), { SOURCE_DATABASE_URL: url(`hv_esrc_${suffix}`), UPLOAD_URL: `${base}/upload` })) as any;
-      expect(exported).toMatchObject({ ok: true, source: { tables: { 'public.Invoices': '42' }, totalRows: '42' } });
+      expect(exported).toMatchObject({ ok: true, source: { tables: { 'public.Invoices': expect.stringMatching(/^42:\d+$/) }, totalRows: '42' } });
       expect(stored?.length).toBeGreaterThan(0);
       const restored = parseTransferResult(await run(databaseRestoreScript(), { DATABASE_URL: url(`hv_edst_${suffix}`), DUMP_URL: `${base}/dump` })) as any;
-      expect(restored).toMatchObject({ ok: true, target: { tables: { 'public.Invoices': '42' } } });
+      expect(restored).toMatchObject({ ok: true, target: { tables: { 'public.Invoices': expect.stringMatching(/^42:\d+$/) } } });
       expect(manifestsMatch(exported.source, restored.target)).toEqual({ match: true, differences: [] });
       expect(psql(url(`hv_edst_${suffix}`), "SELECT count(*) FROM information_schema.tables WHERE table_name = 'stale'").trim()).toBe('0');
     } finally {

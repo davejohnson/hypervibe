@@ -17,6 +17,26 @@ export interface DomainTargetObservation {
 
 type RoutedEnvironmentSpec = EnvironmentSpec & { domainTarget?: { environment: string; service: string } };
 
+/** A web service observed in an OpenTofu-managed target, read from its cloud. */
+export interface EngineWebServiceObservation {
+  provider: string;
+  providerProjectId: string;
+  providerEnvironmentId: string;
+  serviceId: string;
+  resourceUid: string;
+  url: string;
+}
+
+type EngineWebServiceResolver = (params: { project: Project; environment: Environment; environmentName: string; service: string }) =>
+  Promise<EngineWebServiceObservation | { unknown: string }>;
+
+let engineWebServiceResolver: EngineWebServiceResolver | undefined;
+
+/** The engine registers its read-only lookup; the domain layer does not depend on it. */
+export function registerEngineWebServiceResolver(resolver: EngineWebServiceResolver): void {
+  engineWebServiceResolver = resolver;
+}
+
 /** Read-only target admission. No custom-domain, DNS, deployment or data writes. */
 export async function observeDomainTarget(params: {
   project: Project;
@@ -40,6 +60,17 @@ export async function observeDomainTarget(params: {
     if (!serviceSpec || serviceSpec.workloadKind !== 'web' || serviceSpec.public === false
       || targetSpec.domainTarget || targetSpec.maintenance?.enabled) {
       return unknown('The target must be an available public web service without another traffic handoff or active maintenance.');
+    }
+    if (targetSpec.hosting.engine === 'opentofu') {
+      if (!engineWebServiceResolver) return unknown('The OpenTofu engine is not available to verify the target.');
+      const observed = await engineWebServiceResolver({ project: params.project, environment: target, environmentName: desired.environment, service: desired.service });
+      if ('unknown' in observed) return unknown(observed.unknown);
+      return await admitTarget({ hostname, path: serviceSpec.healthCheckPath ?? '/', url: observed.url, fingerprint: (origin) => bindingIdentityFingerprint({
+        projectId: params.project.id, environmentId: target.id, environmentName: target.name,
+        provider: observed.provider, providerProjectId: observed.providerProjectId,
+        providerEnvironmentId: observed.providerEnvironmentId, serviceName: desired.service, serviceId: observed.serviceId,
+        resourceUid: observed.resourceUid, origin,
+      }) }, unknown);
     }
     const bindings = parseHostingBindings(target);
     const sourceBindings = parseHostingBindings(params.environment);
@@ -107,4 +138,20 @@ export async function observeDomainTarget(params: {
   } catch {
     return unknown('The target identity or HTTPS readiness could not be verified; the maintenance page remains in place.');
   }
+}
+
+/** Shared HTTPS admission for an engine target: same-origin health path, then a successful response. */
+async function admitTarget(params: { hostname: string; path: string; url: string; fingerprint: (origin: string) => string },
+  unknown: (reason: string) => DomainTargetObservation): Promise<DomainTargetObservation> {
+  const origin = normalizedTrafficOrigin(params.hostname, params.url);
+  const health = new URL(params.path, `${origin}/`);
+  if (!params.path.startsWith('/') || health.origin !== origin || health.username || health.password || health.hash) {
+    return unknown('The target health check must stay on its verified HTTPS origin.');
+  }
+  const response = await fetch(health.toString(), { redirect: 'manual', signal: AbortSignal.timeout(10_000), headers: { 'Cache-Control': 'no-cache' } });
+  await response.body?.cancel();
+  if (response.status < 200 || response.status >= 400) {
+    return unknown('The target HTTPS health check did not succeed; the maintenance page remains in place.');
+  }
+  return { state: 'ready', target: { origin, targetFingerprint: params.fingerprint(origin) } };
 }

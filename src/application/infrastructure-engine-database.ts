@@ -217,3 +217,47 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     return { success: false, message: `The database refused a credential step (${reason}). The app keeps using its current login.`, error: reason };
   }
 }
+
+export interface WorkerWakeGrantMetadata {
+  operation: string;
+  gcpProjectId: string;
+  instanceName: string;
+  databaseName: string;
+  /** Secret holding the app's current connection URL; read here, never output. */
+  secretId: string;
+  /** Cloud SQL IAM database user of the runtime identity. */
+  iamUser: string;
+}
+
+/**
+ * Lets the on-demand worker's waker read pending work: the runtime identity's
+ * IAM database user gets SELECT on the app's tables, now and for tables the
+ * owner role creates later. Granted as the owner role through the app's own
+ * login, so no broader database role is involved.
+ */
+export async function grantWorkerWakeRead(token: string, serviceAccount: Record<string, unknown>, action: PlanAction): Promise<ActionResult> {
+  const meta = action.metadata as unknown as WorkerWakeGrantMetadata;
+  const instanceResponse = await sqlAdmin(token, meta.gcpProjectId, `instances/${meta.instanceName}`);
+  if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Cloud SQL returned HTTP ${instanceResponse.status} for ${meta.instanceName}.` };
+  const instance = await instanceResponse.json() as { state?: string; connectionName?: string };
+  if (instance.state !== 'RUNNABLE' || !instance.connectionName) return { success: false, status: 'pending', message: `Database instance ${meta.instanceName} is not ready yet.` };
+  const secretResponse = await fetch(`https://secretmanager.googleapis.com/v1/projects/${meta.gcpProjectId}/secrets/${meta.secretId}/versions/latest:access`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!secretResponse.ok) return { success: false, status: 'blocked', message: `Reading the database connection (${meta.secretId}) returned HTTP ${secretResponse.status}.` };
+  const url = Buffer.from((await secretResponse.json() as { payload?: { data?: string } }).payload?.data ?? '', 'base64').toString('utf8');
+  const parsed = /^postgresql:\/\/([a-z_]+):([^@]+)@/.exec(url);
+  if (!parsed || !isLogin(parsed[1])) return { success: false, status: 'blocked', message: `${meta.secretId} does not hold a Hypervibe database login.` };
+  try {
+    await withSession(serviceAccount, instance.connectionName, parsed[1], decodeURIComponent(parsed[2]!), meta.databaseName, async (client) => {
+      const user = client.escapeIdentifier(meta.iamUser);
+      await client.query(`SET ROLE ${DATABASE_OWNER_ROLE}`);
+      await client.query(`GRANT USAGE ON SCHEMA public TO ${user}`);
+      await client.query(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${user}`);
+      await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ${user}`);
+    });
+  } catch (error) {
+    return { success: false, message: `Granting the worker waker read access failed: ${error instanceof Error ? error.message.replace(/postgresql:\/\/\S+/g, '<redacted>') : 'unknown error'}.` };
+  }
+  return { success: true, message: `The worker waker can read pending work (read-only access for ${meta.iamUser}).` };
+}

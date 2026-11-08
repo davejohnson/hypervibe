@@ -146,7 +146,8 @@ describe('planMaintenance', () => {
     });
     expect(result.actions[0]).toMatchObject({
       verified: false,
-      metadata: { blockedReason: 'maintenance_edge_unknown' },
+      // The edge's own reason is shown, so the user sees what to fix.
+      metadata: { blockedReason: 'permission denied' },
     });
   });
 

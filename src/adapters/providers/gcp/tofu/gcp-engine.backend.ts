@@ -80,6 +80,11 @@ export interface GcpCloudRunServiceInput {
   port?: number;
   cpu?: string;
   memory?: string;
+  /**
+   * worker: run only while this read-only count of pending work is above
+   * zero. A scheduled workflow scales the worker pool between 0 and 1.
+   */
+  pendingWorkQuery?: string;
   minInstances?: number;
   maxInstances?: number;
   command?: string[];
@@ -194,7 +199,45 @@ export interface GcpCloudSqlInput {
   wireServices: boolean;
 }
 
-export const DATABASE_ENGINE_ADDRESSES = ['google_sql_database_instance.db', 'google_sql_database.app'] as const;
+export const DATABASE_ENGINE_ADDRESSES = ['google_sql_database_instance.db', 'google_sql_database.app', 'google_sql_user.worker_waker'] as const;
+
+/** The Cloud SQL IAM database user for a service account email. */
+export function iamDatabaseUser(serviceAccountEmail: string): string {
+  return serviceAccountEmail.replace(/\.gserviceaccount\.com$/, '');
+}
+
+function wakerAddresses(key: string): string[] {
+  return [`google_workflows_workflow.${key}_waker`, `google_cloud_scheduler_job.${key}_waker`, `google_cloud_run_v2_worker_pool_iam_member.${key}_waker`];
+}
+
+/**
+ * The on-demand worker's waker: every minute it counts pending work through
+ * the Cloud SQL Data API, as the runtime identity's read-only IAM database
+ * user, and sets the worker pool to one instance while work exists and to
+ * zero otherwise. If the count cannot be read it keeps one instance running,
+ * so work is never stranded.
+ */
+function wakerWorkflow(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput, key: string): string {
+  const pool = `https://run.googleapis.com/v2/projects/${input.projectId}/locations/${input.region}/workerPools/${service.resourceName}`;
+  return JSON.stringify({ main: { steps: [
+    { count: { try: { steps: [
+      { query: { call: 'http.post', args: {
+        url: `https://sqladmin.googleapis.com/v1/projects/${input.projectId}/instances/${input.database!.instanceName}/executeSql`,
+        auth: { type: 'OAuth2' },
+        body: { database: input.database!.databaseName, sqlStatement: service.pendingWorkQuery, autoIamAuthn: true, rowLimit: '1', application: `hv-waker-${key}`.slice(0, 32) },
+      }, result: 'sql' } },
+      { read: { assign: [{ want: '${if(int(sql.body.results[0].rows[0].values[0].value) > 0, 1, 0)}' }] } },
+    ] }, except: { as: 'error', steps: [{ fallback: { assign: [{ want: 1 }] } }] } } },
+    { current: { call: 'http.get', args: { url: pool, auth: { type: 'OAuth2' } }, result: 'observed' } },
+    { compare: { switch: [{ condition: '${default(map.get(observed.body.scaling, "manualInstanceCount"), 0) == want}', return: '${want}' }] } },
+    { scale: { call: 'http.patch', args: {
+      url: `${pool}?updateMask=scaling.manualInstanceCount`,
+      auth: { type: 'OAuth2' },
+      body: { scaling: { scalingMode: 'MANUAL', manualInstanceCount: '${want}' } },
+    } } },
+    { done: { return: '${want}' } },
+  ] } }).replace(/\$\{/g, () => '$${'); // Workflows expressions, escaped from OpenTofu interpolation.
+}
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_ENV = new Set(['PORT', 'K_SERVICE', 'K_REVISION', 'K_CONFIGURATION']);
@@ -321,14 +364,17 @@ function workerPoolResource(input: GcpCloudRunEngineInput, service: GcpCloudRunS
     location: input.region,
     deletion_protection: false,
     labels: base.labels,
-    scaling: [{ scaling_mode: 'MANUAL', manual_instance_count: service.minInstances ?? 1 }],
+    // An on-demand pool starts at zero; its waker owns the instance count afterwards.
+    scaling: [{ scaling_mode: 'MANUAL', manual_instance_count: service.pendingWorkQuery ? 0 : service.minInstances ?? 1 }],
     template: [{
       service_account: template.service_account,
       containers: [container],
       ...(template.volumes ? { volumes: template.volumes } : {}),
       ...(template.vpc_access ? { vpc_access: template.vpc_access } : {}),
     }],
-    lifecycle: base.lifecycle,
+    lifecycle: service.pendingWorkQuery
+      ? [{ ignore_changes: [...((base.lifecycle as Array<{ ignore_changes: string[] }>)[0]!.ignore_changes), 'scaling[0].manual_instance_count'] }]
+      : base.lifecycle,
   };
 }
 
@@ -415,6 +461,8 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   const schedules: Record<string, unknown> = {};
   const jobIam: Record<string, unknown> = {};
   const workerPools: Record<string, unknown> = {};
+  const workflows: Record<string, unknown> = {};
+  const poolIam: Record<string, unknown> = {};
   for (const service of input.services) {
     const key = engineKey(service.logicalName);
     if (seen.has(key)) throw new Error(`Duplicate engine address for service ${service.logicalName}.`);
@@ -430,6 +478,42 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     if (service.workload === 'worker') {
       workerPools[key] = workerPoolResource(input, service);
       resources[`google_cloud_run_v2_worker_pool.${key}`] = mapping;
+      for (const address of wakerAddresses(key)) resources[address] = mapping;
+      if (service.pendingWorkQuery) {
+        if (!input.database) throw new Error(`Worker ${service.logicalName} counts pending work in the database, so it needs one.`);
+        workflows[`${key}_waker`] = {
+          name: `${service.resourceName}-waker`.slice(0, 64),
+          project: input.projectId,
+          region: input.region,
+          description: `Scales worker ${service.logicalName} between 0 and 1 instance from its pending work.`,
+          service_account: service.runtimeServiceAccountEmail,
+          deletion_protection: false,
+          labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
+          source_contents: wakerWorkflow(input, service, key),
+        };
+        schedules[`${key}_waker`] = {
+          name: `${service.resourceName}-waker`.slice(0, 500),
+          project: input.projectId,
+          region: input.region,
+          schedule: '* * * * *',
+          time_zone: 'Etc/UTC',
+          attempt_deadline: '60s',
+          http_target: [{
+            http_method: 'POST',
+            uri: `https://workflowexecutions.googleapis.com/v1/\${google_workflows_workflow.${key}_waker.id}/executions`,
+            body: Buffer.from('{}').toString('base64'),
+            headers: { 'Content-Type': 'application/json' },
+            oauth_token: [{ service_account_email: service.runtimeServiceAccountEmail, scope: 'https://www.googleapis.com/auth/cloud-platform' }],
+          }],
+        };
+        poolIam[`${key}_waker`] = {
+          project: input.projectId,
+          location: input.region,
+          name: `\${google_cloud_run_v2_worker_pool.${key}.name}`,
+          role: 'roles/run.developer',
+          member: `serviceAccount:${service.runtimeServiceAccountEmail}`,
+        };
+      }
       continue;
     }
     services[key] = serviceResource(input, service);
@@ -447,6 +531,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   }
   const sql: Record<string, Record<string, unknown>> = {};
   const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true };
+  const onDemand = input.services.some((service) => service.workload === 'worker' && service.pendingWorkQuery);
   if (input.database) {
     if (!/^[a-z][a-z0-9-]{0,96}[a-z0-9]$/.test(input.database.instanceName)) throw new Error('Cloud SQL instance name is invalid.');
     if (!/^[a-z][a-z0-9_]{0,62}$/.test(input.database.databaseName)) throw new Error('Database name is invalid.');
@@ -463,6 +548,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
         tier: input.database.tier ?? 'db-f1-micro',
         availability_type: 'ZONAL',
         ip_configuration: [{ ipv4_enabled: true }],
+        // On-demand workers count pending work through the Data API as an IAM database user.
+        ...(onDemand ? {
+          data_api_access: 'ALLOW_DATA_API',
+          database_flags: [{ name: 'cloudsql.iam_authentication', value: 'on' }],
+        } : {}),
         backup_configuration: [{ enabled: true, point_in_time_recovery_enabled: true }],
         user_labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
       }],
@@ -474,6 +564,15 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       // Deleting the instance removes its databases; dropping one first fails while connections exist.
       deletion_policy: 'ABANDON',
     } };
+    if (onDemand) {
+      if (!input.runtimeServiceAccountEmail) throw new Error('On-demand workers require the runtime identity.');
+      sql.google_sql_user = { worker_waker: {
+        name: iamDatabaseUser(input.runtimeServiceAccountEmail),
+        project: input.projectId,
+        instance: '${google_sql_database_instance.db.name}',
+        type: 'CLOUD_IAM_SERVICE_ACCOUNT',
+      } };
+    }
   }
   if (input.database || input.retiredDatabase) {
     for (const address of DATABASE_ENGINE_ADDRESSES) resources[address] = databaseMapping;
@@ -581,7 +680,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     resources[`google_cloud_run_v2_service.${key}`] = mapping;
     resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
     resources[`google_cloud_run_v2_worker_pool.${key}`] = mapping;
-    for (const address of jobAddresses(key)) resources[address] = mapping;
+    for (const address of [...jobAddresses(key), ...wakerAddresses(key)]) resources[address] = mapping;
   }
   // A worker that used to be a service moves to a worker pool; the old service is retired.
   for (const service of input.services) {
@@ -605,14 +704,19 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       ...(Object.keys(imports).length ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id })) } } : {}),
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
       // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
-      'jobs.tf.json': Object.keys(jobs).length ? {
+      'jobs.tf.json': Object.keys(jobs).length || Object.keys(schedules).length ? {
         resource: {
-          google_cloud_run_v2_job: jobs,
+          ...(Object.keys(jobs).length ? { google_cloud_run_v2_job: jobs } : {}),
           ...(Object.keys(schedules).length ? { google_cloud_scheduler_job: schedules } : {}),
           ...(Object.keys(jobIam).length ? { google_cloud_run_v2_job_iam_member: jobIam } : {}),
         },
       } : {},
-      'workerpools.tf.json': Object.keys(workerPools).length ? { resource: { google_cloud_run_v2_worker_pool: workerPools } } : {},
+      'workerpools.tf.json': Object.keys(workerPools).length ? {
+        resource: {
+          google_cloud_run_v2_worker_pool: workerPools,
+          ...(Object.keys(workflows).length ? { google_workflows_workflow: workflows, google_cloud_run_v2_worker_pool_iam_member: poolIam } : {}),
+        },
+      } : {},
       'cloudrun.tf.json': Object.keys(services).length ? {
         resource: {
           google_cloud_run_v2_service: services,

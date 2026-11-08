@@ -20,6 +20,10 @@ import {
   MEMORYSTORE_PREPARE_ADDONS,
   withCloudPreparationRecord,
   QUEUE_PREPARE_ADDON,
+  WORKER_WAKE_PREPARE_ADDON,
+  CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES,
+  CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES,
+  type WorkerPrepareAccess,
   type GcsPrepareAccess,
   type MemorystorePrepareAccess,
   type QueuePrepareAccess,
@@ -85,6 +89,8 @@ interface CloudPreparePlan {
   runtimeGrantScope?: 'project';
   runtimeRevokeRoles: string[];
   runtimeServiceAccountGrantRoles: string[];
+  /** Roles granted to the runtime identity on itself only. */
+  runtimeSelfGrantRoles?: string[];
   /** Deployment identity may act as itself so Cloud Build never needs the Editor default account. */
   buildIdentityGrantRoles?: string[];
   /** Private bucket that holds local-repository build archives. */
@@ -92,6 +98,7 @@ interface CloudPreparePlan {
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
+  workerAccess?: WorkerPrepareAccess;
 }
 
 /**
@@ -113,6 +120,7 @@ export async function runCloudPrepare(params: {
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
+  workerAccess?: WorkerPrepareAccess;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
@@ -129,6 +137,7 @@ export async function runCloudPrepare(params: {
     gcsAccess,
     memorystoreAccess,
     queueAccess,
+    workerAccess,
     confirm = false,
   } = params;
 
@@ -157,7 +166,8 @@ export async function runCloudPrepare(params: {
     : undefined;
   const queueAddon = queueAccess === 'lifecycle' ? QUEUE_PREPARE_ADDON : undefined;
   const removalOnly = queueAccess === 'remove';
-  const basePreparation = !gcsAccess && !memorystoreAccess && !queueAccess;
+  const workerAddon = workerAccess === 'lifecycle' ? WORKER_WAKE_PREPARE_ADDON : undefined;
+  const basePreparation = !gcsAccess && !memorystoreAccess && !queueAccess && !workerAccess;
   // Every add-on is explicit and independently reviewable. A GCS or
   // Memorystore preparation must never broaden queue permissions, and vice
   // versa.
@@ -166,6 +176,7 @@ export async function runCloudPrepare(params: {
     ...(queueAddon?.requiredApis ?? []),
     ...(gcsAddon?.requiredApis ?? []),
     ...(memorystoreAddon?.requiredApis ?? []),
+    ...(workerAddon?.requiredApis ?? []),
   ]));
   const runtimeBaseRoles = new Set<string>(CLOUD_RUN_RUNTIME_BASE_ROLES);
   const runtimeServiceAccountAccessRoles = new Set<string>(
@@ -183,6 +194,7 @@ export async function runCloudPrepare(params: {
     ...(queueAddon?.requiredRoles ?? []),
     ...(gcsAddon?.requiredRoles ?? []),
     ...(memorystoreAddon?.requiredRoles ?? []),
+    ...(workerAddon?.requiredRoles ?? []),
   ]));
   const revokeRoles: string[] = Array.from(new Set<string>([
     ...(queueAccess === 'remove' ? QUEUE_PREPARE_ADDON.requiredRoles : []),
@@ -195,6 +207,7 @@ export async function runCloudPrepare(params: {
       ...(basePreparation ? CLOUD_RUN_RUNTIME_BASE_ROLES : []),
       ...(queueAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_QUEUE_ROLES : []),
       ...(gcsAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_STORAGE_ROLES : []),
+      ...(workerAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES : []),
     ]))
     : [];
   const runtimeRevokeRoles: string[] = resolved.runtimeServiceAccountEmail && queueAccess === 'remove'
@@ -204,11 +217,14 @@ export async function runCloudPrepare(params: {
     && resolved.runtimeServiceAccountEmail
     ? [...CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES]
     : [];
+  const runtimeSelfGrantRoles: string[] = workerAccess === 'lifecycle' && resolved.runtimeServiceAccountEmail
+    ? [...CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES]
+    : [];
   const requiredAdminPermissions = Array.from(new Set([
     ...(removalOnly
       ? REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable')
       : REQUIRED_ADMIN_PERMISSIONS),
-    ...(runtimeServiceAccountGrantRoles.length > 0 || basePreparation
+    ...(runtimeServiceAccountGrantRoles.length > 0 || runtimeSelfGrantRoles.length > 0 || basePreparation
       ? REQUIRED_SERVICE_ACCOUNT_POLICY_PERMISSIONS
       : []),
   ]));
@@ -216,7 +232,7 @@ export async function runCloudPrepare(params: {
     ...(removalOnly
       ? REQUIRED_ADMIN_ROLES.filter((role) => role !== 'roles/serviceusage.serviceUsageAdmin')
       : REQUIRED_ADMIN_ROLES),
-    ...(runtimeServiceAccountGrantRoles.length > 0 || basePreparation
+    ...(runtimeServiceAccountGrantRoles.length > 0 || runtimeSelfGrantRoles.length > 0 || basePreparation
       ? REQUIRED_SERVICE_ACCOUNT_POLICY_ROLES
       : []),
   ]));
@@ -238,6 +254,7 @@ export async function runCloudPrepare(params: {
     ...(runtimeGrantRoles.length > 0 ? { runtimeGrantScope: 'project' as const } : {}),
     runtimeRevokeRoles,
     runtimeServiceAccountGrantRoles,
+    ...(runtimeSelfGrantRoles.length ? { runtimeSelfGrantRoles } : {}),
     ...(basePreparation ? {
       buildIdentityGrantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES],
       buildSourceBucket: { name: buildSourceBucketName(resolved.gcpProjectId), role: 'roles/storage.objectAdmin', expiresAfterDays: 14 },
@@ -245,6 +262,7 @@ export async function runCloudPrepare(params: {
     ...(gcsAccess ? { gcsAccess } : {}),
     ...(memorystoreAccess ? { memorystoreAccess } : {}),
     ...(queueAccess ? { queueAccess } : {}),
+    ...(workerAccess ? { workerAccess } : {}),
   };
 
   if (!confirm) {
@@ -285,6 +303,15 @@ export async function runCloudPrepare(params: {
           serviceAccountEmail: resolved.runtimeServiceAccountEmail,
           member,
           grantRoles: runtimeServiceAccountGrantRoles,
+        })
+      : undefined;
+    const runtimeSelfIamResult = resolved.runtimeServiceAccountEmail && runtimeMember && runtimeSelfGrantRoles.length > 0
+      ? await reconcileServiceAccountIamRoles({
+          token,
+          projectId: resolved.gcpProjectId,
+          serviceAccountEmail: resolved.runtimeServiceAccountEmail,
+          member: runtimeMember,
+          grantRoles: runtimeSelfGrantRoles,
         })
       : undefined;
     if (basePreparation) {
@@ -364,6 +391,11 @@ export async function runCloudPrepare(params: {
                   ? { runtimeServiceAccountUniqueId }
                   : {}),
                 runtimeServiceAccountAccessRoles: recordedRuntimeServiceAccountAccessRoles,
+                runtimeSelfRoles: Array.from(new Set([
+                  ...(preservesRuntime ? previous?.runtimeSelfRoles ?? [] : []),
+                  ...(runtimeSelfIamResult?.updatedRoles ?? []),
+                  ...(runtimeSelfIamResult?.existingRoles ?? []),
+                ])),
               }
             : {}),
         }),
@@ -450,6 +482,7 @@ export async function runCloudPrepare(params: {
         gcsAccess,
         memorystoreAccess,
         queueAccess,
+        workerAccess,
         requiredAdminPermissions,
         requiredAdminRoles,
         runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail,
@@ -608,6 +641,7 @@ function cloudPrepareAuditDetails(params: {
     ...(params.plan.gcsAccess ? { gcsAccess: params.plan.gcsAccess } : {}),
     ...(params.plan.memorystoreAccess ? { memorystoreAccess: params.plan.memorystoreAccess } : {}),
     ...(params.plan.queueAccess ? { queueAccess: params.plan.queueAccess } : {}),
+    ...(params.plan.workerAccess ? { workerAccess: params.plan.workerAccess } : {}),
     authenticationSource: params.authenticationSource,
     ...(params.failureCategory ? { failureCategory: params.failureCategory } : {}),
   };
@@ -620,6 +654,7 @@ function cloudPrepareAdminCredentialSetup(params: {
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
+  workerAccess?: WorkerPrepareAccess;
   requiredAdminPermissions: string[];
   requiredAdminRoles: string[];
   runtimeServiceAccountEmail?: string;
@@ -631,6 +666,7 @@ function cloudPrepareAdminCredentialSetup(params: {
     ...(params.gcsAccess ? { gcsAccess: params.gcsAccess } : {}),
     ...(params.memorystoreAccess ? { memorystoreAccess: params.memorystoreAccess } : {}),
     ...(params.queueAccess ? { queueAccess: params.queueAccess } : {}),
+    ...(params.workerAccess ? { workerAccess: params.workerAccess } : {}),
     adminAuth: 'default',
     confirm: true,
   };
@@ -642,6 +678,7 @@ function cloudPrepareAdminCredentialSetup(params: {
     ...(params.gcsAccess ? [`gcsAccess="${params.gcsAccess}"`] : []),
     ...(params.memorystoreAccess ? [`memorystoreAccess="${params.memorystoreAccess}"`] : []),
     ...(params.queueAccess ? [`queueAccess="${params.queueAccess}"`] : []),
+    ...(params.workerAccess ? [`workerAccess="${params.workerAccess}"`] : []),
     'adminAuth="default"',
     'confirm=true',
   ].join(' ');
@@ -774,8 +811,31 @@ async function enableRequiredApis(params: {
   const results: Array<{ service: string; status: 'enabled' | 'already_enabled' }> = [];
   for (const service of params.services) {
     results.push({ service, status: await client.enableService(params.projectId, service) });
+    if (SERVICES_WITH_LAZY_AGENTS.has(service)) await ensureServiceAgent(params.token, params.projectId, service);
   }
   return results;
+}
+
+/**
+ * APIs whose Google-managed service agent appears only on first use. Creating
+ * a resource before it exists fails ("service agent does not exist"), so
+ * preparation asks Google to provision it.
+ */
+const SERVICES_WITH_LAZY_AGENTS = new Set(['workflows.googleapis.com']);
+
+async function ensureServiceAgent(token: string, projectId: string, service: string): Promise<void> {
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const response = await fetch(`https://serviceusage.googleapis.com/v1beta1/projects/${projectId}/services/${service}:generateServiceIdentity`, { method: 'POST', headers, body: '{}' });
+  if (!response.ok) throw new Error(`Provisioning the ${service} service agent failed (HTTP ${response.status}).`);
+  let operation = await response.json() as { name?: string; done?: boolean; error?: { message?: string } };
+  for (let attempt = 0; !operation.done && operation.name && attempt < 30; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const poll = await fetch(`https://serviceusage.googleapis.com/v1beta1/${operation.name}`, { headers });
+    if (!poll.ok) throw new Error(`Checking the ${service} service agent failed (HTTP ${poll.status}).`);
+    operation = await poll.json() as typeof operation;
+  }
+  if (operation.error) throw new Error(`Provisioning the ${service} service agent failed: ${operation.error.message ?? 'unknown error'}.`);
+  if (!operation.done && operation.name) throw new Error(`The ${service} service agent is still being provisioned. Run the same command again.`);
 }
 
 async function reconcileServiceAccountIamRoles(params: {

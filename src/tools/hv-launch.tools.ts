@@ -16,7 +16,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       env: envField,
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
-      approveAccess: z.array(z.enum(['storage', 'storage-s3', 'memorystore', 'queues', 'ci-release'])).optional()
+      approveAccess: z.array(z.enum(['storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional()
         .describe('accessId values from needs_access results, passed only after the user approved that exact access.'),
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
@@ -37,7 +37,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       switch (result.status) {
         case 'needs_billing_choice':
           return commandSuccess(result, {
-            hint: 'Ask the user which billing account should pay for this app, then call hv_launch again with billingAccountName.',
+            hint: 'Show plannedSteps (including any access the app needs) and ask which billing account should pay for this app; choosing one approves those steps. Then call hv_launch again with billingAccountName.',
             agentInstruction: { action: 'ask_user', message: 'Show the billing accounts by display name and ask the user to pick one. Never choose a billing account for them.' },
             next: ['hv_launch'],
           });

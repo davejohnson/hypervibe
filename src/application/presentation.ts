@@ -45,6 +45,8 @@ const COMMAND_PRESENTATION = {
   hv_destroy: { label: 'DESTROY' },
   hv_logs: { label: 'LOGS' },
   hv_health: { label: 'HEALTH' },
+  hv_launch: { label: 'LAUNCH' },
+  hv_migrate: { label: 'MIGRATE' },
   hv_ci_status: { label: 'CI STATUS' },
   hv_ci_trigger: { label: 'CI TRIGGER' },
   hv_spec: { label: 'SPEC' },

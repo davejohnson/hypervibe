@@ -595,8 +595,12 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
       return markerVerified
         ? { state: 'active', hostname, markerVerified: true, binding }
         : { state: 'unknown', hostname, markerVerified: false, binding, reason: 'maintenance_edge_marker_unverified' };
-    } catch {
-      return { state: 'unknown', hostname, markerVerified: false, reason: 'maintenance_edge_observation_failed' };
+    } catch (error) {
+      // A DNS-only token cannot read Workers; say exactly which permissions to add.
+      const denied = /authentication error|unauthorized|forbidden/i.test(error instanceof Error ? error.message : String(error));
+      return { state: 'unknown', hostname, markerVerified: false, reason: denied
+        ? 'The Cloudflare token cannot manage Workers. Add Zone > Workers Routes > Edit and Account > Workers Scripts > Edit to it, then plan again.'
+        : 'maintenance_edge_observation_failed' };
     }
   }
 

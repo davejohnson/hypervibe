@@ -119,6 +119,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
+      workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
       adminAuth: z.literal('default').optional().describe('Required for action="bootstrap" and confirmed action="prepare": use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
@@ -142,6 +143,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcsAccess,
       memorystoreAccess,
       queueAccess,
+      workerAccess,
       adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
@@ -191,6 +193,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || gcsAccess !== undefined
           || memorystoreAccess !== undefined
           || queueAccess !== undefined
+          || workerAccess !== undefined
           || adminAuth !== undefined
           || adminCredentialsJson !== undefined
           || adminCredentialsJsonRef !== undefined
@@ -229,7 +232,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction === 'describe') {
         const incompatible = suppliedOptionNames({ credentials, credentialsRef, credentialsKey, credentialsMap,
           gcpProjectId, billingAccountName, deployServiceAccountEmail,
-          gcsAccess, memorystoreAccess, queueAccess, adminAuth, adminCredentialsJson,
+          gcsAccess, memorystoreAccess, queueAccess, workerAccess, adminAuth, adminCredentialsJson,
           adminCredentialsJsonRef, adminAccessToken, adminAccessTokenRef, confirm });
         if (incompatible.length) return commandError('VALIDATION', `describe does not accept: ${incompatible.join(', ')}.`);
         const { context: repositoryGuidance } = await resolveGuidanceContext();
@@ -252,6 +255,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         gcsAccess,
         memorystoreAccess,
         queueAccess,
+        workerAccess,
         adminCredentialsJson,
         adminCredentialsJsonRef,
         adminAccessToken,
@@ -301,6 +305,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       if (requestedAction === 'prepare' && memorystoreAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'memorystoreAccess is supported only when preparing the shared cloudrun connection.');
+      }
+      if (requestedAction === 'prepare' && workerAccess && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'workerAccess is supported only when preparing the shared cloudrun connection.');
       }
       if (requestedAction === 'prepare' && queueAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'queueAccess is supported only when preparing the shared cloudrun connection.');
@@ -422,6 +429,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           gcsAccess,
           memorystoreAccess,
           queueAccess,
+          workerAccess,
           adminAuth,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,

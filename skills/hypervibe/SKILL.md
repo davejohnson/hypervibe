@@ -61,9 +61,28 @@ only when the spec already has it or the user asks) is driven end to end by
 `hv_launch`: it connects GCP, creates or updates the Cloud Run services, Cloud
 SQL database, storage buckets and custom domain in reviewed rounds, releases
 the committed local code and verifies it. Ask the user only at its stop points:
-`needs_billing_choice` (they pick the account) and `needs_confirmation` (show
-the changes and estimated monthly cost, then pass exactly `confirmActions`).
-Call it again after `pending`. `hv_plan scope="infrastructure"`/`hv_apply` and
+`needs_billing_choice` (show its `plannedSteps`, including any resource access
+listed there; choosing the account approves them), `needs_access` (an existing
+project needs one more permission: explain it, then pass its `accessId` in
+`approveAccess`) and `needs_confirmation` (show the changes and estimated
+monthly cost, then pass exactly `confirmActions`). Call it again after
+`pending`.
+
+Keep running costs low by default. A background worker that polls a database
+queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
+`SELECT count(*)` of queued plus in-progress work, read from the app's own
+job code (for example claimed status, run-after time and remaining attempts).
+The worker then runs only while that count is above zero and starts within
+about a minute of new work. Keep a worker always on only when it must react
+instantly or does not use the app database.
+
+`hv_migrate` moves an app from another environment (for example Railway) to an
+OpenTofu-managed GCP environment and stops at the same points, plus
+`needs_secret_import` and `needs_copy_approval`. The source keeps serving.
+After a verified copy, a re-run releases without copying again; pass
+`refreshData=true` only after the user approves copying again, and
+`verifyOnly=true` to compare the source and the copy (row counts, per-table
+content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
 `hv_deploy` remain available for individual steps; a full-scope `hv_plan` is
 refused. Resources it reports as unsupported stay blocked; do not work around
 them.

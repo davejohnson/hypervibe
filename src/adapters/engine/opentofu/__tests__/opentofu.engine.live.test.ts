@@ -136,6 +136,30 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
+  it('validates an on-demand worker: pool at zero, scheduled waker, read-only IAM database user', async () => {
+    const configuration = buildCloudRunConfiguration({
+      projectId: 'demo-project', region: 'us-central1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
+      database: { instanceName: 'hv-staging-db-1', databaseName: 'app', wireServices: true },
+      services: [{
+        logicalName: 'worker', resourceName: 'worker-staging', workload: 'worker',
+        initialImage: `us-docker.pkg.dev/demo-project/app/worker@sha256:${'a'.repeat(64)}`,
+        runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', public: false,
+        pendingWorkQuery: "SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')",
+      }],
+    });
+    const files = configuration.files as any;
+    const pool = files['workerpools.tf.json'].resource.google_cloud_run_v2_worker_pool.worker;
+    expect(pool.scaling).toEqual([{ scaling_mode: 'MANUAL', manual_instance_count: 0 }]);
+    expect(pool.lifecycle[0].ignore_changes).toContain('scaling[0].manual_instance_count');
+    const workflow = files['workerpools.tf.json'].resource.google_workflows_workflow.worker_waker.source_contents;
+    expect(workflow).toContain('executeSql');
+    expect(workflow).not.toMatch(/[^$]\$\{/);
+    expect(files['jobs.tf.json'].resource.google_cloud_scheduler_job.worker_waker.schedule).toBe('* * * * *');
+    expect(files['cloudsql.tf.json'].resource.google_sql_user.worker_waker).toMatchObject({ name: 'runtime@demo-project.iam', type: 'CLOUD_IAM_SERVICE_ACCOUNT' });
+    expect(configuration.resources['google_workflows_workflow.worker_waker']).toMatchObject({ actionId: 'service:worker' });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates Pub/Sub queues (runtime access comes from the queue setup add-on)', async () => {
     const configuration = buildCloudRunConfiguration({
       projectId: 'demo-project', region: 'us-central1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',

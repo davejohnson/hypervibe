@@ -148,9 +148,8 @@ export interface ReleaseWorkflowInput {
   region: string;
   provider: string;
   releaseIdentity: string;
-  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools' }>;
-  /** Used only when the repository has no Dockerfile of its own. */
-  generatedDockerfile?: string;
+  /** generatedDockerfile is used only when the repository has no Dockerfile of its own; it carries that service's start command. */
+  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string }>;
 }
 
 const RELEASE_SCRIPT = String.raw`
@@ -217,22 +216,19 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     '      - uses: google-github-actions/setup-gcloud@v3',
     `      - run: gcloud auth configure-docker ${input.region}-docker.pkg.dev --quiet`,
   ];
-  if (input.generatedDockerfile) {
-    lines.push(
-      '      - name: Use the Hypervibe Dockerfile when the repository has none',
-      '        run: |',
-      '          if [ ! -f Dockerfile ]; then',
-      `            printf '%s' '${Buffer.from(input.generatedDockerfile, 'utf8').toString('base64')}' | base64 --decode > Dockerfile`,
-      '          fi',
-    );
-  }
   for (const service of input.services) {
     const id = service.name.replace(/[^A-Za-z0-9_]/g, '_');
+    const generated = service.generatedDockerfile ? `.hypervibe-${id}.Dockerfile` : undefined;
     lines.push(
       `      - name: Build ${service.name}`,
       `        id: build_${id}`,
       '        run: |',
-      `          docker build -t ${service.image}:$GITHUB_SHA .`,
+      // A repository Dockerfile wins; otherwise the service's generated one (with its own start command).
+      ...(generated ? [
+        `          DOCKERFILE=Dockerfile`,
+        `          if [ ! -f Dockerfile ]; then DOCKERFILE=${generated}; printf '%s' '${Buffer.from(service.generatedDockerfile!, 'utf8').toString('base64')}' | base64 --decode > "$DOCKERFILE"; fi`,
+        `          DOCKER_BUILDKIT=1 docker build -f "$DOCKERFILE" -t ${service.image}:$GITHUB_SHA .`,
+      ] : [`          docker build -t ${service.image}:$GITHUB_SHA .`]),
       `          docker push ${service.image}:$GITHUB_SHA`,
       `          echo "digest=$(gcloud artifacts docker images describe ${service.image}:$GITHUB_SHA --format='value(image_summary.digest)')" >> "$GITHUB_OUTPUT"`,
       `      - name: Release ${service.name}`,

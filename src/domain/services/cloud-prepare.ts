@@ -22,6 +22,8 @@ export interface CloudPreparationRecord {
   requiredRoles: string[];
   runtimeRequiredRoles?: string[];
   runtimeServiceAccountAccessRoles?: string[];
+  /** Roles the runtime identity holds on itself (granted on that one service account). */
+  runtimeSelfRoles?: string[];
 }
 
 export const CLOUD_PREPARE_PROFILES: Record<CloudPrepareProvider, CloudPrepareProfile> = {
@@ -89,6 +91,7 @@ export function getCloudPreparation(
     requiredRoles,
     runtimeRequiredRoles: asStringArray(record.runtimeRequiredRoles),
     runtimeServiceAccountAccessRoles: asStringArray(record.runtimeServiceAccountAccessRoles),
+    runtimeSelfRoles: asStringArray(record.runtimeSelfRoles),
   };
 }
 
@@ -164,6 +167,36 @@ export const QUEUE_PREPARE_ADDON = {
 } as const;
 
 export type QueuePrepareAccess = 'lifecycle' | 'remove';
+
+/**
+ * On-demand background workers: a scheduled Google Workflow, running as the
+ * app's runtime identity, counts pending work through the Cloud SQL Data API
+ * and scales the worker pool between zero and one instance. Selected
+ * explicitly with workerAccess="lifecycle".
+ */
+export const WORKER_WAKE_PREPARE_ADDON = {
+  requiredApis: ['workflows.googleapis.com'],
+  requiredRoles: ['roles/workflows.editor'],
+} as const;
+
+export const CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES = ['roles/workflows.invoker', 'roles/cloudsql.instanceUser'] as const;
+
+/** Changing a worker pool's instance count requires acting as the pool's identity: the runtime identity, on itself only. */
+export const CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES = ['roles/iam.serviceAccountUser'] as const;
+
+export type WorkerPrepareAccess = 'lifecycle';
+
+/** Whether GCP setup granted on-demand worker access (the workerAccess="lifecycle" add-on). */
+export function isCloudPreparedForWorkerWake(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record
+    && WORKER_WAKE_PREPARE_ADDON.requiredApis.every((api) => record.requiredApis.includes(api))
+    && WORKER_WAKE_PREPARE_ADDON.requiredRoles.every((role) => record.requiredRoles.includes(role))
+    && (!record.runtimeServiceAccountEmail
+      || (CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES.every((role) => (record.runtimeRequiredRoles ?? []).includes(role))
+        && CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES.every((role) => (record.runtimeSelfRoles ?? []).includes(role)))));
+}
 
 export const GCS_PREPARE_ADDONS = {
   inspect: {

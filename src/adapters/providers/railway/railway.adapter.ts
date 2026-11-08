@@ -217,8 +217,10 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function buildTaskStartCommand(command: string): string {
-  const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:\${hv_exit}__"; exit $hv_exit`;
+export function buildTaskStartCommand(command: string, lingerSeconds = 0): string {
+  // A short task can exit before Railway's log stream reads its last lines; lingering lets them flush.
+  const linger = lingerSeconds > 0 ? `; sleep ${Math.floor(lingerSeconds)}` : '';
+  const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:\${hv_exit}__"${linger}; exit $hv_exit`;
   return `/bin/sh -c ${shellSingleQuote(inner)}`;
 }
 
@@ -4197,7 +4199,7 @@ export class RailwayAdapter implements
           serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
         }
       `, { serviceId, environmentId: params.environmentId, input: {
-        source: { image: params.image }, startCommand: buildTaskStartCommand('sh -c "$HV_TASK_SCRIPT"'), restartPolicyType: 'NEVER', restartPolicyMaxRetries: 0,
+        source: { image: params.image }, startCommand: buildTaskStartCommand('sh -c "$HV_TASK_SCRIPT"', 45), restartPolicyType: 'NEVER', restartPolicyMaxRetries: 0,
       } });
       const deployed = await client.request<{ serviceInstanceDeployV2?: string }>(gql`
         mutation DeployPrivateTask($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }
@@ -4208,6 +4210,7 @@ export class RailwayAdapter implements
       let lastLogs: RailwayLogEntry[] = [];
       let lastLogError: string | undefined;
       let lastStatus = 'UNKNOWN';
+      let succeededAt: number | undefined;
       // The exit sentinel is the completion signal; NEVER-restart services have no "finished" status.
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -4215,6 +4218,9 @@ export class RailwayAdapter implements
           const status = await client.request<{ deployment?: { status?: string } }>(gql`query PrivateTaskStatus($id: String!) { deployment(id: $id) { status } }`, { id: deploymentId });
           lastStatus = status.deployment?.status ?? lastStatus;
         } catch { /* keep the last known status */ }
+        // A finished task whose result never reaches the logs will not produce it later.
+        if (lastStatus === 'SUCCESS') succeededAt ??= Date.now();
+        if (succeededAt && Date.now() - succeededAt > 120_000) break;
         if (['FAILED', 'CRASHED', 'REMOVED'].includes(lastStatus) && !lastLogs.length) {
           try { lastLogs = await this.getDeploymentLogs(deploymentId, 500); } catch { /* reported below */ }
           if (!lastLogs.some((entry) => entry.message.includes(TASK_EXIT_SENTINEL_PREFIX))) break;
