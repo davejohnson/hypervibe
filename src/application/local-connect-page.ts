@@ -246,6 +246,6 @@ export async function connectCloudflareInBrowser(params: {
   ]);
   return waited ?? {
     status: 'waiting', provider: 'cloudflare', scope, url: entry.url,
-    message: `A Cloudflare connect page is open in your browser (${entry.url}). Finish there, then ask your assistant to continue.`,
+    message: `A Cloudflare connect page is open in your browser (${entry.url}). Finish there, then ${context.agent} continues.`,
   };
 }
