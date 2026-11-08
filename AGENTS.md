@@ -12,6 +12,10 @@ For every user-facing page, email, prompt, tool result, approval and error, read
 [Who we build and write for](docs/development/product.md#who-we-build-and-write-for).
 Our customer can describe the app they want; they should not need to learn cloud
 administration or our internal terminology to use Hypervibe.
+Any step a person must take in a provider's console (a token, a permission, a
+billing choice) comes with a clickable deep link to that exact page or
+pre-filled form, from both Hypervibe's results and the agent's replies; never
+send people to find settings by hand.
 
 ## Working method
 
