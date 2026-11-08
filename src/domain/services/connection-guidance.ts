@@ -7,6 +7,9 @@ const CLOUDFLARE_DNS_TOKEN_PERMISSIONS = [
   { key: 'zone_settings', type: 'read' },
   { key: 'dns', type: 'edit' },
   { key: 'account_settings', type: 'read' },
+  // Maintenance pages and migration cutovers run as a Cloudflare Worker on the app's hostname.
+  { key: 'workers_routes', type: 'edit' },
+  { key: 'workers_scripts', type: 'edit' },
 ];
 const CLOUDFLARE_DNS_PERMISSION_QUERY = encodeURIComponent(JSON.stringify(CLOUDFLARE_DNS_TOKEN_PERMISSIONS));
 

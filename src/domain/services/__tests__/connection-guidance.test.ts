@@ -124,6 +124,8 @@ describe('connection guidance', () => {
       { key: 'zone_settings', type: 'read' },
       { key: 'dns', type: 'edit' },
       { key: 'account_settings', type: 'read' },
+      { key: 'workers_routes', type: 'edit' },
+      { key: 'workers_scripts', type: 'edit' },
     ];
 
     for (const [kind, value] of Object.entries(CLOUDFLARE_TOKEN_URLS)) {

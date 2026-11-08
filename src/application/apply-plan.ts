@@ -33,6 +33,7 @@ import {
 } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { applyInfrastructureEngine } from './infrastructure-engine.js';
 import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
@@ -802,6 +803,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
+  if (planScope === 'infrastructure-engine') {
+    const engineOutcome = await applyInfrastructureEngine(ctx, { project, spec, specRevision: params.specRevision,
+      planId, confirmActions: params.confirmActions });
+    return engineOutcome.kind === 'blocked'
+      ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'gcp', reason: engineOutcome.reason }] }
+      : { ...engineOutcome, actionScopedWarnings: [] };
+  }
   const secretsOnly = planScope === 'secrets';
   const retainedCleanupOnly = planScope === 'retained-cleanup';
   const backupProvisioningOnly = planScope === 'backup-provisioning';

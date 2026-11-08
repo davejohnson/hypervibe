@@ -37,6 +37,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
@@ -762,7 +763,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups']).optional().describe('Default full. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure']).optional().describe('Default full. infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"): Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it never releases code (use hv_deploy). backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -771,6 +772,39 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      if (scope === 'infrastructure') {
+        const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
+        if (supplied) return commandError('VALIDATION', 'scope="infrastructure" takes only project and env.', { next: ['hv_plan'] });
+        const specResult = specStore.get(project);
+        if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
+        const environmentName = commandEnvironment(specResult.spec, env);
+        const planned = await planInfrastructureEngine(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName });
+        if ('blocked' in planned) {
+          return commandError('VALIDATION', 'The infrastructure plan is blocked.', {
+            details: { blocked: planned.blocked },
+            agentInstruction: { action: 'stop_and_report', message: 'Report each blocker in plain language. Do not work around it with provider CLIs or APIs.' },
+            next: ['hv_spec', 'hv_connections'],
+          });
+        }
+        const pending = planned.actions.filter((action) => action.type !== 'noop');
+        return commandSuccess({
+          planId: planned.planRunId,
+          scope: 'infrastructure',
+          environment: planned.environmentName,
+          specRevision: planned.specRevision,
+          actions: pending.map(({ metadata: _metadata, ...action }) => action),
+          unchanged: planned.actions.length - pending.length,
+          confirmActions: planned.confirmActions,
+        }, {
+          warnings: planned.warnings,
+          hint: pending.length === 0
+            ? 'No infrastructure changes are needed.'
+            : planned.confirmActions.length
+              ? `Review the changes with the user, then hv_apply with planId and confirmActions exactly ${JSON.stringify(planned.confirmActions)}.`
+              : 'Review the changes, then hv_apply with planId.',
+          next: pending.length === 0 ? ['hv_deploy', 'hv_status'] : ['hv_apply'],
+        });
+      }
       if (scope === 'retained-cleanup' || scope === 'backups') {
         const incompatibleInputs = [
           services !== undefined ? 'services' : null,

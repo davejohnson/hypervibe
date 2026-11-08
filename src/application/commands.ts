@@ -11,6 +11,8 @@ import { registerCoreTools } from '../tools/core.tools.js';
 import { registerLifecycleTools } from '../tools/lifecycle.tools.js';
 import { registerConnectionsTools } from '../tools/connections.tools.js';
 import { registerHvDeployTools } from '../tools/hv-deploy.tools.js';
+import { registerHvLaunchTools } from '../tools/hv-launch.tools.js';
+import { registerHvMigrateTools } from '../tools/hv-migrate.tools.js';
 import { registerHvObservabilityTools } from '../tools/hv-observability.tools.js';
 import { registerHvDbTools } from '../tools/hv-db.tools.js';
 import { registerHvSecretsTools } from '../tools/hv-secrets.tools.js';
@@ -200,6 +202,8 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerLifecycleTools(registry, ctx);
   registerConnectionsTools(registry, ctx);
   registerHvDeployTools(registry, ctx);
+  registerHvLaunchTools(registry, ctx);
+  registerHvMigrateTools(registry, ctx);
   registerHvObservabilityTools(registry, ctx);
   registerHvDbTools(registry, ctx);
   registerHvSecretsTools(registry, ctx);

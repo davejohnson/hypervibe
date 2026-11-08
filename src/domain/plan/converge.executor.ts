@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
+import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
@@ -251,6 +252,7 @@ export const planRunDocumentSchema = z.object({
     'backup-program-publication',
     'managed-ci-publication',
     'managed-ci-credentials',
+    'infrastructure-engine',
   ]).optional(),
   environmentName: z.string().min(1),
   databaseCredentialAliasesReady: z.boolean().optional(),
@@ -280,6 +282,21 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
+    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant'];
+  if (document.scope === 'infrastructure-engine') {
+    const engine = (document as { engine?: { planId?: unknown } }).engine;
+    if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length
+      || document.actions.some((action) => action.type !== 'noop' && !engineSegmentOf(action)
+        && !engineOperations.includes(String(action.metadata?.operation)))) {
+      ctx.addIssue({ code: 'custom', message: 'Engine plans contain only reviewed engine changes and Hypervibe-owned secret actions.' });
+    }
+    return;
+  }
+  if (document.actions.some((action) => engineSegmentOf(action) || engineOperations.includes(String(action.metadata?.operation)))) {
+    ctx.addIssue({ code: 'custom', message: 'Infrastructure-engine actions require their isolated stage.' });
+  }
   if (document.scope === 'database-bootstrap') {
     if (document.actions.length > 1 || document.actions.some(action => !isDatabaseBootstrapAction(action))
       || (document.actions.length === 1) !== (document.databaseBootstrapReady === true)
@@ -543,8 +560,37 @@ export interface ConvergeParams {
   freshIntegrationFingerprints?: Record<string, string>;
   /** Executes a single non-noop action. */
   handler: ActionHandler;
+  /**
+   * Executes one saved infrastructure-engine plan covering several actions.
+   * Called at most once per segment; actions carrying an engine segment are
+   * never passed to `handler`.
+   */
+  segmentHandler?: EngineSegmentHandler;
   /** Maximum plan age before it must be regenerated. Default 24h. */
   maxPlanAgeMs?: number;
+}
+
+export type EngineSegmentHandler = (
+  segment: EngineActionSegment,
+  actions: PlanAction[],
+  context: ActionExecutionContext
+) => Promise<EngineSegmentResult>;
+
+/** Collapses per-address engine outcomes into one truthful action result. */
+export function engineSegmentActionResult(action: PlanAction, segment: EngineActionSegment, result: EngineSegmentResult): ActionResult {
+  const outcomes = segment.addresses.map((address) => result.outcomes[address] ?? 'not_started');
+  const diagnostics = result.diagnostics.join('\n') || undefined;
+  const data = { engineSegment: segment.id, outcomes: Object.fromEntries(segment.addresses.map((a, i) => [a, outcomes[i]])) };
+  if (outcomes.some((outcome) => outcome === 'failed')) {
+    return { success: false, message: `OpenTofu failed to change ${action.resource.name}.`, error: diagnostics ?? 'Engine apply failed.', data };
+  }
+  if (outcomes.some((outcome) => outcome === 'unknown')) {
+    return { success: false, status: 'pending', message: `The outcome for ${action.resource.name} is unknown. Observe it with hv_status before planning a retry.`, error: diagnostics, data };
+  }
+  if (outcomes.every((outcome) => outcome === 'succeeded')) {
+    return { success: true, message: `OpenTofu applied ${segment.addresses.length} change(s) for ${action.resource.name}.`, data };
+  }
+  return { success: false, status: 'blocked', message: `OpenTofu did not start changes for ${action.resource.name}.`, error: diagnostics, data };
 }
 
 export type ActionReceiptStatus =
@@ -848,13 +894,18 @@ export class ConvergeExecutor {
     }
 
     const completed = new Set<string>();
+    const segmentResults = new Map<string, EngineSegmentResult>();
     let failed = false;
     let pending = false;
     let blocked = false;
     let firstError: string | undefined;
 
     for (const action of ordered) {
-      if (failed || pending || blocked) {
+      // Members of an already-executed engine plan report their real outcome,
+      // even after an earlier failure: the engine may have changed them.
+      const executedSegment = engineSegmentOf(action);
+      const alreadyExecuted = executedSegment !== undefined && segmentResults.has(executedSegment.id);
+      if (!alreadyExecuted && (failed || pending || blocked)) {
         const state = failed ? 'failure' : pending ? 'pending result' : 'blocked result';
         receipts.push({ actionId: action.id, status: 'aborted', message: `Skipped after earlier ${state}` });
         continue;
@@ -865,7 +916,7 @@ export class ConvergeExecutor {
         continue;
       }
       // A dependency that was skipped (not completed) blocks dependents.
-      const unmetDep = (action.dependsOn ?? []).find(
+      const unmetDep = alreadyExecuted ? undefined : (action.dependsOn ?? []).find(
         (dep) => ordered.some((a) => a.id === dep) && !completed.has(dep)
       );
       if (unmetDep) {
@@ -897,7 +948,28 @@ export class ConvergeExecutor {
       };
 
       try {
-        const result = await params.handler(action, { applyRunId: applyRun.id });
+        const segment = engineSegmentOf(action);
+        let result: ActionResult;
+        if (segment) {
+          let segmentResult = segmentResults.get(segment.id);
+          if (!segmentResult) {
+            const members = ordered.filter((candidate) => engineSegmentOf(candidate)?.id === segment.id);
+            const memberIds = new Set(members.map((member) => member.id));
+            const externalDep = members.flatMap((member) => member.dependsOn ?? [])
+              .find((dep) => !memberIds.has(dep) && ordered.some((a) => a.id === dep) && !completed.has(dep));
+            if (!params.segmentHandler) {
+              segmentResult = { outcomes: {}, diagnostics: ['This apply path cannot execute infrastructure-engine plans. Re-run hv_plan.'] };
+            } else if (externalDep) {
+              segmentResult = { outcomes: {}, diagnostics: [`Engine plan prerequisite "${externalDep}" has not completed.`] };
+            } else {
+              segmentResult = await params.segmentHandler(segment, members, { applyRunId: applyRun.id });
+            }
+            segmentResults.set(segment.id, segmentResult);
+          }
+          result = engineSegmentActionResult(action, segment, segmentResult);
+        } else {
+          result = await params.handler(action, { applyRunId: applyRun.id });
+        }
         if (result.status === 'pending') {
           pending = true;
           recordReceipt('pending', result.message, result.error, result.data);

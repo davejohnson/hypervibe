@@ -109,7 +109,7 @@ export function planMaintenance(params: {
       blockedReason: !hostname
         ? 'maintenance_domain_missing'
         : !routingDesired && parsedBinding?.pendingEdge ? undefined
-          : unknownReason(edgeState, 'maintenance_edge_unknown'),
+          : unknownReason(edgeState, maintenance?.edge.reason ?? 'maintenance_edge_unknown'),
       confirm: true,
       metadata: { environmentName: params.environmentName, hostname },
     }));

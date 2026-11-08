@@ -88,7 +88,9 @@ export interface IEdgeMaintenanceAdapter {
   ensureMaintenanceEdge(
     hostname: string,
     expectedContentHash: string,
-    binding?: MaintenanceEdgeBinding
+    binding?: MaintenanceEdgeBinding,
+    /** The name visitors see on the notice, for example the app's name. */
+    page?: { appName?: string }
   ): Promise<Receipt>;
 
   removeMaintenanceEdge(binding: MaintenanceEdgeBinding): Promise<Receipt>;

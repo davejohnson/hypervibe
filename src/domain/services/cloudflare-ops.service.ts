@@ -22,7 +22,8 @@ function adapterFromConnection(connection: NonNullable<ReturnType<ConnectionRepo
  * @param scopeHint - Optional domain hint (e.g., "example.com") for finding scoped tokens
  */
 export function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter; scope: string | null } | { error: string } {
-  return getCloudflareAdapterFromHints(scopeHint ? [scopeHint] : []);
+  // A connection scoped to the zone (example.com) covers its hostnames (app.example.com).
+  return getCloudflareAdapterFromHints(scopeHint ? [...new Set([scopeHint, dnsZoneScopeForDomain(normalizeDomainName(scopeHint))])] : []);
 }
 
 /** Resolve the first exact, wildcard, or global Cloudflare connection matching the ordered scope hints. */

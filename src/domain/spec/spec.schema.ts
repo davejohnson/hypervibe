@@ -74,6 +74,20 @@ export const serviceSpecSchema = z.object({
   cronSchedule: z.string().min(1).optional(),
   timeZone: z.string().min(1).optional(),
   public: z.boolean().optional(),
+  /** vCPU per instance, for example "0.5" or "1" (provider limits apply). */
+  cpu: z.string().regex(/^(0\.\d{1,2}|[1-8])$/, 'Use a vCPU count such as "0.5", "1" or "2".').optional(),
+  /** Memory per instance, for example "512Mi" or "1Gi". */
+  memory: z.string().regex(/^[1-9]\d*(Mi|Gi)$/, 'Use a memory size such as "512Mi" or "1Gi".').optional(),
+  /**
+   * Run a background worker only while it has work: it scales to zero when
+   * idle and starts within about a minute of new work. pendingWorkQuery is one
+   * read-only SELECT against the app database that returns a single count of
+   * queued plus in-progress work.
+   */
+  onDemand: z.object({
+    pendingWorkQuery: z.string().min(1).max(2000)
+      .regex(/^\s*(select|with)\b[^;]*;?\s*$/i, 'Use one SELECT statement that returns a single count, for example SELECT count(*) FROM jobs WHERE status IN (\'queued\', \'running\').'),
+  }).strict().optional(),
   /**
    * Per-service compatibility aliases for Hypervibe-managed database URLs.
    * Only names and canonical sources are persisted; resolved values remain
@@ -89,6 +103,13 @@ export const serviceSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'cron services require cronSchedule',
       path: ['cronSchedule'],
+    });
+  }
+  if (service.onDemand && service.workloadKind !== 'worker') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'onDemand applies only to background workers (workloadKind "worker")',
+      path: ['onDemand'],
     });
   }
   if (service.workloadKind === 'cron' && !service.startCommand) {
@@ -229,6 +250,10 @@ export const databaseSpecSchema = z.object({
   credentialAliases: z.object({ mode: z.literal('issuer-references') }).strict().optional(),
   /** One-use destructive initialization of empty persistence on an exact existing database. */
   freshInitialization: databaseFreshInitializationIntentSchema.optional(),
+  /** OpenTofu-managed databases: increment to rotate the Hypervibe-owned password with no downtime. */
+  passwordGeneration: z.number().int().positive().optional(),
+  /** OpenTofu-managed databases: PostgreSQL major version (default 16). Never lower than a migration source. */
+  version: z.number().int().min(13).max(18).optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
@@ -1167,6 +1192,8 @@ export const storageSpecSchema = z.object({
   injectInto: z.array(z.string().min(1)),
   /** A retained backup destination is never wired into application services. */
   purpose: z.literal('backup').optional(),
+  /** "s3": also give services S3-compatible variables (AWS_*), for apps written against S3 APIs. */
+  access: z.enum(['native', 's3']).optional(),
 }).strict().superRefine((storage, ctx) => {
   if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
     path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });
@@ -1582,6 +1609,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
+    /** Opt-in: OpenTofu plans and applies this environment's infrastructure (Cloud Run pilot). */
+    engine: z.literal('opentofu').optional(),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

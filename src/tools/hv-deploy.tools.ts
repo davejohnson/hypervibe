@@ -1,5 +1,7 @@
+import { isEngineManaged, releaseEngineServices } from '../application/infrastructure-engine.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
+import { localRepositoryFor } from '../application/local-repository.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -119,6 +121,42 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ?? ctx.repos.environments.create({ projectId: project.id, name: envName });
 
       assertConfirmed(project, environment, confirm, 'hv_deploy');
+
+      if (isEngineManaged(envSpec)) {
+        const supplied = [envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined);
+        if (supplied) {
+          return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
+        }
+        const sourceDirectory = localRepositoryFor(project, specResult.source);
+        const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });
+        if ('blocked' in released) {
+          return commandError('VALIDATION', released.blocked, {
+            next: ['hv_plan'],
+            agentInstruction: { action: 'stop_and_report', message: 'Report the blocker. Releases never create infrastructure.' },
+          });
+        }
+        const failed = released.results.filter((result) => result.status !== 'released');
+        if (failed.length) {
+          return commandError('PROVIDER_ERROR', 'The release did not complete.', {
+            details: { environment: envName, results: released.results },
+            hint: failed.some((result) => result.status === 'unknown') ? 'Check hv_status before retrying; the outcome is not yet known.' : 'Fix the reported problem, then re-run hv_deploy.',
+            next: ['hv_status', 'hv_logs'],
+          });
+        }
+        return commandSuccess({
+          status: 'succeeded',
+          environment: envName,
+          applyRunId: released.applyRunId,
+          ...(released.source ? { source: released.source } : {}),
+          results: released.results,
+          serviceUrls: Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url])),
+          message: `Released ${released.results.length} service(s).`,
+        }, {
+          ...(released.source?.uncommittedChangesExcluded
+            ? { warnings: ['Only committed code was deployed; uncommitted changes in this repository were not included.'] } : {}),
+          next: ['hv_health'],
+        });
+      }
 
       const ciDeploy = ciBranchDeployGuidance(project, envName);
       if (ciDeploy) {

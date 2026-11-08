@@ -1,4 +1,5 @@
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
@@ -8,6 +9,7 @@ import {
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
+import { connectCloudflareInBrowser } from '../application/local-connect-page.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
 import {
@@ -104,7 +106,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
-      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup.'),
+      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat.'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like aws-secrets://name#key, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. GitHub packageReadToken alone updates an existing verified exact-scope connection while preserving its primary API credential. Optional for common single-token providers.'),
@@ -115,9 +117,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId: z.string().optional().describe('Exact GCP project ID. Bootstrap preview reuses verified repository-scoped access or derives a stable name when omitted; confirmation requires the exact ID returned by that preview. Prepare defaults to the Cloud Run connection projectId.'),
       billingAccountName: z.string().optional().describe('action="bootstrap" with confirm=true: exact open billing account name returned by the preview, such as billingAccounts/AAAAAA-BBBBBB-CCCCCC.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
-      gcsAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project.'),
+      gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
+      purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
+      environment: z.string().optional().describe('action="connect": the environment this access is for, shown on the connect page.'),
+      workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
       adminAuth: z.literal('default').optional().describe('Required for action="bootstrap" and confirmed action="prepare": use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
@@ -141,6 +146,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcsAccess,
       memorystoreAccess,
       queueAccess,
+      workerAccess,
+      purpose,
+      environment,
       adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
@@ -190,6 +198,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || gcsAccess !== undefined
           || memorystoreAccess !== undefined
           || queueAccess !== undefined
+          || workerAccess !== undefined
           || adminAuth !== undefined
           || adminCredentialsJson !== undefined
           || adminCredentialsJsonRef !== undefined
@@ -206,6 +215,24 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
 
       const requestedAction = action ?? 'add';
+      if (requestedAction === 'connect') {
+        if (provider !== 'cloudflare' || !scope?.trim()) {
+          return commandError('VALIDATION', 'action="connect" currently supports provider="cloudflare" with scope set to the domain to manage.', { next: ['hv_connections'] });
+        }
+        const { project: contextProject } = await resolveGuidanceContext().catch(() => ({ project: undefined }));
+        const repository = contextProject?.gitRemoteUrl ? parseGitHubRepoFromRemote(contextProject.gitRemoteUrl) : undefined;
+        const result = await connectCloudflareInBrowser({ domain: scope, context: {
+          ...(contextProject?.name ? { project: contextProject.name } : {}), ...(repository ? { repository } : {}),
+          ...(environment ? { environment } : {}), ...(purpose ? { purpose } : {}),
+        } });
+        return result.status === 'connected'
+          ? commandSuccess(result, { next: ['hv_launch', 'hv_plan'] })
+          : commandSuccess(result, {
+            hint: 'Tell the user a Cloudflare page is open in their browser and give them the link in case it did not open. Call action="connect" again after they finish.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to finish connecting Cloudflare in the browser tab that opened, then continue.' },
+            next: ['hv_connections'],
+          });
+      }
       // Stale connections for unregistered providers must stay removable.
       if (requestedAction !== 'remove' && !providerNames.includes(provider)) {
         return commandError('VALIDATION', `Unknown provider: ${provider}.`, {
@@ -215,7 +242,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction === 'describe') {
         const incompatible = suppliedOptionNames({ credentials, credentialsRef, credentialsKey, credentialsMap,
           gcpProjectId, billingAccountName, deployServiceAccountEmail,
-          gcsAccess, memorystoreAccess, queueAccess, adminAuth, adminCredentialsJson,
+          gcsAccess, memorystoreAccess, queueAccess, workerAccess, adminAuth, adminCredentialsJson,
           adminCredentialsJsonRef, adminAccessToken, adminAccessTokenRef, confirm });
         if (incompatible.length) return commandError('VALIDATION', `describe does not accept: ${incompatible.join(', ')}.`);
         const { context: repositoryGuidance } = await resolveGuidanceContext();
@@ -238,6 +265,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         gcsAccess,
         memorystoreAccess,
         queueAccess,
+        workerAccess,
         adminCredentialsJson,
         adminCredentialsJsonRef,
         adminAccessToken,
@@ -287,6 +315,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       if (requestedAction === 'prepare' && memorystoreAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'memorystoreAccess is supported only when preparing the shared cloudrun connection.');
+      }
+      if (requestedAction === 'prepare' && workerAccess && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'workerAccess is supported only when preparing the shared cloudrun connection.');
       }
       if (requestedAction === 'prepare' && queueAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'queueAccess is supported only when preparing the shared cloudrun connection.');
@@ -408,6 +439,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           gcsAccess,
           memorystoreAccess,
           queueAccess,
+          workerAccess,
           adminAuth,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,

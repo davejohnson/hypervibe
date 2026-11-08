@@ -216,11 +216,22 @@ export async function parseCliInvocation(
   return { command, input, json, nonInteractive, help, version };
 }
 
+/** Lists of fixed choices reject the placeholder 'value' but still repeat. */
+function isListSchema(schema: ZodTypeAny): boolean {
+  let current: unknown = schema;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    const definition = (current as { _zod?: { def?: { type?: string; innerType?: unknown } } })._zod?.def;
+    if (definition?.type === 'array') return true;
+    current = definition?.innerType;
+  }
+  return false;
+}
+
 function optionValue(schema: ZodTypeAny): string {
   if (schemaAccepts(schema, true) && schemaAccepts(schema, false)) {
     return '';
   }
-  if (schemaAccepts(schema, ['value'])) {
+  if (schemaAccepts(schema, ['value']) || isListSchema(schema)) {
     return ' <value...>';
   }
   return ' <value>';

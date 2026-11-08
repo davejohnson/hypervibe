@@ -4,6 +4,7 @@ import { railwayDeploySource } from './railway-deploy-source.js';
 import { runRailwayDatabaseTask } from './railway-database-task.js';
 import { createRailwayDatabaseInitializationInspection } from './railway-database-initialization-inspection.js';
 import { GraphQLClient, gql } from 'graphql-request';
+import { redactSensitiveString } from '../../../utils/redact-sensitive-string.js';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { resourceName } from '../../../domain/services/resource-names.js';
@@ -216,8 +217,10 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function buildTaskStartCommand(command: string): string {
-  const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:\${hv_exit}__"; exit $hv_exit`;
+export function buildTaskStartCommand(command: string, lingerSeconds = 0): string {
+  // A short task can exit before Railway's log stream reads its last lines; lingering lets them flush.
+  const linger = lingerSeconds > 0 ? `; sleep ${Math.floor(lingerSeconds)}` : '';
+  const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:\${hv_exit}__"${linger}; exit $hv_exit`;
   return `/bin/sh -c ${shellSingleQuote(inner)}`;
 }
 
@@ -4161,6 +4164,98 @@ export class RailwayAdapter implements
       return 'deploying';
     }
     return status.toLowerCase();
+  }
+
+  /**
+   * Runs one fixed program in a temporary service inside an exact environment so
+   * it can reach a database over Railway's private network, then deletes the
+   * service. Used for migration exports: no public TCP proxy is ever created.
+   * `variables` may use Railway references (for example ${{Postgres.DATABASE_URL}}).
+   * Returns only the program's last output lines and its exit code.
+   */
+  async runPrivateTask(params: {
+    projectId: string;
+    environmentId: string;
+    image: string;
+    command: string;
+    variables: Record<string, string>;
+    timeoutMs: number;
+  }): Promise<{ exitCode: number | undefined; output: string; cleanedUp: boolean; error?: string }> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const client = this.client;
+    const name = `hv-export-${Date.now().toString(36)}`;
+    let serviceId: string | undefined;
+    try {
+      // The program travels as a variable: Railway mishandles long multi-line start commands.
+      const created = await client.request<{ serviceCreate?: { id?: string; name?: string } }>(gql`
+        mutation CreatePrivateTask($input: ServiceCreateInput!) { serviceCreate(input: $input) { id name } }
+      `, { input: { projectId: params.projectId, environmentId: params.environmentId, name, variables: { ...params.variables, HV_TASK_SCRIPT: params.command } } });
+      if (!created.serviceCreate?.id || created.serviceCreate.name !== name) {
+        return { exitCode: undefined, output: '', cleanedUp: false, error: 'Railway returned an ambiguous task identity.' };
+      }
+      serviceId = created.serviceCreate.id;
+      await client.request(gql`
+        mutation ConfigurePrivateTask($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
+          serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+        }
+      `, { serviceId, environmentId: params.environmentId, input: {
+        source: { image: params.image }, startCommand: buildTaskStartCommand('sh -c "$HV_TASK_SCRIPT"', 45), restartPolicyType: 'NEVER', restartPolicyMaxRetries: 0,
+      } });
+      const deployed = await client.request<{ serviceInstanceDeployV2?: string }>(gql`
+        mutation DeployPrivateTask($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }
+      `, { serviceId, environmentId: params.environmentId });
+      const deploymentId = deployed.serviceInstanceDeployV2;
+      if (!deploymentId) return { exitCode: undefined, output: '', cleanedUp: false, error: 'Railway did not start the task.' };
+      const deadline = Date.now() + params.timeoutMs;
+      let lastLogs: RailwayLogEntry[] = [];
+      let lastLogError: string | undefined;
+      let lastStatus = 'UNKNOWN';
+      let succeededAt: number | undefined;
+      // The exit sentinel is the completion signal; NEVER-restart services have no "finished" status.
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        try {
+          const status = await client.request<{ deployment?: { status?: string } }>(gql`query PrivateTaskStatus($id: String!) { deployment(id: $id) { status } }`, { id: deploymentId });
+          lastStatus = status.deployment?.status ?? lastStatus;
+        } catch { /* keep the last known status */ }
+        // A finished task whose result never reaches the logs will not produce it later.
+        if (lastStatus === 'SUCCESS') succeededAt ??= Date.now();
+        if (succeededAt && Date.now() - succeededAt > 120_000) break;
+        if (['FAILED', 'CRASHED', 'REMOVED'].includes(lastStatus) && !lastLogs.length) {
+          try { lastLogs = await this.getDeploymentLogs(deploymentId, 500); } catch { /* reported below */ }
+          if (!lastLogs.some((entry) => entry.message.includes(TASK_EXIT_SENTINEL_PREFIX))) break;
+        }
+        let logs: RailwayLogEntry[] = [];
+        try { logs = await this.getDeploymentLogs(deploymentId, 500); lastLogs = logs; lastLogError = undefined; }
+        catch (error) { lastLogError = error instanceof Error ? error.message : String(error); continue; }
+        const exit = logs.map((entry) => entry.message.trim().match(/^__HYPERVIBE_TASK_EXIT:(\d+)__$/)).find(Boolean);
+        if (exit) {
+          const output = logs.map((entry) => entry.message).filter((message) => !message.includes(TASK_EXIT_SENTINEL_PREFIX)).slice(-40).join('\n');
+          return { exitCode: Number(exit[1]), output, cleanedUp: false };
+        }
+      }
+      const tail = redactSensitiveString(lastLogs.slice(-15).map((entry) => entry.message).join('\n')).slice(-2000);
+      return { exitCode: undefined, output: tail, cleanedUp: false,
+        error: `The Railway task did not finish (deployment ${lastStatus}${lastLogError ? `; reading its logs failed: ${lastLogError.slice(0, 200)}` : ''}).` };
+    } catch (error) {
+      return { exitCode: undefined, output: '', cleanedUp: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (serviceId) {
+        const removed = await this.deleteService(serviceId, { scope: 'environment', projectId: params.projectId, environmentId: params.environmentId }, { allowMutation: true })
+          .catch(() => ({ success: false }));
+        this.lastPrivateTaskCleanup = removed.success;
+      }
+    }
+  }
+
+  /** Whether the most recent private task's temporary service was deleted. */
+  lastPrivateTaskCleanup = false;
+
+  /** Railway service name of a database service, for private ${{Name.VAR}} references. */
+  async serviceName(serviceId: string): Promise<string | undefined> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const result = await this.client.request<{ service?: { name?: string } }>(gql`query ServiceName($id: String!) { service(id: $id) { name } }`, { id: serviceId });
+    return result.service?.name;
   }
 
   async runJob(

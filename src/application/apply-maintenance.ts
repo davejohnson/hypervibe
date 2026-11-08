@@ -171,7 +171,8 @@ export async function applyMaintenanceAction(params: {
         environment = saveBinding(params.ctx, environment, { ...currentBinding, mode, state: 'entering',
           pendingEdge: { ...prior, contentHash }, updatedAt: new Date().toISOString() });
       }
-      const receipt = await result.adapter.ensureMaintenanceEdge(hostname, contentHash, currentBinding?.edge);
+      const appName = params.project.name.replace(/[-_]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+      const receipt = await result.adapter.ensureMaintenanceEdge(hostname, contentHash, currentBinding?.edge, { appName });
       if (!receipt.success) {
         return blocked('Maintenance edge was not enabled', receipt.error ?? receipt.message);
       }

@@ -39,6 +39,7 @@ import type {
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   cloudRunMigrationJobName,
@@ -261,7 +262,7 @@ interface CloudRunContainer {
   livenessProbe?: { httpGet?: { path?: string } };
 }
 
-interface CloudBuildResult {
+export interface CloudBuildResult {
   success: boolean;
   imageUri?: string;
   buildId?: string;
@@ -450,6 +451,89 @@ export class CloudRunAdapter implements
       this.serviceAccountCreds = JSON.parse(this.credentials.credentials);
     } catch {
       throw new Error('Invalid service account JSON');
+    }
+  }
+
+  /**
+   * OpenTofu engine integration only: the connection's deployment credential
+   * for the engine process environment. Callers must redact it from every output.
+   */
+  engineConnection(): { projectId: string; credentials: string; runtimeServiceAccountEmail?: string } {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId, credentials, runtimeServiceAccountEmail } = this.credentials;
+    return { projectId, credentials, ...(runtimeServiceAccountEmail ? { runtimeServiceAccountEmail } : {}) };
+  }
+
+  /** OpenTofu engine integration only: short-lived token for retained operational calls. */
+  async engineAccessToken(): Promise<string> {
+    return this.getAccessToken();
+  }
+
+  /**
+   * OpenTofu engine integration only: a short-lived token limited to Google
+   * Site Verification, used to prove domain ownership as the deployment identity.
+   */
+  async siteVerificationAccessToken(): Promise<string> {
+    if (!this.serviceAccountCreds) throw new Error('No service account credentials');
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await this.createJwt({ alg: 'RS256', typ: 'JWT' }, {
+      iss: this.serviceAccountCreds.client_email,
+      sub: this.serviceAccountCreds.client_email,
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 600,
+      scope: 'https://www.googleapis.com/auth/siteverification',
+    }, this.serviceAccountCreds.private_key);
+    const response = await fetchWithRetry('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }),
+    }, 4, true);
+    if (!response.ok) throw new Error(`Site Verification token exchange failed: HTTP ${response.status}`);
+    return ((await response.json()) as { access_token: string }).access_token;
+  }
+
+  /** The deployment identity's email, which becomes the verified domain owner. */
+  engineDeploymentIdentity(): string {
+    if (!this.serviceAccountCreds) throw new Error('No service account credentials');
+    return this.serviceAccountCreds.client_email;
+  }
+
+  /**
+   * Builds from an archive of the user's local repository (an exact commit),
+   * so private repositories need no git credentials. The archive is uploaded
+   * to the project's private build-source bucket prepared during GCP setup.
+   */
+  async buildReleaseImageFromArchive(
+    service: Service,
+    environment: Environment,
+    source: { archive: Buffer; commitSha: string; bucket: string }
+  ): Promise<CloudBuildResult> {
+    if (!this.credentials) return { success: false, error: 'Not connected. Call connect() first.' };
+    try {
+      const token = await this.getAccessToken();
+      const { projectId, region } = this.credentials;
+      const object = `source/${environment.name}/${service.name}/${source.commitSha}-${Date.now()}.tar.gz`;
+      const upload = await fetch(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(source.bucket)}/o?uploadType=media&name=${encodeURIComponent(object)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/gzip' },
+        body: new Uint8Array(source.archive),
+      });
+      if (upload.status === 403 || upload.status === 404) {
+        return { success: false, error: 'The private build-source bucket is not ready. Re-run GCP setup (hv_connections action="prepare" for cloudrun), then retry.' };
+      }
+      if (!upload.ok) return { success: false, error: `Uploading the source archive failed (HTTP ${upload.status}).` };
+      const repository = 'hypervibe';
+      const imageName = this.sanitizeName(`${environment.name}-${service.name}`);
+      const imageUri = `${region}-docker.pkg.dev/${projectId}/${repository}/${imageName}:${source.commitSha.slice(0, 12)}-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}`;
+      await this.ensureArtifactRepository(repository, token);
+      const build = await this.submitCloudBuild({
+        token, service, sourceRepoUrl: '', revision: source.commitSha, imageUri,
+        storageSource: { bucket: source.bucket, object },
+      });
+      return { success: true, imageUri: build.imageUri, buildId: build.id, logsUrl: build.logsUrl, resolvedCommitSha: source.commitSha };
+    } catch (error) {
+      return { success: false, error: this.formatError(error) };
     }
   }
 
@@ -2955,6 +3039,8 @@ export class CloudRunAdapter implements
     sourceRepoUrl: string;
     revision: string;
     imageUri: string;
+    /** Build from an uploaded archive instead of cloning a git URL. */
+    storageSource?: { bucket: string; object: string };
   }): Promise<{
     id?: string;
     logsUrl?: string;
@@ -2966,19 +3052,21 @@ export class CloudRunAdapter implements
     }
 
     const { projectId } = this.credentials;
-    const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
+    const submit = (buildIdentity?: string) => fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        source: {
-          gitSource: {
-            url: params.sourceRepoUrl,
-            revision: params.revision,
+        source: params.storageSource
+          ? { storageSource: params.storageSource }
+          : {
+            gitSource: {
+              url: params.sourceRepoUrl,
+              revision: params.revision,
+            },
           },
-        },
         steps: [{
           name: 'gcr.io/cloud-builders/docker',
           entrypoint: 'bash',
@@ -2986,9 +3074,27 @@ export class CloudRunAdapter implements
         }],
         images: [params.imageUri],
         timeout: '1200s',
+        // A user-specified build identity requires an explicit logging mode.
+        ...(buildIdentity
+          ? { serviceAccount: `projects/${projectId}/serviceAccounts/${buildIdentity}`, options: { logging: 'CLOUD_LOGGING_ONLY' } }
+          : {}),
       }),
     });
 
+    let response = await submit();
+    if (response.status === 403) {
+      const text = await response.text();
+      const deployIdentity = this.serviceAccountCreds?.client_email;
+      // Newer projects build as the Compute Engine default account (Editor).
+      // Never act as it; build as the deployment identity instead.
+      if (!/act as service account/i.test(text) || !deployIdentity) {
+        throw new Error(`Cloud Build submission failed: ${response.status} ${text}`);
+      }
+      response = await submit(deployIdentity);
+      if (response.status === 403) {
+        throw new Error('Cloud Build cannot run as the Hypervibe deployment identity yet. Re-run GCP setup (hv_connections action="prepare" for cloudrun) to grant the build permissions, then retry.');
+      }
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`Cloud Build submission failed: ${response.status} ${text}`);
@@ -3109,6 +3215,8 @@ export class CloudRunAdapter implements
 
     return [
       'set -euo pipefail',
+      // Generated Dockerfiles mount the optional package token as a build secret.
+      'export DOCKER_BUILDKIT=1',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
       `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,
@@ -3189,14 +3297,14 @@ export class CloudRunAdapter implements
     const jwt = await this.createJwt(header, payload, this.serviceAccountCreds.private_key);
 
     // Exchange JWT for access token
-    const response = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await fetchWithRetry('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
         assertion: jwt,
       }),
-    });
+    }, 4, true);
 
     if (!response.ok) {
       const text = await response.text();

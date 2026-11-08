@@ -56,12 +56,48 @@ replace them with remembered permission tables or dashboard procedures.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
 
+An environment with `hosting.engine: "opentofu"` (experimental GCP path; use it
+only when the spec already has it or the user asks) is driven end to end by
+`hv_launch`: it connects GCP, creates or updates the Cloud Run services, Cloud
+SQL database, storage buckets and custom domain in reviewed rounds, releases
+the committed local code and verifies it. Ask the user only at its stop points:
+`needs_billing_choice` (show its `plannedSteps`, including any resource access
+listed there; choosing the account approves them), `needs_access` (an existing
+project needs one more permission: explain it, then pass its `accessId` in
+`approveAccess`) and `needs_confirmation` (show the changes and estimated
+monthly cost, then pass exactly `confirmActions`). Call it again after
+`pending`.
+
+Keep running costs low by default. A background worker that polls a database
+queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
+`SELECT count(*)` of queued plus in-progress work, read from the app's own
+job code (for example claimed status, run-after time and remaining attempts).
+The worker then runs only while that count is above zero and starts within
+about a minute of new work. Keep a worker always on only when it must react
+instantly or does not use the app database.
+
+`hv_migrate` moves an app from another environment (for example Railway) to an
+OpenTofu-managed GCP environment and stops at the same points, plus
+`needs_secret_import` and `needs_copy_approval`. The source keeps serving.
+After a verified copy, a re-run releases without copying again; pass
+`refreshData=true` only after the user approves copying again, and
+`verifyOnly=true` to compare the source and the copy (row counts, per-table
+content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
+`hv_deploy` remain available for individual steps; a full-scope `hv_plan` is
+refused. Resources it reports as unsupported stay blocked; do not work around
+them.
+
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
 requires explicit intent to adopt and the exact reviewed mapping.
 
 ## Present the next step accurately
 
+- Every manual provider step comes with a clickable deep link to the exact
+  page or pre-filled form (for example the Cloudflare token form with its
+  permissions already selected), never only a list of settings to find by
+  hand. When a result names missing permissions without a link, get one from
+  `hv_connections action="describe"` before replying.
 - For a form the user must complete, first request contextual guidance through
   `hv_connections action="describe"` with the known `provider` and `scope`, plus `project` only
   when already initialized. Generic provider discovery is not completed scoped

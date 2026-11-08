@@ -22,6 +22,8 @@ export interface CloudPreparationRecord {
   requiredRoles: string[];
   runtimeRequiredRoles?: string[];
   runtimeServiceAccountAccessRoles?: string[];
+  /** Roles the runtime identity holds on itself (granted on that one service account). */
+  runtimeSelfRoles?: string[];
 }
 
 export const CLOUD_PREPARE_PROFILES: Record<CloudPrepareProvider, CloudPrepareProfile> = {
@@ -89,6 +91,7 @@ export function getCloudPreparation(
     requiredRoles,
     runtimeRequiredRoles: asStringArray(record.runtimeRequiredRoles),
     runtimeServiceAccountAccessRoles: asStringArray(record.runtimeServiceAccountAccessRoles),
+    runtimeSelfRoles: asStringArray(record.runtimeSelfRoles),
   };
 }
 
@@ -104,6 +107,14 @@ export const CLOUD_RUN_RUNTIME_QUEUE_ROLES = [
 
 /** Existing cloud preparation grants these at project scope, not bucket scope. */
 export const CLOUD_RUN_RUNTIME_STORAGE_ROLES = ['roles/storage.objectUser'] as const;
+
+/**
+ * Lets Cloud Build run as the deployment identity instead of the project's
+ * Compute Engine default account (Editor). Granted during base preparation but
+ * not required by isCloudPrepared, so existing projects keep working.
+ */
+export const CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES = ['roles/logging.logWriter'] as const;
+export const CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES = ['roles/iam.serviceAccountUser'] as const;
 
 export const CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES = [
   'roles/iam.serviceAccountUser',
@@ -157,6 +168,36 @@ export const QUEUE_PREPARE_ADDON = {
 
 export type QueuePrepareAccess = 'lifecycle' | 'remove';
 
+/**
+ * On-demand background workers: a scheduled Google Workflow, running as the
+ * app's runtime identity, counts pending work through the Cloud SQL Data API
+ * and scales the worker pool between zero and one instance. Selected
+ * explicitly with workerAccess="lifecycle".
+ */
+export const WORKER_WAKE_PREPARE_ADDON = {
+  requiredApis: ['workflows.googleapis.com'],
+  requiredRoles: ['roles/workflows.editor'],
+} as const;
+
+export const CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES = ['roles/workflows.invoker', 'roles/cloudsql.instanceUser'] as const;
+
+/** Changing a worker pool's instance count requires acting as the pool's identity: the runtime identity, on itself only. */
+export const CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES = ['roles/iam.serviceAccountUser'] as const;
+
+export type WorkerPrepareAccess = 'lifecycle';
+
+/** Whether GCP setup granted on-demand worker access (the workerAccess="lifecycle" add-on). */
+export function isCloudPreparedForWorkerWake(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record
+    && WORKER_WAKE_PREPARE_ADDON.requiredApis.every((api) => record.requiredApis.includes(api))
+    && WORKER_WAKE_PREPARE_ADDON.requiredRoles.every((role) => record.requiredRoles.includes(role))
+    && (!record.runtimeServiceAccountEmail
+      || (CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES.every((role) => (record.runtimeRequiredRoles ?? []).includes(role))
+        && CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES.every((role) => (record.runtimeSelfRoles ?? []).includes(role)))));
+}
+
 export const GCS_PREPARE_ADDONS = {
   inspect: {
     requiredApis: ['storage.googleapis.com'],
@@ -165,6 +206,11 @@ export const GCS_PREPARE_ADDONS = {
   lifecycle: {
     requiredApis: ['storage.googleapis.com'],
     requiredRoles: ['roles/storage.admin'],
+  },
+  /** S3-compatible bucket access: lets Hypervibe create S3-style access keys for the runtime identity. */
+  s3: {
+    requiredApis: ['storage.googleapis.com'],
+    requiredRoles: ['roles/storage.hmacKeyAdmin'],
   },
 } as const;
 
@@ -198,6 +244,27 @@ export function isCloudPreparedForQueues(
     && (!record.runtimeServiceAccountEmail
       || CLOUD_RUN_RUNTIME_QUEUE_ROLES.every((role) => (record.runtimeRequiredRoles ?? []).includes(role)))
   );
+}
+
+/** Whether GCP setup granted bucket lifecycle access (the explicit gcsAccess="lifecycle" add-on). */
+export function isCloudPreparedForStorage(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record && GCS_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
+}
+
+/** Whether GCP setup granted Memorystore lifecycle access (the memorystoreAccess="lifecycle" add-on). */
+export function isCloudPreparedForCache(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record && MEMORYSTORE_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
+}
+
+/** Whether GCP setup granted S3-compatible key management (the gcsAccess="s3" add-on). */
+export function isCloudPreparedForStorageS3(project: Pick<Project, 'policies'> | null | undefined): boolean {
+  if (!project) return false;
+  const record = getCloudPreparation(project, 'cloudrun');
+  return Boolean(record && GCS_PREPARE_ADDONS.s3.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
 export function withCloudPreparationRecord(
