@@ -93,6 +93,11 @@ requires explicit intent to adopt and the exact reviewed mapping.
 
 ## Present the next step accurately
 
+- Every manual provider step comes with a clickable deep link to the exact
+  page or pre-filled form (for example the Cloudflare token form with its
+  permissions already selected), never only a list of settings to find by
+  hand. When a result names missing permissions without a link, get one from
+  `hv_connections action="describe"` before replying.
 - For a form the user must complete, first request contextual guidance through
   `hv_connections action="describe"` with the known `provider` and `scope`, plus `project` only
   when already initialized. Generic provider discovery is not completed scoped

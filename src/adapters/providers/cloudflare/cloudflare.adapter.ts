@@ -599,7 +599,7 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
       // A DNS-only token cannot read Workers; say exactly which permissions to add.
       const denied = /authentication error|unauthorized|forbidden/i.test(error instanceof Error ? error.message : String(error));
       return { state: 'unknown', hostname, markerVerified: false, reason: denied
-        ? 'The Cloudflare token cannot manage Workers. Add Zone > Workers Routes > Edit and Account > Workers Scripts > Edit to it, then plan again.'
+        ? `The Cloudflare token cannot manage Workers. Create a replacement from this pre-filled form (it includes Zone > Workers Routes > Edit and Account > Workers Scripts > Edit; narrow it to this zone and account before creating): ${CLOUDFLARE_TOKEN_URLS.user}. Then reconnect with hv_connections provider="cloudflare" action="connect" and plan again.`
         : 'maintenance_edge_observation_failed' };
     }
   }
