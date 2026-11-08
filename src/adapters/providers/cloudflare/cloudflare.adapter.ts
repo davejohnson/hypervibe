@@ -366,6 +366,32 @@ function isDuplicateDnsRecordError(error: unknown): boolean {
   return /already exists|identical record/i.test(message);
 }
 
+function escapeMaintenanceHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+}
+
+/** A neutral, self-contained notice in the app's name; it loads nothing and refreshes itself. */
+export function maintenancePageHtml(appName: string): string {
+  const app = escapeMaintenanceHtml(appName);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60"><meta name="robots" content="noindex"><title>${app} · Scheduled maintenance</title>
+<style>
+:root{--bg:#f7f7f8;--fg:#18181b;--muted:#63636b;--card:#fff;--line:#e4e4e7;--dot:#d97706}
+@media (prefers-color-scheme:dark){:root{--bg:#0f0f11;--fg:#f4f4f5;--muted:#a1a1aa;--card:#18181b;--line:#27272a;--dot:#f59e0b}}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;padding:24px}
+main{width:100%;max-width:30rem;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:2.25rem 2rem;text-align:center}
+.app{font-weight:700;font-size:1.05rem;letter-spacing:-.01em;margin:0 0 1.5rem;color:var(--fg)}
+.status{display:inline-flex;align-items:center;gap:.5rem;font-size:.8rem;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:.2rem .7rem;margin-bottom:1rem}
+.status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--dot)}
+h1{font-size:1.5rem;line-height:1.25;margin:0 0 .6rem;letter-spacing:-.015em}p{margin:0;color:var(--muted)}
+</style></head><body><main>
+<p class="app">${app}</p>
+<div class="status"><i></i>Scheduled maintenance</div>
+<h1>We'll be back shortly</h1>
+<p>${app} is briefly offline for planned maintenance. Your data is safe. This page refreshes on its own.</p>
+</main></body></html>`;
+}
+
 export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IEdgeMaintenanceAdapter, IEdgeTrafficAdapter {
   readonly name = 'cloudflare';
   private credentials: CloudflareCredentials | null = null;
@@ -536,11 +562,17 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
     return response;
   }
 
-  private maintenanceScript(hostname: string): { name: string; source: string; contentHash: string } {
+  /**
+   * The Worker that answers for a paused app. Visitors see the app's own
+   * name on a self-contained notice page; the marker header (derived from the
+   * hostname only) lets Hypervibe verify the page without depending on its text.
+   */
+  private maintenanceScript(hostname: string, page?: { appName?: string }): { name: string; source: string; contentHash: string } {
     const normalized = normalizedEdgeHostname(hostname);
     const contentHash = createHash('sha256').update(`hypervibe-maintenance-v1:${normalized}`).digest('hex');
     const name = `hv-maintenance-${createHash('sha256').update(normalized).digest('hex').slice(0, 20)}`;
-    const source = `addEventListener("fetch",event=>event.respondWith(new Response("Temporarily unavailable for maintenance\\n",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store","Retry-After":"30","X-Hypervibe-Maintenance":"${contentHash}"}})));`;
+    const html = maintenancePageHtml(page?.appName?.trim() || normalized);
+    const source = `const body=${JSON.stringify(html)};addEventListener("fetch",event=>event.respondWith(new Response(body,{status:503,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","Retry-After":"60","X-Hypervibe-Maintenance":"${contentHash}"}})));`;
     return { name, source, contentHash };
   }
 
@@ -607,11 +639,12 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
   async ensureMaintenanceEdge(
     hostname: string,
     expectedContentHash: string,
-    binding?: MaintenanceEdgeBinding
+    binding?: MaintenanceEdgeBinding,
+    page?: { appName?: string }
   ): Promise<Receipt> {
     hostname = normalizedEdgeHostname(hostname);
     try {
-      const expected = this.maintenanceScript(hostname);
+      const expected = this.maintenanceScript(hostname, page);
       if (expected.contentHash !== expectedContentHash) {
         throw new Error('Reviewed maintenance content changed.');
       }

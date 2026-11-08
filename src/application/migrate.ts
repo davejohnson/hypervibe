@@ -238,8 +238,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
 
   if (params.cutover) {
     if (!migration()?.copiedAt) return { status: 'blocked', message: `Migrate ${params.from} to ${params.to} and check the app there before the cutover.` };
-    return cutoverEnvironment(ctx, params, () => verifyMigratedCopy(ctx, { project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
-      instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName, copiedAt: migration()!.copiedAt }));
+    return cutoverEnvironment(ctx, params);
   }
 
   if (params.verifyOnly) {
@@ -445,7 +444,7 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
  * then its existing domain forwards to the target. The source's resources and
  * DNS stay in place, so pointing the domain back is one more reviewed change.
  */
-async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof migrateEnvironment>[1], verify: () => Promise<MigrateResult>): Promise<MigrateResult> {
+async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof migrateEnvironment>[1]): Promise<MigrateResult> {
   const store = new SpecStore();
   const spec = store.get(params.project)!.spec;
   const source = spec.environments[params.from]!;
@@ -487,16 +486,17 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
   if (Object.keys(retarget).length) store.merge(params.project, { environments: { [params.to]: { envVars: retarget } } });
   const copied = await migrateEnvironment(ctx, { ...params, cutover: false, confirmCutover: false, copyData: true, refreshData: true });
   if (copied.status !== 'migrated') return copied;
-  const checked = await verify();
-  if (checked.status !== 'verified') {
-    return { status: 'blocked', message: `The final copy does not match the paused source, so ${domain} keeps showing the maintenance page. ${'message' in checked ? checked.message : ''}` };
+  // The copy is proven by its own check: the paused source's checksums against the restored
+  // target, taken before the target app can write. A later comparison would race the live target.
+  if (copied.database && !copied.database.match) {
+    return { status: 'blocked', message: `The final copy does not match the paused source (${copied.database.differences.slice(0, 3).join('; ')}), so ${domain} keeps showing the maintenance page.` };
   }
   // 3. Send the domain to the target.
   store.merge(params.project, { environments: { [params.from]: { domainTarget: { environment: params.to, service: web }, maintenance: { enabled: true, mode: 'application', page: 'off' } } } });
   const moved = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'traffic move');
   if (moved !== 'done') return moved;
   return {
-    status: 'cut_over', domain, target: params.to, ...('database' in checked && checked.database ? { database: checked.database } : {}),
+    status: 'cut_over', domain, target: params.to, ...(copied.database ? { database: copied.database } : {}),
     message: `${domain} now forwards to ${params.to}; the final copy matched the paused source. ${params.from} stays paused with its data and DNS in place.`,
   };
 }
