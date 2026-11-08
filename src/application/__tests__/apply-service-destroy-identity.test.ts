@@ -19,6 +19,25 @@ import type {
 } from '../../domain/ports/provider.port.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { bindingIdentityFingerprint } from '../../domain/services/binding-identity.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services'], ['fixture-regional-hosting', 'project']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
 
 const target = {
   provider: 'railway',
@@ -584,13 +603,13 @@ describe('hosting service destroy apply identity', () => {
 
   it('blocks aggregate-absent project-scoped task cleanup before adapter resolution', async () => {
     const projectId = '/subscriptions/sub/resourceGroups/hv-app';
-    const action = taskDestroyAction({ provider: 'azure-container-apps', projectId, deleteScope: 'project' });
+    const action = taskDestroyAction({ provider: 'fixture-regional-hosting', projectId, deleteScope: 'project' });
     ctx.repos.environments.updatePlatformBindings(environment.id, {
-      provider: 'azure-container-apps',
+      provider: 'fixture-regional-hosting',
       projectId,
     });
     freshObservation = observedState({
-      provider: 'azure-container-apps',
+      provider: 'fixture-regional-hosting',
       projectId,
       environmentId: undefined,
       services: [],
@@ -614,7 +633,7 @@ describe('hosting service destroy apply identity', () => {
   });
 
   it.each([
-    ['provider', { provider: 'cloudrun' }],
+    ['provider', { provider: 'fixture-hosting' }],
     ['project', { projectId: 'rail-project-rebound' }],
     ['environment', { environmentId: 'rail-environment-rebound' }],
     ['service id', { services: { [target.serviceName]: { serviceId: 'rail-service-rebound' } } }],

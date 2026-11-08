@@ -1475,8 +1475,6 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec, then hv_plan.' });
       }
-      validateInstalledProviders(specResult.spec);
-
       const outcome = await executePlanApply(ctx, {
         project,
         spec: specResult.spec,

@@ -34,8 +34,9 @@ describe('host-native database default', () => {
     const registeredNativeProviders = providerRegistry.namesFor('database').filter(name =>
       providerRegistry.getMetadata(name)?.lifecycle?.databaseConnectivity
     );
-    expect(registeredNativeProviders.sort()).toEqual(Object.keys(nativeDatabaseConnectivity).sort());
-    for (const [provider, connectivity] of Object.entries(nativeDatabaseConnectivity)) {
+    expect(registeredNativeProviders).toEqual(['railway']);
+    for (const provider of registeredNativeProviders) {
+      const connectivity = nativeDatabaseConnectivity[provider as keyof typeof nativeDatabaseConnectivity];
       expect(providerRegistry.getMetadata(provider)?.lifecycle?.databaseConnectivity).toEqual(connectivity);
     }
   });

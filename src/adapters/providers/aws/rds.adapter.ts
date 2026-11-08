@@ -1,12 +1,9 @@
-import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import {
-  CreateDBInstanceCommand,
-  DeleteDBInstanceCommand,
   ModifyDBInstanceCommand,
   DescribeDBInstancesCommand,
   DescribeDBSubnetGroupsCommand,
@@ -15,8 +12,6 @@ import {
 } from '@aws-sdk/client-rds';
 import {
   AuthorizeSecurityGroupIngressCommand,
-  CreateSecurityGroupCommand,
-  DeleteSecurityGroupCommand,
   DescribeSecurityGroupRulesCommand,
   DescribeSecurityGroupsCommand,
   DescribeSubnetsCommand,
@@ -33,19 +28,15 @@ import type { Component } from '../../../domain/entities/component.entity.js';
 import type {
   DatabaseCapabilities,
   DatabaseTargetOptions,
-  IDatabaseAdapter,
-  ProvisionResult,
-  ProvisionableType,
+  IDatabaseOperations,
 } from '../../../domain/ports/database.port.js';
-import { databaseCreateMayHaveCommitted } from '../../../domain/ports/database.port.js';
-import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
 import type { IObservableDatabase, ObservedDatabase } from '../../../domain/ports/observe.port.js';
 import {
   providerRegistry,
   standardDatabaseRuntimeProjection,
   type ProviderInspectionRequest,
 } from '../../../domain/registry/provider.registry.js';
-import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import {
   type AwsWorkloadNetwork,
@@ -74,28 +65,11 @@ type TemporaryIngress = {
   port: number;
 };
 
-class RdsSecurityGroupProvisionError extends Error {
-  constructor(
-    message: string,
-    readonly groupId: string | undefined,
-    readonly vpcId: string,
-    readonly groupName: string
-  ) {
-    super(message);
-    this.name = 'RdsSecurityGroupProvisionError';
-  }
-}
 
 const PUBLIC_IP_ENDPOINT = 'https://checkip.amazonaws.com/';
 const TEMPORARY_INGRESS_DESCRIPTION = 'Hypervibe operation-scoped database query';
-const RUNTIME_INGRESS_DESCRIPTION = 'Hypervibe ECS workload access to RDS';
 const DATABASE_PORT = 5432;
-const DEFAULT_POLL_ATTEMPTS = 120;
-const DEFAULT_POLL_DELAY_MS = 15_000;
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function encodeDatabaseUrl(params: {
   username: string;
@@ -150,7 +124,7 @@ function hypervibeTemporaryRule(
   };
 }
 
-export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
+export class RdsAdapter implements IDatabaseOperations, IObservableDatabase {
   readonly name = 'rds';
 
   readonly credentialLifecycle = createPostgresCredentialLifecycle(() => this, {
@@ -280,257 +254,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     this.accountId = null;
   }
 
-  async provision(
-    type: ProvisionableType,
-    environment: Environment,
-    options?: { size?: string; region?: string; databaseName?: string; resourceName?: string }
-  ): Promise<ProvisionResult> {
-    if (!this.rds || !this.ec2 || !this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-    if (type !== 'postgres') {
-      return this.failedProvision(environment, type, `Amazon RDS adapter supports postgres. Requested type: ${type}`);
-    }
-
-    const identifier = this.sanitizeIdentifier(options?.resourceName || environmentResourceName('postgres', environment));
-    const database = this.sanitizeDatabaseName(options?.databaseName ?? 'app');
-    const username = 'hypervibe_admin';
-    const password = this.generatePassword();
-    try {
-      this.configureForEcsEnvironment(environment, options?.region);
-    } catch (error) {
-      return this.failedProvision(
-        environment,
-        type,
-        `Amazon RDS requires the exact applied ECS workload network: ${error instanceof Error ? error.message : String(error)}`,
-        { instanceId: identifier, resourceCreated: false }
-      );
-    }
-    let securityGroupId: string | undefined;
-    let securityGroupVpcId: string | undefined;
-    let securityGroupName: string | undefined;
-    let securityGroupCreated = false;
-    let instanceMutationAttempted = false;
-    let instanceCreateAcknowledged = false;
-    let instanceCreateMayHaveCommitted = false;
-    let existing: DBInstance | null;
-    try {
-      existing = await this.describeInstance(identifier);
-    } catch (error) {
-      return this.failedProvision(
-        environment,
-        type,
-        `Could not observe Amazon RDS instance ${identifier}, so Hypervibe refused to create a database whose absence is unknown: ${error instanceof Error ? error.message : String(error)}`,
-        {
-          instanceId: identifier,
-          resourceCreated: 'unknown',
-          liveObservationError: error instanceof Error ? error.message : String(error),
-        }
-      );
-    }
-    if (existing) {
-      return this.failedProvision(
-        environment,
-        type,
-        `Amazon RDS instance ${identifier} already exists. Hypervibe will not silently adopt or replace it; use hv_import for that exact provider identity.`,
-        {
-          instanceId: existing.DBInstanceIdentifier ?? identifier,
-          resourceCreated: true,
-        }
-      );
-    }
-    let workloadNetwork: AwsWorkloadNetwork;
-    try {
-      workloadNetwork = await this.resolveWorkloadNetwork(environment, options?.region);
-    } catch (error) {
-      return this.failedProvision(
-        environment,
-        type,
-        `Amazon RDS requires the exact applied ECS workload network: ${error instanceof Error ? error.message : String(error)}`,
-        { instanceId: identifier, resourceCreated: false }
-      );
-    }
-    const providerScope: Record<string, string> = {
-      accountId: workloadNetwork.accountId,
-      region: workloadNetwork.region,
-    };
-    try {
-      try {
-        const securityGroup = await this.ensureSecurityGroup(identifier, workloadNetwork);
-        securityGroupId = securityGroup.id;
-        securityGroupVpcId = securityGroup.vpcId;
-        securityGroupName = securityGroup.name;
-        securityGroupCreated = securityGroup.created;
-      } catch (error) {
-        if (error instanceof RdsSecurityGroupProvisionError) {
-          securityGroupId = error.groupId;
-          securityGroupVpcId = error.vpcId;
-          securityGroupName = error.groupName;
-          securityGroupCreated = true;
-        }
-        throw error;
-      }
-      instanceMutationAttempted = true;
-      try {
-        await this.rds.send(new CreateDBInstanceCommand({
-          DBInstanceIdentifier: identifier,
-          DBInstanceClass: options?.size ?? 'db.t4g.micro',
-          Engine: 'postgres',
-          MasterUsername: username,
-          MasterUserPassword: password,
-          AllocatedStorage: 20,
-          DBName: database,
-          Port: 5432,
-          PubliclyAccessible: true,
-          StorageEncrypted: true,
-          BackupRetentionPeriod: 7,
-          MultiAZ: false,
-          StorageType: 'gp3',
-          VpcSecurityGroupIds: [securityGroupId],
-          ...(this.credentials.dbSubnetGroupName ? { DBSubnetGroupName: this.credentials.dbSubnetGroupName } : {}),
-          Tags: [
-            { Key: 'Environment', Value: environment.name },
-            { Key: 'ManagedBy', Value: 'Hypervibe' },
-          ],
-        }));
-      } catch (error) {
-        instanceCreateMayHaveCommitted = databaseCreateMayHaveCommitted(error);
-        throw error;
-      }
-      instanceCreateMayHaveCommitted = true;
-      instanceCreateAcknowledged = true;
-
-      const instance = await this.waitForInstance(identifier, 'available');
-      if (!instance.Endpoint?.Address || !instance.Endpoint.Port) {
-        throw new Error(`RDS instance ${identifier} became available without an endpoint.`);
-      }
-      await this.assertInstanceNetwork(instance, identifier, securityGroupId, workloadNetwork);
-      const connectionUrl = encodeDatabaseUrl({
-        username,
-        password,
-        host: instance.Endpoint.Address,
-        port: instance.Endpoint.Port,
-        database,
-      });
-      const liveScope = this.instanceScope(instance);
-      if (liveScope.accountId !== providerScope.accountId || liveScope.region !== providerScope.region) {
-        throw new Error(`RDS instance ${identifier} resolved outside the connected account or desired region.`);
-      }
-      const component: Component = {
-        id: '',
-        environmentId: environment.id,
-        type: 'postgres',
-        bindings: {
-          provider: 'rds',
-          instanceId: identifier,
-          instanceArn: instance.DBInstanceArn,
-          providerScope: liveScope,
-          connectionString: connectionUrl,
-          host: instance.Endpoint.Address,
-          port: instance.Endpoint.Port,
-          username,
-          password,
-          database,
-          securityGroupId,
-          securityGroupVpcId,
-          securityGroupName,
-          securityGroupManagedByHypervibe: true,
-          securityGroupRuntimeIngressManaged: true,
-          workloadSecurityGroupId: workloadNetwork.workloadSecurityGroupId,
-          subnetIds: workloadNetwork.subnetIds,
-          publiclyAccessible: instance.PubliclyAccessible === true,
-        },
-        externalId: identifier,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-      return {
-        component,
-        connectionUrl,
-        envVars: buildDatabaseEnvVarsFromComponent(component).envVars,
-        receipt: {
-          success: true,
-          message: `Created and verified Amazon RDS PostgreSQL instance ${identifier}`,
-          data: { instanceId: identifier, status: instance.DBInstanceStatus, securityGroupId },
-        },
-      };
-    } catch (error) {
-      let live: DBInstance | null | undefined;
-      let liveObservationError: string | undefined;
-      try {
-        live = instanceCreateMayHaveCommitted
-          ? await this.recoverInstanceAfterCreateAttempt(identifier)
-          : await this.describeInstance(identifier);
-      } catch (observationError) {
-        liveObservationError = observationError instanceof Error
-          ? observationError.message
-          : String(observationError);
-      }
-      // Delete the network resource only after RDS positively confirms that
-      // no database exists. An unreadable instance is unknown, not absent.
-      let networkCleanupError: string | undefined;
-      if (live === null && !instanceCreateMayHaveCommitted && securityGroupCreated && securityGroupId) {
-        try {
-          await this.deleteSecurityGroupById(
-            securityGroupId,
-            identifier,
-            securityGroupVpcId
-          );
-          securityGroupId = undefined;
-          securityGroupVpcId = undefined;
-          securityGroupName = undefined;
-          securityGroupCreated = false;
-        } catch (cleanupError) {
-          networkCleanupError = cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError);
-        }
-      }
-      const retainIdentity = securityGroupCreated
-        || Boolean(securityGroupId)
-        || instanceCreateMayHaveCommitted;
-      const partialComponent = retainIdentity
-        ? this.partialProvisionComponent({
-            environment,
-            identifier,
-            type,
-            providerScope,
-            username,
-            password,
-            database,
-            live,
-            securityGroupId,
-            securityGroupVpcId,
-            securityGroupName,
-            securityGroupCreated,
-            instanceMutationAttempted,
-            workloadNetwork,
-          })
-        : undefined;
-      return this.failedProvision(
-        environment,
-        type,
-        `Failed to provision Amazon RDS PostgreSQL: ${error instanceof Error ? error.message : String(error)}`,
-        {
-          instanceId: identifier,
-          providerScope,
-          instanceMutationAttempted,
-          instanceCreateAcknowledged,
-          instanceCreateMayHaveCommitted,
-          resourceCreated: live === undefined || (instanceCreateMayHaveCommitted && live === null)
-            ? 'unknown'
-            : Boolean(live),
-          securityGroupId,
-          securityGroupVpcId,
-          securityGroupName,
-          ...(liveObservationError ? { liveObservationError } : {}),
-          ...(networkCleanupError ? { networkCleanupError } : {}),
-        },
-        partialComponent
-      );
-    }
-  }
-
   async getConnectionUrl(component: Component): Promise<string | null> {
     if (!this.rds || !component.externalId) return null;
     await this.assertComponentScope(component);
@@ -631,47 +354,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     if (!ingress) return;
     await this.revokeIngress(ingress);
     this.temporaryIngress.delete(access.releaseToken);
-  }
-
-  async destroy(component: Component): Promise<Receipt> {
-    if (!this.rds || !this.ec2 || !component.externalId) {
-      return { success: false, message: 'Amazon RDS adapter is not connected or the component has no instance ID' };
-    }
-    try {
-      await this.assertComponentScope(component);
-      const existing = await this.describeInstance(component.externalId);
-      if (!existing) {
-        await this.deleteManagedSecurityGroup(component);
-        return { success: true, message: `Amazon RDS instance is already absent: ${component.externalId}` };
-      }
-      await this.rds.send(new DeleteDBInstanceCommand({
-        DBInstanceIdentifier: component.externalId,
-        SkipFinalSnapshot: true,
-        DeleteAutomatedBackups: true,
-      }));
-      await this.waitForInstance(component.externalId, 'deleted');
-      await this.deleteManagedSecurityGroup(component);
-      return { success: true, message: `Deleted Amazon RDS instance ${component.externalId}` };
-    } catch (error) {
-      const name = (error as { name?: string }).name;
-      if (name === 'DBInstanceNotFound' || name === 'DBInstanceNotFoundFault') {
-        try {
-          await this.deleteManagedSecurityGroup(component);
-          return { success: true, message: `Amazon RDS instance is already absent: ${component.externalId}` };
-        } catch (cleanupError) {
-          return {
-            success: false,
-            message: `Amazon RDS instance is absent but managed network cleanup failed`,
-            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-          };
-        }
-      }
-      return {
-        success: false,
-        message: `Failed to delete Amazon RDS instance ${component.externalId}`,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
   }
 
   async getStatus(component: Component): Promise<{
@@ -958,110 +640,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     return subnetIds.sort();
   }
 
-  private async ensureSecurityGroup(
-    identifier: string,
-    network: AwsWorkloadNetwork
-  ): Promise<{ id: string; vpcId: string; name: string; created: boolean }> {
-    if (!this.ec2 || !this.credentials) throw new Error('Amazon EC2 adapter is not connected.');
-    const vpcId = network.vpcId;
-    const groupName = this.sanitizeIdentifier(`${identifier}-hypervibe-db`);
-    const existing = await this.managedSecurityGroupByName(identifier, groupName, vpcId);
-    if (existing) {
-      throw new Error(
-        `An RDS security group already exists for ${identifier} (${existing.GroupId}). Hypervibe will not silently adopt an unbound network resource; clean up or import the retained database binding first.`
-      );
-    }
-
-    let groupId: string | undefined;
-    let createError: unknown;
-    try {
-      const created = await this.ec2.send(new CreateSecurityGroupCommand({
-        GroupName: groupName,
-        Description: `ECS workload access to PostgreSQL for ${identifier}`,
-        VpcId: vpcId,
-        TagSpecifications: [{
-          ResourceType: 'security-group',
-          Tags: [{ Key: 'ManagedBy', Value: 'Hypervibe' }, { Key: 'Database', Value: identifier }],
-        }],
-      }));
-      groupId = created.GroupId;
-      if (!groupId) {
-        createError = new Error('AWS acknowledged the RDS security-group create without returning its ID.');
-      }
-    } catch (error) {
-      createError = error;
-    }
-
-    if (!groupId) {
-      try {
-        const recovered = await this.recoverSecurityGroupAfterCreateAttempt(identifier, groupName, vpcId);
-        groupId = recovered?.GroupId;
-      } catch (recoveryError) {
-        const createMessage = createError instanceof Error ? createError.message : String(createError);
-        const recoveryMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-        throw new RdsSecurityGroupProvisionError(
-          `Could not recover the exact RDS security group after its create response was ambiguous: ${createMessage}; recovery failed: ${recoveryMessage}`,
-          undefined,
-          vpcId,
-          groupName
-        );
-      }
-      if (!groupId) {
-        const createMessage = createError instanceof Error ? createError.message : String(createError);
-        throw new RdsSecurityGroupProvisionError(
-          `Could not recover the exact RDS security group after its create response was ambiguous: ${createMessage}`,
-          undefined,
-          vpcId,
-          groupName
-        );
-      }
-    }
-
-    try {
-      const observed = await this.recoverSecurityGroupById(groupId);
-      if (!observed) throw new Error(`RDS security group ${groupId} disappeared after creation.`);
-      this.assertManagedSecurityGroup(observed, identifier, vpcId);
-      await this.ensureRuntimeIngress(observed, identifier, network);
-    } catch (error) {
-      throw new RdsSecurityGroupProvisionError(
-        `Could not verify newly created RDS security group ${groupId}: ${error instanceof Error ? error.message : String(error)}`,
-        groupId,
-        vpcId,
-        groupName
-      );
-    }
-    return { id: groupId, vpcId, name: groupName, created: true };
-  }
-
-  private async managedSecurityGroupByName(
-    identifier: string,
-    groupName: string,
-    vpcId: string
-  ): Promise<SecurityGroup | null> {
-    if (!this.ec2) throw new Error('Amazon EC2 adapter is not connected.');
-    const output = await this.ec2.send(new DescribeSecurityGroupsCommand({
-      Filters: [
-        { Name: 'group-name', Values: [groupName] },
-        { Name: 'vpc-id', Values: [vpcId] },
-        { Name: 'tag:ManagedBy', Values: ['Hypervibe'] },
-        { Name: 'tag:Database', Values: [identifier] },
-      ],
-    }));
-    if (!Array.isArray(output.SecurityGroups)) {
-      throw new Error(`AWS returned an invalid security-group list for RDS instance ${identifier}.`);
-    }
-    if (output.SecurityGroups.length > 1) {
-      throw new Error(`AWS returned multiple managed security groups for RDS instance ${identifier}.`);
-    }
-    const group = output.SecurityGroups[0];
-    if (!group) return null;
-    if (!group.GroupId) {
-      throw new Error(`AWS returned an RDS security group without an ID for ${identifier}.`);
-    }
-    this.assertManagedSecurityGroup(group, identifier, vpcId);
-    return group;
-  }
-
   private assertRuntimeIngress(
     group: SecurityGroup,
     network: AwsWorkloadNetwork
@@ -1087,63 +665,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
   }
 
-  private async ensureRuntimeIngress(
-    group: SecurityGroup,
-    identifier: string,
-    network: AwsWorkloadNetwork
-  ): Promise<void> {
-    if (!this.ec2 || !group.GroupId) {
-      throw new Error('Amazon EC2 adapter or RDS security-group identity is unavailable.');
-    }
-    if ((group.IpPermissions?.length ?? 0) > 0) {
-      this.assertRuntimeIngress(group, network);
-      return;
-    }
-
-    let authorizeError: unknown;
-    try {
-      await this.ec2.send(new AuthorizeSecurityGroupIngressCommand({
-        GroupId: group.GroupId,
-        IpPermissions: [{
-          IpProtocol: 'tcp',
-          FromPort: DATABASE_PORT,
-          ToPort: DATABASE_PORT,
-          UserIdGroupPairs: [{
-            GroupId: network.workloadSecurityGroupId,
-            Description: RUNTIME_INGRESS_DESCRIPTION,
-          }],
-        }],
-      }));
-    } catch (error) {
-      authorizeError = error;
-    }
-
-    const attempts = this.positiveIntegerEnv(
-      'HYPERVIBE_RDS_NETWORK_READY_ATTEMPTS',
-      3
-    );
-    const delayMs = this.nonNegativeIntegerEnv(
-      'HYPERVIBE_RDS_NETWORK_READY_DELAY_MS',
-      DEFAULT_POLL_DELAY_MS
-    );
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const observed = await this.securityGroupById(group.GroupId);
-      if (observed) {
-        this.assertManagedSecurityGroup(observed, identifier, network.vpcId);
-        if ((observed.IpPermissions?.length ?? 0) > 0) {
-          this.assertRuntimeIngress(observed, network);
-          return;
-        }
-      }
-      if (attempt < attempts) await delay(delayMs);
-    }
-    throw new Error(
-      authorizeError
-        ? `RDS workload ingress could not be proven after an ambiguous authorize response: ${authorizeError instanceof Error ? authorizeError.message : String(authorizeError)}`
-        : `RDS workload ingress was not observable after authorization for security group ${group.GroupId}.`
-    );
-  }
-
   private async assertInstanceNetwork(
     instance: DBInstance,
     identifier: string,
@@ -1167,80 +688,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
     this.assertManagedSecurityGroup(group, identifier, network.vpcId);
     this.assertRuntimeIngress(group, network);
-  }
-
-  private async recoverSecurityGroupAfterCreateAttempt(
-    identifier: string,
-    groupName: string,
-    vpcId: string
-  ): Promise<SecurityGroup | null> {
-    const attempts = this.positiveIntegerEnv(
-      'HYPERVIBE_RDS_SECURITY_GROUP_CREATE_RECOVERY_ATTEMPTS',
-      3
-    );
-    const delayMs = this.nonNegativeIntegerEnv(
-      'HYPERVIBE_RDS_SECURITY_GROUP_CREATE_RECOVERY_DELAY_MS',
-      DEFAULT_POLL_DELAY_MS
-    );
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const group = await this.managedSecurityGroupByName(identifier, groupName, vpcId);
-      if (group) return group;
-      if (attempt < attempts) await delay(delayMs);
-    }
-    return null;
-  }
-
-  private async recoverSecurityGroupById(groupId: string): Promise<SecurityGroup | null> {
-    const attempts = this.positiveIntegerEnv(
-      'HYPERVIBE_RDS_SECURITY_GROUP_CREATE_RECOVERY_ATTEMPTS',
-      3
-    );
-    const delayMs = this.nonNegativeIntegerEnv(
-      'HYPERVIBE_RDS_SECURITY_GROUP_CREATE_RECOVERY_DELAY_MS',
-      DEFAULT_POLL_DELAY_MS
-    );
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const group = await this.securityGroupById(groupId);
-      if (group) return group;
-      if (attempt < attempts) await delay(delayMs);
-    }
-    return null;
-  }
-
-  private async deleteManagedSecurityGroup(component: Component): Promise<void> {
-    if (!this.ec2) throw new Error('Amazon EC2 adapter is not connected.');
-    const bindings = component.bindings as Record<string, unknown>;
-    if (bindings.securityGroupManagedByHypervibe !== true) return;
-    let groupId = typeof bindings.securityGroupId === 'string'
-      ? bindings.securityGroupId
-      : undefined;
-    const vpcId = typeof bindings.securityGroupVpcId === 'string'
-      ? bindings.securityGroupVpcId
-      : undefined;
-    if (!groupId && bindings.securityGroupCreatedDuringProvision === true) {
-      const groupName = typeof bindings.securityGroupName === 'string'
-        ? bindings.securityGroupName
-        : undefined;
-      if (!component.externalId || !vpcId || !groupName) {
-        throw new Error(
-          'The retained RDS security-group create has no exact ID and lacks its deterministic name/VPC cleanup identity.'
-        );
-      }
-      const recovered = await this.recoverSecurityGroupAfterCreateAttempt(
-        component.externalId,
-        groupName,
-        vpcId
-      );
-      groupId = recovered?.GroupId;
-      if (!groupId) {
-        throw new Error(
-          `The outcome of the retained RDS security-group create (${groupName} in ${vpcId}) is still unknown; keep the cleanup binding and retry after provider visibility converges.`
-        );
-      }
-    }
-    if (groupId) {
-      await this.deleteSecurityGroupById(groupId, component.externalId!, vpcId, true);
-    }
   }
 
   private async securityGroupById(groupId: string): Promise<SecurityGroup | null> {
@@ -1282,34 +729,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
   }
 
-  private async deleteSecurityGroupById(
-    groupId: string,
-    identifier: string,
-    vpcId?: string,
-    allowLegacyDatabaseTag = false
-  ): Promise<void> {
-    if (!this.ec2) throw new Error('Amazon EC2 adapter is not connected.');
-    const attempts = this.positiveIntegerEnv('HYPERVIBE_RDS_NETWORK_DELETE_ATTEMPTS', 30);
-    const delayMs = this.nonNegativeIntegerEnv('HYPERVIBE_RDS_NETWORK_DELETE_DELAY_MS', DEFAULT_POLL_DELAY_MS);
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const group = await this.securityGroupById(groupId);
-      if (!group) return;
-      this.assertManagedSecurityGroup(group, identifier, vpcId, allowLegacyDatabaseTag);
-      try {
-        await this.ec2.send(new DeleteSecurityGroupCommand({ GroupId: groupId }));
-      } catch (error) {
-        if (this.hasErrorName(error, 'InvalidGroup.NotFound')) return;
-        if (!this.hasErrorName(error, 'DependencyViolation') || attempt === attempts - 1) throw error;
-      }
-      if (attempt < attempts - 1) await delay(delayMs);
-    }
-    const remaining = await this.securityGroupById(groupId);
-    if (remaining) {
-      this.assertManagedSecurityGroup(remaining, identifier, vpcId, allowLegacyDatabaseTag);
-      throw new Error(`RDS security group ${groupId} remained observable after deletion.`);
-    }
-  }
-
   private async describeInstance(identifier: string): Promise<DBInstance | null> {
     if (!this.rds) throw new Error('Amazon RDS adapter is not connected.');
     try {
@@ -1334,40 +753,6 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       if (name === 'DBInstanceNotFound' || name === 'DBInstanceNotFoundFault') return null;
       throw error;
     }
-  }
-
-  private async waitForInstance(identifier: string, target: 'available' | 'deleted'): Promise<DBInstance> {
-    const attempts = Number(process.env.HYPERVIBE_RDS_READY_ATTEMPTS ?? DEFAULT_POLL_ATTEMPTS);
-    const delayMs = Number(process.env.HYPERVIBE_RDS_READY_DELAY_MS ?? DEFAULT_POLL_DELAY_MS);
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const instance = await this.describeInstance(identifier);
-      if (target === 'deleted' && !instance) return { DBInstanceIdentifier: identifier };
-      if (target === 'available' && instance?.DBInstanceStatus === 'available') return instance;
-      if (instance && /failed|incompatible|storage-full|restore-error/i.test(instance.DBInstanceStatus ?? '')) {
-        throw new Error(`RDS instance ${identifier} entered terminal status ${instance.DBInstanceStatus}.`);
-      }
-      if (attempt < attempts - 1) await delay(delayMs);
-    }
-    throw new Error(`RDS instance ${identifier} did not become ${target} before timeout.`);
-  }
-
-  private async recoverInstanceAfterCreateAttempt(
-    identifier: string
-  ): Promise<DBInstance | null> {
-    const attempts = this.positiveIntegerEnv(
-      'HYPERVIBE_RDS_CREATE_RECOVERY_ATTEMPTS',
-      3
-    );
-    const delayMs = this.nonNegativeIntegerEnv(
-      'HYPERVIBE_RDS_CREATE_RECOVERY_DELAY_MS',
-      DEFAULT_POLL_DELAY_MS
-    );
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const instance = await this.describeInstance(identifier);
-      if (instance) return instance;
-      if (attempt < attempts) await delay(delayMs);
-    }
-    return null;
   }
 
   private securityGroupId(component: Component, instance: DBInstance): string | undefined {
@@ -1410,114 +795,14 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     return 'provisioning';
   }
 
-  private failedProvision(
-    environment: Environment,
-    type: ProvisionableType,
-    error: string,
-    data?: Record<string, unknown>,
-    component?: Component
-  ): ProvisionResult {
-    return {
-      component: component ?? {
-        id: '', environmentId: environment.id, type, bindings: {}, externalId: null,
-        createdAt: new Date(), updatedAt: new Date(),
-      },
-      receipt: { success: false, message: 'Failed to provision Amazon RDS instance', error, data },
-    };
-  }
-
-  private partialProvisionComponent(params: {
-    environment: Environment;
-    identifier: string;
-    type: ProvisionableType;
-    providerScope: Record<string, string>;
-    username: string;
-    password: string;
-    database: string;
-    live?: DBInstance | null;
-    securityGroupId?: string;
-    securityGroupVpcId?: string;
-    securityGroupName?: string;
-    securityGroupCreated: boolean;
-    instanceMutationAttempted: boolean;
-    workloadNetwork: AwsWorkloadNetwork;
-  }): Component {
-    const endpoint = params.live?.Endpoint;
-    const connectionString = endpoint?.Address && endpoint.Port
-      ? encodeDatabaseUrl({
-          username: params.username,
-          password: params.password,
-          host: endpoint.Address,
-          port: endpoint.Port,
-          database: params.database,
-        })
-      : undefined;
-    return {
-      id: '',
-      environmentId: params.environment.id,
-      type: params.type,
-      externalId: params.identifier,
-      bindings: {
-        provider: 'rds',
-        instanceId: params.identifier,
-        ...(params.live?.DBInstanceArn ? { instanceArn: params.live.DBInstanceArn } : {}),
-        providerScope: params.providerScope,
-        username: params.username,
-        password: params.password,
-        database: params.database,
-        ...(connectionString ? { connectionString } : {}),
-        ...(endpoint?.Address ? { host: endpoint.Address } : {}),
-        ...(endpoint?.Port ? { port: endpoint.Port } : {}),
-        ...(params.securityGroupId ? { securityGroupId: params.securityGroupId } : {}),
-        ...(params.securityGroupVpcId ? { securityGroupVpcId: params.securityGroupVpcId } : {}),
-        ...(params.securityGroupName ? { securityGroupName: params.securityGroupName } : {}),
-        securityGroupManagedByHypervibe: Boolean(
-          params.securityGroupId || params.securityGroupCreated
-        ),
-        securityGroupRuntimeIngressManaged: Boolean(params.securityGroupId),
-        securityGroupCreatedDuringProvision: params.securityGroupCreated,
-        workloadSecurityGroupId: params.workloadNetwork.workloadSecurityGroupId,
-        subnetIds: params.workloadNetwork.subnetIds,
-        mutationAttempted: params.instanceMutationAttempted,
-        publiclyAccessible: params.live?.PubliclyAccessible === true,
-      },
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-  }
-
   private hasErrorName(error: unknown, name: string): boolean {
     if (!error || typeof error !== 'object') return false;
     const candidate = error as { name?: unknown; code?: unknown };
     return candidate.name === name || candidate.code === name;
   }
 
-  private positiveIntegerEnv(name: string, fallback: number): number {
-    const value = Number(process.env[name] ?? fallback);
-    return Number.isInteger(value) && value > 0 ? value : fallback;
-  }
-
-  private nonNegativeIntegerEnv(name: string, fallback: number): number {
-    const value = Number(process.env[name] ?? fallback);
-    return Number.isInteger(value) && value >= 0 ? value : fallback;
-  }
-
   private sanitizeIdentifier(value: string): string {
     return value.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 63);
-  }
-
-  private sanitizeDatabaseName(value: string): string {
-    const normalized = value.replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '');
-    return normalized.slice(0, 63) || 'app';
-  }
-
-  private generatePassword(): string {
-    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&*+-=?';
-    let password = '';
-    for (let index = 0; index < 32; index += 1) {
-      password += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return password;
   }
 }
 
@@ -1531,12 +816,8 @@ providerRegistry.register({
     connectionAliases: ['ecs'],
     maturity: {
       lifecycle: {
-        database: { status: 'ready-for-live' },
+        database: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
       },
-    },
-    lifecycle: {
-      databaseEngines: ['postgres'],
-      databaseConnectivity: nativeDatabaseConnectivity.rds,
     },
   },
   inspection: {

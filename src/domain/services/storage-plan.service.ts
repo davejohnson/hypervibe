@@ -3,7 +3,7 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
-import type { IProviderAdapter, Receipt } from '../ports/provider.port.js';
+import type { IProviderAdapter, IProviderLifecycleAdapter, Receipt } from '../ports/provider.port.js';
 import {
   createStorageCreateRecovery,
   parseStorageCreateRecovery,
@@ -1312,7 +1312,7 @@ export async function applyStorageAction(params: {
   const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
   if (!service) return { success: false, message: `Service "${serviceName}" not found locally` };
   const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project);
-  const hosting = hostingResult.adapter as IProviderAdapter | undefined;
+  const hosting = hostingResult.adapter as (IProviderAdapter & Partial<IProviderLifecycleAdapter>) | undefined;
   if (!hostingResult.success || !hosting?.setEnvVars) return { success: false, message: 'Hosting adapter cannot sync storage variables', error: hostingResult.error };
   if (hosting.name !== params.environmentSpec.hosting.provider) {
     return {

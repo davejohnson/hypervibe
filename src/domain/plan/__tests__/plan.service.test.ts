@@ -1,3 +1,6 @@
+import type { IProviderLifecycleAdapter } from '../../ports/provider.port.js';
+import { z } from 'zod';
+import { providerRegistry } from '../../registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -12,7 +15,6 @@ import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/s3.adapter.js';
 import '../../../adapters/providers/azure/azure-container-apps.adapter.js';
-import '../../../adapters/providers/azure/azure-managed-redis.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
@@ -55,6 +57,35 @@ import '../../../application/devops-providers.js';
 import { dailyBackupEvidence } from '../../../test/backup-fixtures.js';
 import type { RecoverySourceIdentity } from '../../ports/recovery-source.port.js';
 import type { ObservedDatabase } from '../../ports/observe.port.js';
+
+// Synthetic hosting supports only the generic lifecycle contracts under test.
+const fixtureHostingProvider = providerRegistry.get('cloudrun')!;
+for (const [name, workloadKinds] of [['fixture-hosting', ['web', 'worker', 'cron']], ['fixture-web-hosting', ['web']]] as const) {
+  providerRegistry.register({
+    ...fixtureHostingProvider,
+    metadata: {
+      ...fixtureHostingProvider.metadata, name, displayName: name,
+      lifecycle: { hosting: { workloadKinds, customDomains: 'unsupported', teardownBoundary: 'services' } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+  });
+}
+
+providerRegistry.register({
+  metadata: {
+    name: 'fixture-cache', displayName: 'Fixture cache', category: 'cache',
+    credentialsSchema: z.object({ projectId: z.string().optional(), credentials: z.string().optional() }),
+    lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+  },
+  factory: () => ({}),
+  inspection: {
+    resources: ['cache'], defaultResource: 'cache',
+    selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] } },
+    inspect: async () => ({ observation: 'absent', resource: 'cache', caches: [], partial: false, truncated: false }),
+  },
+});
+
 
 let project: Project;
 
@@ -232,7 +263,7 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
   };
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
     success: true,
-    adapter: {
+    adapter: ({
       ...extra,
       name: 'railway',
       capabilities: {
@@ -253,7 +284,7 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
       deploy: async () => { throw new Error('unused'); },
       setEnvVars: async () => ({ success: true, message: 'ok' }),
       observe: async () => normalizedObserved,
-    },
+    } as IProviderLifecycleAdapter),
   });
 }
 
@@ -307,250 +338,7 @@ describe('PlanService datastore naming compatibility policy', () => {
   });
 });
 
-async function prepareCronPlanFixture() {
-    project = new ProjectRepository().update(project.id, {
-      defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/dave/cron-app',
-    })!;
-    new SpecStore().replace(project, {
-      version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
-      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
-      environments: { staging: {
-        hosting: { provider: 'cloudrun', region: 'us-central1' },
-        services: { cron: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 * * * *' } },
-        email: { enabled: false }, envVars: {}, envFile: { mode: 'off' },
-        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-      } },
-    });
-    const pending = { version: 1, state: 'pending', jobName: 'cron-staging', jobUid: 'job-uid', holdingImage: `registry.example/holding@sha256:${'d'.repeat(64)}` };
-    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
-      provider: 'cloudrun', projectId: 'gcp-test', providerScope: { projectId: 'gcp-test', region: 'us-central1' }, services: { cron: {
-        serviceId: pending.jobName, jobName: pending.jobName, resourceUid: pending.jobUid, resourceType: 'scheduledJob', workloadKind: 'cron', scheduleActivation: pending,
-      } },
-    } });
-    new ServiceRepository().create({ projectId: project.id, name: 'cron', buildConfig: { runtime: { kind: 'node', version: '24', installCommand: 'npm ci' } } });
-    seedVerifiedConnection('cloudrun', { projectId: 'gcp-test', region: 'us-central1', credentials: '{"fixture":true}' });
-    seedVerifiedConnection('github', { apiToken: 'github-token', login: 'dave' });
-    mockObservingAdapter({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'gcp-test',
-      services: [{ name: 'cron', externalId: pending.jobName, workloadKind: 'cron', customDomains: [],
-        scheduleActivationPending: true, config: { startCommand: 'npm run cron' }, envVarKeys: [], envVarHashes: {}, status: 'empty' }],
-      databases: [], partial: false, warnings: [],
-    });
-    const { targets, migration } = resolveBranchDeployTargets(project);
-    const target = targets.find(t => t.environmentName === 'staging')!;
-    const workflow = buildBranchDeployWorkflow('cloudrun', target, migration);
-    new EnvironmentRepository().updatePlatformBindings(environment.id, { ci: { deployBranch: { [workflow.path]: {
-      contentHash: workflowFilesContentHash(workflowFiles(workflow)),
-      inputHash: githubActionsWorkflowInputHash({ provider: 'cloudrun', target, migration }),
-      syncedEnvironmentSecrets: ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID'], syncedEnvironmentSecretHashes: { GCP_SERVICE_ACCOUNT_JSON: sha256('{"fixture":true}'), GCP_PROJECT_ID: sha256('gcp-test') },
-    } } } });
-    mockLiveWorkflow(workflow);
-    vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
-    vi.spyOn(GitHubAdapter.prototype, 'getEnvironmentVariable').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({ ref: 'refs/heads/main', object: { sha: 'a'.repeat(40) } });
-    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({ total_count: 0, workflow_runs: [] });
-    return { environment, workflow };
-}
-
 describe('PlanService.plan', () => {
-  it('orders prepared cron activation after the applied contract and one exact release', async () => {
-    await prepareCronPlanFixture();
-    const result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
-    expect(result).not.toHaveProperty('error');
-    const plan = result as Exclude<typeof result, { error: string }>;
-    const activation = plan.actions.find(a => a.metadata?.operation === 'hostingScheduleActivate');
-    const release = plan.actions.find(a => a.metadata?.operation === 'githubActionsRelease');
-    const marker = plan.actions.find(a => a.id === 'ci:github-actions:staging:applied-spec-hash');
-    expect(activation).toMatchObject({ type: 'update', billable: true, requiresConfirm: true, resource: { kind: 'service', name: 'cron', provider: 'cloudrun' },
-      dependsOn: expect.arrayContaining(['ci:github-actions:staging:release']) });
-    expect(release?.dependsOn).toContain(marker?.id);
-    expect(marker?.dependsOn).not.toContain(activation?.id);
-    const ids = orderActions(plan.actions).map(a => a.id);
-    expect(ids.indexOf(marker!.id)).toBeLessThan(ids.indexOf(release!.id));
-    expect(ids.indexOf(release!.id)).toBeLessThan(ids.indexOf(activation!.id));
-    expect(plan.actions.filter(a => a.metadata?.operation === 'githubActionsRelease')).toHaveLength(1);
-    expect(plan.actions.find(a => a.id === 'service:cron')?.type).toBe('noop');
-  });
-
-  it('keeps cron activation out of workflow publication and identity-only prerequisite plans', async () => {
-    const { environment, workflow } = await prepareCronPlanFixture();
-    vi.mocked(GitHubAdapter.prototype.getFileContent).mockResolvedValue(null);
-    let result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
-    expect(result).not.toHaveProperty('error');
-    let plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.scope).toBe('managed-ci-publication');
-    expect(plan.actions.some(a => ['hostingScheduleActivate', 'githubActionsRelease'].includes(String(a.metadata?.operation)))).toBe(false);
-    expect(plan.actions.every(a => !a.dependsOn?.includes('service:cron:activate-schedule'))).toBe(true);
-
-    // After publication, the same durable pending Job rejoins the release graph.
-    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, file) => workflowFiles(workflow).find(entry => entry.path === file)?.content ?? null);
-    result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
-    expect(result).not.toHaveProperty('error');
-    plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.actions.find(a => a.metadata?.operation === 'hostingScheduleActivate')).toBeDefined();
-
-    new EnvironmentRepository().updatePlatformBindings(environment.id, { services: {} });
-    mockObservingAdapter({ provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true, projectId: 'gcp-test',
-      services: [], databases: [], partial: false, warnings: [] });
-    result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
-    expect(result).not.toHaveProperty('error');
-    plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.scope).toBe('managed-ci-bindings');
-    expect(plan.actions.some(a => ['hostingScheduleActivate', 'githubActionsRelease'].includes(String(a.metadata?.operation)))).toBe(false);
-  });
-
-  it('keeps a present mismatched scheduler visible as ordinary configuration drift', async () => {
-    await prepareCronPlanFixture();
-    const adapter = (await adapterFactory.getProviderAdapter('cloudrun', project)).adapter!;
-    const observed = await adapter.observe!(new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!);
-    observed.services[0].config.cronSchedule = '0 1 * * *';
-    observed.services[0].status = 'running';
-    const result = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
-    expect(result).not.toHaveProperty('error');
-    const plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.actions.find(a => a.id === 'service:cron')).toMatchObject({ type: 'update',
-      diff: expect.arrayContaining([{ field: 'cronSchedule', from: '0 1 * * *', to: '0 * * * *' }]) });
-  });
-
-  it('defers an initially unbound Cloud Run seed until managed CI has exact provider bindings', async () => {
-    project = new ProjectRepository().update(project.id, {
-      defaultPlatform: 'cloudrun',
-      gitRemoteUrl: 'https://github.com/davejohnson/cloudrun-seed-app.git',
-    })!;
-    new SpecStore().replace(project, {
-      version: 1,
-      project: project.name,
-      gitRemoteUrl: project.gitRemoteUrl,
-      runtime: {
-        kind: 'node',
-        version: '22',
-        installCommand: 'npm ci',
-      },
-      environments: {
-        staging: {
-          hosting: { provider: 'cloudrun', region: 'us-central1' },
-          services: {
-            web: {
-              workloadKind: 'web' as const,
-              startCommand: 'npm start',
-              healthCheckPath: '/ready',
-              public: true,
-            },
-          },
-          database: {
-            provider: 'cloudsql',
-            engine: 'postgres',
-            seedCommand: 'npm run db:seed',
-          },
-          email: { enabled: false },
-          envVars: {},
-          envFile: { mode: 'off' },
-          deploy: {
-            strategy: 'branch',
-            trigger: 'ci',
-            branch: 'main',
-          },
-        },
-      },
-    });
-
-    const result = await new PlanService().plan(project, 'staging', {
-      includeEnvFile: false,
-    });
-
-    expect(result).not.toHaveProperty('error');
-    const plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.scope).toBe('managed-ci-bindings');
-    expect(plan.actions.find((action) => action.metadata?.operation === 'githubActionsRelease'))
-      .toBeUndefined();
-    expect(plan.actions.find((action) => action.metadata?.operation === 'databaseSeed'))
-      .toBeUndefined();
-    expect(plan.actions.some((action) => action.resource.kind === 'ci')).toBe(false);
-    expect(plan.warnings).toContainEqual(expect.stringContaining(
-      'Managed CI reconciliation is deferred until provider identity changes converge.'
-    ));
-    expect(new RunRepository().findById(plan.planRunId)?.status).toBe('succeeded');
-  });
-
-  it('freezes the repository HEAD into a managed Cloud Run deployment plan', async () => {
-    const oldCwd = process.cwd();
-    const oldDisableRepoSpec = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
-    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-source-sha-plan-'));
-    const spec = {
-      version: 1,
-      project: 'source-sha-app',
-      gitRemoteUrl: 'https://github.com/davejohnson/source-sha-app.git',
-      environments: {
-        staging: {
-          hosting: { provider: 'cloudrun', region: 'us-central1' },
-          services: { web: { workloadKind: 'web', public: true } },
-          email: { enabled: false },
-          envVars: {},
-          envFile: { mode: 'off' },
-          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-        },
-      },
-    };
-    mkdirSync(path.join(root, '.hypervibe'));
-    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`);
-    execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
-    execFileSync('git', ['config', 'user.email', 'test@hypervibe.dev'], { cwd: root });
-    execFileSync('git', ['config', 'user.name', 'Hypervibe Test'], { cwd: root });
-    execFileSync('git', ['remote', 'add', 'origin', spec.gitRemoteUrl], { cwd: root });
-    execFileSync('git', ['add', '.hypervibe/spec.json'], { cwd: root });
-    execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: root, stdio: 'ignore' });
-    const expectedSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-
-    try {
-      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
-      process.chdir(root);
-      const sourceProject = new ProjectRepository().create({
-        name: spec.project,
-        defaultPlatform: 'cloudrun',
-        gitRemoteUrl: spec.gitRemoteUrl,
-      });
-      new EnvironmentRepository().create({
-        projectId: sourceProject.id,
-        name: 'staging',
-        platformBindings: {
-          provider: 'cloudrun',
-          projectId: 'source-sha-gcp-project',
-          environmentId: 'us-central1',
-          providerScope: {
-            projectId: 'source-sha-gcp-project',
-            region: 'us-central1',
-          },
-          services: { web: { serviceId: 'source-sha-web' } },
-        },
-      });
-
-      const result = await new PlanService().plan(sourceProject, 'staging', {
-        includeEnvFile: false,
-      });
-
-      expect(result).not.toHaveProperty('error');
-      const plan = result as Exclude<typeof result, { error: string }>;
-      expect(plan.specSource).toEqual({
-        kind: 'repo',
-        path: path.join(realpathSync(root), '.hypervibe', 'spec.json'),
-      });
-      expect(new RunRepository().findById(plan.planRunId)?.plan).toMatchObject({
-        sourceCommitSha: expectedSha,
-      });
-
-      spec.environments.staging.envVars = { UNCOMMITTED: 'true' };
-      writeFileSync(path.join(root, '.hypervibe', 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`);
-      const dirtyResult = await new PlanService().plan(sourceProject, 'staging', {
-        includeEnvFile: false,
-      });
-      expect(dirtyResult).toEqual({
-        error: expect.stringContaining('will not plan a first Cloud Run release'),
-      });
-    } finally {
-      process.chdir(oldCwd);
-      if (oldDisableRepoSpec === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
-      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisableRepoSpec;
-    }
-  });
 
   it('errors when the project has no spec', async () => {
     const bare = new ProjectRepository().create({ name: 'no-spec' });
@@ -633,8 +421,8 @@ describe('PlanService.plan', () => {
       project: project.name,
       environments: {
         production: {
-          hosting: { provider: 'azure-container-apps' },
-          cache: { provider: 'azure-managed-redis', engine: 'redis' },
+          hosting: { provider: 'fixture-hosting' },
+          cache: { provider: 'fixture-cache', engine: 'redis' },
           services: {},
         },
       },
@@ -644,10 +432,10 @@ describe('PlanService.plan', () => {
 
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.actions.find((action) => action.id === 'cache:azure-managed-redis'))
+    expect(plan.actions.find((action) => action.id === 'cache:fixture-cache'))
       .toMatchObject({
         type: 'create',
-        dependsOn: ['project:azure-container-apps'],
+        dependsOn: ['project:fixture-hosting'],
       });
   });
 
@@ -1365,7 +1153,7 @@ describe('PlanService.plan', () => {
     const observedBindings: Record<string, unknown>[] = [];
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
-      adapter: {
+      adapter: ({
         name: 'railway',
         capabilities: {
           supportedBuilders: ['nixpacks'],
@@ -1404,7 +1192,7 @@ describe('PlanService.plan', () => {
             warnings: ['Could not resolve Railway environment for "staging"'],
           };
         },
-      },
+      } as IProviderLifecycleAdapter),
     });
 
     const result = await new PlanService().plan(project, 'staging');
@@ -1465,7 +1253,7 @@ describe('PlanService.plan', () => {
     seedVerifiedConnection('railway', { apiKey: 'derived-provider-key' });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
-      adapter: {
+      adapter: ({
         name: 'railway',
         capabilities: {
           supportedBuilders: ['dockerfile'],
@@ -1510,7 +1298,7 @@ describe('PlanService.plan', () => {
           partial: false,
           warnings: [],
         }),
-      },
+      } as IProviderLifecycleAdapter),
     });
     const observeDatabase = vi.fn(async (
       _environment: Environment,
@@ -3312,7 +3100,7 @@ describe('PlanService.plan', () => {
         environmentId: 'rail-env-1',
         services: { web: { serviceId: 'svc-1' } },
         previousHosting: {
-          provider: 'cloudrun',
+          provider: 'fixture-hosting',
           projectId: 'gcp-1',
           services: { web: { serviceId: 'cr-web' }, cron: { serviceId: 'cr-cron' } },
         },

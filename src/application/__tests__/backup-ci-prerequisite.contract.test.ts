@@ -75,7 +75,12 @@ describe('backup activation through CI credentials and canonical repository publ
       policyFingerprint: 'a'.repeat(64), preservationFingerprint: 'b'.repeat(64), mechanism: 'snapshot' }));
     vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true,
       adapter: { name: 'railway', dailyBackups: { observe } } as unknown as IDatabaseAdapter });
+    vi.spyOn(AdapterFactory.prototype, 'getDatabaseOperations').mockResolvedValue({ success: true,
+      adapter: { name: 'railway', dailyBackups: { observe } } as unknown as IDatabaseAdapter });
     vi.spyOn(AdapterFactory.prototype, 'getStorageAdapter').mockResolvedValue({ success: true,
+      adapter: { name: 'railway', capabilities: { recoveryCredentialScope: 'bucket' },
+        getCredentials: vi.fn(() => { throw new Error('No storage data-plane access is authorized'); }) } as unknown as IStorageAdapter });
+    vi.spyOn(AdapterFactory.prototype, 'getStorageOperations').mockResolvedValue({ success: true,
       adapter: { name: 'railway', capabilities: { recoveryCredentialScope: 'bucket' },
         getCredentials: vi.fn(() => { throw new Error('No storage data-plane access is authorized'); }) } as unknown as IStorageAdapter });
     vi.spyOn(PlanService.prototype, 'observeEnvironment').mockResolvedValue({ warnings: [], observed: {

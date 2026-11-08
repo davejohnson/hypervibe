@@ -406,8 +406,6 @@ describe('credentialFieldsFromSchema', () => {
     expect(providerRegistry.connectionProviders('s3')).toEqual(['s3', 'ecs']);
     expect(providerRegistry.connectionProviders('gcs')).toEqual(['gcs', 'cloudrun']);
     expect(providerRegistry.connectionProviders('azureblob')).toEqual(['azureblob', 'azure-container-apps']);
-    expect(providerRegistry.connectionProviders('memorystore')).toEqual(['memorystore', 'cloudrun']);
-    expect(providerRegistry.connectionProviders('elasticache')).toEqual(['elasticache', 'ecs']);
   });
 
   it('describes required, optional, secret, multiline, and choice fields', () => {

@@ -95,12 +95,12 @@ describe('provider conformance matrix', () => {
       'AWS',
       'Microsoft Azure',
     ]);
-    expect(hostingProviderContracts.map((entry) => entry.provider).sort())
+    expect(hostingProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('hosting').sort());
   });
 
   it('keeps maintenance live promotion distinct from implemented adapter support', () => {
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       const lifecycle = providerRegistry.getMetadata(contract.provider)
         ?.lifecycle?.hosting?.maintenance;
       expect(lifecycle, contract.provider).toBe(
@@ -110,7 +110,7 @@ describe('provider conformance matrix', () => {
   });
 
   it('pins environment custom-domain support to provider lifecycle metadata', () => {
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       expect(
         providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.customDomains,
         contract.provider
@@ -122,11 +122,11 @@ describe('provider conformance matrix', () => {
     }
     expect(providerRegistry.supports('github', 'hosting')).toBe(false);
     expect(hostingProviderContracts.filter((entry) => entry.customDomains === 'managed').map((entry) => entry.provider))
-      .toEqual(['railway', 'cloudrun', 'ecs', 'azure-container-apps']);
+      .toEqual(['railway']);
   });
 
   it('pins exact hosting workload-kind support to provider lifecycle metadata', () => {
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       expect(
         providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.workloadKinds,
         contract.provider
@@ -136,9 +136,9 @@ describe('provider conformance matrix', () => {
       hostingProviderContracts.map((entry) => [entry.provider, entry.workloadKinds])
     )).toEqual({
       railway: ['web', 'worker', 'cron'],
-      cloudrun: ['web', 'worker', 'cron'],
-      ecs: ['web'],
-      'azure-container-apps': ['web'],
+      cloudrun: [],
+      ecs: [],
+      'azure-container-apps': [],
     });
   });
 
@@ -150,7 +150,7 @@ describe('provider conformance matrix', () => {
     const environments = Object.values(fixture.environments);
 
     expect(environments.map((environment) => environment.hosting.provider)).toEqual(
-      hostingProviderContracts.map((contract) => contract.provider)
+      hostingProviderContracts.filter(entry => entry.status !== 'planned').map((contract) => contract.provider)
     );
     expect(new Set(environments.map((environment) => environment.domain)).size).toBe(environments.length);
     for (const environment of environments) {
@@ -165,7 +165,7 @@ describe('provider conformance matrix', () => {
       railway: 'disconnect',
     } as const;
 
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       const metadata = providerRegistry.getMetadata(contract.provider);
       const policy = metadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy;
       const expected = expectedPolicies[contract.provider as keyof typeof expectedPolicies];
@@ -224,7 +224,7 @@ describe('provider conformance matrix', () => {
       ['Railway', 'postgres'],
       ['Microsoft Azure', 'postgres'],
     ]);
-    expect(databaseProviderContracts.map((entry) => entry.provider).sort())
+    expect(databaseProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('database').sort());
   });
 
@@ -258,56 +258,16 @@ describe('provider conformance matrix', () => {
     }
   });
 
-  it('includes Azure Managed Redis in the cache lifecycle matrix', () => {
-    expect(cacheProviderContracts).toContainEqual(
-      expect.objectContaining({
-        provider: 'azure-managed-redis',
-        vendor: 'Microsoft Azure',
-        engine: 'redis',
-      })
-    );
-  });
-
   it('excludes Upstash from the provider catalog', () => {
     expect(
       providerContracts.some((entry) => entry.provider === 'upstash')
     ).toBe(false);
   });
 
-  it('keeps Memorystore ready-for-live until the declarative GCP stack passes live conformance', () => {
-    const memorystore = cacheProviderContracts.find(
-      (entry) => entry.provider === 'memorystore'
-    );
-    expect(memorystore).toMatchObject({
-      status: 'ready-for-live',
-      fixtureHostingProvider: 'cloudrun',
-    });
-    expect(memorystore?.implementationNote).toContain(
-      'Cloud Run Direct VPC egress'
-    );
-    expect(memorystore?.credentials.map((credential) => credential.field)).toEqual([
-      'projectId',
-      'credentials',
-    ]);
-  });
-
-  it('keeps ElastiCache at ready-for-live until the declarative AWS stack passes live conformance', () => {
-    const elasticache = cacheProviderContracts.find((entry) => entry.provider === 'elasticache');
-    expect(elasticache).toMatchObject({
-      status: 'ready-for-live',
-      engine: 'redis',
-      fixtureHostingProvider: 'ecs',
-    });
-    expect(elasticache?.credentials.map((credential) => credential.field)).toEqual([
-      'accessKeyId',
-      'secretAccessKey',
-    ]);
-  });
-
-  it('keeps RDS pinned to the ECS workload-network lifecycle', () => {
+  it('preserves RDS authentication aliases while its lifecycle moves to OpenTofu', () => {
     const rds = databaseProviderContracts.find((entry) => entry.provider === 'rds');
     expect(rds).toMatchObject({
-      status: 'ready-for-live',
+      status: 'planned',
       engine: 'postgres',
       fixtureHostingProvider: 'ecs',
     });
@@ -317,7 +277,7 @@ describe('provider conformance matrix', () => {
     ]);
     expect(providerRegistry.connectionProviders('rds')).toEqual(['rds', 'ecs']);
     expect(providerRegistry.getMetadata('rds')?.lifecycle?.databaseConnectivity)
-      .toEqual({ compatibleHostingProviders: ['ecs'] });
+      .toBeUndefined();
   });
 
   it('assigns database lifecycle to the provider that owns the resource', () => {
@@ -346,8 +306,8 @@ describe('provider conformance matrix', () => {
     expect(providerRegistry.supports('render', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
-    expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
-    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(true);
+    expect(providerRegistry.supports('ecs', 'hosting')).toBe(false);
+    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(false);
     expect(providerRegistry.supports('fly', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(false);
   });

@@ -38,7 +38,6 @@ export const AzureDatastoreCredentialsSchema = z.preprocess(
 
 export const AzurePostgresCredentialsSchema = AzureDatastoreCredentialsSchema;
 
-export const AzureManagedRedisCredentialsSchema = AzureDatastoreCredentialsSchema;
 
 export type AzureDatastoreCredentials = z.infer<
   typeof AzureDatastoreCredentialsSchema
@@ -46,8 +45,4 @@ export type AzureDatastoreCredentials = z.infer<
 
 export type AzurePostgresCredentials = z.infer<
   typeof AzurePostgresCredentialsSchema
->;
-
-export type AzureManagedRedisCredentials = z.infer<
-  typeof AzureManagedRedisCredentialsSchema
 >;

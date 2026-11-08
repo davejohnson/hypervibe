@@ -2,7 +2,7 @@
   "name": "@hypervibe/hypervibe",
   "version": "0.1.46",
   "packageManager": "npm@11.19.0",
-  "description": "Desired-state infrastructure orchestration through CLI and MCP",
+  "description": "Cloud operations for app builders through CLI and MCP",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -12,11 +12,12 @@
     "cli",
     "mcp",
     "model-context-protocol",
-    "infrastructure",
+    "opentofu",
+    "gcp",
+    "aws",
+    "azure",
     "deploy",
-    "railway",
-    "cloud-run",
-    "terraform",
+    "devops",
     "agent"
   ],
   "type": "module",
@@ -66,14 +67,8 @@
     "prepublishOnly": "npm run build && npm run prepublish-check"
   },
   "dependencies": {
-    "@aws-sdk/client-acm": "^3.1106.0",
     "@aws-sdk/client-ec2": "^3.1092.0",
-    "@aws-sdk/client-ecr": "^3.1106.0",
     "@aws-sdk/client-ecs": "^3.1106.0",
-    "@aws-sdk/client-efs": "^3.1134.0",
-    "@aws-sdk/client-elastic-load-balancing-v2": "^3.1106.0",
-    "@aws-sdk/client-elasticache": "^3.1098.0",
-    "@aws-sdk/client-iam": "^3.1106.0",
     "@aws-sdk/client-rds": "^3.1092.0",
     "@aws-sdk/client-s3": "^3.1108.0",
     "@aws-sdk/client-sts": "^3.1106.0",
@@ -98,6 +93,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@aws-sdk/client-ecr": "^3.1106.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.16.0",

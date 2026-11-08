@@ -48,7 +48,7 @@ describe('reviewed daily backup policy application', () => {
     });
     const adapter = { name: 'railway', ...(kind === 'database' ? { dailyBackups: { observe, configureDaily } }
       : { serviceVolumes: { dailyBackups: { observe, configureDaily } } }) };
-    vi.spyOn(ctx.adapterFactory, kind === 'database' ? 'getDatabaseAdapter' : 'getProviderAdapter')
+    vi.spyOn(ctx.adapterFactory, kind === 'database' ? 'getDatabaseOperations' : 'getProviderAdapter')
       .mockResolvedValue({ success: true, adapter: adapter as never });
     const coverage = await observeBackupPolicy({ spec: environmentSpec, environment, components: component ? [component] : [], project, adapterFactory: ctx.adapterFactory });
     const action = planBackupPolicy(coverage).actions[0];

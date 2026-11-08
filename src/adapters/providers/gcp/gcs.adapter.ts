@@ -4,9 +4,9 @@ import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
-import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import type {
-  IStorageAdapter,
+  IStorageOperations,
   StorageContext,
   StorageEnsureResult,
   StorageObjectClient,
@@ -15,7 +15,6 @@ import type {
   StorageObservationTarget,
   StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
-import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   providerRegistry,
   type ProviderInspectionRequest,
@@ -24,7 +23,6 @@ import {
 const STORAGE_API = 'https://storage.googleapis.com';
 const ENVIRONMENT_LABEL = 'hypervibe_environment_id';
 const STORAGE_NAME_LABEL = 'hypervibe_storage_name';
-const PROJECT_LABEL = 'hypervibe_project';
 
 const ServiceAccountSchema = z.object({
   type: z.literal('service_account'),
@@ -111,18 +109,6 @@ async function defaultTokenProvider(_credentials: GcsStorageCredentials, service
     email: serviceAccount?.client_email ?? 'Google Application Default Credentials',
     expiresAt: client.credentials.expiry_date ?? Date.now() + 50 * 60 * 1_000,
   };
-}
-
-function slug(value: string): string {
-  return value.toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function bucketName(context: StorageContext, environment: Environment, name: string): string {
-  return resourceName(name, { minLength: 3, scope: [context.projectId, environment.projectId, environment.name],
-    reservedPrefixes: ['goog'] });
 }
 
 function errorMessage(error: unknown): string {
@@ -279,7 +265,7 @@ class GcsObjectClient implements StorageObjectClient {
   }
 }
 
-export class GcsStorageAdapter implements IStorageAdapter {
+export class GcsStorageAdapter implements IStorageOperations {
   readonly name = 'gcs';
   readonly capabilities = {
     kind: 'object' as const,
@@ -494,72 +480,6 @@ export class GcsStorageAdapter implements IStorageAdapter {
     };
   }
 
-  async ensureBucket(
-    environment: Environment,
-    context: StorageContext,
-    name: string,
-    region: string
-  ): Promise<StorageEnsureResult> {
-    try {
-      await this.assertContext(context);
-      const externalId = bucketName(context, environment, name);
-      const existing = await this.getBucket(externalId);
-      if (existing) {
-        if (existing.labels?.[ENVIRONMENT_LABEL] !== environment.id || existing.labels?.[STORAGE_NAME_LABEL] !== name) {
-          throw new Error(`Google Cloud Storage bucket ${externalId} exists but is not owned by this Hypervibe storage binding.`);
-        }
-        if (existing.location?.toLowerCase() !== region.toLowerCase()) {
-          throw new Error(`Google Cloud Storage bucket ${externalId} exists in immutable location ${existing.location}, not ${region}.`);
-        }
-        return {
-          receipt: { success: true, message: `Using existing Google Cloud Storage bucket "${externalId}"`, data: { created: false } },
-          externalId,
-          context,
-        };
-      }
-
-      const response = await this.authorized(
-        `${STORAGE_API}/storage/v1/b?project=${encodeURIComponent(context.projectId)}`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            name: externalId,
-            location: region,
-            labels: {
-              [ENVIRONMENT_LABEL]: environment.id,
-              [STORAGE_NAME_LABEL]: name,
-              [PROJECT_LABEL]: slug(context.projectName ?? environment.projectId).slice(0, 63),
-            },
-            iamConfiguration: {
-              uniformBucketLevelAccess: { enabled: true },
-              publicAccessPrevention: 'enforced',
-            },
-          }),
-        }
-      );
-      if (!response.ok) throw await responseError(response);
-      const created = await this.getBucket(externalId);
-      if (!created) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} did not become observable after creation.`);
-      }
-      if (
-        created.labels?.[ENVIRONMENT_LABEL] !== environment.id
-        || created.labels?.[STORAGE_NAME_LABEL] !== name
-        || created.location?.toLowerCase() !== region.toLowerCase()
-      ) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} did not converge to the reviewed labels and location.`);
-      }
-      return {
-        receipt: { success: true, message: `Created private Google Cloud Storage bucket "${externalId}"`, data: { created: true } },
-        externalId,
-        context,
-      };
-    } catch (error) {
-      return { receipt: { success: false, message: `Failed to ensure Google Cloud Storage bucket "${name}"`, error: errorMessage(error) } };
-    }
-  }
-
   async getRuntimeEnv(
     _environment: Environment,
     context: StorageContext,
@@ -606,35 +526,6 @@ export class GcsStorageAdapter implements IStorageAdapter {
   ): Promise<StorageObjectClient> {
     await this.assertContext(context);
     return new GcsObjectClient(externalId, this.request, () => this.accessToken(), this.mediaRequest);
-  }
-
-  async destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt> {
-    try {
-      await this.assertContext(context);
-      const bucket = await this.getBucket(externalId);
-      if (!bucket) return { success: true, message: `Google Cloud Storage bucket "${externalId}" is already absent` };
-      if (bucket.labels?.[ENVIRONMENT_LABEL] !== environment.id) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} is not owned by this Hypervibe environment.`);
-      }
-      const transfer = await this.openObjectTransfer(environment, context, externalId);
-      try {
-        for (const object of await transfer.list()) {
-          const response = await this.authorized(
-            `${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}/o/${encodeURIComponent(object.key)}`,
-            { method: 'DELETE' }
-          );
-          if (!response.ok && response.status !== 404) throw await responseError(response);
-        }
-      } finally {
-        transfer.destroy();
-      }
-      const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 404) throw await responseError(response);
-      if (await this.getBucket(externalId)) throw new Error(`Google Cloud Storage bucket ${externalId} deletion is not yet observable.`);
-      return { success: true, message: `Deleted Google Cloud Storage bucket "${externalId}" and all objects` };
-    } catch (error) {
-      return { success: false, message: `Failed to delete Google Cloud Storage bucket "${externalId}"`, error: errorMessage(error) };
-    }
   }
 
   private connectedCredentials(): GcsStorageCredentials {
@@ -718,7 +609,10 @@ providerRegistry.register({
     storageRuntimeContract: 'gcs-native-adc-v1',
     maturity: {
       lifecycle: {
-        storage: { status: 'ready-for-live' },
+        storage: {
+          status: 'planned',
+          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+        },
       },
     },
   },

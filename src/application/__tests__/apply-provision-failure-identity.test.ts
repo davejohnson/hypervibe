@@ -16,6 +16,63 @@ import { createUnresolvedCacheNetworkMutation } from '../../domain/ports/cache.p
 import { createCommandContext, type CommandContext } from '../context.js';
 import { executePlanApply } from '../apply-plan.js';
 import '../providers.js';
+import { providerRegistry, standardDatabaseRuntimeProjection } from '../../domain/registry/provider.registry.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services'], ['fixture-project-hosting', 'project'], ['fixture-regional-hosting', 'project']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-database', 'fixture-hosting'], ['fixture-project-database', 'fixture-project-hosting'], ['fixture-regional-database', 'fixture-regional-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'database', credentialsSchema: z.object({}),
+      lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['database', 'backup'], defaultResource: 'database',
+      selectors: {
+        database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: name === 'fixture-regional-database' ? ['subscriptionId', 'resourceGroup', 'scopeVersion'] : name === 'fixture-project-database' ? ['accountId', 'region'] : ['projectId'], collectionKey: 'databases' },
+        backup: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'backups' },
+      },
+      inspect: (adapter, request) => (adapter as { inspectBackupResources: (request: unknown) => Promise<Record<string, unknown>> }).inspectBackupResources(request),
+    },
+    databaseRuntime: standardDatabaseRuntimeProjection,
+    retainedCleanup: {
+      resources: ['backup'],
+      destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+    },
+    factory: () => { throw new Error('Synthetic database requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-project-cache', 'fixture-project-hosting'], ['fixture-regional-cache', 'fixture-regional-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'cache', credentialsSchema: z.object({}),
+      lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['cache'], defaultResource: 'cache',
+      selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: name === 'fixture-regional-cache' ? ['subscriptionId', 'resourceGroup', 'scopeVersion'] : ['accountId', 'region', 'vpcId'], collectionKey: 'caches' } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic cache requires an explicit test adapter.'); },
+  });
+}
 
 async function applyAction(params: {
   ctx: CommandContext;
@@ -79,12 +136,12 @@ describe('failed datastore provisioning identity retention', () => {
     ctx = createCommandContext();
     project = ctx.repos.projects.create({
       name: 'failed-provision-identity',
-      defaultPlatform: 'azure-container-apps',
+      defaultPlatform: 'fixture-regional-hosting',
     });
     environment = ctx.repos.environments.create({
       projectId: project.id,
       name: 'staging',
-      platformBindings: { provider: 'azure-container-apps' },
+      platformBindings: { provider: 'fixture-regional-hosting' },
     });
     vi.spyOn(PlanService.prototype, 'preflight').mockReturnValue([]);
     vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
@@ -102,7 +159,7 @@ describe('failed datastore provisioning identity retention', () => {
 
   it('keeps a failed database receipt failed while retaining its exact identity and previous provider', async () => {
     const previousBindings = {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       instanceId: 'projects/old/instances/postgres',
       providerScope: { projectId: 'old', region: 'us-central1' },
       connectionUrl: 'postgres://stored-locally',
@@ -123,7 +180,7 @@ describe('failed datastore provisioning identity retention', () => {
       component: failedComponent({
         environment,
         type: 'postgres',
-        provider: 'azure-postgres',
+        provider: 'fixture-regional-database',
         externalId,
         providerScope,
       }),
@@ -146,16 +203,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps', region: 'canadacentral' },
+          hosting: { provider: 'fixture-regional-hosting', region: 'canadacentral' },
           services: {},
-          database: { provider: 'azure-postgres' },
+          database: { provider: 'fixture-regional-database' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'database:azure-postgres',
+      id: 'database:fixture-regional-database',
       type: 'create',
-      resource: { kind: 'database', name: 'postgres', provider: 'azure-postgres' },
+      resource: { kind: 'database', name: 'postgres', provider: 'fixture-regional-database' },
       billable: true,
       verified: true,
       reason: 'Create Azure PostgreSQL',
@@ -179,10 +236,10 @@ describe('failed datastore provisioning identity retention', () => {
       id: previous.id,
       externalId,
       bindings: {
-        provider: 'azure-postgres',
+        provider: 'fixture-regional-database',
         instanceId: externalId,
         providerScope,
-        previousProvider: 'cloudsql',
+        previousProvider: 'fixture-database',
         previousExternalId: previous.externalId,
         previousBindings,
         provisioningIncomplete: true,
@@ -203,7 +260,7 @@ describe('failed datastore provisioning identity retention', () => {
         environmentId: environment.id,
         type: 'postgres',
         externalId: null,
-        bindings: { provider: 'cloudsql', providerScope, unresolvedMutation },
+        bindings: { provider: 'fixture-database', providerScope, unresolvedMutation },
         createdAt: new Date(),
         updatedAt: new Date(),
       } as Component,
@@ -223,16 +280,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'cloudrun' },
+          hosting: { provider: 'fixture-hosting' },
           services: {},
-          database: { provider: 'cloudsql' },
+          database: { provider: 'fixture-database' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'database:cloudsql',
+      id: 'database:fixture-database',
       type: 'create',
-      resource: { kind: 'database', name: 'postgres', provider: 'cloudsql' },
+      resource: { kind: 'database', name: 'postgres', provider: 'fixture-database' },
       billable: true,
       verified: true,
       reason: 'Create Cloud SQL PostgreSQL',
@@ -250,7 +307,7 @@ describe('failed datastore provisioning identity retention', () => {
     expect(ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres')).toMatchObject({
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope,
         unresolvedMutation,
         provisioningIncomplete: true,
@@ -377,7 +434,7 @@ describe('failed datastore provisioning identity retention', () => {
         type: 'redis',
         externalId: null,
         bindings: {
-          provider: 'elasticache',
+          provider: 'fixture-project-cache',
           providerScope,
           unresolvedNetworkMutation,
           provisioningIncomplete: true,
@@ -401,16 +458,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'ecs' },
+          hosting: { provider: 'fixture-project-hosting' },
           services: {},
-          cache: { provider: 'elasticache' },
+          cache: { provider: 'fixture-project-cache' },
         },
       },
     });
     const initialAction: PlanAction = {
-      id: 'cache:elasticache',
+      id: 'cache:fixture-project-cache',
       type: 'create',
-      resource: { kind: 'cache', name: 'redis', provider: 'elasticache' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-project-cache' },
       billable: true,
       verified: true,
       reason: 'Create ElastiCache Redis',
@@ -464,13 +521,13 @@ describe('failed datastore provisioning identity retention', () => {
     expect(secondProvisionCall?.[2]).toMatchObject({
       component: {
         externalId: null,
-        bindings: { provider: 'elasticache', unresolvedNetworkMutation },
+        bindings: { provider: 'fixture-project-cache', unresolvedNetworkMutation },
       },
     });
     expect(ctx.repos.components.findByEnvironmentAndType(environment.id, 'redis')).toMatchObject({
       externalId: null,
       bindings: {
-        provider: 'elasticache',
+        provider: 'fixture-project-cache',
         providerScope,
         unresolvedNetworkMutation,
         provisioningIncomplete: true,
@@ -499,7 +556,7 @@ describe('failed datastore provisioning identity retention', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'elasticache',
+        provider: 'fixture-project-cache',
         providerScope,
         unresolvedNetworkMutation: currentMarker,
         provisioningIncomplete: true,
@@ -514,16 +571,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'ecs' },
+          hosting: { provider: 'fixture-project-hosting' },
           services: {},
-          cache: { provider: 'elasticache' },
+          cache: { provider: 'fixture-project-cache' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'cache:elasticache',
+      id: 'cache:fixture-project-cache',
       type: 'update',
-      resource: { kind: 'cache', name: 'redis', provider: 'elasticache' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-project-cache' },
       billable: true,
       verified: true,
       reason: 'Resume exact unresolved ElastiCache network setup',
@@ -594,7 +651,7 @@ describe('failed datastore provisioning identity retention', () => {
           component: failedComponent({
             environment,
             type: 'redis',
-            provider: 'azure-managed-redis',
+            provider: 'fixture-regional-cache',
             externalId,
             providerScope,
           }),
@@ -612,16 +669,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps' },
+          hosting: { provider: 'fixture-regional-hosting' },
           services: {},
-          cache: { provider: 'azure-managed-redis' },
+          cache: { provider: 'fixture-regional-cache' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'cache:azure-managed-redis',
+      id: 'cache:fixture-regional-cache',
       type: 'create',
-      resource: { kind: 'cache', name: 'redis', provider: 'azure-managed-redis' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-regional-cache' },
       billable: true,
       verified: true,
       reason: 'Create Azure Managed Redis',
@@ -652,7 +709,7 @@ describe('failed datastore provisioning identity retention', () => {
       id: previous.id,
       externalId,
       bindings: {
-        provider: 'azure-managed-redis',
+        provider: 'fixture-regional-cache',
         instanceId: externalId,
         providerScope,
         previousProvider: 'railway',
@@ -672,7 +729,7 @@ describe('failed datastore provisioning identity retention', () => {
           component: failedComponent({
             environment,
             type: 'postgres',
-            provider: 'azure-postgres',
+            provider: 'fixture-regional-database',
             externalId,
             providerScope: { subscriptionId: 'sub' },
           }),
@@ -685,16 +742,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps' },
+          hosting: { provider: 'fixture-regional-hosting' },
           services: {},
-          database: { provider: 'azure-postgres' },
+          database: { provider: 'fixture-regional-database' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'database:azure-postgres',
+      id: 'database:fixture-regional-database',
       type: 'create',
-      resource: { kind: 'database', name: 'postgres', provider: 'azure-postgres' },
+      resource: { kind: 'database', name: 'postgres', provider: 'fixture-regional-database' },
       billable: true,
       verified: true,
       reason: 'Create Azure PostgreSQL',
@@ -719,16 +776,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps' },
+          hosting: { provider: 'fixture-regional-hosting' },
           services: {},
-          database: { provider: 'azure-postgres' },
+          database: { provider: 'fixture-regional-database' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'database:rds',
+      id: 'database:fixture-project-database',
       type: 'create',
-      resource: { kind: 'database', name: 'postgres', provider: 'rds' },
+      resource: { kind: 'database', name: 'postgres', provider: 'fixture-project-database' },
       billable: true,
       verified: true,
       reason: 'stale database action',
@@ -755,7 +812,7 @@ describe('failed datastore provisioning identity retention', () => {
       type: 'redis',
       externalId,
       bindings: {
-        provider: 'azure-managed-redis',
+        provider: 'fixture-regional-cache',
         instanceId: externalId,
         providerScope,
         connectionUrl: 'rediss://stored-locally',
@@ -769,7 +826,7 @@ describe('failed datastore provisioning identity retention', () => {
           component: failedComponent({
             environment,
             type: 'redis',
-            provider: 'azure-managed-redis',
+            provider: 'fixture-regional-cache',
             externalId,
             providerScope,
           }),
@@ -787,16 +844,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps' },
+          hosting: { provider: 'fixture-regional-hosting' },
           services: {},
-          cache: { provider: 'azure-managed-redis', size: '2gb' },
+          cache: { provider: 'fixture-regional-cache', size: '2gb' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'cache:azure-managed-redis',
+      id: 'cache:fixture-regional-cache',
       type: 'update',
-      resource: { kind: 'cache', name: 'redis', provider: 'azure-managed-redis' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-regional-cache' },
       billable: true,
       verified: true,
       reason: 'Resize the exact Azure cache',
@@ -819,7 +876,7 @@ describe('failed datastore provisioning identity retention', () => {
     expect(ctx.repos.components.findByEnvironmentAndType(environment.id, 'redis')).toMatchObject({
       externalId,
       bindings: {
-        provider: 'azure-managed-redis',
+        provider: 'fixture-regional-cache',
         providerScope,
         connectionUrl: 'rediss://stored-locally',
         reconciliationIncomplete: true,
@@ -861,7 +918,7 @@ describe('failed datastore provisioning identity retention', () => {
       type: 'redis',
       externalId,
       bindings: {
-        provider: 'azure-managed-redis',
+        provider: 'fixture-regional-cache',
         instanceId: externalId,
         providerScope,
         connectionUrl: 'rediss://stored-locally',
@@ -875,7 +932,7 @@ describe('failed datastore provisioning identity retention', () => {
           component: failedComponent({
             environment,
             type: 'redis',
-            provider: 'azure-managed-redis',
+            provider: 'fixture-regional-cache',
             externalId: returnedExternalId,
             providerScope: returnedScope,
           }),
@@ -892,16 +949,16 @@ describe('failed datastore provisioning identity retention', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'azure-container-apps' },
+          hosting: { provider: 'fixture-regional-hosting' },
           services: {},
-          cache: { provider: 'azure-managed-redis', size: '2gb' },
+          cache: { provider: 'fixture-regional-cache', size: '2gb' },
         },
       },
     });
     const action: PlanAction = {
-      id: 'cache:azure-managed-redis',
+      id: 'cache:fixture-regional-cache',
       type: 'update',
-      resource: { kind: 'cache', name: 'redis', provider: 'azure-managed-redis' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-regional-cache' },
       billable: true,
       verified: true,
       reason: 'Resize the exact Azure cache',

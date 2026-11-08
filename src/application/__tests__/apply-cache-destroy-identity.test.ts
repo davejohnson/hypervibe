@@ -14,6 +14,40 @@ import type { Environment } from '../../domain/entities/environment.entity.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
 import { bindingIdentityFingerprint } from '../../domain/services/binding-identity.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-cache', 'fixture-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'cache', credentialsSchema: z.object({}),
+      lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['cache'], defaultResource: 'cache',
+      selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'caches' } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic cache requires an explicit test adapter.'); },
+  });
+}
 
 describe('cache destroy apply identity', () => {
   let ctx: CommandContext;
@@ -178,9 +212,9 @@ describe('cache destroy apply identity', () => {
 
   it('blocks cache provisioning when desired placement changed after planning', async () => {
     const action: PlanAction = {
-      id: 'cache:memorystore',
+      id: 'cache:fixture-cache',
       type: 'create',
-      resource: { kind: 'cache', name: 'redis', provider: 'memorystore' },
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-cache' },
       verified: true,
       reason: 'Create cache',
       billable: true,
@@ -199,10 +233,10 @@ describe('cache destroy apply identity', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'cloudrun' },
+          hosting: { provider: 'fixture-hosting' },
           services: {},
           cache: {
-            provider: 'memorystore', region: 'us-central1', network: 'default',
+            provider: 'fixture-cache', region: 'us-central1', network: 'default',
             subnetwork: 'default', tier: 'BASIC', size: '2gb',
           },
         },
@@ -235,7 +269,7 @@ describe('cache destroy apply identity', () => {
       tier: 'BASIC', size: '1gb',
     };
     const runtimeNetwork = {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       projectId: 'gcp-project',
       region: 'us-central1',
       network: 'projects/gcp-project/global/networks/default',
@@ -243,8 +277,8 @@ describe('cache destroy apply identity', () => {
       egress: 'PRIVATE_RANGES_ONLY',
     };
     const action: PlanAction = {
-      id: 'cache:memorystore', type: 'create',
-      resource: { kind: 'cache', name: 'redis', provider: 'memorystore' },
+      id: 'cache:fixture-cache', type: 'create',
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-cache' },
       verified: true, reason: 'Create cache', billable: true,
       metadata: { operation: CACHE_OPERATIONS.ensure, ...placement },
     };
@@ -254,7 +288,7 @@ describe('cache destroy apply identity', () => {
         id: '', environmentId: environment.id, type: 'redis' as const,
         externalId: 'projects/gcp-project/locations/us-central1/instances/cache',
         bindings: {
-          provider: 'memorystore',
+          provider: 'fixture-cache',
           providerScope: { projectId: 'gcp-project', region: 'us-central1' },
           runtimeNetwork,
         },
@@ -265,7 +299,7 @@ describe('cache destroy apply identity', () => {
     vi.spyOn(adapterFactory, 'getCacheAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'memorystore',
+        name: 'fixture-cache',
         capabilities: {
           supportedCaches: ['redis'], supportsTls: false, supportsHighAvailability: true,
           supportsPersistence: true, serverlessOptimized: false,
@@ -280,8 +314,8 @@ describe('cache destroy apply identity', () => {
       version: 1, project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'cloudrun' }, services: {},
-          cache: { provider: 'memorystore', ...placement },
+          hosting: { provider: 'fixture-hosting' }, services: {},
+          cache: { provider: 'fixture-cache', ...placement },
         },
       },
     });
@@ -314,8 +348,8 @@ describe('cache destroy apply identity', () => {
 
   it('retains a recoverable component but fails when a network-required cache omits runtime metadata', async () => {
     const action: PlanAction = {
-      id: 'cache:memorystore', type: 'create',
-      resource: { kind: 'cache', name: 'redis', provider: 'memorystore' },
+      id: 'cache:fixture-cache', type: 'create',
+      resource: { kind: 'cache', name: 'redis', provider: 'fixture-cache' },
       verified: true, reason: 'Create cache', billable: true,
       metadata: {
         operation: CACHE_OPERATIONS.ensure,
@@ -325,7 +359,7 @@ describe('cache destroy apply identity', () => {
     vi.spyOn(adapterFactory, 'getCacheAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'memorystore',
+        name: 'fixture-cache',
         capabilities: {
           supportedCaches: ['redis'], supportsTls: false, supportsHighAvailability: true,
           supportsPersistence: true, serverlessOptimized: false, requiresRuntimeNetwork: true,
@@ -336,7 +370,7 @@ describe('cache destroy apply identity', () => {
             id: '', environmentId: environment.id, type: 'redis' as const,
             externalId: 'projects/gcp-project/locations/us-central1/instances/recover-me',
             bindings: {
-              provider: 'memorystore',
+              provider: 'fixture-cache',
               providerScope: { projectId: 'gcp-project', region: 'us-central1' },
             },
             createdAt: new Date(), updatedAt: new Date(),
@@ -350,7 +384,7 @@ describe('cache destroy apply identity', () => {
     const spec = projectSpecSchema.parse({
       version: 1, project: project.name,
       environments: {
-        staging: { hosting: { provider: 'cloudrun' }, services: {}, cache: { provider: 'memorystore' } },
+        staging: { hosting: { provider: 'fixture-hosting' }, services: {}, cache: { provider: 'fixture-cache' } },
       },
     });
     const plan = ctx.repos.runs.create({
@@ -382,7 +416,7 @@ describe('cache destroy apply identity', () => {
   it('clears stale private-cache networking when provisioning a non-network cache', async () => {
     ctx.repos.environments.updatePlatformBindings(environment.id, {
       cacheNetwork: {
-        provider: 'cloudrun', projectId: 'gcp-project', region: 'us-central1',
+        provider: 'fixture-hosting', projectId: 'gcp-project', region: 'us-central1',
         network: 'projects/gcp-project/global/networks/default',
         subnetwork: 'projects/gcp-project/regions/us-central1/subnetworks/default',
         egress: 'PRIVATE_RANGES_ONLY',

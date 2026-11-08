@@ -20,46 +20,6 @@
         "https://docs.railway.com/builds/private-registries",
         "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json"
       ]
-    },
-    {
-      "provider": "cloudrun",
-      "implementation": "unsupported",
-      "databaseProviders": [],
-      "identity": "Cloud project, location, Job, Execution and individual Task are distinct resources.",
-      "completionAndRecovery": "Native execution status and task outcomes must be correlated; cancellation retains the execution, while deletion removes its history. Restarting a job is another execution.",
-      "prerequisites": "Reviewed image, job service identity, scoped execution permissions, secret access and appropriate VPC egress for a private database.",
-      "limitations": "No fresh-generation bootstrap admission, finite SQL receipt or durable task-recovery implementation is registered. Existing runJob or Cloud SQL connectivity does not admit this lifecycle.",
-      "officialSources": [
-        "https://docs.cloud.google.com/run/docs/execute/jobs",
-        "https://docs.cloud.google.com/sql/docs/postgres/connect-run"
-      ]
-    },
-    {
-      "provider": "ecs",
-      "implementation": "unsupported",
-      "databaseProviders": [],
-      "identity": "AWS account, region, cluster ARN, task definition revision and returned task ARN.",
-      "completionAndRecovery": "RunTask supports a clientToken tied to request parameters. DescribeTasks is eventually consistent and reports container exits; stopped task visibility is retained for at least one hour, not indefinitely.",
-      "prerequisites": "Exact task and execution roles, immutable image, approved subnet/security groups and a separately admitted private database credential source.",
-      "limitations": "No fresh-generation bootstrap admission or finite SQL/task recovery contract is implemented. An available RDS instance or RUNNING task cannot prove SQL authentication or migration completion.",
-      "officialSources": [
-        "https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html",
-        "https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeTasks.html",
-        "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToPostgreSQLInstance.html"
-      ]
-    },
-    {
-      "provider": "azure-container-apps",
-      "implementation": "unsupported",
-      "databaseProviders": [],
-      "identity": "Full job ARM identity, Container Apps environment and returned execution identity.",
-      "completionAndRecovery": "Manual jobs execute finite replicas with separate timeout, retry, parallelism and completion-count settings. Native retry behavior must not silently replay an uncertain migration.",
-      "prerequisites": "Approved job image and identity, registry access, credential references and networking to the selected PostgreSQL server.",
-      "limitations": "No fresh-generation receipt or resumable finite SQL/migration executor is registered. Shared environment networking alone does not establish database or command compatibility.",
-      "officialSources": [
-        "https://learn.microsoft.com/en-us/azure/container-apps/jobs",
-        "https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private"
-      ]
     }
   ],
   "database": [
@@ -77,39 +37,6 @@
         "https://docs.railway.com/volumes",
         "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json",
         "https://www.postgresql.org/docs/18/auth-password.html"
-      ]
-    },
-    {
-      "provider": "cloudsql",
-      "hostingProviders": [],
-      "identity": "Cloud project, instance and region/connection name, selected database and database identity.",
-      "completionAndRecovery": "Private Cloud Run connectivity requires the instance private IP and the appropriate VPC egress path. Instance state, connector IAM authorization and SQL login are different evidence.",
-      "prerequisites": "Approved runtime identity and database user, Cloud SQL API/permissions, exact VPC route and connection mode.",
-      "limitations": "Fresh-generation bootstrap is unsupported. No Railway variable interpolation, empty-volume semantics or public-IP fallback may be inferred.",
-      "officialSources": [
-        "https://docs.cloud.google.com/sql/docs/postgres/connect-run"
-      ]
-    },
-    {
-      "provider": "rds",
-      "hostingProviders": [],
-      "identity": "AWS account, region, DB instance identifier/ARN, endpoint and selected database/role.",
-      "completionAndRecovery": "An available instance must also be network-accessible before SQL connection. A private instance requires VPC access; control-plane availability does not prove the supplied SQL password.",
-      "prerequisites": "Approved task network/security groups, database authentication mode and endpoint/TLS configuration.",
-      "limitations": "No fresh-generation bootstrap pair is implemented. Existing ECS task support is not migration or old-data backup-waiver authority.",
-      "officialSources": [
-        "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToPostgreSQLInstance.html"
-      ]
-    },
-    {
-      "provider": "azure-postgres",
-      "hostingProviders": [],
-      "identity": "Flexible Server ARM id with subscription/resource group, selected database and role.",
-      "completionAndRecovery": "Private access uses virtual network integration and DNS; another network needs the appropriate connectivity. Server readiness is separate from a fresh SQL connection and migration result.",
-      "prerequisites": "Approved identity, database role, VNet/subnet/private DNS route and exact TLS configuration.",
-      "limitations": "Fresh-generation receipt and bootstrap executor are unsupported. ARM authorization must not be treated as database login authority.",
-      "officialSources": [
-        "https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private"
       ]
     }
   ]

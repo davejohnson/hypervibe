@@ -1,15 +1,7 @@
 import { vi } from 'vitest';
-import {
-  CreateDBInstanceCommand,
-  DeleteDBInstanceCommand,
-  DescribeDBInstancesCommand,
-} from '@aws-sdk/client-rds';
-import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedState } from '../../../domain/ports/observe.port.js';
-import { RdsAdapter } from '../aws/rds.adapter.js';
-import { CloudSqlAdapter } from '../gcp/cloudsql.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../railway/railway-database.factory.js';
 import {
@@ -49,130 +41,6 @@ function makeComponent(
     bindings: { provider, ...bindings },
     createdAt: now,
     updatedAt: now,
-  };
-}
-
-function fetchMetrics(fetchMock: ReturnType<typeof vi.fn>): Pick<
-  DatabaseLifecycleParityFixture,
-  'mutations' | 'observations'
-> {
-  return {
-    mutations: () => fetchMock.mock.calls
-      .filter((call) => !['GET', 'HEAD'].includes((call[1] as RequestInit | undefined)?.method ?? 'GET'))
-      .map((call) => call[0]),
-    observations: () => fetchMock.mock.calls
-      .filter((call) => ['GET', 'HEAD'].includes((call[1] as RequestInit | undefined)?.method ?? 'GET'))
-      .length,
-  };
-}
-
-async function setupCloudSql(
-  scenario: DatabaseLifecycleParityScenario
-): Promise<DatabaseLifecycleParityFixture> {
-  let itemReads = 0;
-  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? 'GET';
-    const itemPath = `/v1/projects/gcp-project/instances/${EXTERNAL_IDS[0]}`;
-
-    if (url.pathname === itemPath && method === 'GET') {
-      itemReads += 1;
-      if (scenario === 'observation_unknown' || scenario === 'delete_observation_unknown') {
-        return Response.json({ message: 'observation unavailable' }, { status: 503 });
-      }
-      if (scenario === 'already_absent' || (scenario === 'delete_retry' && itemReads >= 3)) {
-        return Response.json({ message: 'not found' }, { status: 404 });
-      }
-      return Response.json({
-        name: EXTERNAL_IDS[0],
-        state: itemReads > 1 ? 'PENDING_DELETE' : 'RUNNABLE',
-        databaseVersion: 'POSTGRES_15',
-        region: 'us-central1',
-      });
-    }
-
-    if (url.pathname === itemPath && method === 'DELETE') {
-      return Response.json({});
-    }
-
-    throw new Error(`Unexpected Cloud SQL request: ${method} ${url}`);
-  });
-  vi.stubGlobal('fetch', fetchMock);
-  vi.stubEnv('HYPERVIBE_CLOUDSQL_DELETE_ATTEMPTS', '4');
-  vi.stubEnv('HYPERVIBE_CLOUDSQL_DELETE_DELAY_MS', '0');
-  const adapter = new CloudSqlAdapter();
-  await adapter.connect({
-    projectId: 'gcp-project',
-    region: 'us-central1',
-    credentials: JSON.stringify({
-      type: 'service_account',
-      project_id: 'gcp-project',
-      private_key: 'dummy',
-      client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
-    }),
-  });
-  (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
-  (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry =
-    new Date(Date.now() + 60_000);
-  return { adapter, ...fetchMetrics(fetchMock) };
-}
-
-async function setupRds(
-  scenario: DatabaseLifecycleParityScenario
-): Promise<DatabaseLifecycleParityFixture> {
-  let observations = 0;
-  const mutations: unknown[] = [];
-  const adapter = new RdsAdapter();
-  await adapter.connect({
-    accessKeyId: 'AKIAEXAMPLE',
-    secretAccessKey: 'secret',
-    region: 'us-west-2',
-    vpcId: 'vpc-1',
-  });
-  const rdsSend = vi.fn(async (command: unknown) => {
-    if (command instanceof DescribeDBInstancesCommand) {
-      observations += 1;
-      if (scenario === 'observation_unknown' || scenario === 'delete_observation_unknown') {
-        const error = new Error('RDS observation unavailable');
-        Object.assign(error, { name: 'ThrottlingException' });
-        throw error;
-      }
-      if (scenario === 'already_absent' || (scenario === 'delete_retry' && observations >= 3)) {
-        const error = new Error('DB instance not found');
-        Object.assign(error, { name: 'DBInstanceNotFoundFault' });
-        throw error;
-      }
-      return {
-        DBInstances: [{
-          DBInstanceIdentifier: EXTERNAL_IDS[0],
-          DBInstanceArn: `arn:aws:rds:us-west-2:123456789012:db:${EXTERNAL_IDS[0]}`,
-          DBInstanceStatus: observations > 1 ? 'deleting' : 'available',
-        }],
-      };
-    }
-    if (command instanceof CreateDBInstanceCommand || command instanceof DeleteDBInstanceCommand) {
-      mutations.push(command);
-      return {};
-    }
-    throw new Error(`Unexpected RDS command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
-  });
-  const ec2Send = vi.fn(async (command: unknown) => {
-    mutations.push(command);
-    return {};
-  });
-  (adapter as unknown as { rds: { send: typeof rdsSend } }).rds = { send: rdsSend };
-  (adapter as unknown as { ec2: { send: typeof ec2Send } }).ec2 = { send: ec2Send };
-  const stsSend = vi.fn(async (command: unknown) => {
-    if (command instanceof GetCallerIdentityCommand) return { Account: '123456789012' };
-    throw new Error(`Unexpected STS command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
-  });
-  (adapter as unknown as { sts: { send: typeof stsSend } }).sts = { send: stsSend };
-  vi.stubEnv('HYPERVIBE_RDS_READY_ATTEMPTS', '4');
-  vi.stubEnv('HYPERVIBE_RDS_READY_DELAY_MS', '0');
-  return {
-    adapter,
-    mutations: () => mutations,
-    observations: () => observations,
   };
 }
 
@@ -323,28 +191,6 @@ const providers: Array<{
     componentBindings: {
       providerScope: { projectId: 'rail-project' },
       resourceKind: 'service',
-    },
-  },
-  {
-    displayName: 'Cloud SQL',
-    provider: 'cloudsql',
-    setup: setupCloudSql,
-    componentBindings: {
-      providerScope: { projectId: 'gcp-project', region: 'us-central1' },
-    },
-  },
-  {
-    displayName: 'Amazon RDS',
-    provider: 'rds',
-    setup: setupRds,
-    platformBindings: {
-      provider: 'ecs',
-      projectId: 'arn:aws:ecs:us-west-2:123456789012:cluster/hv-parity-production',
-      environmentId: 'arn:aws:ecs:us-west-2:123456789012:cluster/hv-parity-production',
-      services: {},
-    },
-    componentBindings: {
-      providerScope: { accountId: '123456789012', region: 'us-west-2' },
     },
   },
 ];

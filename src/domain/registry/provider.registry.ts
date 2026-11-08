@@ -458,7 +458,7 @@ export class ProviderRegistry {
         `Provider "${provider.metadata.name}" declares database lifecycle support without a database runtime projection.`
       );
     }
-    if (!supportsDatabase && provider.databaseRuntime) {
+    if (!supportsDatabase && provider.databaseRuntime && provider.metadata.category !== 'database') {
       throw new Error(
         `Provider "${provider.metadata.name}" declares a database runtime projection without a database lifecycle.`
       );
@@ -592,7 +592,7 @@ export class ProviderRegistry {
       }
     }
     for (const capability of Object.keys(maturity) as ProviderLifecycleCapability[]) {
-      if (!declared.has(capability)) {
+      if (!declared.has(capability) && maturity[capability]?.status !== 'planned') {
         throw new Error(
           `Provider "${provider.metadata.name}" declares ${capability} maturity without an implemented lifecycle capability.`
         );
@@ -837,12 +837,12 @@ export class ProviderRegistry {
     name: string,
     capability: ProviderLifecycleCapability
   ): ProviderCapabilityMaturity | undefined {
-    if (!this.supports(name, capability)) return undefined;
     return this.providers.get(name)?.metadata.maturity?.lifecycle?.[capability];
   }
 
   /** Planned capabilities remain discoverable/readable but cannot authorize mutation. */
   supportsMutation(name: string, capability: ProviderLifecycleCapability): boolean {
+    if (!this.supports(name, capability)) return false;
     const maturity = this.lifecycleMaturity(name, capability);
     return maturity?.status === 'ready-for-live' || maturity?.status === 'supported';
   }

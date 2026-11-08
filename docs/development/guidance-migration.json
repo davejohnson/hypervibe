@@ -1353,5 +1353,209 @@
         "docs/development-guidance-migration.json": "docs/development/guidance-migration.json"
       }
     }
+  ],
+  "policyChanges": [
+    {
+      "id": "2026-11-06-opentofu-product-reset",
+      "date": "2026-11-06",
+      "authority": "Owner-requested reset toward easy app deployment on GCP, AWS and Azure using OpenTofu, with minimal user-installed dependencies and existing Railway apps preserved.",
+      "historicalRecords": "Earlier rules, source hashes and migration decisions remain historical snapshots. This entry records the current superseding direction; it does not claim implementation, tests or live support.",
+      "changes": [
+        {
+          "area": "Product and architecture",
+          "destinations": [
+            "README.md",
+            "AGENTS.md",
+            "ARCHITECTURE.md",
+            "docs/development/product.md"
+          ],
+          "decision": "Hypervibe owns the complete app DevOps journey. OpenTofu becomes the new cloud resource lifecycle engine; retain useful authentication/bootstrap/build/operations/integration clients and existing Railway behavior. Remove custom cloud CRUD rather than rebuilding it in parallel. The unused GCP prototype requires no compatibility or import-migration project. Engine integration and packaged installation are explicitly pending."
+        },
+        {
+          "area": "Installation and dependency ownership",
+          "rules": [
+            "DG-014",
+            "DG-115"
+          ],
+          "destinations": [
+            "ARCHITECTURE.md#engine-runtime-and-installation",
+            "docs/development/connections.md#dg-115"
+          ],
+          "decision": "Allow internally provisioned, pinned, integrity-verified OpenTofu and provider plugins within Hypervibe lifecycle and secret boundaries. Target no separate user installation of OpenTofu, Terraform, cloud CLIs or Docker. Preserve current Node.js/npm prerequisite and the narrow authorized Railway private SSH diagnostic exception."
+        },
+        {
+          "area": "Environment defaults",
+          "rules": [
+            "DG-008"
+          ],
+          "destination": "docs/development/product.md#dg-008",
+          "decision": "Replace automatic production-and-staging creation with environments/resources needed for the requested journey. Recommend staging when useful, explain costs and preserve environment isolation, existing policy and explicit choices."
+        },
+        {
+          "area": "Failure continuation and adoption",
+          "rules": [
+            "DG-081",
+            "DG-082"
+          ],
+          "destinations": [
+            "docs/development/product.md#dg-081",
+            "docs/development/product.md#dg-082"
+          ],
+          "decision": "Stop dependent effects after blocked, pending, failed or confirmation-required results while honoring explicit bounded continuation. Adoption remains an explicit user request; it is not a prerequisite for replacing the unused GCP prototype."
+        },
+        {
+          "area": "Integrated provider evidence",
+          "rules": [
+            "DG-017",
+            "DG-069",
+            "DG-079"
+          ],
+          "destination": "docs/development/provider-evidence.md",
+          "decision": "Prove one complete cloud journey before extending it. Remove the requirement to reconstruct every cloud provider schema/CRUD or pass an obsolete all-provider lifecycle matrix first. Preserve meaningful required-CI boundary regressions, real pinned-binary/generated-configuration checks and independent API contract evidence. Existing readiness claims do not transfer automatically to the new engine."
+        },
+        {
+          "area": "Product wording and stable rule anchors",
+          "rules": [
+            "DG-001",
+            "DG-002",
+            "DG-003",
+            "DG-004",
+            "DG-005",
+            "DG-006",
+            "DG-007",
+            "DG-008",
+            "DG-009",
+            "DG-010",
+            "DG-012",
+            "DG-013",
+            "DG-014",
+            "DG-081",
+            "DG-082",
+            "DG-084",
+            "DG-086",
+            "DG-092",
+            "DG-096",
+            "DG-097",
+            "DG-132",
+            "DG-133",
+            "DG-137"
+          ],
+          "destination": "docs/development/product.md",
+          "decision": "Condense product guidance around the vibe-coder journey while retaining every DG anchor and essential consent, least-privilege, exact-scope, secret, invitation and failure-evidence boundaries. Specific policy changes are listed separately above."
+        },
+        {
+          "area": "Retained operational reference",
+          "source": "ARCHITECTURE.md",
+          "destination": "docs/development/operational-contracts.md",
+          "decision": "Retain the prior detailed architecture with rebased links and an explicit status notice for Railway, integrations and operations. Root architecture overrides obsolete cloud CRUD, provider support, dependency and Railway-retirement claims. Preserve root anchors used by existing guidance and historical AGENTS anchor aliases."
+        }
+      ],
+      "documentRevisions": [
+        {
+          "path": "README.md",
+          "beforeSha256": "252ec1ac0a5041e4a9da505df73afb5f660b2360ab765767fa0ba9e769c161e4",
+          "afterSha256": "f0aa993bef1a3312a997d92843bd6ddb0bd5d464c23415792f4347735a6b4f34"
+        },
+        {
+          "path": "AGENTS.md",
+          "beforeSha256": "8e397601129c307475ccd715bd2d92c6ebdeadfc18ab30d78f45cf09fd1f87dd",
+          "afterSha256": "1f47a3bd434fa667be910828043bb6e741dde1a10522219caf85e63fd73d4419"
+        },
+        {
+          "path": "ARCHITECTURE.md",
+          "beforeSha256": "0ef94e4bd654ec94ecf3ef5d5002c1b8dc8a43a21ee9dbfa5c6e413287ed49fd",
+          "afterSha256": "7287986370809318b71fd93190dddfea887e7303b394408497821b757cd51984"
+        },
+        {
+          "path": "docs/development/product.md",
+          "beforeSha256": "ef83ec5512aae70bcc743f85900240b71f8ef6beebf04552b4016586b56db0ce",
+          "afterSha256": "1dffff2d8f6497c9c71b91d44c3bbcd96f011285ca375e26303b6bab15d5f5bb"
+        },
+        {
+          "path": "docs/development/provider-evidence.md",
+          "beforeSha256": "eb915afd24b53d17bac2641a13deb1fd034c1b8f4c58bef669b67a58a631f02b",
+          "afterSha256": "170b1b91f57ef02906149921ab0ef0a129e58816cec092910231b93528501da2"
+        },
+        {
+          "path": "docs/development/connections.md",
+          "beforeSha256": "19328077c517f7301a64e5b169765de95ae95af3ddb3afe229ed5845103cb847",
+          "afterSha256": "3e32b7de52d8430cfd51987839fbe8869ffba94e4951fb3b6c91095db50543a3"
+        }
+      ],
+      "retainedReferenceSha256": "cf3a9fd9ed73bee99df03aa11008d279365bcd70b194e3f8322014d7a490aea0"
+    },
+    {
+      "id": "2026-11-06-reconcile-preserved-guidance",
+      "date": "2026-11-06",
+      "authority": "Owner request to reconcile the preserved November 5 agent-overhead edits with current OpenTofu main and clean the original checkout.",
+      "historicalRecords": "Preserve previous migration records and the OpenTofu reset entry. Record the surviving changes here instead of replacing the new architecture or rewriting historical rule hashes.",
+      "changes": [
+        {
+          "area": "Root guidance",
+          "destination": "AGENTS.md",
+          "decision": "Keep the current OpenTofu root unchanged. Its complete-journey focus, bounded agents, integration owner, repeated-failure reassessment, scoped reading and handoff rules already carry the useful intent of the preserved root rewrite."
+        },
+        {
+          "area": "Provider evidence",
+          "rules": [
+            "DG-017",
+            "DG-020",
+            "DG-025"
+          ],
+          "destination": "docs/development/provider-evidence.md",
+          "decision": "Preserve the OpenTofu evidence model and one complete cloud path. Reuse verified evidence for adapter-local fixes, review affected implementations when shared boundaries change, scope schema variants to the changed decoder or support claim, and centralize CI wiring guidance."
+        },
+        {
+          "area": "Verification and communication",
+          "rules": [
+            "DG-122",
+            "DG-134",
+            "DG-135"
+          ],
+          "destination": "docs/development/workflow.md",
+          "decision": "Provide PR links without an unsolicited browser-opening exchange. Reuse passing verification and unchanged CI wiring; preserve focused tests, required checks, independent evidence, a failing regression before bug fixes and generated-program execution. Keep the repository method self-contained when optional personal guidance is unavailable. Record detailed evidence once and reassess repeated failures before expanding work."
+        },
+        {
+          "area": "Product clarity review",
+          "rules": [
+            "DG-137"
+          ],
+          "destination": "docs/development/product.md#who-we-build-and-write-for",
+          "decision": "Use one bounded independent clarity review for a substantial flow; repeat it only for changed behavior or unresolved findings. Preserve real-screen inspection and the first-time-user clarity check."
+        },
+        {
+          "area": "Checkout housekeeping",
+          "destination": ".gitignore",
+          "decision": "Ignore Finder .DS_Store metadata so cleanup does not recur as an untracked repository change."
+        }
+      ],
+      "documentRevisions": [
+        {
+          "path": "AGENTS.md",
+          "beforeSha256": "1f47a3bd434fa667be910828043bb6e741dde1a10522219caf85e63fd73d4419",
+          "afterSha256": "1f47a3bd434fa667be910828043bb6e741dde1a10522219caf85e63fd73d4419",
+          "preservedEditSha256": "9b6415d99ef0fc5e4cc296a93866b3c4be4df115faf98151f20b80cee89a4654"
+        },
+        {
+          "path": "docs/development/product.md",
+          "beforeSha256": "1dffff2d8f6497c9c71b91d44c3bbcd96f011285ca375e26303b6bab15d5f5bb",
+          "afterSha256": "040dc668ebb8d9e0d25b203fd56aa8d1682a8bae0a2aa040447e2002af553cbf",
+          "preservedEditSha256": "a9854949a020ae255018b3edaf1a23cd6327329f8674c8c1a24760c6840a4ff5"
+        },
+        {
+          "path": "docs/development/provider-evidence.md",
+          "beforeSha256": "170b1b91f57ef02906149921ab0ef0a129e58816cec092910231b93528501da2",
+          "afterSha256": "7fdf8c3d94e81ec439de083152183281f646845d0d3acd0686d0d9cc410ae6c3",
+          "preservedEditSha256": "deb0d6692d3b5c2af8c3ca13674298df801bda6ad2f830a1bed3a8b363106291"
+        },
+        {
+          "path": "docs/development/workflow.md",
+          "beforeSha256": "c3c89dc5e2ecfac4ce2dd4ecfa248a32ac902cb06e1d49cbb269fb91a12db04f",
+          "afterSha256": "9820bbd326c52cfbd1208391f512994804d361f26f4372c6db81855dfcf8b241",
+          "preservedEditSha256": "83efe0a6aa37c4a02ac233c4559998a3a9dddfacf7b4a494027558f1cc508b4f"
+        }
+      ],
+      "preserved": "OpenTofu ownership, GCP/AWS/Azure focus, existing Railway support, minimal user installs, exact authorization, unknown-state handling, secret boundaries, regression obligations, required CI/reviews, and merge-stop/runtime rules."
+    }
   ]
 }

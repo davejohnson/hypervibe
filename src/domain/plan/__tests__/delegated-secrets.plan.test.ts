@@ -140,6 +140,7 @@ describe('PlanService delegated secret inputs', () => {
     });
     // Secret reconciliation scenarios start with an existing protected database.
     // Supply provider-port evidence while exercising the real backup gates.
+    vi.spyOn(adapterFactory, 'getDatabaseOperations').mockImplementation((...args) => adapterFactory.getDatabaseAdapter(...args));
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true,
       adapter: { name: 'railway', dailyBackups: dailyBackupEvidence(databaseRecoverySource) } as never });
   });

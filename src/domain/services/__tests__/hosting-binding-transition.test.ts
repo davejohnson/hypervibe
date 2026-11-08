@@ -1,18 +1,40 @@
+import '../../../application/providers.js';
+import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { describe, expect, it } from 'vitest';
 import { prepareHostingBindingTransition } from '../hosting-binding-transition.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { ...fixtureHostingMetadata.orchestration, ci: {
+      ...fixtureHostingMetadata.orchestration!.ci!,
+      requiredSecrets: ['FIXTURE_CREDENTIALS', 'FIXTURE_PROJECT'],
+      secretCredentialKeys: { FIXTURE_CREDENTIALS: 'credentials', FIXTURE_PROJECT: 'projectId' },
+    } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
+
 const oldScope = { projectId: 'old-gcp-project', region: 'us-east1' };
 
 function current(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    provider: 'cloudrun',
+    provider: "fixture-hosting",
     projectId: 'logical-production',
     environmentId: 'us-east1',
     providerScope: oldScope,
     services: { web: { serviceId: 'old-web' } },
-    runtimeRollouts: [{ service: 'web', provider: 'cloudrun' }],
+    runtimeRollouts: [{ service: 'web', provider: "fixture-hosting" }],
     ...extra,
   };
 }
@@ -23,7 +45,7 @@ describe('hosting binding scope transitions', () => {
   // The 2026-10-29 MCP regression observed this valid intermediate state reject
   // Railway's first exact IDs as though it were replacing an old Railway scope.
   const previousHosting = {
-    provider: 'cloudrun', projectId: 'logical-production', environmentId: 'us-east1',
+    provider: "fixture-hosting", projectId: 'logical-production', environmentId: 'us-east1',
     providerScope: oldScope, services: { web: { serviceId: 'old-web' } },
   };
   const newTarget = { provider: 'railway', projectId: 'new-rail-project', environmentId: 'new-rail-environment' };
@@ -90,7 +112,7 @@ describe('hosting binding scope transitions', () => {
     const result = prepareHostingBindingTransition({
       current: current(),
       target: {
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         projectId: 'logical-production',
         ...(providerScope ? { providerBindings: { providerScope } } : {}),
       },
@@ -100,13 +122,13 @@ describe('hosting binding scope transitions', () => {
       ok: true,
       changed: true,
       patch: expect.objectContaining({
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         projectId: 'logical-production',
         services: {},
         serviceCreateRecovery: undefined,
         runtimeRollouts: undefined,
         previousHosting: {
-          provider: 'cloudrun',
+          provider: "fixture-hosting",
           projectId: 'logical-production',
           environmentId: 'us-east1',
           providerScope: oldScope,
@@ -119,7 +141,7 @@ describe('hosting binding scope transitions', () => {
 
   it('rehomes an exact service-create recovery into retained cleanup', () => {
     const recovery = {
-      provider: 'cloudrun',
+      provider: "fixture-hosting",
       operation: 'create' as const,
       resourceName: 'worker',
       providerScope: oldScope,
@@ -130,7 +152,7 @@ describe('hosting binding scope transitions', () => {
     const result = prepareHostingBindingTransition({
       current: current({ serviceCreateRecovery: { worker: recovery } }),
       target: {
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         projectId: 'logical-production',
         providerBindings: { providerScope: { ...oldScope, region: 'us-west1' } },
       },
@@ -155,7 +177,7 @@ describe('hosting binding scope transitions', () => {
   it.each([
     ['unresolved create recovery', { serviceCreateRecovery: {
       worker: {
-        provider: 'cloudrun', operation: 'create', resourceName: 'worker', providerScope: oldScope,
+        provider: "fixture-hosting", operation: 'create', resourceName: 'worker', providerScope: oldScope,
         state: 'unresolved',
       },
     } }],
@@ -164,7 +186,7 @@ describe('hosting binding scope transitions', () => {
     const result = prepareHostingBindingTransition({
       current: current(extra),
       target: {
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         projectId: 'logical-production',
         providerBindings: { providerScope: { ...oldScope, region: 'us-west1' } },
       },
