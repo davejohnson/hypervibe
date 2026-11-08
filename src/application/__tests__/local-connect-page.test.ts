@@ -42,10 +42,12 @@ describe('local Cloudflare connect page', () => {
     expect((await request(opened, { headers: { host: `evil.test:${url.port}` } })).status).toBe(421);
     expect((await request(`${url.origin}/connect/wrong`)).status).toBe(404);
     const form = (token: string) => new URLSearchParams({ nonce, token }).toString();
-    const post = (token: string, origin?: string) => request(opened, { method: 'POST', body: form(token),
-      headers: { 'content-type': 'application/x-www-form-urlencoded', ...(origin ? { origin } : {}) } });
+    const post = (token: string, origin?: string, site?: string) => request(opened, { method: 'POST', body: form(token),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', ...(origin ? { origin } : {}), ...(site ? { 'sec-fetch-site': site } : {}) } });
     expect((await post('good-token')).status).toBe(403);
-    const rejected = await post('bad-token', url.origin);
+    expect((await post('good-token', 'null', 'cross-site')).status).toBe(403);
+    // Browsers send "Origin: null" for the page's own post under some referrer policies.
+    const rejected = await post('bad-token', 'null', 'same-origin');
     expect(rejected.status).toBe(400);
     expect(rejected.body).toContain('did not accept');
     const accepted = await post('good-token', url.origin);

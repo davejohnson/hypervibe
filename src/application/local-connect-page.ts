@@ -95,7 +95,7 @@ ${params.error ? `<p class="error" role="alert">${escapeHtml(params.error)}</p>`
 ${CLOUDFLARE_PERMISSIONS.map((entry) => `  <li><strong>${escapeHtml(entry.name)}</strong> <span class="muted">to ${escapeHtml(entry.why)}</span></li>`).join('\n')}
 </ul><p class="muted small">Revoke it any time under My Profile → API Tokens.</p></details>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <title>Connect Cloudflare · Hypervibe</title>
 <style>
 /* Matches the hosted Hypervibe app: ink background, signal green, terminal wordmark. */
@@ -210,10 +210,14 @@ export async function connectCloudflareInBrowser(params: {
       const html = (body: string, status = 200) => response.writeHead(status, {
         'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
         'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
-        'Referrer-Policy': 'no-referrer',
+        // same-origin, not no-referrer: under no-referrer browsers send "Origin: null" on this page's own form post.
+        'Referrer-Policy': 'same-origin',
       }).end(body);
       if (request.method === 'GET') { html(page({ domain, nonce, context, ...(entry?.settled?.status === 'connected' ? { connected: entry.settled.message } : {}) })); return; }
-      if (request.method !== 'POST' || request.headers.origin !== `http://127.0.0.1:${port}`) { response.writeHead(403).end(); return; }
+      // Only this page may post: its exact origin, or the browser's own same-origin marker.
+      const sameOrigin = request.headers.origin === `http://127.0.0.1:${port}`
+        || ((request.headers.origin === undefined || request.headers.origin === 'null') && request.headers['sec-fetch-site'] === 'same-origin');
+      if (request.method !== 'POST' || !sameOrigin) { response.writeHead(403).end(); return; }
       let raw = '';
       request.on('data', (chunk: Buffer) => { raw += chunk.toString('utf8'); if (raw.length > 8192) request.destroy(); });
       request.on('end', async () => {
