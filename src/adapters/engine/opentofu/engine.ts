@@ -43,6 +43,8 @@ export interface EnginePlanResult {
   segmentId: string;
   actions: PlanAction[];
   blockers: string[];
+  /** State addresses OpenTofu would delete that no declared resource maps. */
+  unmanagedDeletes: string[];
   planFile: string;
   segment: Omit<EngineActionSegment, 'addresses'>;
 }

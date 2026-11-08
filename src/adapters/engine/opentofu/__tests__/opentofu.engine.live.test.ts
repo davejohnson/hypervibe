@@ -95,7 +95,7 @@ describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
     });
     expect(Object.keys(configuration.resources).sort()).toEqual([
       'google_cloud_run_v2_job.nightly', 'google_cloud_run_v2_job_iam_member.nightly_invoker', 'google_cloud_scheduler_job.nightly_schedule',
-      'google_sql_database.app', 'google_sql_database_instance.db',
+      'google_sql_database.app', 'google_sql_database_instance.db', 'google_sql_user.worker_waker',
     ]);
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);

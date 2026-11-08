@@ -584,7 +584,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     resources[`google_cloud_run_v2_job.${RELEASE_JOB_KEY}`] = { actionId: 'release-job:migrations', kind: 'service', name: 'release command' };
   }
   const redis: Record<string, unknown> = {};
-  const cacheMapping: EngineResourceMapping = { actionId: 'cache:redis', kind: 'cache', name: 'redis', billable: true };
+  const cacheMapping: EngineResourceMapping = { actionId: 'cache:redis', kind: 'cache', name: 'redis', billable: true, dataBearing: true };
   if (input.cache) {
     if (!/^[a-z][a-z0-9-]{0,38}[a-z0-9]$/.test(input.cache.instanceName)) throw new Error('Memorystore instance name is invalid.');
     if (!/^[a-z][a-z0-9-]{0,62}$/.test(input.cache.network) || !/^[a-z][a-z0-9-]{0,62}$/.test(input.cache.subnetwork)) throw new Error('Cache network names are invalid.');

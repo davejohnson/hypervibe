@@ -869,6 +869,19 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
+  // Queues recorded only in engine state (for example, created before Hypervibe recorded queue
+  // bindings) are Hypervibe's own: retire them by their state address, then plan again.
+  const strayQueues = [...new Set(planned.unmanagedDeletes
+    .map((address) => /^google_pubsub_(?:topic|subscription|topic_iam_member|subscription_iam_member)\.queue_([a-z0-9_]+?)(?:_publisher|_subscriber)?$/.exec(address)?.[1])
+    .filter((key): key is string => Boolean(key)))].map((key) => key.replace(/_/g, '-'));
+  if (strayQueues.length && planned.unmanagedDeletes.every((address) => address.startsWith('google_pubsub_'))
+    && strayQueues.every((name) => !environmentSpec!.queues?.[name])) {
+    engineBinding.queues = [...new Set([...(engineBinding.queues ?? []), ...strayQueues])];
+    configuration = configure(leftovers.databaseInstance || leftovers.buckets.length ? { ...(leftovers.databaseInstance ? { databaseInstance: leftovers.databaseInstance } : {}), buckets: leftovers.buckets } : undefined);
+    planId = crypto.randomUUID();
+    planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+    if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
+  }
   if (planned.blockers.length) return { blocked: planned.blockers };
 
   const secretIds = secretActions.filter((a) => a.type !== 'noop').map((a) => a.id);

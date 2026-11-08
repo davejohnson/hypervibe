@@ -99,6 +99,8 @@ export interface EnginePlanTranslation {
   actions: PlanAction[];
   /** Human-readable reasons the plan must not be applied. */
   blockers: string[];
+  /** Addresses in engine state that OpenTofu would delete although no declared resource maps them. */
+  unmanagedDeletes: string[];
 }
 
 /**
@@ -116,9 +118,11 @@ export function translateEnginePlan(params: {
   const blockers = params.parsed.unsupported.map((address) =>
     `OpenTofu proposed an unsupported action for ${address}; Hypervibe will not apply it.`);
   const grouped = new Map<string, { changes: EngineResourceChange[] }>();
+  const unmanagedDeletes: string[] = [];
   for (const change of params.parsed.changes) {
     const mapping = params.configuration.resources[change.address];
     if (!mapping) {
+      if (change.action === 'delete') unmanagedDeletes.push(change.address);
       if (change.action !== 'noop') {
         blockers.push(`OpenTofu proposed ${change.action} for ${change.address}, which this plan does not manage.`);
       }
@@ -165,7 +169,7 @@ export function translateEnginePlan(params: {
       }),
     });
   }
-  return { actions: actions.sort((a, b) => a.id.localeCompare(b.id)), blockers };
+  return { actions: actions.sort((a, b) => a.id.localeCompare(b.id)), blockers, unmanagedDeletes };
 }
 
 /**
