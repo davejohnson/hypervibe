@@ -36,8 +36,6 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 }
 
-/** Hypervibe's mark: a small wave in a rounded square, drawn inline so the page loads nothing. */
-const MARK = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="var(--brand)"/><path d="M7 18c2.5 0 2.5-6 5-6s2.5 8 5 8 2.5-10 5-10 2 4 3 4" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const LOCK = `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 9V7a4 4 0 1 1 8 0v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="9" width="12" height="9" rx="2.2" fill="currentColor"/></svg>`;
 
 /** What the requested token can do, and why Hypervibe needs each part. */
@@ -57,7 +55,7 @@ function page(params: { domain: string; nonce: string; error?: string; connected
 <h1>Let Hypervibe manage <span class="nowrap">${zone}</span> on Cloudflare</h1>
 <p class="lead">Your assistant asked Hypervibe to set up <strong>${escapeHtml(params.domain)}</strong>. Create a Cloudflare token for it and paste it below. This takes about a minute.</p>
 <ol class="steps">
-  <li><span class="num">1</span><div><a class="button provider" href="${CLOUDFLARE_TOKEN_URLS.user}" target="_blank" rel="noopener noreferrer">Open Cloudflare's token form ↗</a>
+  <li><span class="num">1</span><div><a class="button" href="${CLOUDFLARE_TOKEN_URLS.user}" target="_blank" rel="noopener noreferrer">Open Cloudflare's token form ↗</a>
     <p class="muted">The permissions below are already selected. Under <em>Zone Resources</em> choose <strong>${zone}</strong>, then click <em>Continue to summary</em> and <em>Create Token</em>.</p></div></li>
   <li><span class="num">2</span><div><p>Copy the token Cloudflare shows you, and paste it here:</p>
 <form method="post" action="/connect/${params.nonce}" autocomplete="off">
@@ -75,33 +73,37 @@ ${CLOUDFLARE_PERMISSIONS.map((entry) => `  <li><strong>${escapeHtml(entry.name)}
 <meta name="referrer" content="no-referrer">
 <title>Connect Cloudflare · Hypervibe</title>
 <style>
-:root{--brand:#635bff;--brand-ink:#4b44d8;--bg:#f6f6fb;--fg:#17172a;--muted:#5d5d73;--card:#fff;--line:#e4e4ef;--soft:#efeefe;--provider:#f38020;--ok:#15803d;--err:#b42318}
-@media (prefers-color-scheme:dark){:root{--brand-ink:#a5a0ff;--bg:#101019;--fg:#f2f2f8;--muted:#a3a3b8;--card:#1a1a27;--line:#2c2c3e;--soft:#22213a;--ok:#4ade80;--err:#f87171}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
-.wrap{max-width:36rem;margin:6vh auto;padding:0 16px}
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
-.brand{display:flex;align-items:center;gap:.55rem;font-weight:700;font-size:1.05rem;letter-spacing:-.01em}.mark{width:28px;height:28px}
-.local{display:flex;align-items:center;gap:.35rem;font-size:.8rem;color:var(--muted);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:.2rem .65rem}
-.icon{width:13px;height:13px;color:var(--ok)}
-main{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1.75rem}
-.eyebrow{margin:0 0 .25rem;font-size:.78rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--brand-ink)}
-h1{font-size:1.45rem;line-height:1.25;margin:0 0 .6rem;letter-spacing:-.015em}.lead{margin:0 0 1.25rem}
-.nowrap{white-space:nowrap}.muted{color:var(--muted)}.small{font-size:.85rem}
-.steps{list-style:none;padding:0;margin:0 0 1rem}.steps>li{display:flex;gap:.8rem;margin-bottom:1.1rem}.steps p{margin:.35rem 0 0}
-.num{flex:none;width:1.6rem;height:1.6rem;border-radius:50%;background:var(--soft);color:var(--brand-ink);font-weight:700;font-size:.85rem;display:grid;place-items:center;margin-top:.15rem}
+/* Matches the hosted Hypervibe app: ink background, signal green, terminal wordmark. */
+:root{color-scheme:dark;--ink-950:#080b0d;--ink-900:#0d1215;--ink-800:#10171b;--cloud-100:#c8d1d6;--cloud-300:#93a1a9;--signal-300:#79d98b;--signal-700:#3a7047;--signal-950:#15221a;--frame:#26333a;--err:#f2a7a7;--mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--ink-950);color:var(--cloud-100);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;
+  background-image:linear-gradient(rgb(121 217 139/.022) 1px,transparent 1px),linear-gradient(90deg,rgb(121 217 139/.018) 1px,transparent 1px);background-size:32px 32px}
+.wrap{max-width:38rem;margin:7vh auto;padding:0 16px}
+header{display:flex;align-items:center;justify-content:space-between;gap:.75rem;margin-bottom:.9rem}
+.wordmark{font-family:var(--mono);font-size:1.125rem;font-weight:600;letter-spacing:-.025em;color:#fff}.wordmark span{color:var(--signal-300)}
+.local{display:flex;align-items:center;gap:.4rem;font-family:var(--mono);font-size:.75rem;color:var(--cloud-300);border:1px solid var(--frame);border-radius:2px;padding:.2rem .55rem;background:var(--ink-900)}
+.icon{width:12px;height:12px;color:var(--signal-300)}
+main{background:var(--ink-900);border:1px solid var(--frame);border-radius:2px;padding:1.5rem}
+.eyebrow{margin:0 0 .35rem;font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--signal-300)}
+h1{font-size:1.15rem;line-height:1.35;margin:0 0 .6rem;font-weight:600;color:#fff}.lead{margin:0 0 1.25rem}
+strong{color:#fff;font-weight:600}.nowrap{white-space:nowrap}.muted{color:var(--cloud-300)}.small{font-size:.8rem}
+.steps{list-style:none;padding:0;margin:0 0 1rem}.steps>li{display:flex;gap:.75rem;margin-bottom:1.1rem}.steps p{margin:.4rem 0 0}
+.num{flex:none;width:1.5rem;height:1.5rem;border:1px solid var(--signal-700);border-radius:2px;color:var(--signal-300);font-family:var(--mono);font-size:.75rem;display:grid;place-items:center;margin-top:.1rem}
 .steps>li>div{flex:1;min-width:0}
-.button,button{display:inline-block;border:0;border-radius:9px;padding:.6rem 1rem;font:inherit;font-weight:600;text-decoration:none;cursor:pointer;color:#fff;background:var(--brand)}
-.button.provider{background:var(--provider)}button:hover,.button:hover{filter:brightness(1.07)}
+.button,button{display:inline-flex;align-items:center;gap:.5rem;min-height:2.5rem;padding:.4rem .8rem;border:1px solid var(--signal-700);border-radius:2px;background:var(--ink-900);color:var(--signal-300);font:500 .8rem/1 inherit;font-family:inherit;text-decoration:none;cursor:pointer}
+.button:hover,button:hover{border-color:var(--signal-300);background:var(--signal-950)}
+a:focus-visible,button:focus-visible{outline:2px solid var(--signal-300);outline-offset:4px}
 form{display:flex;gap:.5rem;margin:.6rem 0 .25rem;flex-wrap:wrap}
-input[type=password]{flex:1 1 14rem;min-width:0;padding:.6rem .75rem;border:1px solid var(--line);border-radius:9px;background:transparent;color:inherit;font:inherit}
-input[type=password]:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:transparent}
-.error{color:var(--err);margin:.4rem 0 0}
-details{border-top:1px solid var(--line);padding-top:.9rem}summary{cursor:pointer;font-weight:600}.perms{margin:.6rem 0;padding-left:1.1rem}.perms li{margin:.25rem 0}
-.trust{margin-top:1rem;font-size:.85rem;color:var(--muted)}.trust ul{margin:.3rem 0 0;padding-left:1.1rem}.trust li{margin:.15rem 0}
-.done{text-align:center}.tick{width:3rem;height:3rem;margin:0 auto .5rem;border-radius:50%;background:var(--soft);color:var(--ok);font-size:1.6rem;display:grid;place-items:center}
+input[type=password]{flex:1 1 14rem;min-width:0;padding:.5rem .75rem;border:1px solid var(--frame);border-radius:2px;background:var(--ink-950);color:var(--cloud-100);font:.875rem var(--mono)}
+input[type=password]::placeholder{color:rgb(147 161 169/.7);font-family:ui-sans-serif,system-ui,sans-serif}
+input[type=password]:focus{outline:none;border-color:var(--signal-300);box-shadow:0 0 0 3px rgb(121 217 139/.2)}
+.error{color:var(--err);margin:.45rem 0 0}
+details{border-top:1px solid var(--frame);padding-top:.85rem}summary{cursor:pointer;color:#fff}.perms{margin:.6rem 0;padding-left:1.1rem}.perms li{margin:.25rem 0}
+.trust{margin-top:1rem;border:1px solid var(--frame);border-radius:2px;background:var(--ink-800);padding:.8rem 1rem;font-size:.8rem;color:var(--cloud-300)}.trust ul{margin:.35rem 0 0;padding-left:1.1rem}.trust li{margin:.2rem 0}.trust strong{font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--signal-300);font-weight:500}
+.done{text-align:center}.tick{width:2.75rem;height:2.75rem;margin:0 auto .6rem;border:1px solid var(--signal-700);border-radius:2px;background:var(--signal-950);color:var(--signal-300);font-size:1.4rem;display:grid;place-items:center}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 </style></head><body><div class="wrap">
-<header><div class="brand">${MARK}<span>Hypervibe</span></div><div class="local" title="Served by Hypervibe on 127.0.0.1">${LOCK}<span>Running on this computer</span></div></header>
+<header><div class="wordmark" aria-label="Hypervibe">hyper<span>vibe</span></div><div class="local" title="Served by Hypervibe on 127.0.0.1">${LOCK}<span>Running on this computer</span></div></header>
 <main>${body}</main>
 <section class="trust" aria-label="How your token is handled"><strong>How your token is handled</strong><ul>
 <li>This page is served by Hypervibe on this computer only (127.0.0.1). It loads nothing from the internet.</li>
