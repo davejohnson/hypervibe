@@ -22,6 +22,11 @@ export function recordMcpClient(clientInfo: { name?: string; title?: string } | 
   mcpClient = KNOWN_CLIENTS[name] ?? clientInfo?.title?.trim() ?? clientInfo?.name?.trim();
 }
 
+/** Whether Hypervibe is serving an MCP client (a long-lived process), rather than one CLI command. */
+export function servingMcpClient(): boolean {
+  return mcpClient !== undefined;
+}
+
 /** The agent's product name, or a neutral description when it cannot be known. */
 export function requestingAgent(env: NodeJS.ProcessEnv = process.env): string {
   if (mcpClient) return mcpClient;

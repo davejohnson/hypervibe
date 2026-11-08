@@ -7,7 +7,7 @@ import { findCloudflareZone } from '../domain/services/cloudflare-ops.service.js
 import { CLOUDFLARE_TOKEN_URLS } from '../domain/services/connection-guidance.js';
 import { saveConnection, verifyConnection } from '../domain/services/connection-ops.service.js';
 import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
-import { requestingAgent } from './requesting-agent.js';
+import { requestingAgent, servingMcpClient } from './requesting-agent.js';
 
 /**
  * A one-page local connect flow for providers that only offer API tokens.
@@ -239,7 +239,7 @@ export async function connectCloudflareInBrowser(params: {
   }
   const waited = await Promise.race([
     entry.result,
-    new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? 4 * 60 * 1000).unref()),
+    new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 30 * 60 * 1000)).unref()),
   ]);
   return waited ?? {
     status: 'waiting', provider: 'cloudflare', scope, url: entry.url,
