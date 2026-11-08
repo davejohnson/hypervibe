@@ -61,11 +61,9 @@ export interface ConnectContext {
 function contextRows(domain: string, context: ConnectContext): string {
   const rows: Array<[string, string]> = [
     ['Requested by', context.agent],
-    ...(context.project ? [['Project', context.project] as [string, string]] : []),
-    ...(context.repository ? [['Repository', context.repository] as [string, string]] : []),
+    ...(context.project ? [['Project', context.repository ? `${context.project} (${context.repository})` : context.project] as [string, string]] : []),
     ...(context.environment ? [['Environment', context.environment] as [string, string]] : []),
     ['Domain', domain],
-    ...(context.purpose ? [['Why', `to ${context.purpose}`] as [string, string]] : []),
   ];
   return `<dl class="context">${rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`;
 }
@@ -73,19 +71,18 @@ function contextRows(domain: string, context: ConnectContext): string {
 function page(params: { domain: string; nonce: string; context: ConnectContext; error?: string; connected?: string }): string {
   const zone = escapeHtml(dnsZoneScopeForDomain(params.domain));
   const agent = escapeHtml(params.context.agent);
-  const subject = params.context.project ? `<strong>${escapeHtml(params.context.project)}</strong>` : `<strong>${escapeHtml(params.domain)}</strong>`;
   const purpose = escapeHtml(params.context.purpose ?? `manage DNS and traffic for ${params.domain}`);
   const body = params.connected
     ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>Cloudflare is connected</h1><p>${escapeHtml(params.connected)}</p>
 <p class="muted">The token is stored encrypted on this computer. You can close this tab; ${agent} continues from here.</p></section>`
     : `<p class="eyebrow">Connect Cloudflare</p>
 <h1>Let Hypervibe manage <span class="nowrap">${zone}</span> on Cloudflare</h1>
-<p class="lead">${agent} is working on ${subject} and needs Hypervibe to ${purpose}. ${zone} is on Cloudflare, so Hypervibe needs a Cloudflare API token for it. Create one below and paste it here; ${agent} continues once it is connected.</p>
+<p class="lead">${agent} needs a Cloudflare token to ${purpose}.</p>
 ${contextRows(params.domain, params.context)}
 <ol class="steps">
   <li><span class="num">1</span><div><a class="button" href="${CLOUDFLARE_TOKEN_URLS.user}" target="_blank" rel="noopener noreferrer">Open Cloudflare's token form ↗</a>
-    <p class="muted">The permissions below are already selected. Under <em>Zone Resources</em> choose <strong>${zone}</strong>, then click <em>Continue to summary</em> and <em>Create Token</em>.</p></div></li>
-  <li><span class="num">2</span><div><p>Copy the token Cloudflare shows you, and paste it here:</p>
+    <p class="muted">Permissions are pre-selected. Set <em>Zone Resources</em> to <strong>${zone}</strong>, then create the token.</p></div></li>
+  <li><span class="num">2</span><div><p>Paste the token:</p>
 <form method="post" action="/connect/${params.nonce}" autocomplete="off">
   <input type="hidden" name="nonce" value="${params.nonce}">
   <label class="sr" for="token">Cloudflare API token</label>
@@ -96,7 +93,7 @@ ${params.error ? `<p class="error" role="alert">${escapeHtml(params.error)}</p>`
 </ol>
 <details><summary>What this token can do</summary><ul class="perms">
 ${CLOUDFLARE_PERMISSIONS.map((entry) => `  <li><strong>${escapeHtml(entry.name)}</strong> <span class="muted">to ${escapeHtml(entry.why)}</span></li>`).join('\n')}
-</ul><p class="muted small">You can narrow it to this one domain, and revoke it any time in Cloudflare under My Profile → API Tokens.</p></details>`;
+</ul><p class="muted small">Revoke it any time under My Profile → API Tokens.</p></details>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Connect Cloudflare · Hypervibe</title>
@@ -136,9 +133,9 @@ details{border-top:1px solid var(--frame);padding-top:.85rem}summary{cursor:poin
 <header><div class="wordmark" aria-label="Hypervibe">hyper<span>vibe</span></div><div class="local" title="Served by Hypervibe on 127.0.0.1">${LOCK}<span>Running on this computer</span></div></header>
 <main>${body}</main>
 <section class="trust" aria-label="How your token is handled"><strong>How your token is handled</strong><ul>
-<li>This page is served by Hypervibe on this computer only (127.0.0.1). It loads nothing from the internet.</li>
-<li>Your token goes straight from this page into Hypervibe's encrypted store on this computer. It never passes through chat, ${agent} or any Hypervibe server.</li>
-<li>Hypervibe checks the token against ${zone} before saving it. This link works once and expires in 30 minutes.</li>
+<li>Served on this computer only (127.0.0.1); loads nothing from the internet.</li>
+<li>Saved encrypted on this computer. Never sent to chat, ${agent} or any Hypervibe server.</li>
+<li>Checked against ${zone} before saving. Link expires in 30 minutes.</li>
 </ul></section>
 </div></body></html>`;
 }
