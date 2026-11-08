@@ -49,7 +49,7 @@ describe('local Cloudflare connect page', () => {
     expect(rejected.status).toBe(400);
     expect(rejected.body).toContain('did not accept');
     const accepted = await post('good-token', url.origin);
-    expect(accepted.body).toContain('Connected');
+    expect(accepted.body).toContain('Cloudflare is connected');
 
     await expect(pending).resolves.toMatchObject({ status: 'connected', scope: 'example.com' });
     expect(received).toEqual(['bad-token', 'good-token']);

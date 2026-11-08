@@ -36,40 +36,85 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 }
 
+/** Hypervibe's mark: a small wave in a rounded square, drawn inline so the page loads nothing. */
+const MARK = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="var(--brand)"/><path d="M7 18c2.5 0 2.5-6 5-6s2.5 8 5 8 2.5-10 5-10 2 4 3 4" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const LOCK = `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 9V7a4 4 0 1 1 8 0v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="9" width="12" height="9" rx="2.2" fill="currentColor"/></svg>`;
+
+/** What the requested token can do, and why Hypervibe needs each part. */
+const CLOUDFLARE_PERMISSIONS: Array<{ name: string; why: string }> = [
+  { name: 'DNS: Edit', why: 'point your domain at your app' },
+  { name: 'Zone and Zone Settings: Read', why: 'find the domain and check its settings' },
+  { name: 'Workers Routes and Scripts: Edit', why: 'show a maintenance page and move traffic during a migration' },
+  { name: 'Account Settings: Read', why: 'find the Cloudflare account the domain belongs to' },
+];
+
 function page(params: { domain: string; nonce: string; error?: string; connected?: string }): string {
+  const zone = escapeHtml(dnsZoneScopeForDomain(params.domain));
   const body = params.connected
-    ? `<div class="done"><div class="tick">✓</div><h1>Connected</h1><p>${escapeHtml(params.connected)}</p><p class="muted">You can close this tab and go back to your assistant.</p></div>`
-    : `<h1>Connect Cloudflare</h1>
-<p>Hypervibe needs to manage DNS for <strong>${escapeHtml(params.domain)}</strong> so your app can use it.</p>
-<ol>
-  <li><a class="button" href="${CLOUDFLARE_TOKEN_URLS.user}" target="_blank" rel="noopener">Open Cloudflare</a>
-    <span class="muted">The permissions are already filled in. Under <em>Zone Resources</em>, choose <strong>${escapeHtml(dnsZoneScopeForDomain(params.domain))}</strong>, then click <em>Continue to summary</em> and <em>Create Token</em>.</span></li>
-  <li>Copy the token Cloudflare shows you and paste it here:</li>
-</ol>
+    ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>Cloudflare is connected</h1><p>${escapeHtml(params.connected)}</p>
+<p class="muted">The token is stored encrypted on this computer. You can close this tab and go back to your assistant.</p></section>`
+    : `<p class="eyebrow">Connect a service</p>
+<h1>Let Hypervibe manage <span class="nowrap">${zone}</span> on Cloudflare</h1>
+<p class="lead">Your assistant asked Hypervibe to set up <strong>${escapeHtml(params.domain)}</strong>. Create a Cloudflare token for it and paste it below. This takes about a minute.</p>
+<ol class="steps">
+  <li><span class="num">1</span><div><a class="button provider" href="${CLOUDFLARE_TOKEN_URLS.user}" target="_blank" rel="noopener noreferrer">Open Cloudflare's token form ↗</a>
+    <p class="muted">The permissions below are already selected. Under <em>Zone Resources</em> choose <strong>${zone}</strong>, then click <em>Continue to summary</em> and <em>Create Token</em>.</p></div></li>
+  <li><span class="num">2</span><div><p>Copy the token Cloudflare shows you, and paste it here:</p>
 <form method="post" action="/connect/${params.nonce}" autocomplete="off">
   <input type="hidden" name="nonce" value="${params.nonce}">
-  <input type="password" name="token" placeholder="Paste your Cloudflare token" required spellcheck="false" autofocus>
+  <label class="sr" for="token">Cloudflare API token</label>
+  <input id="token" type="password" name="token" placeholder="Paste your Cloudflare token" required spellcheck="false" autocapitalize="off" autofocus>
   <button type="submit">Connect</button>
 </form>
-${params.error ? `<p class="error" role="alert">${escapeHtml(params.error)}</p>` : ''}
-<p class="muted small">The token goes straight from this page to Hypervibe on your computer and is stored encrypted. It is never shown in chat.</p>`;
+${params.error ? `<p class="error" role="alert">${escapeHtml(params.error)}</p>` : ''}</div></li>
+</ol>
+<details><summary>What this token can do</summary><ul class="perms">
+${CLOUDFLARE_PERMISSIONS.map((entry) => `  <li><strong>${escapeHtml(entry.name)}</strong> <span class="muted">to ${escapeHtml(entry.why)}</span></li>`).join('\n')}
+</ul><p class="muted small">You can narrow it to this one domain, and revoke it any time in Cloudflare under My Profile → API Tokens.</p></details>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>Connect Cloudflare · Hypervibe</title>
 <style>
-:root{--bg:#fafaf9;--fg:#1c1917;--muted:#78716c;--card:#fff;--line:#e7e5e4;--accent:#f38020;--ok:#15803d;--err:#b91c1c}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--muted:#a8a29e;--card:#292524;--line:#44403c;--ok:#4ade80;--err:#f87171}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,sans-serif}
-main{max-width:34rem;margin:8vh auto;padding:2rem;background:var(--card);border:1px solid var(--line);border-radius:14px}
-h1{font-size:1.4rem;margin:0 0 .5rem}ol{padding-left:1.2rem}li{margin:.9rem 0}.muted{color:var(--muted)}.small{font-size:.85rem}
-.button,button{display:inline-block;background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.55rem 1rem;font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
-li .button{margin-right:.5rem}form{display:flex;gap:.5rem;margin:.5rem 0 1rem}input[type=password]{flex:1;min-width:0;padding:.55rem .7rem;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;font:inherit}
-.error{color:var(--err)}.done{text-align:center}.tick{font-size:2.5rem;color:var(--ok)}
-</style></head><body><main>${body}</main></body></html>`;
+:root{--brand:#635bff;--brand-ink:#4b44d8;--bg:#f6f6fb;--fg:#17172a;--muted:#5d5d73;--card:#fff;--line:#e4e4ef;--soft:#efeefe;--provider:#f38020;--ok:#15803d;--err:#b42318}
+@media (prefers-color-scheme:dark){:root{--brand-ink:#a5a0ff;--bg:#101019;--fg:#f2f2f8;--muted:#a3a3b8;--card:#1a1a27;--line:#2c2c3e;--soft:#22213a;--ok:#4ade80;--err:#f87171}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:36rem;margin:6vh auto;padding:0 16px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+.brand{display:flex;align-items:center;gap:.55rem;font-weight:700;font-size:1.05rem;letter-spacing:-.01em}.mark{width:28px;height:28px}
+.local{display:flex;align-items:center;gap:.35rem;font-size:.8rem;color:var(--muted);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:.2rem .65rem}
+.icon{width:13px;height:13px;color:var(--ok)}
+main{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1.75rem}
+.eyebrow{margin:0 0 .25rem;font-size:.78rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--brand-ink)}
+h1{font-size:1.45rem;line-height:1.25;margin:0 0 .6rem;letter-spacing:-.015em}.lead{margin:0 0 1.25rem}
+.nowrap{white-space:nowrap}.muted{color:var(--muted)}.small{font-size:.85rem}
+.steps{list-style:none;padding:0;margin:0 0 1rem}.steps>li{display:flex;gap:.8rem;margin-bottom:1.1rem}.steps p{margin:.35rem 0 0}
+.num{flex:none;width:1.6rem;height:1.6rem;border-radius:50%;background:var(--soft);color:var(--brand-ink);font-weight:700;font-size:.85rem;display:grid;place-items:center;margin-top:.15rem}
+.steps>li>div{flex:1;min-width:0}
+.button,button{display:inline-block;border:0;border-radius:9px;padding:.6rem 1rem;font:inherit;font-weight:600;text-decoration:none;cursor:pointer;color:#fff;background:var(--brand)}
+.button.provider{background:var(--provider)}button:hover,.button:hover{filter:brightness(1.07)}
+form{display:flex;gap:.5rem;margin:.6rem 0 .25rem;flex-wrap:wrap}
+input[type=password]{flex:1 1 14rem;min-width:0;padding:.6rem .75rem;border:1px solid var(--line);border-radius:9px;background:transparent;color:inherit;font:inherit}
+input[type=password]:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:transparent}
+.error{color:var(--err);margin:.4rem 0 0}
+details{border-top:1px solid var(--line);padding-top:.9rem}summary{cursor:pointer;font-weight:600}.perms{margin:.6rem 0;padding-left:1.1rem}.perms li{margin:.25rem 0}
+.trust{margin-top:1rem;font-size:.85rem;color:var(--muted)}.trust ul{margin:.3rem 0 0;padding-left:1.1rem}.trust li{margin:.15rem 0}
+.done{text-align:center}.tick{width:3rem;height:3rem;margin:0 auto .5rem;border-radius:50%;background:var(--soft);color:var(--ok);font-size:1.6rem;display:grid;place-items:center}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style></head><body><div class="wrap">
+<header><div class="brand">${MARK}<span>Hypervibe</span></div><div class="local" title="Served by Hypervibe on 127.0.0.1">${LOCK}<span>Running on this computer</span></div></header>
+<main>${body}</main>
+<section class="trust" aria-label="How your token is handled"><strong>How your token is handled</strong><ul>
+<li>This page is served by Hypervibe on this computer only (127.0.0.1). It loads nothing from the internet.</li>
+<li>Your token goes straight from this page into Hypervibe's encrypted store on this computer. It never passes through chat, your AI assistant or any Hypervibe server.</li>
+<li>Hypervibe checks the token against ${zone} before saving it. This link works once and expires in 30 minutes.</li>
+</ul></section>
+</div></body></html>`;
 }
 
 /** Checks that the token can read the zone and its DNS records before anything is saved. */
 async function checkCloudflareToken(token: string, domain: string): Promise<{ ok: true; zone: string } | { ok: false; error: string }> {
   const adapter = new CloudflareAdapter();
+  let zoneName: string;
   try {
     adapter.connect({ apiToken: token });
     const verified = await adapter.verify();
@@ -77,10 +122,16 @@ async function checkCloudflareToken(token: string, domain: string): Promise<{ ok
     const zone = await findCloudflareZone(adapter, domain);
     if (!zone) return { ok: false, error: `That token cannot see ${dnsZoneScopeForDomain(domain)}. In Cloudflare, edit the token and include this zone under Zone Resources.` };
     await adapter.listRecords(zone.id);
-    return { ok: true, zone: zone.name };
+    zoneName = zone.name;
   } catch {
     return { ok: false, error: 'That token cannot read DNS records for this domain. Make sure it has the DNS Edit permission.' };
   }
+  // Maintenance pages and migration cutovers run as a Worker on the app's hostname.
+  const workers = await adapter.observeMaintenanceEdge(domain).catch(() => undefined);
+  if (!workers || /cannot manage Workers/.test(workers.reason ?? '')) {
+    return { ok: false, error: 'That token cannot manage Cloudflare Workers, which Hypervibe uses for maintenance pages and moving traffic. Create it again from the button above and keep the Workers Routes and Workers Scripts permissions.' };
+  }
+  return { ok: true, zone: zoneName };
 }
 
 function openInBrowser(url: string): void {
