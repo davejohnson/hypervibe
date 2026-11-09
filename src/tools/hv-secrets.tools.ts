@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { collectSecretInBrowser } from '../application/local-secret-page.js';
 import type { CommandContext } from '../application/context.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { commandError, commandSuccess, HvError, wrapCommandHandler } from '../application/results.js';
@@ -81,9 +82,11 @@ function resolveHostingService(
 export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_secrets',
-    'Secret read modes: {project?,env,view:"inventory"} reports credential sources, exact consumers, configuration, rollout and evidence gaps without writes; {} or {project} lists sources; {provider,pathPrefix?} lists one manager; {provider,path,key?,version?} checks one manager value; {include:["github"],project?,repo?} lists GitHub Actions names; {project?,env,service?,key?} inspects masked hosting variables. Hosting mode requires explicit env; inventory also requires env. Values and private fingerprints are never returned.',
+    'Secret read modes: {project?,env,view:"inventory"} reports credential sources, exact consumers, configuration, rollout and evidence gaps without writes; {} or {project} lists sources; {provider,pathPrefix?} lists one manager; {provider,path,key?,version?} checks one manager value; {include:["github"],project?,repo?} lists GitHub Actions names; {project?,env,service?,key?} inspects masked hosting variables. Hosting mode requires explicit env; inventory also requires env. Values and private fingerprints are never returned. {project?,env,key,action:"collect",purpose?} opens the Hypervibe local page so the user pastes a new value for one runtime setting of an OpenTofu-managed environment (with a link to the key page of the issuing service and a live check where known); it is saved to Secret Manager, never through chat. Then run hv_launch to roll services onto it.',
     {
       project: projectField.describe('Optional Hypervibe project name/id for validated context. Project-only still lists sources. Omit to use no project context for source/manager lists or auto-detect only in GitHub/hosting modes.'),
+      action: z.literal('collect').optional().describe('Open the local page for the user to paste a new value for key in env (OpenTofu-managed environments).'),
+      purpose: z.string().max(160).optional().describe('action="collect": why the value is needed, as a phrase after "to", shown on the page.'),
       view: z.literal('inventory').optional().describe('Read-only credential inventory for the exact project/environment. Cannot combine with other secret-mode selectors. Does not adopt, synchronize, validate credentials, or deploy.'),
       env: envField.describe('Exact environment for hosting-variable inspection or credential inventory. Required in both modes; never inferred from project alone.'),
       key: z.string().min(1).optional().describe('Hosting variable name or key within a manager secret'),
@@ -95,7 +98,19 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       include: z.array(z.literal('github')).optional().describe('Also list GitHub Actions secret names'),
       repo: z.string().min(1).optional().describe('GitHub owner/name; defaults to the project git remote'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, view, key, provider, path, version, service, pathPrefix, include, repo }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, view, key, provider, path, version, service, pathPrefix, include, repo, action, purpose }) => {
+      if (action === 'collect') {
+        if (!env || !key) throw new HvError('VALIDATION', 'action="collect" requires env and key.');
+        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const specResult = new SpecStore().get(project);
+        if (!specResult) throw new HvError('NOT_FOUND', `Project "${project.name}" has no spec.`);
+        const result = await collectSecretInBrowser(ctx, { project, spec: specResult.spec, environmentName: env, key, ...(purpose ? { context: { purpose } } : {}) });
+        if (result.status === 'blocked') return commandError('VALIDATION', result.message);
+        return result.status === 'connected'
+          ? commandSuccess(result, { hint: `Run hv_launch env="${env}" to move its services onto the new ${key}.`, next: ['hv_launch'] })
+          : commandSuccess(result, { hint: 'Tell the user the page is open in their browser and give them the link. Call again after they finish.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to paste the value in the browser tab that opened, then continue.' } });
+      }
       if (view === 'inventory') {
         const incompatible = suppliedOptionNames({ key, provider, path, version, service, pathPrefix, include, repo });
         if (!env || incompatible.length) throw new HvError('VALIDATION', 'Inventory requires env and accepts only project, env, and view.');
