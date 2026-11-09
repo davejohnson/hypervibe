@@ -7,11 +7,12 @@ import { escapeHtml, servePastePage, type LocalPasteResult } from './local-paste
 import { requestingAgent } from './requesting-agent.js';
 
 /** Where a well-known key is created, and a read-only call that proves a pasted value works. */
-interface KnownSecret {
+export interface KnownSecret {
   service: string;
   url: string;
   hintHtml: string;
-  check: (value: string) => Promise<boolean>;
+  /** A read-only call that proves a pasted value works; omitted when the service offers none. */
+  check?: (value: string) => Promise<boolean>;
 }
 
 const accepts = (url: string, headers: (value: string) => Record<string, string>) => async (value: string) => {
@@ -20,7 +21,7 @@ const accepts = (url: string, headers: (value: string) => Record<string, string>
   return response.ok;
 };
 
-const KNOWN_SECRETS: Record<string, KnownSecret> = {
+export const KNOWN_SECRETS: Record<string, KnownSecret> = {
   ANTHROPIC_API_KEY: {
     service: 'Anthropic', url: 'https://console.anthropic.com/settings/keys',
     hintHtml: 'Click <em>Create Key</em> and copy the key.',
@@ -40,6 +41,10 @@ const KNOWN_SECRETS: Record<string, KnownSecret> = {
     service: 'Resend', url: 'https://resend.com/api-keys',
     hintHtml: 'Click <em>Create API Key</em> and copy it.',
     check: accepts('https://api.resend.com/domains', (value) => ({ Authorization: `Bearer ${value}` })),
+  },
+  RECAPTCHA_SECRET_KEY: {
+    service: 'Google reCAPTCHA', url: 'https://www.google.com/recaptcha/admin',
+    hintHtml: 'Open the site, go to its settings, and copy the secret key (or create a new site).',
   },
   SENDGRID_API_KEY: {
     service: 'SendGrid', url: 'https://app.sendgrid.com/settings/api_keys',
@@ -90,7 +95,7 @@ export async function collectSecretInBrowser(ctx: CommandContext, params: {
     ...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
     ...(params.openBrowser ? { openBrowser: params.openBrowser } : {}),
     accept: async (value) => {
-      if (known && !(await known.check(value).catch(() => false))) {
+      if (known?.check && !(await known.check(value).catch(() => false))) {
         return { ok: false, error: `${known.service} did not accept that key. Copy it again and paste the whole value.` };
       }
       const failure = await writeSecretVersion(await engine.adapter.engineAccessToken(), engine.gcpProjectId, engineSecretId(params.environmentName, params.key),
@@ -109,7 +114,7 @@ export async function collectSecretInBrowser(ctx: CommandContext, params: {
       input: { label: params.key, placeholder: `Paste the ${params.key}`, button: 'Save', missing: `Paste the ${params.key}.` },
       done: { title: `${params.key} is saved`, note: 'It is stored in Google Secret Manager for this environment.' },
       agent: context.agent,
-      ...(known ? { checkedAgainst: known.service } : {}),
+      ...(known?.check ? { checkedAgainst: known.service } : {}),
       storedWhere: `Saved to Google Secret Manager for ${params.environmentName}`,
     },
   });

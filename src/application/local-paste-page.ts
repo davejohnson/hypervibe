@@ -51,35 +51,11 @@ const LOCK = `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="
 const COPY_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M13 7V4.5A1.5 1.5 0 0 0 11.5 3h-7A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13H7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`;
 const CHECK_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-export function renderPastePage(spec: PastePageSpec, state: { nonce: string; scriptNonce?: string; error?: string; connected?: string }): string {
-  const agent = escapeHtml(spec.agent);
-  const rows = `<dl class="context">${spec.rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`;
-  const body = state.connected
-    ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>${escapeHtml(spec.done.title)}</h1><p>${escapeHtml(state.connected)}</p>
-<p class="muted">${escapeHtml(spec.done.note)} You can close this tab; ${agent} continues from here.</p></section>`
-    : `<p class="eyebrow">${escapeHtml(spec.eyebrow)}</p>
-<h1>${spec.titleHtml}</h1>
-<p class="lead">${spec.leadHtml}</p>
-${rows}
-<ol class="steps">
-  <li><span class="num">1</span><div>${spec.link ? `<a class="button" href="${escapeHtml(spec.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(spec.link.label)} ↗</a>
-    <p class="muted">${spec.link.hintHtml}</p>${spec.link.copy ? `
-    <p class="copyrow"><span class="muted">${escapeHtml(spec.link.copy.label)}</span> <code class="copy">${escapeHtml(spec.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(spec.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}` : `<p>${spec.sourceHintHtml ?? 'Copy the value from the service that issued it.'}</p>`}</div></li>
-  <li><span class="num">2</span><div><p>Paste it here:</p>
-<form method="post" action="/connect/${state.nonce}" autocomplete="off">
-  <input type="hidden" name="nonce" value="${state.nonce}">
-  <label class="sr" for="token">${escapeHtml(spec.input.label)}</label>
-  <input id="token" type="password" name="token" placeholder="${escapeHtml(spec.input.placeholder)}" required spellcheck="false" autocapitalize="off" autofocus>
-  <button type="submit">${escapeHtml(spec.input.button)}</button>
-</form>
-${state.error ? `<p class="error" role="alert">${escapeHtml(state.error)}</p>` : ''}</div></li>
-</ol>
-${spec.details ? `<details><summary>${escapeHtml(spec.details.summary)}</summary><ul class="perms">
-${spec.details.items.map((entry) => `  <li><strong>${escapeHtml(entry.name)}</strong> <span class="muted">to ${escapeHtml(entry.why)}</span></li>`).join('\n')}
-</ul><p class="muted small">${escapeHtml(spec.details.note)}</p></details>` : ''}`;
+function pageShell(params: { tabTitle: string; body: string; agent: string; storedWhere: string; checkedAgainst?: string; scriptNonce?: string; expiresMinutes?: number }): string {
+  const agent = escapeHtml(params.agent);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="same-origin">
-<title>${escapeHtml(spec.tabTitle)} · Hypervibe</title>
+<title>${escapeHtml(params.tabTitle)} · Hypervibe</title>
 <style>
 /* Matches the hosted Hypervibe app: ink background, signal green, terminal wordmark. */
 :root{color-scheme:dark;--ink-950:#080b0d;--ink-900:#0d1215;--ink-800:#10171b;--cloud-100:#c8d1d6;--cloud-300:#93a1a9;--signal-300:#79d98b;--signal-700:#3a7047;--signal-950:#15221a;--frame:#26333a;--err:#f2a7a7;--mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
@@ -116,13 +92,43 @@ details{border-top:1px solid var(--frame);padding-top:.85rem}summary{cursor:poin
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 </style></head><body><div class="wrap">
 <header><div class="wordmark" aria-label="Hypervibe">hyper<span>vibe</span></div><div class="local" title="Served by Hypervibe on 127.0.0.1">${LOCK}<span>Running on this computer</span></div></header>
-<main>${body}</main>
+<main>${params.body}</main>
 <section class="trust" aria-label="How this is handled"><strong>How this is handled</strong><ul>
 <li>Served on this computer only (127.0.0.1); loads nothing from the internet.</li>
-<li>${escapeHtml(spec.storedWhere)}. Never sent to chat, ${agent} or any Hypervibe server.</li>
-<li>${spec.checkedAgainst ? `Checked against ${escapeHtml(spec.checkedAgainst)} before saving. ` : ''}Link expires in 30 minutes.</li>
+<li>${escapeHtml(params.storedWhere)}. Never sent to chat, ${agent} or any Hypervibe server.</li>
+<li>${params.checkedAgainst ? `Checked against ${escapeHtml(params.checkedAgainst)} before saving. ` : ''}Link expires in ${params.expiresMinutes ?? 30} minutes.</li>
 </ul></section>
-</div>${state.scriptNonce ? `<script nonce="${state.scriptNonce}">document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){var i=b.innerHTML;b.innerHTML=${JSON.stringify(CHECK_ICON)};b.title='Copied';setTimeout(function(){b.innerHTML=i;b.title='Copy'},1500)})})})</script>` : ''}</body></html>`;
+</div>${params.scriptNonce ? `<script nonce="${params.scriptNonce}">document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){var i=b.innerHTML;b.innerHTML=${JSON.stringify(CHECK_ICON)};b.title='Copied';setTimeout(function(){b.innerHTML=i;b.title='Copy'},1500)})})})</script>` : ''}</body></html>`;
+}
+
+export function renderPastePage(spec: PastePageSpec, state: { nonce: string; scriptNonce?: string; error?: string; connected?: string }): string {
+  const agent = escapeHtml(spec.agent);
+  const rows = `<dl class="context">${spec.rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`;
+  const body = state.connected
+    ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>${escapeHtml(spec.done.title)}</h1><p>${escapeHtml(state.connected)}</p>
+<p class="muted">${escapeHtml(spec.done.note)} You can close this tab; ${agent} continues from here.</p></section>`
+    : `<p class="eyebrow">${escapeHtml(spec.eyebrow)}</p>
+<h1>${spec.titleHtml}</h1>
+<p class="lead">${spec.leadHtml}</p>
+${rows}
+<ol class="steps">
+  <li><span class="num">1</span><div>${spec.link ? `<a class="button" href="${escapeHtml(spec.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(spec.link.label)} ↗</a>
+    <p class="muted">${spec.link.hintHtml}</p>${spec.link.copy ? `
+    <p class="copyrow"><span class="muted">${escapeHtml(spec.link.copy.label)}</span> <code class="copy">${escapeHtml(spec.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(spec.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}` : `<p>${spec.sourceHintHtml ?? 'Copy the value from the service that issued it.'}</p>`}</div></li>
+  <li><span class="num">2</span><div><p>Paste it here:</p>
+<form method="post" action="/connect/${state.nonce}" autocomplete="off">
+  <input type="hidden" name="nonce" value="${state.nonce}">
+  <label class="sr" for="token">${escapeHtml(spec.input.label)}</label>
+  <input id="token" type="password" name="token" placeholder="${escapeHtml(spec.input.placeholder)}" required spellcheck="false" autocapitalize="off" autofocus>
+  <button type="submit">${escapeHtml(spec.input.button)}</button>
+</form>
+${state.error ? `<p class="error" role="alert">${escapeHtml(state.error)}</p>` : ''}</div></li>
+</ol>
+${spec.details ? `<details><summary>${escapeHtml(spec.details.summary)}</summary><ul class="perms">
+${spec.details.items.map((entry) => `  <li><strong>${escapeHtml(entry.name)}</strong> <span class="muted">to ${escapeHtml(entry.why)}</span></li>`).join('\n')}
+</ul><p class="muted small">${escapeHtml(spec.details.note)}</p></details>` : ''}`;
+  return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere,
+    ...(spec.checkedAgainst ? { checkedAgainst: spec.checkedAgainst } : {}), ...(state.scriptNonce ? { scriptNonce: state.scriptNonce } : {}) });
 }
 
 interface ActivePage {
@@ -209,5 +215,143 @@ export async function servePastePage(params: {
   return waited ?? {
     status: 'waiting', provider: params.provider, scope: params.scope, url: entry.url,
     message: `A ${params.spec.tabTitle.replace(/^Connect /, '')} page is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.`,
+  };
+}
+
+// ---------------------------------------------------------------- Several keys on one page
+
+export interface PasteField {
+  /** Form field id; also the setting name shown, for example ANTHROPIC_API_KEY. */
+  id: string;
+  /** Where the value is created, with an optional suggested name to copy. */
+  link?: { url: string; label: string; hintHtml: string; copy?: { label: string; value: string } };
+  /** Offer "Generate a random value" for app-internal secrets Hypervibe cannot identify. */
+  allowGenerate?: boolean;
+  /** A note such as "Delete the old key in Anthropic after this". */
+  noteHtml?: string;
+}
+
+export interface MultiPastePageSpec {
+  tabTitle: string;
+  eyebrow: string;
+  titleHtml: string;
+  leadHtml: string;
+  rows: Array<[string, string]>;
+  fields: PasteField[];
+  agent: string;
+  storedWhere: string;
+  doneTitle: string;
+}
+
+function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; scriptNonce: string; saved: Record<string, string>; errors: Record<string, string>; finished?: string }): string {
+  const rows = `<dl class="context">${spec.rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`;
+  const remaining = spec.fields.filter((field) => !state.saved[field.id]).length;
+  const items = spec.fields.map((field) => {
+    const saved = state.saved[field.id];
+    const id = escapeHtml(field.id);
+    const head = `<p class="fieldname"><code>${id}</code>${saved ? ` <span class="ok">✓ ${escapeHtml(saved)}</span>` : ''}</p>`;
+    if (saved) return `<li class="field saved">${head}${field.noteHtml ? `<p class="muted small">${field.noteHtml}</p>` : ''}</li>`;
+    const link = field.link ? `<p><a class="button" href="${escapeHtml(field.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(field.link.label)} ↗</a></p>
+<p class="muted">${field.link.hintHtml}</p>${field.link.copy ? `<p class="copyrow"><span class="muted">${escapeHtml(field.link.copy.label)}</span> <code class="copy">${escapeHtml(field.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(field.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}`
+      : `<p class="muted">Paste the new value from wherever it was issued${field.allowGenerate ? ', or generate one if it is a secret only your app uses' : ''}.</p>`;
+    return `<li class="field">${head}${link}
+<form method="post" action="/connect/${state.nonce}" autocomplete="off">
+  <input type="hidden" name="nonce" value="${state.nonce}"><input type="hidden" name="field" value="${id}">
+  <label class="sr" for="v-${id}">${id}</label>
+  <input id="v-${id}" type="password" name="token" placeholder="Paste the new ${id}" spellcheck="false" autocapitalize="off">
+  <button type="submit">Save</button>${field.allowGenerate ? `<button type="submit" name="generate" value="1" class="secondary">Generate</button>` : ''}
+</form>
+${state.errors[field.id] ? `<p class="error" role="alert">${escapeHtml(state.errors[field.id]!)}</p>` : ''}</li>`;
+  }).join('\n');
+  const body = state.finished
+    ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>${escapeHtml(spec.doneTitle)}</h1><p>${escapeHtml(state.finished)}</p>
+<p class="muted">You can close this tab; ${escapeHtml(spec.agent)} continues from here.</p></section>`
+    : `<p class="eyebrow">${escapeHtml(spec.eyebrow)}</p>
+<h1>${spec.titleHtml}</h1>
+<p class="lead">${spec.leadHtml}</p>
+${rows}
+<p class="muted small">${remaining} of ${spec.fields.length} left. Each one is saved as soon as you click Save.</p>
+<ol class="fields">${items}</ol>`;
+  return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere, scriptNonce: state.scriptNonce, expiresMinutes: 60 })
+    .replace('</style>', '.fields{list-style:none;padding:0;margin:0}.field{border-top:1px solid var(--frame);padding:.9rem 0}.field.saved{opacity:.8}.fieldname{margin:0 0 .4rem}.fieldname code{font-family:var(--mono);color:#fff}.ok{color:var(--signal-300);font-size:.8rem}button.secondary{border-color:var(--frame);color:var(--cloud-100)}</style>');
+}
+
+/**
+ * One local page for several values, each saved independently (so a long
+ * rotation survives a mistake on one key). Resolves when every field is saved.
+ */
+export async function serveMultiPastePage(params: {
+  key: string;
+  provider: string;
+  scope: string;
+  spec: MultiPastePageSpec;
+  /** Checks and saves one field; generate=true asks Hypervibe to create a random value. */
+  accept: (field: string, value: string | { generate: true }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  waitMs?: number;
+  openBrowser?: (url: string) => void;
+}): Promise<LocalPasteResult & { saved?: string[] }> {
+  let entry = active.get(params.key);
+  if (entry?.settled?.status === 'connected') return entry.settled;
+  if (!entry) {
+    const nonce = crypto.randomBytes(24).toString('base64url');
+    const saved: Record<string, string> = {};
+    const errors: Record<string, string> = {};
+    let resolve!: (result: LocalPasteResult) => void;
+    const result = new Promise<LocalPasteResult>((done) => { resolve = done; });
+    const server = http.createServer((request, response) => {
+      const port = (server.address() as AddressInfo).port;
+      if (request.headers.host !== `127.0.0.1:${port}`) { response.writeHead(421).end(); return; }
+      const path = new URL(request.url ?? '/', `http://127.0.0.1:${port}`).pathname;
+      if (path !== `/connect/${nonce}`) { response.writeHead(404).end(); return; }
+      const scriptNonce = crypto.randomBytes(16).toString('base64');
+      const html = (status = 200, finished?: string) => response.writeHead(status, {
+        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; form-action 'self'; base-uri 'none'`,
+        'Referrer-Policy': 'same-origin',
+      }).end(renderMultiPastePage(params.spec, { nonce, scriptNonce, saved, errors, ...(finished ? { finished } : {}) }));
+      if (request.method === 'GET') { html(200, entry?.settled?.message); return; }
+      const sameOrigin = request.headers.origin === `http://127.0.0.1:${port}`
+        || ((request.headers.origin === undefined || request.headers.origin === 'null') && request.headers['sec-fetch-site'] === 'same-origin');
+      if (request.method !== 'POST' || !sameOrigin) { response.writeHead(403).end(); return; }
+      let raw = '';
+      request.on('data', (chunk: Buffer) => { raw += chunk.toString('utf8'); if (raw.length > 8192) request.destroy(); });
+      request.on('end', async () => {
+        const form = new URLSearchParams(raw);
+        const field = form.get('field') ?? '';
+        const known = params.spec.fields.find((candidate) => candidate.id === field);
+        if (form.get('nonce') !== nonce || !known || saved[field]) { html(400); return; }
+        const generate = form.get('generate') === '1' && known.allowGenerate;
+        const value = form.get('token')?.trim() ?? '';
+        if (!generate && !value) { errors[field] = `Paste the new ${field}, or leave it for later.`; html(400); return; }
+        const outcome = await params.accept(field, generate ? { generate: true } : value);
+        if (!outcome.ok) { errors[field] = outcome.error; html(400); return; }
+        delete errors[field];
+        saved[field] = outcome.message;
+        if (params.spec.fields.every((candidate) => saved[candidate.id])) {
+          const message = `All ${params.spec.fields.length} values are saved.`;
+          const settled: LocalPasteResult & { saved?: string[] } = { status: 'connected', provider: params.provider, scope: params.scope, message, saved: Object.keys(saved) };
+          entry!.settled = settled;
+          html(200, message);
+          resolve(settled);
+          setTimeout(() => { server.close(); active.delete(params.key); }, 2000).unref();
+          return;
+        }
+        html(200);
+      });
+    });
+    await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/connect/${nonce}`;
+    setTimeout(() => { if (!entry?.settled) { server.close(); active.delete(params.key); } }, 60 * 60 * 1000).unref();
+    entry = { url, result };
+    active.set(params.key, entry);
+    (params.openBrowser ?? openInBrowser)(url);
+  }
+  const waited = await Promise.race([
+    entry.result,
+    new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 60 * 60 * 1000)).unref()),
+  ]);
+  return waited ?? {
+    status: 'waiting', provider: params.provider, scope: params.scope, url: entry.url,
+    message: `A page for the new values is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.`,
   };
 }

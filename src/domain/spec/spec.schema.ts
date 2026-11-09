@@ -1670,6 +1670,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
   ).optional(),
   dataMigration: dataMigrationSpecSchema.optional(),
   maintenance: maintenanceSpecSchema.optional(),
+  /** How often runtime secrets should be replaced; hv_status warns when one is older. Defaults to 90 days. */
+  secretRotation: z.object({ everyDays: z.number().int().min(7).max(730) }).strict().optional(),
   payments: paymentsSpecSchema.optional(),
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),

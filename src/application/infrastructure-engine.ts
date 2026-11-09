@@ -167,7 +167,7 @@ function domainServiceFor(environment: EnvironmentSpec): string | undefined {
   return candidates.length === 1 ? candidates[0] : undefined;
 }
 
-function engineSecretKeys(spec: ProjectSpec, environmentName: string): string[] {
+export function engineSecretKeys(spec: ProjectSpec, environmentName: string): string[] {
   return Object.entries(spec.secrets)
     .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(environmentName))
     .map(([key]) => key)
@@ -197,6 +197,8 @@ export interface EngineBinding {
   workerWakeGrant?: string;
   /** When that grant was made; a later data copy replaces the tables and drops it. */
   workerWakeGrantAt?: string;
+  /** An in-progress secret rotation, so hv_secrets action="rotate" resumes where it stopped. */
+  rotation?: { startedAt: string; keys: string[]; databaseGeneration?: number };
   /** Runtime secrets copied from a migration source into Secret Manager. */
   importedSecrets?: string[];
   /** Keyless CI release trust granted for this exact repository. */

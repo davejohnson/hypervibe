@@ -1,4 +1,5 @@
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
+import { secretAges } from '../application/secret-rotation.js';
 import { engineWorkerStatus, isEngineManaged } from '../application/infrastructure-engine.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
@@ -1055,6 +1056,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (envSpec && isEngineManaged(envSpec)) {
         const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
         if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
+        const ages = await secretAges(ctx, project, specResult.spec, envName);
+        if (!('blocked' in ages)) {
+          const overdue = ages.secrets.filter((secret) => secret.overdue);
+          if (overdue.length) engine.warnings.push(`${overdue.length} secret(s) are older than ${ages.everyDays} days (${overdue.map((secret) => `${secret.key} ${secret.ageDays}d`).join(', ')}). Rotate them with hv_secrets action="rotate".`);
+        }
         return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: engine.workers }, {
           warnings: engine.warnings,
           hint: engine.warnings.length ? 'Fix the warnings above, then check hv_status again.' : 'Run hv_plan scope="infrastructure" to check infrastructure drift.',
