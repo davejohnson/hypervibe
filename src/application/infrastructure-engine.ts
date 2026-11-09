@@ -1547,3 +1547,62 @@ async function releaseImage(token: string, context: EngineContext, resource: str
   if (running !== imageUri || !ready) return { status: 'unknown', message: 'The service did not report the new image as ready.' };
   return { status: 'released', message: `Released ${imageUri.split('@')[0]} to ${resource}.`, ...(typeof after.value.uri === 'string' ? { url: after.value.uri } : {}) };
 }
+
+// ---------------------------------------------------------------- Status
+
+export interface EngineWorkerStatus {
+  service: string;
+  mode: 'on-demand' | 'always-on';
+  instances?: number;
+  waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: string };
+}
+
+/**
+ * Read-only status of an engine environment's background workers. An
+ * on-demand worker whose waker cannot read pending work keeps running (the
+ * waker fails open), so that is reported as a warning with its cost.
+ */
+export async function engineWorkerStatus(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<{ workers: EngineWorkerStatus[]; warnings: string[] } | { blocked: string }> {
+  const environmentSpec = spec.environments[environmentName];
+  if (!environmentSpec) return { blocked: `The spec has no environment "${environmentName}".` };
+  const context = await resolveEngineContext(ctx, project, spec, environmentName);
+  if ('blocked' in context) return { blocked: context.blocked };
+  const token = await context.adapter.engineAccessToken();
+  const bound = (context.environment.platformBindings as { services?: Record<string, { workerPoolName?: string }> }).services ?? {};
+  const workers: EngineWorkerStatus[] = [];
+  const warnings: string[] = [];
+  for (const [name, service] of Object.entries(environmentSpec.services)) {
+    if (service.workloadKind !== 'worker') continue;
+    const resource = bound[name]?.workerPoolName;
+    const status: EngineWorkerStatus = { service: name, mode: service.onDemand ? 'on-demand' : 'always-on' };
+    if (resource) {
+      const pool = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'workerPools');
+      if (pool.state === 'present') status.instances = Number(pool.value.scaling?.manualInstanceCount ?? 0);
+      if (service.onDemand) {
+        const response = await fetchWithRetry(`https://workflowexecutions.googleapis.com/v1/projects/${context.gcpProjectId}/locations/${context.region}/workflows/${resource}-waker/executions?pageSize=1&view=FULL`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const latest = response.ok ? ((await response.json()) as { executions?: Array<{ state?: string; startTime?: string; result?: string }> }).executions?.[0] : undefined;
+        if (latest) {
+          let parsed: { pendingWork?: number | string; readError?: string } = {};
+          try { const value = JSON.parse(latest.result ?? 'null'); if (value && typeof value === 'object') parsed = value; } catch { /* an older waker returns only a count */ }
+          const pendingWork = parsed.pendingWork === undefined ? undefined : Number(parsed.pendingWork);
+          status.waker = { ...(latest.startTime ? { lastRunAt: latest.startTime } : {}), ...(latest.state ? { state: latest.state } : {}),
+            ...(pendingWork !== undefined && pendingWork >= 0 ? { pendingWork } : {}), ...(parsed.readError ? { readError: parsed.readError } : {}) };
+          if (parsed.readError || pendingWork === -1) {
+            warnings.push(`Worker ${name} is running all the time: its waker cannot read pending work (${parsed.readError || 'query failed'}). Run hv_plan scope="infrastructure" to repair its access.`);
+          } else if (latest.state === 'FAILED') {
+            warnings.push(`Worker ${name}'s waker failed its last run, so it cannot start or stop the worker. Check hv_logs.`);
+          }
+          if (latest.startTime && Date.now() - Date.parse(latest.startTime) > 10 * 60 * 1000) {
+            warnings.push(`Worker ${name}'s waker has not run since ${latest.startTime}; new work may wait.`);
+          }
+        } else if (!response.ok) {
+          warnings.push(`Worker ${name}'s waker could not be read (HTTP ${response.status}).`);
+        }
+      }
+    }
+    workers.push(status);
+  }
+  return { workers, warnings };
+}
