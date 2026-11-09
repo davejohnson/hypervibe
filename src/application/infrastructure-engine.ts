@@ -195,6 +195,8 @@ export interface EngineBinding {
   releaseJob?: string;
   /** IAM database user that was granted read access for on-demand worker wakers. */
   workerWakeGrant?: string;
+  /** When that grant was made; a later data copy replaces the tables and drops it. */
+  workerWakeGrantAt?: string;
   /** Runtime secrets copied from a migration source into Secret Manager. */
   importedSecrets?: string[];
   /** Keyless CI release trust granted for this exact repository. */
@@ -921,7 +923,11 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if ('blocked' in credentialActions) return { blocked: [credentialActions.blocked] };
   const onDemandWorkers = Object.entries(environmentSpec!.services).filter(([, service]) => service.workloadKind === 'worker' && service.onDemand).map(([name]) => name);
   const wakeUser = context.runtimeServiceAccountEmail ? iamDatabaseUser(context.runtimeServiceAccountEmail) : undefined;
-  const wakeGrantActions: PlanAction[] = databaseSpec && wakeUser && onDemandWorkers.length && engineBinding.workerWakeGrant !== wakeUser ? [{
+  // A data copy (migration restore) recreates the tables, so a grant older than the copy is gone.
+  const copiedAt = engineBinding.migration?.copiedAt;
+  const grantStale = engineBinding.workerWakeGrant !== wakeUser
+    || Boolean(copiedAt && (!engineBinding.workerWakeGrantAt || engineBinding.workerWakeGrantAt < copiedAt));
+  const wakeGrantActions: PlanAction[] = databaseSpec && wakeUser && onDemandWorkers.length && grantStale ? [{
     id: 'worker-wake-grant:postgres', type: 'update', verified: true,
     resource: { kind: 'database', name: 'postgres', provider: 'gcp' },
     reason: `Hypervibe will let the on-demand worker waker read pending work: read-only access to the app's tables for ${wakeUser}.`,
@@ -1098,7 +1104,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         if (granted.success) {
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
           const binding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
-          ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...binding, kind: 'opentofu', workerWakeGrant: (action.metadata as { iamUser: string }).iamUser } });
+          ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...binding, kind: 'opentofu', workerWakeGrant: (action.metadata as { iamUser: string }).iamUser, workerWakeGrantAt: new Date().toISOString() } });
         }
         return granted;
       }
