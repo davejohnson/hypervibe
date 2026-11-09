@@ -243,6 +243,19 @@ export interface MultiPastePageSpec {
   doneTitle: string;
 }
 
+/**
+ * Saves fields in the background so a save never clears what was typed in
+ * the other fields. Without script the form still posts and re-renders.
+ */
+const MULTI_SCRIPT = `(function(){var f=document.getElementById('keys');if(!f)return;f.addEventListener('submit',function(e){e.preventDefault();var b=e.submitter,d=new FormData(f);if(b&&b.name)d.append(b.name,b.value);
+f.querySelectorAll('button').forEach(function(x){x.disabled=true});
+fetch(f.action,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded','x-hv-fetch':'1'},body:new URLSearchParams(d).toString()}).then(function(r){return r.json()}).then(function(r){
+if(r.finished){location.reload();return}
+Object.keys(r.saved||{}).forEach(function(id){var li=f.querySelector('[data-field="'+id+'"]');if(!li||li.classList.contains('saved'))return;li.classList.add('saved');var en=li.querySelector('.entry');if(en)en.remove();var er=li.querySelector('.error');if(er)er.hidden=true;var s=document.createElement('span');s.className='ok';s.textContent=' \u2713 '+r.saved[id];li.querySelector('.fieldname').appendChild(s)});
+f.querySelectorAll('[data-field]').forEach(function(li){var er=li.querySelector('.error'),m=(r.errors||{})[li.getAttribute('data-field')];if(er&&!li.classList.contains('saved')){er.hidden=!m;er.textContent=m||''}});
+var left=f.querySelectorAll('[data-field]:not(.saved)').length,all=f.querySelector('.saveall');if(all&&left<2)all.remove();
+}).catch(function(){var er=f.querySelector('[data-field]:not(.saved) .error');if(er){er.hidden=false;er.textContent='Could not reach Hypervibe. Ask your agent to reopen this page.'}}).finally(function(){f.querySelectorAll('button').forEach(function(x){x.disabled=false})})})})();`;
+
 function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; scriptNonce: string; saved: Record<string, string>; errors: Record<string, string>; finished?: string }): string {
   const rows = `<dl class="context">${spec.rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`;
   const remaining = spec.fields.filter((field) => !state.saved[field.id]).length;
@@ -254,14 +267,13 @@ function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; 
     const link = field.link ? `<p><a class="button" href="${escapeHtml(field.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(field.link.label)} ↗</a></p>
 <p class="muted">${field.link.hintHtml}</p>${field.link.copy ? `<p class="copyrow"><span class="muted">${escapeHtml(field.link.copy.label)}</span> <code class="copy">${escapeHtml(field.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(field.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}`
       : `<p class="muted">Paste the new value from wherever it was issued${field.allowGenerate ? ', or generate one if it is a secret only your app uses' : ''}.</p>`;
-    return `<li class="field">${head}${link}
-<form method="post" action="/connect/${state.nonce}" autocomplete="off">
-  <input type="hidden" name="nonce" value="${state.nonce}"><input type="hidden" name="field" value="${id}">
+    return `<li class="field" data-field="${id}">${head}<div class="entry">${link}
+<div class="inputrow">
   <label class="sr" for="v-${id}">${id}</label>
-  <input id="v-${id}" type="password" name="token" placeholder="Paste the new ${id}" spellcheck="false" autocapitalize="off">
-  <button type="submit">Save</button>${field.allowGenerate ? `<button type="submit" name="generate" value="1" class="secondary">Generate</button>` : ''}
-</form>
-${state.errors[field.id] ? `<p class="error" role="alert">${escapeHtml(state.errors[field.id]!)}</p>` : ''}</li>`;
+  <input id="v-${id}" type="password" name="value:${id}" placeholder="Paste the new ${id}" spellcheck="false" autocapitalize="off">
+  <button type="submit" name="save" value="${id}">Save</button>${field.allowGenerate ? `<button type="submit" name="generate" value="${id}" class="secondary">Generate</button>` : ''}
+</div></div>
+<p class="error" role="alert"${state.errors[field.id] ? '' : ' hidden'}>${escapeHtml(state.errors[field.id] ?? '')}</p></li>`;
   }).join('\n');
   const body = state.finished
     ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>${escapeHtml(spec.doneTitle)}</h1><p>${escapeHtml(state.finished)}</p>
@@ -270,10 +282,14 @@ ${state.errors[field.id] ? `<p class="error" role="alert">${escapeHtml(state.err
 <h1>${spec.titleHtml}</h1>
 <p class="lead">${spec.leadHtml}</p>
 ${rows}
-<p class="muted small">${remaining} of ${spec.fields.length} left. Each one is saved as soon as you click Save.</p>
-<ol class="fields">${items}</ol>`;
+<p class="muted small">Save each key as you go, or fill them in and save all at once.</p>
+<form id="keys" method="post" action="/connect/${state.nonce}" autocomplete="off"><input type="hidden" name="nonce" value="${state.nonce}">
+<ol class="fields">${items}</ol>
+${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*">Save all</button></p>` : ''}
+</form>
+<script nonce="${state.scriptNonce}">${MULTI_SCRIPT}</script>`;
   return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere, scriptNonce: state.scriptNonce, expiresMinutes: 60 })
-    .replace('</style>', '.fields{list-style:none;padding:0;margin:0}.field{border-top:1px solid var(--frame);padding:.9rem 0}.field.saved{opacity:.8}.fieldname{margin:0 0 .4rem}.fieldname code{font-family:var(--mono);color:#fff}.ok{color:var(--signal-300);font-size:.8rem}button.secondary{border-color:var(--frame);color:var(--cloud-100)}</style>');
+    .replace('</style>', '.fields{list-style:none;padding:0;margin:0}.field{border-top:1px solid var(--frame);padding:.9rem 0}.field.saved{opacity:.8}.fieldname{margin:0 0 .4rem}.fieldname code{font-family:var(--mono);color:#fff}.ok{color:var(--signal-300);font-size:.8rem}button.secondary{border-color:var(--frame);color:var(--cloud-100)}#keys{display:block;margin:0}.inputrow{display:flex;gap:.5rem;margin:.6rem 0 .25rem;flex-wrap:wrap}.saveall{border-top:1px solid var(--frame);padding-top:.9rem;margin:0}</style>');
 }
 
 /**
@@ -306,7 +322,7 @@ export async function serveMultiPastePage(params: {
       const scriptNonce = crypto.randomBytes(16).toString('base64');
       const html = (status = 200, finished?: string) => response.writeHead(status, {
         'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; form-action 'self'; base-uri 'none'`,
+        'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'`,
         'Referrer-Policy': 'same-origin',
       }).end(renderMultiPastePage(params.spec, { nonce, scriptNonce, saved, errors, ...(finished ? { finished } : {}) }));
       if (request.method === 'GET') { html(200, entry?.settled?.message); return; }
@@ -317,26 +333,42 @@ export async function serveMultiPastePage(params: {
       request.on('data', (chunk: Buffer) => { raw += chunk.toString('utf8'); if (raw.length > 8192) request.destroy(); });
       request.on('end', async () => {
         const form = new URLSearchParams(raw);
-        const field = form.get('field') ?? '';
-        const known = params.spec.fields.find((candidate) => candidate.id === field);
-        if (form.get('nonce') !== nonce || !known || saved[field]) { html(400); return; }
-        const generate = form.get('generate') === '1' && known.allowGenerate;
-        const value = form.get('token')?.trim() ?? '';
-        if (!generate && !value) { errors[field] = `Paste the new ${field}, or leave it for later.`; html(400); return; }
-        const outcome = await params.accept(field, generate ? { generate: true } : value);
-        if (!outcome.ok) { errors[field] = outcome.error; html(400); return; }
-        delete errors[field];
-        saved[field] = outcome.message;
+        const asJson = request.headers['x-hv-fetch'] === '1';
+        const reply = (status: number, finished?: string) => asJson
+          ? response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            .end(JSON.stringify({ saved, errors, ...(finished ? { finished } : {}) }))
+          : html(status, finished);
+        if (form.get('nonce') !== nonce) { reply(400); return; }
+        const open = params.spec.fields.filter((candidate) => !saved[candidate.id]);
+        const generateId = form.get('generate');
+        const saveId = form.get('save');
+        const targets = generateId
+          ? open.filter((candidate) => candidate.id === generateId && candidate.allowGenerate)
+          : saveId === '*' ? open.filter((candidate) => form.get(`value:${candidate.id}`)?.trim()) : open.filter((candidate) => candidate.id === saveId);
+        if (!targets.length) {
+          const first = saveId === '*' ? open[0] : undefined;
+          if (first) errors[first.id] = 'Paste at least one value, then save.';
+          reply(400); return;
+        }
+        let failed = false;
+        for (const target of targets) {
+          const value = form.get(`value:${target.id}`)?.trim() ?? '';
+          if (!generateId && !value) { errors[target.id] = `Paste the new ${target.id}, or leave it for later.`; failed = true; continue; }
+          const outcome = await params.accept(target.id, generateId ? { generate: true } : value);
+          if (!outcome.ok) { errors[target.id] = outcome.error; failed = true; continue; }
+          delete errors[target.id];
+          saved[target.id] = outcome.message;
+        }
         if (params.spec.fields.every((candidate) => saved[candidate.id])) {
           const message = `All ${params.spec.fields.length} values are saved.`;
           const settled: LocalPasteResult & { saved?: string[] } = { status: 'connected', provider: params.provider, scope: params.scope, message, saved: Object.keys(saved) };
           entry!.settled = settled;
-          html(200, message);
+          reply(200, message);
           resolve(settled);
           setTimeout(() => { server.close(); active.delete(params.key); }, 2000).unref();
           return;
         }
-        html(200);
+        reply(failed ? 400 : 200);
       });
     });
     await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));

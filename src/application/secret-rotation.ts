@@ -10,7 +10,7 @@ import {
 import { launchEnvironment, type LaunchResult } from './launch.js';
 import { contextRows } from './local-connect-page.js';
 import { serveMultiPastePage, type PasteField } from './local-paste-page.js';
-import { KNOWN_SECRETS } from './local-secret-page.js';
+import { checkKnownSecret, keyHintHtml, KNOWN_SECRETS } from './local-secret-page.js';
 import { requestingAgent } from './requesting-agent.js';
 
 /**
@@ -119,11 +119,16 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   const save = (rotation: EngineBinding['rotation']) => ctx.repos.environments.updatePlatformBindings(engine.environment.id, { engine: { ...current(), kind: 'opentofu', rotation } });
 
   const rotatable = ages.secrets.filter((secret) => secret.kind === 'generated' || secret.kind === 'database' || secret.kind === 'third-party');
-  const unknown = (params.keys ?? []).filter((key) => !rotatable.some((secret) => secret.key === key));
+  // Settings issued with a key (a reCAPTCHA site key) are replaced on the same page as it.
+  const companionsOf = (key: string) => (KNOWN_SECRETS[key]?.companions ?? [])
+    .filter((companion) => ages.secrets.some((secret) => secret.key === companion.key));
+  const parentOf = (key: string) => rotatable.find((secret) => companionsOf(secret.key).some((companion) => companion.key === key))?.key;
+  const unknown = (params.keys ?? []).filter((key) => !rotatable.some((secret) => secret.key === key) && !parentOf(key));
   if (unknown.length) return { status: 'blocked', message: `Not rotatable here: ${unknown.join(', ')}.` };
   let rotation = current().rotation;
   if (!rotation) {
-    rotation = { startedAt: new Date().toISOString(), keys: params.keys?.length ? params.keys : rotatable.map((secret) => secret.key) };
+    const requested = params.keys?.length ? params.keys.map((key) => parentOf(key) ?? key) : rotatable.map((secret) => secret.key);
+    rotation = { startedAt: new Date().toISOString(), keys: [...new Set(requested)] };
     save(rotation);
   }
   const selected = rotatable.filter((secret) => rotation!.keys.includes(secret.key));
@@ -152,7 +157,9 @@ export async function rotateSecrets(ctx: CommandContext, params: {
     }
   }
   // 1d. Third-party keys: one local page, each value checked where Hypervibe knows how.
-  const pending = selected.filter((entry) => entry.kind === 'third-party' && !replaced(entry));
+  const pendingKeys = selected.filter((entry) => entry.kind === 'third-party' && !replaced(entry));
+  const pending = pendingKeys.flatMap((secret) => [secret, ...companionsOf(secret.key)
+    .map((companion) => ages.secrets.find((entry) => entry.key === companion.key)!).filter((entry) => !replaced(entry))]);
   if (pending.length) {
     const environmentSpec = specResult.spec.environments[params.environmentName]!;
     const forwardedFrom = Object.values(specResult.spec.environments)
@@ -161,8 +168,10 @@ export async function rotateSecrets(ctx: CommandContext, params: {
     const agent = requestingAgent();
     const fields: PasteField[] = pending.map((secret) => {
       const known = KNOWN_SECRETS[secret.key];
+      const companion = KNOWN_SECRETS[parentOf(secret.key) ?? '']?.companions?.find((entry) => entry.key === secret.key);
+      if (companion) return { id: secret.key, noteHtml: companion.hintHtml };
       return known
-        ? { id: secret.key, link: { url: known.url, label: `Open ${known.service}'s key page`, hintHtml: known.hintHtml, copy: { label: 'Name it', value: `${domain}-${params.environmentName}` } },
+        ? { id: secret.key, link: { url: known.url, label: `Open ${known.service}'s key page`, hintHtml: keyHintHtml(known), copy: { label: 'Name it', value: `${domain}-${params.environmentName}` } },
             noteHtml: `Delete the old key in ${known.service} once ${params.environmentName} runs on the new one.` }
         : { id: secret.key, allowGenerate: true, ...(SIGNS_OUT.test(secret.key) ? { noteHtml: 'Generating a new value signs everyone out once it is live.' } : {}) };
     });
@@ -172,9 +181,8 @@ export async function rotateSecrets(ctx: CommandContext, params: {
       accept: async (key, value) => {
         const known = KNOWN_SECRETS[key];
         const secretValue = typeof value === 'string' ? value : crypto.randomBytes(32).toString('base64url');
-        if (typeof value === 'string' && known?.check && !(await known.check(value).catch(() => false))) {
-          return { ok: false, error: `${known.service} did not accept that key. Copy it again and paste the whole value.` };
-        }
+        const rejected = typeof value === 'string' && known ? await checkKnownSecret(known, value) : undefined;
+        if (rejected) return { ok: false, error: rejected };
         const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, key), { ...labels, 'hv-imported': 'true' }, secretValue);
         if (failure) return { ok: false, error: 'Hypervibe could not save it to Google Secret Manager. Try again.' };
         return { ok: true, message: typeof value === 'string' ? (known?.check ? `saved, ${known.service} accepted it` : 'saved') : 'generated and saved' };
