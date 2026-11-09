@@ -88,6 +88,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       project: projectField.describe('Optional Hypervibe project name/id for validated context. Project-only still lists sources. Omit to use no project context for source/manager lists or auto-detect only in GitHub/hosting modes.'),
       action: z.enum(['collect', 'rotate', 'ages']).optional().describe('OpenTofu-managed environments. collect: local page to paste a new value for key. rotate: replace every secret in env (or keys) now: new generated values, a no-downtime database login change, one local page for all third-party keys, services moved onto them, old versions disabled. Call again after any stop; it resumes. ages: read-only list of each secret, its kind and age.'),
       keys: z.array(z.string().min(1)).optional().describe('action="rotate": only these settings (default: all rotatable).'),
+      generateInternal: z.boolean().optional().describe('action="rotate": replace app-internal secrets (no outside service issued them, for example JWT_SECRET) with generated values instead of asking. Signing secrets sign everyone out.'),
       confirmActions: z.array(z.string().min(1)).optional().describe('action="rotate": exact confirmActions from a needs_confirmation result, after the user approved them.'),
       purpose: z.string().max(160).optional().describe('action="collect": why the value is needed, as a phrase after "to", shown on the page.'),
       view: z.literal('inventory').optional().describe('Read-only credential inventory for the exact project/environment. Cannot combine with other secret-mode selectors. Does not adopt, synchronize, validate credentials, or deploy.'),
@@ -101,7 +102,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       include: z.array(z.literal('github')).optional().describe('Also list GitHub Actions secret names'),
       repo: z.string().min(1).optional().describe('GitHub owner/name; defaults to the project git remote'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, view, key, provider, path, version, service, pathPrefix, include, repo, action, purpose, keys, confirmActions }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, view, key, provider, path, version, service, pathPrefix, include, repo, action, purpose, keys, confirmActions, generateInternal }) => {
       if (action === 'rotate' || action === 'ages') {
         if (!env) throw new HvError('VALIDATION', `action="${action}" requires env.`);
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -113,7 +114,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
           const overdue = ages.secrets.filter((secret) => secret.overdue).map((secret) => secret.key);
           return commandSuccess(ages, { hint: overdue.length ? `${overdue.length} secret(s) are older than ${ages.everyDays} days. Rotate them with action="rotate".` : `Every secret is newer than ${ages.everyDays} days.` });
         }
-        const rotated = await rotateSecrets(ctx, { project, environmentName: env, ...(keys?.length ? { keys } : {}), ...(confirmActions?.length ? { confirmActions } : {}) });
+        const rotated = await rotateSecrets(ctx, { project, environmentName: env, ...(keys?.length ? { keys } : {}), ...(confirmActions?.length ? { confirmActions } : {}), ...(generateInternal ? { generateInternal } : {}) });
         if (rotated.status === 'blocked') return commandError('VALIDATION', rotated.message);
         if (rotated.status === 'needs_input') {
           return commandSuccess(rotated, { hint: 'Tell the user the page for the new keys is open in their browser (give the link). Call action="rotate" again after they finish.',

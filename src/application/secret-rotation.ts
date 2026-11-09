@@ -99,6 +99,8 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   project: Project;
   environmentName: string;
   keys?: string[];
+  /** Replace app-internal secrets (ones no outside service issued) with generated values instead of asking. */
+  generateInternal?: boolean;
   confirmActions?: string[];
   approveAccess?: string[];
   waitMs?: number;
@@ -141,7 +143,15 @@ export async function rotateSecrets(ctx: CommandContext, params: {
     rotation = { ...rotation, databaseGeneration: next };
     save(rotation);
   }
-  // 1c. Third-party keys: one local page, each value checked where Hypervibe knows how.
+  // 1c. App-internal secrets, when asked: generated without a page (no outside service issued them).
+  if (params.generateInternal) {
+    for (const secret of selected.filter((entry) => entry.kind === 'third-party' && !KNOWN_SECRETS[entry.key] && !replaced(entry))) {
+      const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, secret.key), { ...labels, 'hv-imported': 'true' }, crypto.randomBytes(32).toString('base64url'));
+      if (failure) return { status: 'blocked', message: failure.message };
+      secret.createdAt = new Date().toISOString();
+    }
+  }
+  // 1d. Third-party keys: one local page, each value checked where Hypervibe knows how.
   const pending = selected.filter((entry) => entry.kind === 'third-party' && !replaced(entry));
   if (pending.length) {
     const environmentSpec = specResult.spec.environments[params.environmentName]!;
