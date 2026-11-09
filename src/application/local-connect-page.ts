@@ -97,7 +97,7 @@ export async function connectCloudflareInBrowser(params: {
       leadHtml: `${escapeHtml(context.agent)} needs a Cloudflare token to ${escapeHtml(context.purpose ?? `manage DNS and traffic for ${domain}`)}.`,
       rows: [...contextRows(context), ['Domain', domain]],
       link: { url: CLOUDFLARE_TOKEN_URLS.user, label: "Open Cloudflare's token form",
-        hintHtml: `Permissions are pre-selected. Set <em>Zone Resources</em> to <strong>${zone}</strong>, then create the token.` },
+        hintHtml: `Set <em>Zone Resources</em> to <strong>${zone}</strong>, then create the token.<br><strong>Permissions:</strong> pre-selected; keep them all (${CLOUDFLARE_PERMISSIONS.map((entry) => escapeHtml(entry.name)).join(', ')}).` },
       input: { label: 'Cloudflare API token', placeholder: 'Paste your Cloudflare token', button: 'Connect', missing: 'Paste the token Cloudflare showed you.' },
       details: { summary: 'What this token can do', items: CLOUDFLARE_PERMISSIONS, note: 'Revoke it any time under My Profile → API Tokens.' },
       done: { title: 'Cloudflare is connected', note: 'The token is stored encrypted on this computer.' },
