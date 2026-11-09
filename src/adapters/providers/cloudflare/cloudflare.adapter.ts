@@ -431,8 +431,13 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IE
       const errorMsg = Array.isArray(data.errors)
         ? data.errors.map((error) => error.message).join(', ')
         : '';
+      // Connecting proves the token can read DNS but cannot prove DNS Edit without
+      // writing, so a refused DNS write most likely means that permission was dropped.
+      const dnsEditHint = method !== 'GET' && /\/dns_records/.test(endpoint) && (response.status === 401 || response.status === 403)
+        ? ` The Cloudflare token can likely read DNS but not edit it. Create a replacement from this pre-filled form (it includes Zone > DNS > Edit): ${CLOUDFLARE_TOKEN_URLS.user}. Then reconnect with hv_connections provider="cloudflare" action="connect" and plan again.`
+        : '';
       throw new CloudflareApiError(
-        `Cloudflare API error: ${errorMsg || `HTTP ${response.status}`}`,
+        `Cloudflare API error: ${errorMsg || `HTTP ${response.status}`}${dnsEditHint}`,
         response.status
       );
     }
