@@ -1,4 +1,5 @@
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
+import { engineWorkerStatus, isEngineManaged } from '../application/infrastructure-engine.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -1047,9 +1048,21 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec.' });
       }
-      validateInstalledProviders(specResult.spec);
       const envName = commandEnvironment(specResult.spec, env);
       const envSpec = specResult.spec.environments[envName];
+      // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
+      // status reports what only live observation shows, starting with background workers.
+      if (envSpec && isEngineManaged(envSpec)) {
+        const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
+        if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
+        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: engine.workers }, {
+          warnings: engine.warnings,
+          hint: engine.warnings.length ? 'Fix the warnings above, then check hv_status again.' : 'Run hv_plan scope="infrastructure" to check infrastructure drift.',
+          next: engine.warnings.length ? ['hv_plan'] : ['hv_plan', 'hv_health'],
+        });
+      }
+
+      validateInstalledProviders(specResult.spec);
       if (!envSpec) {
         if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
           const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);

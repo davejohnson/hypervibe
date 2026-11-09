@@ -226,16 +226,18 @@ function wakerWorkflow(input: GcpCloudRunEngineInput, service: GcpCloudRunServic
         auth: { type: 'OAuth2' },
         body: { database: input.database!.databaseName, sqlStatement: service.pendingWorkQuery, autoIamAuthn: true, rowLimit: '1', application: `hv-waker-${key}`.slice(0, 32) },
       }, result: 'sql' } },
-      { read: { assign: [{ want: '${if(int(sql.body.results[0].rows[0].values[0].value) > 0, 1, 0)}' }] } },
-    ] }, except: { as: 'error', steps: [{ fallback: { assign: [{ want: 1 }] } }] } } },
+      { read: { assign: [{ pending: '${int(sql.body.results[0].rows[0].values[0].value)}' }, { want: '${if(pending > 0, 1, 0)}' }, { readError: '' }] } },
+    ] }, except: { as: 'error', steps: [{ fallback: { assign: [{ pending: -1 }, { want: 1 }, { readError: '${default(map.get(error, "message"), "the pending-work query failed")}' }] } }] } } },
     { current: { call: 'http.get', args: { url: pool, auth: { type: 'OAuth2' } }, result: 'observed' } },
-    { compare: { switch: [{ condition: '${default(map.get(observed.body.scaling, "manualInstanceCount"), 0) == want}', return: '${want}' }] } },
+    // The result records what was read, so hv_status can tell real work from a failed read (pending -1).
+    { report: { assign: [{ outcome: { instances: '${want}', pendingWork: '${pending}', readError: '${readError}' } }] } },
+    { compare: { switch: [{ condition: '${default(map.get(observed.body.scaling, "manualInstanceCount"), 0) == want}', return: '${outcome}' }] } },
     { scale: { call: 'http.patch', args: {
       url: `${pool}?updateMask=scaling.manualInstanceCount`,
       auth: { type: 'OAuth2' },
       body: { scaling: { scalingMode: 'MANUAL', manualInstanceCount: '${want}' } },
     } } },
-    { done: { return: '${want}' } },
+    { done: { return: '${outcome}' } },
   ] } }).replace(/\$\{/g, () => '$${'); // Workflows expressions, escaped from OpenTofu interpolation.
 }
 
