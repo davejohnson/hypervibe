@@ -1,4 +1,5 @@
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
+import { addTasks } from './aws-engine.tasks.js';
 
 /**
  * Pure OpenTofu configuration for one AWS environment. Values are non-secret:
@@ -19,6 +20,47 @@ export interface AwsEngineInput {
   storage?: Array<{ name: string; bucket: string }>;
   /** Web services on Lambda (container image with the Lambda Web Adapter). */
   services?: AwsWebServiceInput[];
+  /** Background workers on Fargate; on-demand ones sit at zero tasks until there is work. */
+  workers?: AwsWorkerInput[];
+  /** Scheduled jobs: EventBridge Scheduler runs a Fargate task. */
+  jobs?: AwsJobInput[];
+  /** Names of the runtime secrets under parameterPath, wired into Fargate tasks by reference. */
+  secretKeys?: string[];
+}
+
+export interface AwsTaskInput {
+  logicalName: string;
+  resourceName: string;
+  /** Image for first creation (in this environment's registry); the release path owns it afterwards. */
+  initialImageUri: string;
+  /** Fargate CPU units (256 = 0.25 vCPU) and memory in MB. */
+  cpu?: number;
+  memory?: number;
+  command?: string[];
+  env?: Record<string, string>;
+}
+
+export interface AwsWorkerInput extends AwsTaskInput {
+  /** Run only while this read-only count of pending work is above zero (uses the Aurora Data API). */
+  pendingWorkQuery?: string;
+}
+
+export interface AwsJobInput extends AwsTaskInput {
+  /** Five-field cron schedule and IANA time zone. */
+  schedule: string;
+  timeZone?: string;
+}
+
+/** Converts a five-field cron to EventBridge Scheduler's six-field form (day-of-week 1-7, one day field '?'). */
+export function schedulerCron(schedule: string): string {
+  const fields = schedule.trim().split(/\s+/);
+  if (fields.length !== 5) throw new Error(`Schedule "${schedule}" must have five fields.`);
+  let [minute, hour, dayOfMonth, month, dayOfWeek] = fields as [string, string, string, string, string];
+  dayOfWeek = dayOfWeek.replace(/\d+/g, (day) => String((Number(day) % 7) + 1));
+  if (dayOfWeek === '*') dayOfWeek = '?';
+  else if (dayOfMonth === '*') dayOfMonth = '?';
+  else throw new Error(`Schedule "${schedule}" sets both day of month and day of week, which EventBridge Scheduler does not support.`);
+  return `cron(${minute} ${hour} ${dayOfMonth} ${month} ${dayOfWeek} *)`;
 }
 
 export interface AwsWebServiceInput {
@@ -80,6 +122,8 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       Resource: buckets.flatMap((bucket) => [`arn:aws:s3:::${bucket.bucket}`, `arn:aws:s3:::${bucket.bucket}/*`]) }] : []),
   ];
   files['base.tf.json'] = {
+    // The default VPC: databases and tasks use its public subnets (no NAT gateway).
+    data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
     resource: {
       aws_ecr_repository: { images: { name: input.prefix, image_tag_mutability: 'IMMUTABLE', force_delete: true, image_scanning_configuration: [{ scan_on_push: true }] } },
       aws_ecr_lifecycle_policy: { images: { repository: '${aws_ecr_repository.images.name}', policy: JSON.stringify({
@@ -119,7 +163,6 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       resources[address] = mapping;
     }
     files['database.tf.json'] = {
-      data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
       resource: {
         aws_security_group: { postgres: { name: `${input.prefix}-postgres`, description: 'Hypervibe: Postgres over TLS', vpc_id: '${data.aws_vpc.default.id}',
           ingress: [{ description: 'Postgres (TLS required by the cluster)', from_port: 5432, to_port: 5432, protocol: 'tcp', cidr_blocks: ['0.0.0.0/0'], ipv6_cidr_blocks: [], prefix_list_ids: [], security_groups: [], self: false }],
@@ -230,6 +273,8 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       output: outputs,
     };
   }
+
+  addTasks(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     registry_url: { value: '${aws_ecr_repository.images.repository_url}' },
