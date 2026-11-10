@@ -51,7 +51,7 @@ const LOCK = `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="
 const COPY_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M13 7V4.5A1.5 1.5 0 0 0 11.5 3h-7A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13H7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`;
 const CHECK_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-function pageShell(params: { tabTitle: string; body: string; agent: string; storedWhere: string; checkedAgainst?: string; scriptNonce?: string; expiresMinutes?: number }): string {
+export function pageShell(params: { tabTitle: string; body: string; agent: string; storedWhere: string; checkedAgainst?: string; scriptNonce?: string; expiresMinutes?: number }): string {
   const agent = escapeHtml(params.agent);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="same-origin">
@@ -98,7 +98,7 @@ details{border-top:1px solid var(--frame);padding-top:.85rem}summary{cursor:poin
 <li>${escapeHtml(params.storedWhere)}. Never sent to chat, ${agent} or any Hypervibe server.</li>
 <li>${params.checkedAgainst ? `Checked against ${escapeHtml(params.checkedAgainst)} before saving. ` : ''}Link expires in ${params.expiresMinutes ?? 30} minutes.</li>
 </ul></section>
-</div>${params.scriptNonce ? `<script nonce="${params.scriptNonce}">document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){var i=b.innerHTML;b.innerHTML=${JSON.stringify(CHECK_ICON)};b.title='Copied';setTimeout(function(){b.innerHTML=i;b.title='Copy'},1500)})})})</script>` : ''}</body></html>`;
+</div>${params.scriptNonce ? `<script nonce="${params.scriptNonce}">document.querySelectorAll('form:not(#keys)').forEach(function(f){f.addEventListener('submit',function(e){var b=e.submitter||f.querySelector('button[type=submit]');setTimeout(function(){f.querySelectorAll('button').forEach(function(x){x.disabled=true});if(b){b.textContent=b.getAttribute('data-busy')||'Working…'}},0)})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){var i=b.innerHTML;b.innerHTML=${JSON.stringify(CHECK_ICON)};b.title='Copied';setTimeout(function(){b.innerHTML=i;b.title='Copy'},1500)})})})</script>` : ''}</body></html>`;
 }
 
 export function renderPastePage(spec: PastePageSpec, state: { nonce: string; scriptNonce?: string; error?: string; connected?: string }): string {
@@ -139,7 +139,7 @@ interface ActivePage {
 
 const active = new Map<string, ActivePage>();
 
-function openInBrowser(url: string): void {
+export function openInBrowser(url: string): void {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
   execFile(command, [url], () => {});
 }

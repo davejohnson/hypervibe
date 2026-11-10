@@ -69,6 +69,7 @@
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1092.0",
     "@aws-sdk/client-ecs": "^3.1106.0",
+    "@aws-sdk/client-iam": "^3.1106.0",
     "@aws-sdk/client-rds": "^3.1092.0",
     "@aws-sdk/client-s3": "^3.1108.0",
     "@aws-sdk/client-sts": "^3.1106.0",

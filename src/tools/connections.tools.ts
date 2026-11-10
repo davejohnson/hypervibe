@@ -9,6 +9,8 @@ import {
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
+import { connectAws } from '../application/aws-connect.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import { connectCloudflareInBrowser } from '../application/local-connect-page.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
@@ -122,6 +124,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('action="connect": the environment this access is for, shown on the connect page.'),
+      awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
       workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
       adminAuth: z.literal('default').optional().describe('Required for action="bootstrap" and confirmed action="prepare": use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
@@ -149,6 +152,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       workerAccess,
       purpose,
       environment,
+      awsAccountId,
       adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
@@ -215,6 +219,23 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
 
       const requestedAction = action ?? 'add';
+      if (requestedAction === 'connect' && provider === 'aws') {
+        const { project: awsProject } = await resolveGuidanceContext().catch(() => ({ project: undefined }));
+        if (!awsProject) return commandError('VALIDATION', 'provider="aws" action="connect" needs the project (run it from the app repository or pass project).', { next: ['hv_connections'] });
+        const specResult = new SpecStore().get(awsProject);
+        const result = await connectAws({ project: awsProject, ...(specResult ? { spec: specResult.spec } : {}), ...(awsAccountId ? { approveAccountId: awsAccountId } : {}) });
+        if (result.status === 'needs_approval') {
+          return commandSuccess(result, {
+            hint: 'Show the user the account, region and each change in one short list, then ask them to approve. On approval call again with awsAccountId set to this accountId.',
+            agentInstruction: { action: 'ask_user', message: `Ask the user to approve setting up Hypervibe in AWS account ${result.accountId}.` }, next: ['hv_connections'],
+          });
+        }
+        if (result.status === 'waiting') {
+          return commandSuccess(result, { hint: 'Tell the user an AWS sign-in page is open in their browser (give the link). Call action="connect" again after they sign in.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to sign in to AWS in the browser tab that opened, then continue.' }, next: ['hv_connections'] });
+        }
+        return result.status === 'connected' ? commandSuccess(result, { next: ['hv_launch', 'hv_plan'] }) : commandError('PROVIDER_ERROR', result.message, { next: ['hv_connections'] });
+      }
       if (requestedAction === 'connect') {
         if (provider !== 'cloudflare' || !scope?.trim()) {
           return commandError('VALIDATION', 'action="connect" currently supports provider="cloudflare" with scope set to the domain to manage.', { next: ['hv_connections'] });
