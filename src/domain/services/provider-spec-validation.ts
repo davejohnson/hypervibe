@@ -136,7 +136,12 @@ function queueConfigurationIssues(params: {
  * without editing a central enum while still rejecting specs that cannot be
  * executed by this Hypervibe installation.
  */
-export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIssue[] {
+/**
+ * Validates project-level providers plus each environment's providers. Pass
+ * `environment` to validate only that environment: an operation on one
+ * environment must not be blocked by an unrelated environment's providers.
+ */
+export function validateProjectSpecProviders(spec: ProjectSpec, environment?: string): ProviderSpecIssue[] {
   const issues: ProviderSpecIssue[] = [];
   if (spec.devops && !devOpsProviderRegistry.codeHost(spec.devops.code.provider)) {
     issues.push({
@@ -168,7 +173,10 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         .filter((provider) => devOpsProviderRegistry.compatible(spec.devops!.code.provider, provider)),
     });
   }
-  for (const [environment, environmentSpec] of Object.entries(spec.environments)) {
+  const environments = environment === undefined
+    ? Object.entries(spec.environments)
+    : Object.entries(spec.environments).filter(([name]) => name === environment);
+  for (const [environment, environmentSpec] of environments) {
     if (!providerRegistry.supports(environmentSpec.hosting.provider, 'hosting')) {
       issues.push({
         environment,
@@ -396,9 +404,10 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
 }
 
 export function firstProviderSpecValidationFailure(
-  spec: ProjectSpec
+  spec: ProjectSpec,
+  environment?: string
 ): ProviderSpecValidationFailure | undefined {
-  const issue = validateProjectSpecProviders(spec)[0];
+  const issue = validateProjectSpecProviders(spec, environment)[0];
   if (!issue) return undefined;
 
   const label = issue.capability;

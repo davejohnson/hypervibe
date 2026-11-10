@@ -98,8 +98,8 @@ import { eligibleCredentialRequirements } from '../application/credential-plan-h
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
 
-function validateInstalledProviders(spec: ProjectSpec): void {
-  const failure = firstProviderSpecValidationFailure(spec);
+function validateInstalledProviders(spec: ProjectSpec, environment?: string): void {
+  const failure = firstProviderSpecValidationFailure(spec, environment);
   if (!failure) return;
   throw new HvError(
     'VALIDATION',
@@ -829,8 +829,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
-      if (currentSpec) validateInstalledProviders(currentSpec);
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
+      if (currentSpec) validateInstalledProviders(currentSpec, scope === 'credentials' ? undefined : plannedEnvironment);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
@@ -1068,7 +1068,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         });
       }
 
-      validateInstalledProviders(specResult.spec);
+      validateInstalledProviders(specResult.spec, envName);
       if (!envSpec) {
         if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
           const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);

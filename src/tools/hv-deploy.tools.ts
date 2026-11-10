@@ -94,7 +94,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           next: ['hv_spec', 'hv_inspect', 'hv_import'],
         });
       }
-      const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
+      const providerValidation = firstProviderSpecValidationFailure(specResult.spec, env?.trim() || 'staging');
       if (providerValidation) {
         return commandError('VALIDATION', providerValidation.message, {
           hint: providerValidation.hint,

@@ -1727,7 +1727,7 @@ export class PlanService {
     // Existing credential operations have their own exact-target capability checks;
     // they do not require permission to create the desired infrastructure.
     const providerValidation = observationOrCleanup || scope === 'credentials'
-      ? undefined : firstProviderSpecValidationFailure(specResult.spec);
+      ? undefined : firstProviderSpecValidationFailure(specResult.spec, environmentName);
     if (providerValidation) return { error: providerValidation.message };
     const pendingBootstrap = lifecycleEnvironments.some(environment =>
       this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseBootstrap(component.bindings)));

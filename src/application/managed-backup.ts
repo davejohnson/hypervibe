@@ -42,6 +42,20 @@ function selectedCredentialNames(target: ManagedBackupTarget) {
 }
 
 /** Verify the reviewed default-branch program and durable bindings before credentials or writes. */
+/**
+ * The runner image is pinned while the spec keeps evolving, so a newer spec
+ * writer may add fields this runner does not know. Strictly validate the
+ * project fields and the environment being backed up; other environments
+ * cannot authorize this backup and must not block it.
+ */
+function targetEnvironmentSpec(raw: unknown, environment: string) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Backup desired state is invalid.');
+  const environments = (raw as { environments?: unknown }).environments;
+  if (!environments || typeof environments !== 'object' || Array.isArray(environments)
+    || !Object.hasOwn(environments, environment)) throw new Error('The current spec does not authorize this backup program.');
+  return projectSpecSchema.parse({ ...raw, environments: { [environment]: (environments as Record<string, unknown>)[environment] } });
+}
+
 export async function verifyManagedBackupAuthority(params: {
   target: unknown; contractHash: string; runnerImage: string; repository: string; sha: string; ref: string;
   github: GitHubAdapter;
@@ -55,7 +69,7 @@ export async function verifyManagedBackupAuthority(params: {
   if (params.ref !== `refs/heads/${repository.default_branch}`) throw new Error('Backup execution requires the default branch.');
   const reference = await params.github.getRef(owner, repo, `heads/${repository.default_branch}`);
   if (reference?.object.sha !== params.sha) throw new Error('The default branch changed before backup execution.');
-  const spec = projectSpecSchema.parse(JSON.parse(await params.github.getFileContent(owner, repo, '.hypervibe/spec.json', params.sha) ?? ''));
+  const spec = targetEnvironmentSpec(JSON.parse(await params.github.getFileContent(owner, repo, '.hypervibe/spec.json', params.sha) ?? ''), target.environment);
   if ((spec.github?.repository ?? parseGitHubRepoFromRemote(spec.gitRemoteUrl)) !== params.repository) throw new Error('Backup desired state belongs to another repository.');
   const bindings = repoBindingsFileSchema.parse(JSON.parse(await params.github.getFileContent(owner, repo, '.hypervibe/bindings.json', params.sha) ?? ''));
   const raw = spec.environments[target.environment];
