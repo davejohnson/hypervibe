@@ -99,6 +99,15 @@ function workloadSpec(provider: string, workloadKind: 'web' | 'worker' | 'cron')
 }
 
 describe('validateProjectSpecProviders', () => {
+  it('scopes validation to the requested environment so another environment cannot block it', () => {
+    const candidate = projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments: {
+      production: { hosting: { provider: 'railway' }, services: {} },
+      gcp: { hosting: { provider: 'cloudrun' }, services: {} },
+    } });
+    expect(firstProviderSpecValidationFailure(candidate)).toMatchObject({ details: { path: 'environments.gcp.hosting.provider' } });
+    expect(firstProviderSpecValidationFailure(candidate, 'production')).toBeUndefined();
+    expect(firstProviderSpecValidationFailure(candidate, 'gcp')).toMatchObject({ details: { maturityStatus: 'planned' } });
+  });
   it.each(['cloudrun', 'ecs', 'azure-container-apps'])('reports %s as awaiting engine integration, not an unknown provider', provider => {
     expect(firstProviderSpecValidationFailure(spec(provider))).toMatchObject({
       message: expect.stringContaining('is planned'),
