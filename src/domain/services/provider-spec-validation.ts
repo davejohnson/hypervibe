@@ -392,7 +392,11 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
       }
     }
   }
-  return issues;
+  // OpenTofu-engine environments: the engine owns these resources and blocks what it cannot
+  // build at plan time, so the legacy lifecycle's "planned" status does not apply to them.
+  return issues.filter((issue) => !(issue.status === 'planned'
+    && spec.environments[issue.environment]?.hosting.engine === 'opentofu'
+    && ['hosting.provider', 'database.provider', 'storage.provider'].includes(issue.field)));
 }
 
 export function firstProviderSpecValidationFailure(
