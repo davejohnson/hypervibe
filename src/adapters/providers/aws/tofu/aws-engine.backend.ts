@@ -1,6 +1,7 @@
 import { AssumeRoleCommand, STSClient } from '@aws-sdk/client-sts';
 import type { EngineAuthentication, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { AwsEngineCredentials } from '../aws-engine.adapter.js';
+import { buildAwsConfiguration, type AwsEngineInput } from './aws-engine.config.js';
 
 /** Pinned hashicorp/aws provider (at least two weeks old when pinned) and its lock hashes. */
 export const AWS_PROVIDER_VERSION = '6.70.0';
@@ -37,14 +38,14 @@ export async function awsEngineAuthentication(connection: AwsEngineCredentials):
   };
 }
 
-export const awsEngineBackend: InfrastructureEngineBackend<never> = {
+export const awsEngineBackend: InfrastructureEngineBackend<AwsEngineInput> = {
   provider: 'aws',
   engine: 'opentofu',
   capabilities: ['hosting'],
   providerRequirements: {
     aws: { source: 'hashicorp/aws', version: AWS_PROVIDER_VERSION, lockHashes: AWS_PROVIDER_LOCK_HASHES },
   },
-  buildConfiguration: () => { throw new Error('The AWS engine does not build environments yet.'); },
+  buildConfiguration: buildAwsConfiguration,
   // projectId is the AWS account; the probe proves the identity and the account it can reach.
   buildAuthenticationProbe: ({ projectId }) => ({
     files: {

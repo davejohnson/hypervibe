@@ -12,7 +12,8 @@ records the AWS-specific decisions and why they were made.
 | Sign-in without the AWS CLI | Built; verified live |
 | One-time setup (deploy role, boundary, GitHub OIDC, local key) | Built; verified live |
 | OpenTofu runs as the deploy role | Built; read-only probe verified live |
-| Environments (web, worker, cron, database, storage, secrets) | Not built |
+| Registry, runtime role, storage, database configuration | Built; passes `tofu validate` |
+| Web, worker, cron, image builds, secrets wiring | Not built |
 | CI releases, data migration, teardown | Not built |
 
 ## Access
@@ -63,6 +64,18 @@ records the AWS-specific decisions and why they were made.
   that Hypervibe would have to patch) stays an option for production.
 - **Secrets: SSM Parameter Store `SecureString`**, which is free. Secrets Manager
   costs $0.40 per secret per month.
+- **Lambda secrets are read at start, not stored in Lambda.** Lambda has no
+  native Parameter Store references, and putting values in its environment
+  would copy them into function configuration and engine state. The image
+  Hypervibe builds reads `/hypervibe/<environment>/` at start; only the runtime
+  role can read that path.
+- **The database master password is managed by RDS**
+  (`manage_master_user_password`, one Secrets Manager secret), so it never enters
+  engine state. Hypervibe creates the app login through the RDS Data API, the
+  way GCP uses the Cloud SQL Data API.
+- **Aurora version: the newest minor of the spec's major**, read from AWS at plan
+  time. Aurora PostgreSQL 18 is available (18.6 in us-west-2 on 2026-11-10), so
+  apps on Postgres 18 elsewhere move without a downgrade.
 - **Image builds: AWS CodeBuild**, like Cloud Build on GCP, so no local Docker.
   This needs CodeBuild access added to the deploy role (a setup update).
 
