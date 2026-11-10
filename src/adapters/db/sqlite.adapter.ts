@@ -400,6 +400,22 @@ const migrations: Migration[] = [
     up: '-- Install the shared apply safety invariants after validating historical identities.',
     run: installApplySerialization,
   },
+  {
+    version: 14,
+    name: 'record_spec_writer_identity',
+    // Identity of the Hypervibe build that wrote each spec revision, so a
+    // reader that cannot parse a newer revision reports an upgrade instead of
+    // corruption. Existing revisions keep NULL (writer unknown). Additive and
+    // idempotent: columns already present are left unchanged.
+    up: '-- Add nullable project_specs writer identity columns (JS hook).',
+    run: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(project_specs)').all() as Array<{ name: string }>)
+        .map((column) => column.name));
+      for (const column of ['writer_version', 'writer_schema']) {
+        if (!columns.has(column)) db.exec(`ALTER TABLE project_specs ADD COLUMN ${column} TEXT`);
+      }
+    },
+  },
 ];
 
 export class SqliteAdapter {

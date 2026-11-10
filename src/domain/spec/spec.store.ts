@@ -1,4 +1,5 @@
-import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
+import { ProjectSpecRepository, type ProjectSpecRow } from '../../adapters/db/repositories/spec.repository.js';
+import { HvError } from '../../application/results.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type ProjectSpec, type EnvironmentSpec, type ServiceSpec } from './spec.schema.js';
 import {
@@ -6,6 +7,7 @@ import {
   readRepoSpecFile,
   writePreflightedRepoSpecFile,
 } from './repo-spec-file.js';
+import { compareReleaseVersions, currentSpecWriter } from './spec-writer.js';
 
 /** Shape of the legacy policies.desiredState blob (pre-spec). */
 interface LegacyDesiredState {
@@ -198,14 +200,47 @@ function repoSpecMatchesProject(spec: ProjectSpec, project: Project): boolean {
   return spec.project === project.name;
 }
 
-function parseStoredSpec(document: unknown, projectId: string, revision: number): ProjectSpec {
+function parseStoredSpec(row: Pick<ProjectSpecRow, 'document' | 'revision' | 'writer'>, projectId: string): ProjectSpec {
+  const { document, revision, writer } = row;
   const parsed = projectSpecSchema.safeParse(document);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const path = issue?.path.join('.') || '(root)';
+    const detail = `persisted JSON has an invalid shape (${path}: ${issue?.message ?? 'unknown'})`;
+    const reader = currentSpecWriter();
+    if (writer && writer.schema !== reader.schema) {
+      // A different build wrote this revision. Fail closed, but say how to
+      // recover: the state is most likely valid for that build, not corrupt.
+      const order = compareReleaseVersions(writer.version, reader.version);
+      const relation = order !== null && order > 0 ? 'a newer Hypervibe' : 'a different Hypervibe build';
+      const upgrade = order !== null && order > 0
+        ? `Upgrade Hypervibe to ${writer.version} or later`
+        : 'Upgrade or rebuild this Hypervibe runtime to match the writer';
+      throw new HvError(
+        'UNSUPPORTED',
+        `Cannot read stored desired state for project ${projectId} at revision ${revision}: `
+        + `it was written by ${relation} (${writer.version}, spec schema ${writer.schema}) `
+        + `and this runtime (${reader.version}, spec schema ${reader.schema}) rejects it: ${detail}. `
+        + `${upgrade}, then restart its MCP server. Hypervibe refuses to treat unreadable desired state as empty; `
+        + 'do not edit or delete the stored revision.',
+        {
+          details: {
+            reason: 'spec-writer-mismatch',
+            projectId,
+            revision,
+            writer,
+            reader,
+          },
+          agentInstruction: {
+            action: 'ask_user',
+            message: 'Stop here. Tell the user which Hypervibe version wrote this project and that this runtime must be upgraded and restarted; do not modify stored state or retry with workarounds.',
+          },
+        },
+      );
+    }
     throw new Error(
       `Cannot read stored desired state for project ${projectId} at revision ${revision}: `
-      + `persisted JSON has an invalid shape (${path}: ${issue?.message ?? 'unknown'}). `
+      + `${detail}. `
       + 'Hypervibe refuses to treat unreadable desired state as empty.'
     );
   }
@@ -237,7 +272,7 @@ export class SpecStore {
   getForInspection(project: Project): SpecResult | null {
     const latest = this.repo.findLatest(project.id);
     if (!latest) return null;
-    const spec = parseStoredSpec(latest.document, project.id, latest.revision);
+    const spec = parseStoredSpec(latest, project.id);
     const repoSpec = readRepoSpecFile();
     if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) {
       if (!sameSpec(spec, repoSpec.spec)) {
@@ -275,7 +310,7 @@ export class SpecStore {
     const latest = this.repo.findLatest(project.id);
     if (latest) {
       return {
-        spec: parseStoredSpec(latest.document, project.id, latest.revision),
+        spec: parseStoredSpec(latest, project.id),
         revision: latest.revision,
         source: { kind: 'local' },
       };
@@ -297,7 +332,7 @@ export class SpecStore {
   getRevision(projectId: string, revision: number): ProjectSpec | null {
     const row = this.repo.findByRevision(projectId, revision);
     if (!row) return null;
-    return parseStoredSpec(row.document, projectId, revision);
+    return parseStoredSpec(row, projectId);
   }
 
   /** Replace the spec wholesale. Returns the new revision. */
