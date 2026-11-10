@@ -117,6 +117,7 @@ segments and receipts. Per cloud: configuration, authentication, resource mappin
   backend is chosen per cloud (S3 for AWS, Blob for Azure, GCS for GCP).
 - Secret Manager references stay inside the GCP backend.
 - The Cloud Run CI image split is a GCP decision, not a model every cloud must use.
+- AWS decisions (access, runtimes, database network): [OpenTofu engine on AWS](opentofu-engine-aws.md).
 
 ## Minimal user interaction (hard requirement)
 

@@ -3,6 +3,8 @@ import { ConnectionRepository } from '../adapters/db/repositories/connection.rep
 import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { gcpEngineAuthentication, gcpEngineBackend } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import { AwsEngineCredentialsSchema } from '../adapters/providers/aws/aws-engine.adapter.js';
+import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 
 export type EngineAuthProbeResult =
@@ -52,4 +54,35 @@ export async function probeGcpEngineAuthentication(params: { scope: string | nul
     return { status: 'scope_mismatch', message: 'OpenTofu authenticated, but not as the connection identity or not in its project. Nothing was changed.' };
   }
   return { status: 'verified', identity, projectId, projectNumber: String(result.outputs.project_number ?? '') };
+}
+
+/**
+ * Read-only proof that the OpenTofu AWS provider runs as the project's
+ * Hypervibe deploy role in exactly the connection's account and region.
+ */
+export async function probeAwsEngineAuthentication(params: { scope: string | null; signal?: AbortSignal }): Promise<
+  | { status: 'verified'; identity: string; accountId: string; region: string }
+  | { status: 'missing_connection' | 'permission_denied' | 'scope_mismatch' | 'engine_unavailable' | 'engine_error'; message: string }> {
+  const connection = new ConnectionRepository().findBestVerifiedMatch('aws', params.scope);
+  if (!connection) return { status: 'missing_connection', message: 'No verified AWS connection exists for this project. Connect AWS with hv_connections provider="aws" action="connect".' };
+  const parsed = AwsEngineCredentialsSchema.safeParse(getSecretStore().decryptObject(connection.credentialsEncrypted));
+  if (!parsed.success) return { status: 'missing_connection', message: 'The AWS connection is not Hypervibe\'s deploy access. Run AWS setup again.' };
+  let auth;
+  try { auth = await awsEngineAuthentication(parsed.data); } catch (error) {
+    return { status: 'permission_denied', message: error instanceof Error ? error.message : String(error) };
+  }
+  const binary = await ensureEngineBinary();
+  if (!binary.ok) return { status: 'engine_unavailable', message: binary.error };
+  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), timeoutMs: 5 * 60 * 1000, signal: params.signal });
+  const result = await engine.probeAuthentication({ backend: awsEngineBackend, projectId: parsed.data.accountId, auth });
+  if (!result.ok) {
+    if (result.stage === 'version') return { status: 'engine_unavailable', message: result.error };
+    return { status: /AccessDenied|not authorized/i.test(result.error) ? 'permission_denied' : 'engine_error', message: result.error.replaceAll(os.homedir(), '~') };
+  }
+  const identity = String(result.outputs.identity ?? '');
+  const roleName = parsed.data.roleArn.split('/').pop();
+  if (String(result.outputs.project_id) !== parsed.data.accountId || !identity.includes(`:assumed-role/${roleName}/`) || String(result.outputs.region) !== parsed.data.region) {
+    return { status: 'scope_mismatch', message: 'OpenTofu authenticated, but not as the deploy role in the connection\'s account and region. Nothing was changed.' };
+  }
+  return { status: 'verified', identity, accountId: parsed.data.accountId, region: parsed.data.region };
 }
