@@ -53,9 +53,14 @@ records the AWS-specific decisions and why they were made.
 - **Worker: on demand.** A Fargate service at zero tasks, woken by an
   EventBridge Scheduler check, like the GCP worker pool and Workflows waker.
 - **Cron:** EventBridge Scheduler running Lambda or a Fargate task.
-- **Database: Aurora Serverless v2 at 0 ACU for staging.** It pauses when idle,
-  so only storage is billed; waking takes about 15 s. Small production uses RDS
-  `db.t4g.micro` (about $12/mo), since a minimum of 0.5 ACU costs about $44/mo.
+- **Two profiles, chosen from the environment name (decided 2026-11-10).**
+  `production` and `staging` (names containing `prod` or `stag`) share one
+  production profile, so staging tests exactly what production runs: an always-on
+  RDS `db.t4g.micro` Postgres (about $12/mo), with no pausing. Every other
+  environment (`test`, `preview`, `pr-*`, `dev`, pilots) gets the testing
+  profile: Aurora Serverless v2 at 0 ACU, which pauses when idle so only storage
+  is billed, and wakes in about 15 s. Aurora kept awake (minimum 0.5 ACU, about
+  $44/mo) is not a default. The same split applies on every cloud.
 - **Database network: public endpoint, TLS required (decided 2026-11-10).**
   Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
   $32/mo and would be more than the rest of a staging environment. The database

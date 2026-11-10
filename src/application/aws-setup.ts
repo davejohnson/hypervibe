@@ -37,9 +37,13 @@ export function appBoundaryDocument(): Record<string, unknown> {
         's3:*', 'rds-data:*', 'rds-db:connect', 'logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents', 'sqs:*', 'sns:Publish',
         'ses:SendEmail', 'ses:SendRawEmail', 'xray:PutTraceSegments', 'xray:PutTelemetryRecords', 'lambda:InvokeFunction',
         'ecr:GetAuthorizationToken', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchCheckLayerAvailability',
+        // Image builds (CodeBuild's role) push to the environment's registry.
+        'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage',
         // The on-demand worker waker reads pending work and sets the worker's task count.
-        'ecs:DescribeServices', 'ecs:UpdateService', 'scheduler:*', 'events:PutEvents',
+        'ecs:DescribeServices', 'ecs:UpdateService', 'ecs:RunTask', 'scheduler:*', 'events:PutEvents', 'states:StartExecution', 'states:StartSyncExecution',
       ] },
+      // The worker waker reads pending work with its own read-only database login.
+      { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: 'arn:aws:secretsmanager:*:*:secret:hypervibe/*' },
       { Sid: 'AppSecrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath', 'kms:Decrypt'], Resource: '*' },
       { Sid: 'PassOnlyAppRoles', Effect: 'Allow', Action: 'iam:PassRole', Resource: `arn:aws:iam::*:role${AWS_APP_ROLE_PATH}*` },
     ],
@@ -58,9 +62,19 @@ export function deployPolicyDocument(accountId: string): Record<string, unknown>
         'application-autoscaling:*', 'elasticloadbalancing:*', 'sqs:*', 'acm:*',
         'ec2:Describe*', 'ec2:CreateSecurityGroup', 'ec2:DeleteSecurityGroup', 'ec2:AuthorizeSecurityGroupIngress', 'ec2:AuthorizeSecurityGroupEgress',
         'ec2:RevokeSecurityGroupIngress', 'ec2:RevokeSecurityGroupEgress', 'ec2:CreateTags', 'ec2:DeleteTags',
-        'ssm:DescribeParameters', 'sts:GetCallerIdentity', 'ce:GetCostAndUsage', 'budgets:ViewBudget',
+        'ssm:DescribeParameters', 'sts:GetCallerIdentity', 'ce:GetCostAndUsage', 'budgets:ViewBudget', 'codebuild:*', 'states:*', 'kms:DescribeKey',
+      ] },
+      // RDS keeps each database's master password in Secrets Manager (rds!... secrets); Hypervibe reads it
+      // only to create the app's own login through the Data API.
+      { Sid: 'DatabaseMasterSecrets', Effect: 'Allow', Resource: `arn:aws:secretsmanager:*:${accountId}:secret:rds!*`, Action: [
+        'secretsmanager:CreateSecret', 'secretsmanager:TagResource', 'secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue',
+        'secretsmanager:RotateSecret', 'secretsmanager:DeleteSecret', 'secretsmanager:PutSecretValue', 'secretsmanager:UpdateSecret',
       ] },
       { Sid: 'AppSecrets', Effect: 'Allow', Action: 'ssm:*', Resource: `arn:aws:ssm:*:${accountId}:parameter/hypervibe/*` },
+      { Sid: 'HypervibeSecrets', Effect: 'Allow', Resource: `arn:aws:secretsmanager:*:${accountId}:secret:hypervibe/*`, Action: [
+        'secretsmanager:CreateSecret', 'secretsmanager:TagResource', 'secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue',
+        'secretsmanager:PutSecretValue', 'secretsmanager:DeleteSecret', 'secretsmanager:UpdateSecret', 'secretsmanager:GetResourcePolicy',
+      ] },
       { Sid: 'CreateCappedAppRoles', Effect: 'Allow', Resource: appRoles,
         Action: ['iam:CreateRole', 'iam:PutRolePolicy', 'iam:AttachRolePolicy', 'iam:PutRolePermissionsBoundary'],
         Condition: { StringEquals: { 'iam:PermissionsBoundary': boundaryArn } } },
@@ -138,7 +152,7 @@ export async function planAwsSetup(session: AwsSignInSession, params: { project:
   const boundary = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${BOUNDARY}`, appBoundaryDocument());
   changes.push({ id: 'boundary', state: boundary === undefined ? 'create' : boundary ? 'ok' : 'update', change: `Policy ${BOUNDARY}: the most any role Hypervibe creates for your app can do (no admin or IAM access)` });
   const deploy = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${DEPLOY_POLICY}`, deployPolicyDocument(account));
-  changes.push({ id: 'deploy-policy', state: deploy === undefined ? 'create' : deploy ? 'ok' : 'update', change: `Policy ${DEPLOY_POLICY}: run your app on Lambda, Fargate, Aurora/RDS, S3 and schedules; create app roles only within ${BOUNDARY}` });
+  changes.push({ id: 'deploy-policy', state: deploy === undefined ? 'create' : deploy ? 'ok' : 'update', change: `Policy ${DEPLOY_POLICY}: run your app on Lambda, Fargate, Aurora/RDS, S3 and schedules, and build its images on CodeBuild; create app roles only within ${BOUNDARY}` });
   if (params.repository) {
     const providers = await iam.send(new ListOpenIDConnectProvidersCommand({}));
     const hasGithub = (providers.OpenIDConnectProviderList ?? []).some((entry) => entry.Arn?.endsWith(`oidc-provider/${GITHUB_OIDC_HOST}`));

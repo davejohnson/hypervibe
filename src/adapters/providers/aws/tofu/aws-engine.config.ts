@@ -17,6 +17,27 @@ export interface AwsEngineInput {
   parameterPath: string;
   database?: AwsDatabaseInput;
   storage?: Array<{ name: string; bucket: string }>;
+  /** Web services on Lambda (container image with the Lambda Web Adapter). */
+  services?: AwsWebServiceInput[];
+}
+
+export interface AwsWebServiceInput {
+  logicalName: string;
+  /** Physical function name. */
+  resourceName: string;
+  /**
+   * Image for first creation, already pushed to this environment's registry.
+   * Afterwards the release path owns the image and plans ignore it.
+   */
+  initialImageUri: string;
+  /** MB; Lambda CPU scales with memory. */
+  memory?: number;
+  /** Seconds per request (up to 900). */
+  timeout?: number;
+  /** Non-secret configuration only; secrets are read from the parameter path at start. */
+  env?: Record<string, string>;
+  public: boolean;
+  healthCheckPath?: string;
 }
 
 export interface AwsDatabaseInput {
@@ -134,9 +155,87 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     };
   }
 
+  // Image builds: CodeBuild reads a source archive Hypervibe uploads and pushes to the registry.
+  const builds: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'builds' };
+  for (const address of ['aws_s3_bucket.build_source', 'aws_s3_bucket_public_access_block.build_source', 'aws_s3_bucket_lifecycle_configuration.build_source',
+    'aws_iam_role.build', 'aws_iam_role_policy.build', 'aws_codebuild_project.images']) resources[address] = builds;
+  files['builds.tf.json'] = { resource: {
+    aws_s3_bucket: { build_source: { bucket: `${input.prefix}-build-${input.accountId}`, force_destroy: true } },
+    aws_s3_bucket_public_access_block: { build_source: { bucket: '${aws_s3_bucket.build_source.id}', block_public_acls: true, block_public_policy: true, ignore_public_acls: true, restrict_public_buckets: true } },
+    aws_s3_bucket_lifecycle_configuration: { build_source: { bucket: '${aws_s3_bucket.build_source.id}', rule: [{ id: 'expire-sources', status: 'Enabled', filter: [{}], expiration: [{ days: 7 }] }] } },
+    aws_iam_role: { build: {
+      name: `${input.prefix}-build`, path: '/hypervibe/app/', permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
+      assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { Service: 'codebuild.amazonaws.com' } }] }),
+    } },
+    aws_iam_role_policy: { build: { name: 'build', role: '${aws_iam_role.build.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: [
+      { Sid: 'Logs', Effect: 'Allow', Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'], Resource: '*' },
+      { Sid: 'Source', Effect: 'Allow', Action: ['s3:GetObject', 's3:GetObjectVersion'], Resource: `arn:aws:s3:::${input.prefix}-build-${input.accountId}/*` },
+      { Sid: 'Login', Effect: 'Allow', Action: 'ecr:GetAuthorizationToken', Resource: '*' },
+      { Sid: 'Push', Effect: 'Allow', Resource: `arn:aws:ecr:${input.region}:${input.accountId}:repository/${input.prefix}`, Action: [
+        'ecr:BatchCheckLayerAvailability', 'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'] },
+    ] }) } },
+    aws_codebuild_project: { images: {
+      name: `${input.prefix}-images`, service_role: '${aws_iam_role.build.arn}', build_timeout: 30,
+      artifacts: [{ type: 'NO_ARTIFACTS' }],
+      environment: [{ compute_type: 'BUILD_GENERAL1_SMALL', image: 'aws/codebuild/amazonlinux-x86_64-standard:5.0', type: 'LINUX_CONTAINER', privileged_mode: true,
+        environment_variable: [{ name: 'REGISTRY', value: '${aws_ecr_repository.images.repository_url}' }] }],
+      // Hypervibe uploads source.zip with its generated Dockerfile and starts builds with an IMAGE_TAG override.
+      source: [{ type: 'S3', location: `${input.prefix}-build-${input.accountId}/source.zip`, buildspec: JSON.stringify({
+        version: '0.2',
+        phases: {
+          pre_build: { commands: ['aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY%%/*}"'] },
+          build: { commands: ['docker build --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
+        },
+      }).replace(/\$\{/g, () => '$${') }],
+      logs_config: [{ cloudwatch_logs: [{ status: 'ENABLED', group_name: `/hypervibe/${input.prefix}/builds` }] }],
+    } },
+  } };
+
+  // Web services: Lambda behind a function URL; requests reach the app through the Lambda Web Adapter.
+  const services = input.services ?? [];
+  if (services.length) {
+    const functions: Record<string, unknown> = {};
+    const urls: Record<string, unknown> = {};
+    const permissions: Record<string, unknown> = {};
+    const logGroups: Record<string, unknown> = {};
+    const outputs: Record<string, unknown> = {};
+    for (const service of services) {
+      const key = awsKey(service.logicalName);
+      const mapping: EngineResourceMapping = { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true };
+      logGroups[key] = { name: `/aws/lambda/${service.resourceName}`, retention_in_days: 30 };
+      functions[key] = {
+        function_name: service.resourceName, role: '${aws_iam_role.runtime.arn}', package_type: 'Image', image_uri: service.initialImageUri,
+        memory_size: service.memory ?? 1024, timeout: service.timeout ?? 60, architectures: ['x86_64'],
+        environment: [{ variables: {
+          ...service.env, HYPERVIBE_PARAMETER_PATH: input.parameterPath,
+          AWS_LWA_PORT: service.env?.PORT ?? '8080', ...(service.healthCheckPath ? { AWS_LWA_READINESS_CHECK_PATH: service.healthCheckPath } : {}),
+        } }],
+        depends_on: [`aws_cloudwatch_log_group.${key}`, 'aws_iam_role_policy.runtime'],
+        // The release path (CI or hv_deploy) owns the image after creation.
+        lifecycle: [{ ignore_changes: ['image_uri'] }],
+      };
+      urls[key] = { function_name: `\${aws_lambda_function.${key}.function_name}`, authorization_type: service.public ? 'NONE' : 'AWS_IAM', invoke_mode: 'RESPONSE_STREAM' };
+      for (const address of [`aws_cloudwatch_log_group.${key}`, `aws_lambda_function.${key}`, `aws_lambda_function_url.${key}`]) resources[address] = mapping;
+      if (service.public) {
+        // Public function URLs need both permissions (Lambda requires InvokeFunction alongside InvokeFunctionUrl).
+        permissions[`${key}_url`] = { statement_id: 'public-url', action: 'lambda:InvokeFunctionUrl', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*', function_url_auth_type: 'NONE' };
+        permissions[`${key}_invoke`] = { statement_id: 'public-invoke', action: 'lambda:InvokeFunction', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*' };
+        resources[`aws_lambda_permission.${key}_url`] = mapping;
+        resources[`aws_lambda_permission.${key}_invoke`] = mapping;
+      }
+      outputs[`service_${key}_url`] = { value: `\${aws_lambda_function_url.${key}.function_url}` };
+    }
+    files['services.tf.json'] = {
+      resource: { aws_cloudwatch_log_group: logGroups, aws_lambda_function: functions, aws_lambda_function_url: urls, ...(Object.keys(permissions).length ? { aws_lambda_permission: permissions } : {}) },
+      output: outputs,
+    };
+  }
+
   files['outputs.tf.json'] = { output: {
     registry_url: { value: '${aws_ecr_repository.images.repository_url}' },
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },
+    build_project: { value: '${aws_codebuild_project.images.name}' },
+    build_source_bucket: { value: '${aws_s3_bucket.build_source.id}' },
   } };
   return { files, resources };
 }
