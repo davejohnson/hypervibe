@@ -44,16 +44,31 @@ function selectedCredentialNames(target: ManagedBackupTarget) {
 /** Verify the reviewed default-branch program and durable bindings before credentials or writes. */
 /**
  * The runner image is pinned while the spec keeps evolving, so a newer spec
- * writer may add fields this runner does not know. Strictly validate the
- * project fields and the environment being backed up; other environments
- * cannot authorize this backup and must not block it.
+ * writer may add fields this runner does not know. Fields this runner does
+ * not recognize are dropped only inside other environments; every
+ * environment is kept so cross-environment references (promoteFrom,
+ * canonicalEnvironment, secret targets) still resolve. Unknown fields in the
+ * target environment or at project level, and every other issue, still fail.
  */
 function targetEnvironmentSpec(raw: unknown, environment: string) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Backup desired state is invalid.');
   const environments = (raw as { environments?: unknown }).environments;
   if (!environments || typeof environments !== 'object' || Array.isArray(environments)
     || !Object.hasOwn(environments, environment)) throw new Error('The current spec does not authorize this backup program.');
-  return projectSpecSchema.parse({ ...raw, environments: { [environment]: (environments as Record<string, unknown>)[environment] } });
+  const candidate = structuredClone(raw) as Record<string, unknown>;
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const parsed = projectSpecSchema.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+    const foreign = parsed.error.issues.filter(issue => issue.code === 'unrecognized_keys'
+      && issue.path[0] === 'environments' && issue.path.length >= 2 && issue.path[1] !== environment);
+    if (foreign.length === 0 || foreign.length !== parsed.error.issues.length) throw parsed.error;
+    for (const issue of foreign) {
+      const holder = issue.path.reduce<unknown>((node, key) => (node as Record<PropertyKey, unknown> | undefined)?.[key], candidate);
+      if (!holder || typeof holder !== 'object') throw parsed.error;
+      for (const key of (issue as { keys: string[] }).keys) delete (holder as Record<string, unknown>)[key];
+    }
+  }
+  throw new Error('Backup desired state is invalid.');
 }
 
 export async function verifyManagedBackupAuthority(params: {
