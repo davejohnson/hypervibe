@@ -47,6 +47,8 @@ export interface AwsEngineBinding {
   imageUri?: string;
   /** The app's database login exists and DATABASE_URL is in Parameter Store. */
   databaseLoginAt?: string;
+  /** Waker login secrets Hypervibe has written (workers can be added after the app login exists). */
+  wakerLogins?: string[];
   services?: Record<string, { url?: string; resource: string }>;
 }
 
@@ -152,22 +154,35 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b));
   // Workloads need an image in this environment's registry, so they are created after the first build.
   const withImage = imageUri ? services : [];
+  const bucketName = (storage: string) => `${context.prefix}-${storage}-${context.connection.accountId}`.slice(0, 63);
+  // The shared S3 contract, minus keys: the runtime role is the credential (Lambda puts its
+  // AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN in the environment; Fargate serves it to SDKs).
+  const envFor = (service: string): Record<string, string> => {
+    const buckets = Object.entries(environmentSpec.storage ?? {}).filter(([, storage]) => storage.injectInto.includes(service)).map(([name]) => name);
+    if (buckets.length > 1) throw new Error(`Service ${service} can receive only one bucket's variables.`);
+    const storage: Record<string, string> = buckets[0] ? {
+      OBJECT_STORAGE_PROVIDER: 's3', OBJECT_STORAGE_BUCKET: bucketName(buckets[0]), AWS_S3_BUCKET_NAME: bucketName(buckets[0]),
+      AWS_ENDPOINT_URL: `https://s3.${context.connection.region}.amazonaws.com`, AWS_DEFAULT_REGION: context.connection.region, AWS_S3_URL_STYLE: 'virtual',
+    } : {};
+    for (const key of Object.keys(storage)) if (key in environmentSpec.envVars) throw new Error(`Environment variable ${key} conflicts with storage ${buckets[0]}.`);
+    return { ...environmentSpec.envVars, ...storage };
+  };
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
     environmentId: context.environment.id, parameterPath: context.parameterPath,
     ...(environmentSpec.database && extra.engineVersion ? { database: { engineVersion: extra.engineVersion, minCapacity: 0, maxCapacity: 2, ...(extra.tlsRequiredByDefault ? { tlsRequiredByDefault: true } : {}) } } : {}),
-    storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: `${context.prefix}-${storage}-${context.connection.accountId}`.slice(0, 63) })),
+    storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: bucketName(storage) })),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
-      env: { ...environmentSpec.envVars }, ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
+      env: envFor(logicalName), ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
     })),
     workers: withImage.filter(([, service]) => service.workloadKind === 'worker').map(([logicalName, service]) => ({
-      logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: { ...environmentSpec.envVars },
+      logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: envFor(logicalName),
       ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
       ...(service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery, ...(service.onDemand.nextWorkAtQuery ? { nextWorkAtQuery: service.onDemand.nextWorkAtQuery } : {}) } : {}),
     })),
     jobs: withImage.filter(([, service]) => service.workloadKind === 'cron').map(([logicalName, service]) => ({
-      logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: { ...environmentSpec.envVars },
+      logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: envFor(logicalName),
       schedule: service.cronSchedule!, timeZone: service.timeZone ?? 'UTC', ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
     })),
     secretKeys: extra.secretKeys,
@@ -240,15 +255,25 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && secretIds.length
     ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...secretIds] } : action);
   const databaseAction = engineActions.find((action) => action.id === 'database:postgres');
-  const onDemand = Object.values(environmentSpec.services).some((service) => service.workloadKind === 'worker' && service.onDemand);
-  const loginActions: PlanAction[] = environmentSpec.database && !binding.databaseLoginAt ? [{
-    id: 'database-login:postgres', type: 'create', verified: true,
-    resource: { kind: 'secret', name: ENGINE_DATABASE_URL_KEY, provider: 'aws' },
-    reason: `Hypervibe will create the app's database login${onDemand ? ' and a read-only login for the worker waker' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`,
-    ...(databaseAction && databaseAction.type !== 'noop' ? { dependsOn: [databaseAction.id] } : {}),
+  // The app login is created once; each on-demand worker's waker login once its secret exists.
+  const wakers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
+  const wakerSecrets = wakers.map((worker) => `hypervibe/${context.prefix}/${worker.resourceName}-waker`);
+  const appLogin = !binding.databaseLoginAt;
+  const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));
+  const loginDependsOn = [
+    ...(databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : []),
+    ...wakers.map((worker) => engineActions.find((action) => action.id === `service:${worker.logicalName}`))
+      .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
+  ];
+  const loginActions: PlanAction[] = environmentSpec.database && (appLogin || missingWakers.length) ? [{
+    id: appLogin ? 'database-login:postgres' : 'database-login:waker', type: 'create', verified: true,
+    resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : 'worker waker login', provider: 'aws' },
+    reason: appLogin
+      ? `Hypervibe will create the app's database login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
+      : 'Hypervibe will create the read-only database login the worker waker counts pending work with. The app login is unchanged.',
+    ...(loginDependsOn.length ? { dependsOn: loginDependsOn } : {}),
     metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: `${context.prefix}-postgres`,
-      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, wakerSecrets: input.workers?.filter((worker) => worker.pendingWorkQuery)
-        .map((worker) => `hypervibe/${context.prefix}/${worker.resourceName}-waker`) ?? [] },
+      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, wakerSecrets },
   }] : [];
   const actions = [...secretActions, ...engineActions, ...loginActions];
   const workloads = Object.keys(environmentSpec.services).length;
@@ -293,7 +318,7 @@ async function ensureParameter(ssm: SSMClient, action: PlanAction): Promise<Acti
 }
 
 async function ensureDatabaseLogin(context: AwsEngineContext, action: PlanAction, clusterArn: string, masterSecretArn: string, endpoint: string): Promise<ActionResult> {
-  const metadata = action.metadata as { parameter: string; wakerSecrets: string[] };
+  const metadata = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean };
   const data = new RDSDataClient({ region: context.connection.region, credentials: context.credentials });
   const sql = async (statement: string) => data.send(new ExecuteStatementCommand({ resourceArn: clusterArn, secretArn: masterSecretArn, database: APP_DATABASE, sql: statement }));
   // A paused Aurora cluster wakes on the first statement; give it time.
@@ -303,15 +328,7 @@ async function ensureDatabaseLogin(context: AwsEngineContext, action: PlanAction
       await new Promise((done) => setTimeout(done, 10_000));
     }
   }
-  const password = crypto.randomBytes(24).toString('base64url');
-  const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${APP_LOGIN}'`);
-  await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${APP_LOGIN} LOGIN PASSWORD '${scramVerifier(password)}'`);
-  await sql(`GRANT ${APP_LOGIN} TO CURRENT_USER`);
-  await sql(`ALTER DATABASE ${APP_DATABASE} OWNER TO ${APP_LOGIN}`);
-  await sql(`ALTER SCHEMA public OWNER TO ${APP_LOGIN}`);
-  const url = `postgresql://${APP_LOGIN}:${password}@${endpoint}:5432/${APP_DATABASE}?sslmode=require`;
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
-  await ssm.send(new PutParameterCommand({ Name: metadata.parameter, Type: 'SecureString', Value: url, Overwrite: true }));
+  if (metadata.appLogin !== false) await ensureAppLogin(context, sql, metadata.parameter, endpoint);
   // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy.
   if (metadata.wakerSecrets.length) {
     const wakerPassword = crypto.randomBytes(24).toString('base64url');
@@ -323,7 +340,21 @@ async function ensureDatabaseLogin(context: AwsEngineContext, action: PlanAction
       await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: WAKER_LOGIN, password: wakerPassword }) }));
     }
   }
-  return { success: true, message: `Created the app's database login and stored ${ENGINE_DATABASE_URL_KEY} in Parameter Store.` };
+  return { success: true, message: metadata.appLogin !== false
+    ? `Created the app's database login and stored ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
+    : 'Created the worker waker\'s read-only database login.' };
+}
+
+async function ensureAppLogin(context: AwsEngineContext, sql: (statement: string) => Promise<{ records?: unknown[] }>, parameter: string, endpoint: string): Promise<void> {
+  const password = crypto.randomBytes(24).toString('base64url');
+  const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${APP_LOGIN}'`);
+  await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${APP_LOGIN} LOGIN PASSWORD '${scramVerifier(password)}'`);
+  await sql(`GRANT ${APP_LOGIN} TO CURRENT_USER`);
+  await sql(`ALTER DATABASE ${APP_DATABASE} OWNER TO ${APP_LOGIN}`);
+  await sql(`ALTER SCHEMA public OWNER TO ${APP_LOGIN}`);
+  const url = `postgresql://${APP_LOGIN}:${password}@${endpoint}:5432/${APP_DATABASE}?sslmode=require`;
+  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  await ssm.send(new PutParameterCommand({ Name: parameter, Type: 'SecureString', Value: url, Overwrite: true }));
 }
 
 export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -363,7 +394,10 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           const created = await ensureDatabaseLogin(context, action, clusterArn, secretArn, endpoint);
           if (created.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-            ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', databaseLoginAt: new Date().toISOString() } });
+            const previous = awsBinding(current);
+            const written = (action.metadata as { wakerSecrets: string[] }).wakerSecrets;
+            ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu',
+              databaseLoginAt: previous.databaseLoginAt ?? new Date().toISOString(), wakerLogins: [...new Set([...(previous.wakerLogins ?? []), ...written])] } });
           }
           return created;
         }

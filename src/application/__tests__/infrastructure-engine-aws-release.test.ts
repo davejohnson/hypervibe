@@ -4,7 +4,7 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import crypto from 'crypto';
 import { describe, expect, it } from 'vitest';
 import { LOAD_SECRETS_SOURCE } from '../../adapters/providers/aws/runtime/load-secrets.js';
-import { awsReleaseDockerfile, LAMBDA_WEB_ADAPTER_IMAGE } from '../infrastructure-engine-aws-release.js';
+import { awsReleaseDockerfile, lambdaErrorType, LAMBDA_WEB_ADAPTER_IMAGE, RDS_CA_BUNDLE_URL } from '../infrastructure-engine-aws-release.js';
 
 describe('AWS release image', () => {
   it('adds the web adapter and secrets loader, and pulls generated bases from ECR Public', () => {
@@ -12,7 +12,18 @@ describe('AWS release image', () => {
     expect(dockerfile).toContain('FROM public.ecr.aws/docker/library/node:24-slim');
     expect(dockerfile).toContain(`COPY --from=${LAMBDA_WEB_ADAPTER_IMAGE} /lambda-adapter /opt/extensions/lambda-adapter`);
     expect(dockerfile).toContain('COPY .hypervibe-aws/load-secrets.cjs /opt/hypervibe/load-secrets.cjs');
+    expect(dockerfile).toContain(`ADD --chmod=644 ${RDS_CA_BUNDLE_URL} /opt/hypervibe/rds-ca.pem`);
+    expect(dockerfile).toContain('ENV NODE_EXTRA_CA_CERTS=/opt/hypervibe/rds-ca.pem');
     expect(awsReleaseDockerfile({ repositoryDockerfile: 'FROM node:24\nCMD ["node","app.js"]\n' })).toMatch(/^FROM node:24\nCMD/);
+  });
+});
+
+describe('AWS release health', () => {
+  it('treats a function URL\'s Lambda error body as a failed start, not a healthy 200', async () => {
+    const json = { 'content-type': 'application/json' };
+    expect(await lambdaErrorType(new Response('{"errorType":"Runtime.ExitError","errorMessage":"exit status 1"}', { status: 200, headers: json }))).toBe('Runtime.ExitError');
+    expect(await lambdaErrorType(new Response('{"errorType":"ValidationError"}', { status: 200, headers: json }))).toBeUndefined();
+    expect(await lambdaErrorType(new Response('<html>ok</html>', { status: 200, headers: { 'content-type': 'text/html' } }))).toBeUndefined();
   });
 });
 

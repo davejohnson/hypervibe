@@ -22,6 +22,9 @@ const execFileAsync = promisify(execFile);
 
 /** Pinned Lambda Web Adapter: lets an ordinary HTTP server answer Lambda function URL requests. */
 export const LAMBDA_WEB_ADAPTER_IMAGE = 'public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1';
+/** Amazon RDS's certificate authorities, so database clients that verify TLS (node-postgres does) trust Aurora. */
+export const RDS_CA_BUNDLE_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem';
+const RDS_CA_PATH = '/opt/hypervibe/rds-ca.pem';
 const AWS_DOCKERFILE = '.hypervibe-aws.Dockerfile';
 const LOADER_IN_SOURCE = '.hypervibe-aws/load-secrets.cjs';
 
@@ -38,9 +41,11 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
   return [
     base.trimEnd(),
     '',
-    '# Added by Hypervibe for AWS: the Lambda Web Adapter (inactive outside Lambda) and the secrets loader.',
+    '# Added by Hypervibe for AWS: the Lambda Web Adapter (inactive outside Lambda), the secrets loader and the RDS certificate authorities.',
     `COPY --from=${LAMBDA_WEB_ADAPTER_IMAGE} /lambda-adapter /opt/extensions/lambda-adapter`,
     `COPY ${LOADER_IN_SOURCE} ${LOAD_SECRETS_PATH}`,
+    `ADD --chmod=644 ${RDS_CA_BUNDLE_URL} ${RDS_CA_PATH}`,
+    `ENV NODE_EXTRA_CA_CERTS=${RDS_CA_PATH} PGSSLROOTCERT=${RDS_CA_PATH}`,
     '',
   ].join('\n');
 }
@@ -125,11 +130,27 @@ async function releaseFunction(context: AwsEngineContext, name: string, resource
   try {
     const response = await fetchWithRetry(new URL(healthCheckPath, url), { redirect: 'manual', signal: AbortSignal.timeout(60_000) });
     result.health = { status: response.status, path: healthCheckPath };
-    if (response.status >= 500) Object.assign(result, { status: 'failed', message: `The new release is serving, but ${healthCheckPath} returned HTTP ${response.status}. Check hv_logs.` });
+    // A function URL answers HTTP 200 with a Lambda error body when the app fails to start.
+    const crashed = await lambdaErrorType(response);
+    if (crashed) Object.assign(result, { status: 'failed', message: `The new release did not start (${crashed}): the app exited while starting. Check hv_logs for its error.` });
+    else if (response.status >= 500) Object.assign(result, { status: 'failed', message: `The new release is serving, but ${healthCheckPath} returned HTTP ${response.status}. Check hv_logs.` });
   } catch {
     Object.assign(result, { health: { status: 0, path: healthCheckPath }, status: 'unknown', message: `The new release is ready, but ${healthCheckPath} could not be reached to verify health.` });
   }
   return result;
+}
+
+/** The Lambda error type when a function URL response is Lambda's own error rather than the app's. */
+export async function lambdaErrorType(response: Response): Promise<string | undefined> {
+  const header = response.headers.get('x-amz-function-error');
+  if (header) return header;
+  if (!(response.headers.get('content-type') ?? '').includes('json')) return undefined;
+  try {
+    const body = JSON.parse((await response.text()).slice(0, 4096)) as { errorType?: unknown };
+    return typeof body.errorType === 'string' && /^Runtime\.|^Function\./.test(body.errorType) ? body.errorType : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
