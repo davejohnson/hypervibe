@@ -6,6 +6,7 @@ import {
   type ProviderLifecycleCapability,
 } from '../registry/provider.registry.js';
 import { devOpsProviderRegistry } from '../registry/devops.registry.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 
 export interface ProviderSpecIssue {
   environment: string;
@@ -407,7 +408,31 @@ export function firstProviderSpecValidationFailure(
   spec: ProjectSpec,
   environment?: string
 ): ProviderSpecValidationFailure | undefined {
-  const issue = validateProjectSpecProviders(spec, environment)[0];
+  return providerSpecValidationFailure(validateProjectSpecProviders(spec, environment)[0]);
+}
+
+/**
+ * For spec writes: report only issues in what the write changed (new or
+ * modified environments, or project-level devops). A write that leaves an
+ * environment untouched must not be rejected for that environment's
+ * providers; plans and applies still gate it when it is the target.
+ */
+export function introducedProviderSpecValidationFailure(
+  previous: ProjectSpec | null,
+  candidate: ProjectSpec
+): ProviderSpecValidationFailure | undefined {
+  if (!previous) return firstProviderSpecValidationFailure(candidate);
+  const changed = (before: unknown, after: unknown) =>
+    canonicalJsonSha256(before ?? null) !== canonicalJsonSha256(after ?? null);
+  return providerSpecValidationFailure(validateProjectSpecProviders(candidate).find(issue =>
+    issue.environment === 'project'
+      ? changed(previous.devops, candidate.devops)
+      : changed(previous.environments[issue.environment], candidate.environments[issue.environment])));
+}
+
+function providerSpecValidationFailure(
+  issue: ProviderSpecIssue | undefined
+): ProviderSpecValidationFailure | undefined {
   if (!issue) return undefined;
 
   const label = issue.capability;
