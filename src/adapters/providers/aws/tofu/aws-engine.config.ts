@@ -88,6 +88,8 @@ export interface AwsDatabaseInput {
   /** 0 pauses when idle (staging); production uses at least 0.5. */
   minCapacity: number;
   maxCapacity: number;
+  /** The engine already requires TLS by default (rds.force_ssl=1); setting the default again never sticks and drifts. */
+  tlsRequiredByDefault?: boolean;
   /** Seconds idle before pausing when minCapacity is 0. */
   pauseAfterSeconds?: number;
 }
@@ -169,7 +171,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
           egress: [] } },
         aws_db_subnet_group: { postgres: { name: `${input.prefix}-postgres`, subnet_ids: '${data.aws_subnets.default.ids}' } },
         aws_rds_cluster_parameter_group: { postgres: { name: `${input.prefix}-postgres`, family: `aurora-postgresql${major}`,
-          parameter: [{ name: 'rds.force_ssl', value: '1' }] } },
+          ...(input.database.tlsRequiredByDefault ? {} : { parameter: [{ name: 'rds.force_ssl', value: '1' }] }) } },
         aws_rds_cluster: { postgres: {
           cluster_identifier: `${input.prefix}-postgres`, engine: 'aurora-postgresql', engine_mode: 'provisioned', engine_version: version,
           database_name: 'app', master_username: 'hvadmin',

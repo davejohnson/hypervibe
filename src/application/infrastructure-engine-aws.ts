@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { RDSClient, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand } from '@aws-sdk/client-rds';
+import { RDSClient, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
 import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { GetParameterCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
@@ -117,8 +117,22 @@ async function newestAuroraVersion(context: AwsEngineContext, major: number): Pr
   return versions.sort((a, b) => Number(a.split('.')[1]) - Number(b.split('.')[1])).pop();
 }
 
+/** Whether Aurora PostgreSQL of this major already requires TLS by default; undefined when it cannot be read. */
+async function tlsRequiredByDefault(context: AwsEngineContext, major: string): Promise<boolean | undefined> {
+  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
+  let marker: string | undefined;
+  do {
+    const page = await rds.send(new DescribeEngineDefaultClusterParametersCommand({ DBParameterGroupFamily: `aurora-postgresql${major}`, Marker: marker }));
+    const forceSsl = page.EngineDefaults?.Parameters?.find((parameter) => parameter.ParameterName === 'rds.force_ssl');
+    if (forceSsl) return forceSsl.ParameterValue === '1';
+    marker = page.EngineDefaults?.Marker;
+  } while (marker);
+  return undefined;
+}
+
 export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment'>, extra: {
   engineVersion?: string;
+  tlsRequiredByDefault?: boolean;
   secretKeys: string[];
 }): AwsEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
@@ -130,7 +144,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
     environmentId: context.environment.id, parameterPath: context.parameterPath,
-    ...(environmentSpec.database && extra.engineVersion ? { database: { engineVersion: extra.engineVersion, minCapacity: 0, maxCapacity: 2 } } : {}),
+    ...(environmentSpec.database && extra.engineVersion ? { database: { engineVersion: extra.engineVersion, minCapacity: 0, maxCapacity: 2, ...(extra.tlsRequiredByDefault ? { tlsRequiredByDefault: true } : {}) } } : {}),
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: `${context.prefix}-${storage}-${context.connection.accountId}`.slice(0, 63) })),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
@@ -184,15 +198,18 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   }
 
   let engineVersion: string | undefined;
+  let tlsDefault: boolean | undefined;
   if (environmentSpec.database) {
     const major = (environmentSpec.database as { version?: number }).version ?? 17;
     engineVersion = await newestAuroraVersion(context, major).catch(() => undefined);
     if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
+    // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
+    tlsDefault = await tlsRequiredByDefault(context, engineVersion.split('.')[0]!).catch(() => undefined);
   }
   const binding = awsBinding(context.environment);
   const databaseWired = Boolean(environmentSpec.database && binding.databaseLoginAt);
   const secretKeys = [...generated, ...imported, ...(databaseWired ? [ENGINE_DATABASE_URL_KEY] : [])];
-  const input = buildAwsEngineInput(spec, environmentName, context, { ...(engineVersion ? { engineVersion } : {}), secretKeys });
+  const input = buildAwsEngineInput(spec, environmentName, context, { ...(engineVersion ? { engineVersion } : {}), ...(tlsDefault ? { tlsRequiredByDefault: true } : {}), secretKeys });
   const configuration = awsEngineBackend.buildConfiguration(input);
 
   const binary = await ensureEngineBinary();
