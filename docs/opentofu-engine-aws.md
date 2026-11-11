@@ -12,8 +12,9 @@ records the AWS-specific decisions and why they were made.
 | Sign-in without the AWS CLI | Built; verified live |
 | One-time setup (deploy role, boundary, GitHub OIDC, local key) | Built; verified live |
 | OpenTofu runs as the deploy role | Built; read-only probe verified live |
-| Registry, runtime role, storage, database configuration | Built; passes `tofu validate` |
-| Web, worker, cron, image builds, secrets wiring | Not built |
+| Registry, runtime role, storage, database, app login | Built; applied live (billforge `aws`) |
+| Image builds and releases (`hv_deploy`) | Built; live verification in progress |
+| Web, worker, cron | Built; passes `tofu validate` |
 | CI releases, data migration, teardown | Not built |
 
 ## Access
@@ -73,7 +74,10 @@ records the AWS-specific decisions and why they were made.
   native Parameter Store references, and putting values in its environment
   would copy them into function configuration and engine state. The image
   Hypervibe builds reads `/hypervibe/<environment>/` at start; only the runtime
-  role can read that path.
+  role can read that path. The reader is a dependency-free script loaded with
+  `NODE_OPTIONS=--require`, so it works with any start command. It fails closed:
+  the function errors instead of starting without its secrets. Python web
+  services need an equivalent loader before they can run on Lambda.
 - **The database master password is managed by RDS**
   (`manage_master_user_password`, one Secrets Manager secret), so it never enters
   engine state. Hypervibe creates the app login through the RDS Data API, the
@@ -82,7 +86,16 @@ records the AWS-specific decisions and why they were made.
   time. Aurora PostgreSQL 18 is available (18.6 in us-west-2 on 2026-11-10), so
   apps on Postgres 18 elsewhere move without a downgrade.
 - **Image builds: AWS CodeBuild**, like Cloud Build on GCP, so no local Docker.
-  This needs CodeBuild access added to the deploy role (a setup update).
+  Hypervibe uploads the exact local commit (`git archive`) and adds the Lambda
+  Web Adapter (pinned, inactive outside Lambda) and the secrets reader to the
+  repository's or the generated Dockerfile. Generated images pull their base from
+  ECR Public, which avoids Docker Hub's pull limits on shared build hosts. Tags
+  are immutable commit SHAs, and an already-built commit reuses its image.
+- **One image for every workload.** The first release only builds it, because
+  workloads are created from an existing image; the next infrastructure plan
+  creates them. Later releases update Lambda code and register a new task
+  revision. Task definitions use `track_latest`, so released revisions are not
+  drift, and scheduled jobs reference the family, so they run the latest.
 
 ## Provider pin
 

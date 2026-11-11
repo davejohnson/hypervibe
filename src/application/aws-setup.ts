@@ -41,6 +41,8 @@ export function appBoundaryDocument(): Record<string, unknown> {
         'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage',
         // The on-demand worker waker reads pending work and sets the worker's task count.
         'ecs:DescribeServices', 'ecs:UpdateService', 'ecs:RunTask', 'scheduler:*', 'events:PutEvents', 'states:StartExecution', 'states:StartSyncExecution',
+        // ...and checks whether the database is paused before counting, so counting never wakes it.
+        'cloudwatch:GetMetricData',
       ] },
       // The worker waker reads pending work with its own read-only database login.
       { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: 'arn:aws:secretsmanager:*:*:secret:hypervibe/*' },
@@ -140,6 +142,22 @@ async function policyMatches(iam: IAMClient, arn: string, document: Record<strin
   } catch (error) {
     if (error instanceof NoSuchEntityException) return undefined;
     throw error;
+  }
+}
+
+/**
+ * Whether the account's Hypervibe policies match this version of Hypervibe, read
+ * with the deploy role. A newer Hypervibe can need more access (one sign-in to
+ * update); planning with older policies would build workloads that fail at runtime.
+ */
+export async function awsAccessCurrent(credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string }, accountId: string): Promise<'current' | 'outdated' | { unknown: string }> {
+  const iam = new IAMClient({ region: 'us-east-1', credentials });
+  try {
+    const boundary = await policyMatches(iam, `arn:aws:iam::${accountId}:policy${AWS_PATH}${BOUNDARY}`, appBoundaryDocument());
+    const deploy = await policyMatches(iam, `arn:aws:iam::${accountId}:policy${AWS_PATH}${DEPLOY_POLICY}`, deployPolicyDocument(accountId));
+    return boundary && deploy ? 'current' : 'outdated';
+  } catch (error) {
+    return { unknown: `Hypervibe could not read its AWS access policies (${error instanceof Error ? error.name : 'error'}).` };
   }
 }
 

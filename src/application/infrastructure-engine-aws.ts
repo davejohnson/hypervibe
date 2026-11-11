@@ -4,6 +4,7 @@ import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { GetParameterCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
+import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import type { AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -49,7 +50,7 @@ export interface AwsEngineBinding {
   services?: Record<string, { url?: string; resource: string }>;
 }
 
-interface AwsEngineContext {
+export interface AwsEngineContext {
   connection: AwsEngineCredentials;
   auth: EngineAuthentication;
   environment: Environment;
@@ -64,7 +65,7 @@ export function isAwsEngineEnvironment(spec: ProjectSpec, environmentName: strin
   return environment?.hosting.engine === 'opentofu' && environment.hosting.provider === 'aws';
 }
 
-function awsBinding(environment: Environment): AwsEngineBinding {
+export function awsBinding(environment: Environment): AwsEngineBinding {
   return ((environment.platformBindings as { aws?: AwsEngineBinding }).aws) ?? {};
 }
 
@@ -99,6 +100,11 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
   if (environment.cache) problems.push('Redis caches are not available on the AWS engine yet.');
   if (Object.keys(environment.queues ?? {}).length) problems.push('Queues are not available on the AWS engine yet.');
   if (environment.domain) problems.push('Custom domains are not available on the AWS engine yet; use the service URL or route traffic with domainTarget.');
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (environment.database && service.onDemand && !service.onDemand.nextWorkAtQuery) {
+      problems.push(`${name} starts on demand, and this database pauses when idle: add onDemand.nextWorkAtQuery (one SELECT returning the earliest time queued work becomes due) so work scheduled for later starts on time.`);
+    }
+  }
   for (const [name, storage] of Object.entries(environment.storage ?? {})) {
     if (storage.provider !== 's3') problems.push(`Storage ${name}: the AWS engine manages buckets only with provider "s3".`);
   }
@@ -130,6 +136,11 @@ async function tlsRequiredByDefault(context: AwsEngineContext, major: string): P
   return undefined;
 }
 
+/** The AWS name of a workload: its Lambda function, ECS service and task family. */
+export function awsResourceName(prefix: string, service: string): string {
+  return `${prefix}-${service}`.slice(0, 60);
+}
+
 export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment'>, extra: {
   engineVersion?: string;
   tlsRequiredByDefault?: boolean;
@@ -137,7 +148,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
 }): AwsEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const imageUri = awsBinding(context.environment).imageUri;
-  const name = (service: string) => `${context.prefix}-${service}`.slice(0, 60);
+  const name = (service: string) => awsResourceName(context.prefix, service);
   const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b));
   // Workloads need an image in this environment's registry, so they are created after the first build.
   const withImage = imageUri ? services : [];
@@ -153,7 +164,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     workers: withImage.filter(([, service]) => service.workloadKind === 'worker').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: { ...environmentSpec.envVars },
       ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
-      ...(service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
+      ...(service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery, ...(service.onDemand.nextWorkAtQuery ? { nextWorkAtQuery: service.onDemand.nextWorkAtQuery } : {}) } : {}),
     })),
     jobs: withImage.filter(([, service]) => service.workloadKind === 'cron').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: { ...environmentSpec.envVars },
@@ -179,6 +190,11 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveAwsEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
+  const access = await awsAccessCurrent(context.credentials, context.connection.accountId);
+  if (access === 'outdated') {
+    return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
+  }
+  if (typeof access === 'object') return { blocked: [access.unknown] };
 
   // Hypervibe-owned generated secrets, observed in Parameter Store (present, absent or unknown).
   const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });

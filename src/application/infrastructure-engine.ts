@@ -1255,6 +1255,10 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   const { spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
   if (!isEngineManaged(environmentSpec)) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
+  if (isAwsEngineEnvironment(spec, environmentName)) {
+    const { releaseAwsEngineServices } = await import('./infrastructure-engine-aws-release.js');
+    return releaseAwsEngineServices(ctx, params);
+  }
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);

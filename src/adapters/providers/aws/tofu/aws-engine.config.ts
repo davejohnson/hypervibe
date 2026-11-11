@@ -1,3 +1,4 @@
+import { LOAD_SECRETS_PATH } from '../runtime/load-secrets.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
 
@@ -43,6 +44,8 @@ export interface AwsTaskInput {
 export interface AwsWorkerInput extends AwsTaskInput {
   /** Run only while this read-only count of pending work is above zero (uses the Aurora Data API). */
   pendingWorkQuery?: string;
+  /** Earliest time future work is due; the waker sets a one-time wake for it so a paused database can stay paused. */
+  nextWorkAtQuery?: string;
 }
 
 export interface AwsJobInput extends AwsTaskInput {
@@ -123,6 +126,26 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     ...(buckets.length ? [{ Sid: 'Storage', Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket'],
       Resource: buckets.flatMap((bucket) => [`arn:aws:s3:::${bucket.bucket}`, `arn:aws:s3:::${bucket.bucket}/*`]) }] : []),
   ];
+  const account = `${input.region}:${input.accountId}`;
+  const runtimeRoleArn = `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`;
+  const onDemand = (input.workers ?? []).some((worker) => worker.pendingWorkQuery);
+  if ((input.jobs ?? []).length || onDemand) {
+    // Schedules start this environment's tasks and wakers, handing them only this role.
+    runtimeStatements.push(
+      { Sid: 'RunTasks', Effect: 'Allow', Action: 'ecs:RunTask', Resource: `arn:aws:ecs:${account}:task-definition/${input.prefix}-*` },
+      { Sid: 'StartWakers', Effect: 'Allow', Action: 'states:StartExecution', Resource: `arn:aws:states:${account}:stateMachine:${input.prefix}-*` },
+      { Sid: 'PassSelf', Effect: 'Allow', Action: 'iam:PassRole', Resource: runtimeRoleArn },
+    );
+  }
+  if (onDemand) {
+    runtimeStatements.push(
+      { Sid: 'WakerCount', Effect: 'Allow', Action: 'rds-data:ExecuteStatement', Resource: `arn:aws:rds:${account}:cluster:${input.prefix}-postgres` },
+      { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: `arn:aws:secretsmanager:${account}:secret:hypervibe/${input.prefix}/*` },
+      { Sid: 'WakerScale', Effect: 'Allow', Action: ['ecs:UpdateService', 'ecs:DescribeServices'], Resource: `arn:aws:ecs:${account}:service/${input.prefix}/*` },
+      { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
+      { Sid: 'WakerDatabaseAwake', Effect: 'Allow', Action: 'cloudwatch:GetMetricData', Resource: '*' },
+    );
+  }
   files['base.tf.json'] = {
     // The default VPC: databases and tasks use its public subnets (no NAT gateway).
     data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
@@ -135,7 +158,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
         name: `${input.prefix}-runtime`, path: '/hypervibe/app/',
         permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
         assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole',
-          Principal: { Service: ['lambda.amazonaws.com', 'ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com'] } }] }),
+          Principal: { Service: ['lambda.amazonaws.com', 'ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com'] } }] }),
       } },
       aws_iam_role_policy: { runtime: { name: 'runtime', role: '${aws_iam_role.runtime.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: runtimeStatements }) } },
     },
@@ -253,6 +276,8 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
         memory_size: service.memory ?? 1024, timeout: service.timeout ?? 60, architectures: ['x86_64'],
         environment: [{ variables: {
           ...service.env, HYPERVIBE_PARAMETER_PATH: input.parameterPath,
+          // The image's loader reads secrets from Parameter Store before the app starts; npm writes only to /tmp.
+          NODE_OPTIONS: `--require ${LOAD_SECRETS_PATH}`, NPM_CONFIG_CACHE: '/tmp/.npm',
           AWS_LWA_PORT: service.env?.PORT ?? '8080', ...(service.healthCheckPath ? { AWS_LWA_READINESS_CHECK_PATH: service.healthCheckPath } : {}),
         } }],
         depends_on: [`aws_cloudwatch_log_group.${key}`, 'aws_iam_role_policy.runtime'],
