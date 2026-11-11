@@ -80,7 +80,7 @@ import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service
 import { planEmail } from '../domain/services/email-plan.service.js';
 import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
 import { inspectWebhookReadiness } from '../domain/services/webhook-readiness.service.js';
-import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
+import { firstProviderSpecValidationFailure, introducedProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
@@ -99,7 +99,10 @@ import { eligibleCredentialRequirements } from '../application/credential-plan-h
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
 
 function validateInstalledProviders(spec: ProjectSpec, environment?: string): void {
-  const failure = firstProviderSpecValidationFailure(spec, environment);
+  throwProviderValidationFailure(firstProviderSpecValidationFailure(spec, environment));
+}
+
+function throwProviderValidationFailure(failure: ReturnType<typeof firstProviderSpecValidationFailure>): void {
   if (!failure) return;
   throw new HvError(
     'VALIDATION',
@@ -681,7 +684,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             hint: nativeDeployConfirmationHint(nativeChanges),
           });
         }
-        validateInstalledProviders(candidateSpec);
+        throwProviderValidationFailure(introducedProviderSpecValidationFailure(previousSpec, candidateSpec));
         if (!project) {
           const initialHostingProvider = Object.values(candidateSpec.environments)[0]?.hosting.provider;
           project = ctx.repos.projects.create({
