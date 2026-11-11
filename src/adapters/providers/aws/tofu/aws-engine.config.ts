@@ -55,6 +55,12 @@ export interface AwsJobInput extends AwsTaskInput {
 }
 
 /** Converts a five-field cron to EventBridge Scheduler's six-field form (day-of-week 1-7, one day field '?'). */
+/** Environment variables Lambda reserves: it sets them and rejects functions that define them. */
+export const LAMBDA_RESERVED_ENV = new Set(['_HANDLER', '_X_AMZN_TRACE_ID', 'AWS_DEFAULT_REGION', 'AWS_REGION', 'AWS_EXECUTION_ENV',
+  'AWS_LAMBDA_FUNCTION_NAME', 'AWS_LAMBDA_FUNCTION_MEMORY_SIZE', 'AWS_LAMBDA_FUNCTION_VERSION', 'AWS_LAMBDA_INITIALIZATION_TYPE',
+  'AWS_LAMBDA_LOG_GROUP_NAME', 'AWS_LAMBDA_LOG_STREAM_NAME', 'AWS_ACCESS_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN', 'AWS_LAMBDA_RUNTIME_API', 'LAMBDA_TASK_ROOT', 'LAMBDA_RUNTIME_DIR']);
+
 export function schedulerCron(schedule: string): string {
   const fields = schedule.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error(`Schedule "${schedule}" must have five fields.`);
@@ -275,10 +281,12 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
         function_name: service.resourceName, role: '${aws_iam_role.runtime.arn}', package_type: 'Image', image_uri: service.initialImageUri,
         memory_size: service.memory ?? 1024, timeout: service.timeout ?? 60, architectures: ['x86_64'],
         environment: [{ variables: {
-          ...service.env, HYPERVIBE_PARAMETER_PATH: input.parameterPath,
+          // Lambda sets its reserved variables itself (the region among them) and rejects them here.
+          ...Object.fromEntries(Object.entries(service.env ?? {}).filter(([key]) => !LAMBDA_RESERVED_ENV.has(key))), HYPERVIBE_PARAMETER_PATH: input.parameterPath,
           // The image's loader reads secrets from Parameter Store before the app starts; npm writes only to /tmp.
           NODE_OPTIONS: `--require ${LOAD_SECRETS_PATH}`, NPM_CONFIG_CACHE: '/tmp/.npm',
-          AWS_LWA_PORT: service.env?.PORT ?? '8080', ...(service.healthCheckPath ? { AWS_LWA_READINESS_CHECK_PATH: service.healthCheckPath } : {}),
+          // The function URL streams responses, so the adapter must stream too (otherwise clients receive Lambda's envelope).
+          AWS_LWA_INVOKE_MODE: 'response_stream', AWS_LWA_PORT: service.env?.PORT ?? '8080', ...(service.healthCheckPath ? { AWS_LWA_READINESS_CHECK_PATH: service.healthCheckPath } : {}),
         } }],
         depends_on: [`aws_cloudwatch_log_group.${key}`, 'aws_iam_role_policy.runtime'],
         // The release path (CI or hv_deploy) owns the image after creation.

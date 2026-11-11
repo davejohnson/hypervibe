@@ -25,6 +25,17 @@ describe('AWS engine configuration', () => {
   });
 });
 
+describe('AWS web services', () => {
+  it('leaves Lambda-reserved variables to Lambda and points it at the secrets loader', () => {
+    const config = buildAwsConfiguration({ ...base, services: [{ logicalName: 'web', resourceName: 'hv-app-web', initialImageUri: 'x', public: true,
+      env: { AWS_DEFAULT_REGION: 'us-west-2', AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1' } }] });
+    const fn = (config.files['services.tf.json'] as { resource: { aws_lambda_function: Record<string, { environment: Array<{ variables: Record<string, string> }> }> } }).resource.aws_lambda_function.web!;
+    const variables = fn.environment[0]!.variables;
+    expect(variables).not.toHaveProperty('AWS_DEFAULT_REGION');
+    expect(variables).toMatchObject({ AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1', NODE_OPTIONS: '--require /opt/hypervibe/load-secrets.cjs', AWS_LWA_INVOKE_MODE: 'response_stream' });
+  });
+});
+
 describe('AWS tasks', () => {
   it('converts five-field cron to EventBridge Scheduler form', () => {
     expect(schedulerCron('0 3 * * 1')).toBe('cron(0 3 ? * 2 *)');

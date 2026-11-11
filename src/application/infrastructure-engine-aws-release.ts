@@ -160,7 +160,8 @@ export async function lambdaErrorType(response: Response): Promise<string | unde
  */
 async function releaseTask(context: AwsEngineContext, name: string, resource: string, imageUri: string, worker: boolean): Promise<EngineReleaseResult> {
   const ecs = new ECSClient({ region: context.connection.region, credentials: context.credentials });
-  const latest = (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: resource }))).taskDefinition;
+  const described = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: resource, include: ['TAGS'] }));
+  const latest = described.taskDefinition;
   if (!latest?.containerDefinitions?.length) return { service: name, status: 'failed', message: `Task family ${resource} was not found. Run hv_plan scope="infrastructure" and hv_apply.` };
   const input: RegisterTaskDefinitionCommandInput = {
     family: latest.family!, containerDefinitions: latest.containerDefinitions.map((container) => container.name === 'app' ? { ...container, image: imageUri } : container),
@@ -168,6 +169,8 @@ async function releaseTask(context: AwsEngineContext, name: string, resource: st
     ...(latest.networkMode ? { networkMode: latest.networkMode } : {}), ...(latest.requiresCompatibilities ? { requiresCompatibilities: latest.requiresCompatibilities } : {}),
     ...(latest.cpu ? { cpu: latest.cpu } : {}), ...(latest.memory ? { memory: latest.memory } : {}), ...(latest.runtimePlatform ? { runtimePlatform: latest.runtimePlatform } : {}),
     ...(latest.volumes?.length ? { volumes: latest.volumes } : {}), ...(latest.ephemeralStorage ? { ephemeralStorage: latest.ephemeralStorage } : {}),
+    // The engine's tags carry over, so a released revision is not drift.
+    ...(described.tags?.length ? { tags: described.tags } : {}),
   };
   const registered = (await ecs.send(new RegisterTaskDefinitionCommand(input))).taskDefinition?.taskDefinitionArn;
   if (!registered) return { service: name, status: 'unknown', message: `Registering the new ${resource} revision had an unknown outcome.` };

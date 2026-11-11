@@ -6,7 +6,7 @@ import { GetParameterCommand, ParameterNotFound, PutParameterCommand, SSMClient 
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
-import type { AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
+import { LAMBDA_RESERVED_ENV, type AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
@@ -102,6 +102,10 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
   if (environment.cache) problems.push('Redis caches are not available on the AWS engine yet.');
   if (Object.keys(environment.queues ?? {}).length) problems.push('Queues are not available on the AWS engine yet.');
   if (environment.domain) problems.push('Custom domains are not available on the AWS engine yet; use the service URL or route traffic with domainTarget.');
+  const reserved = Object.keys(environment.envVars).filter((key) => LAMBDA_RESERVED_ENV.has(key));
+  if (reserved.length && Object.values(environment.services).some((service) => (service.workloadKind ?? 'web') === 'web')) {
+    problems.push(`${reserved.join(', ')} ${reserved.length === 1 ? 'is' : 'are'} set by AWS Lambda itself and cannot be configured; remove ${reserved.length === 1 ? 'it' : 'them'} from envVars.`);
+  }
   for (const [name, service] of Object.entries(environment.services)) {
     if (environment.database && service.onDemand && !service.onDemand.nextWorkAtQuery) {
       problems.push(`${name} starts on demand, and this database pauses when idle: add onDemand.nextWorkAtQuery (one SELECT returning the earliest time queued work becomes due) so work scheduled for later starts on time.`);
