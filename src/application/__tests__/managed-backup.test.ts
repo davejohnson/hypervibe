@@ -65,6 +65,19 @@ describe('reviewed recurring backup authority', () => {
     files.set('.hypervibe/spec.json', JSON.stringify(spec));
     expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
   });
+  it('keeps other environments so cross-environment references still resolve', async () => {
+    const { input, spec, files } = fixture();
+    Object.assign(spec.environments, { staging: { hosting: { provider: 'railway' }, services: {},
+      deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' }, futureMaintenance: { mode: 'application' } } });
+    Object.assign(spec.environments.production, { deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', promoteFrom: 'staging' } });
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
+  });
+  it('still rejects unrecognized project-level fields', async () => {
+    const { input, spec, files } = fixture();
+    files.set('.hypervibe/spec.json', JSON.stringify({ ...spec, futureProjectField: true }));
+    await expect(verifyManagedBackupAuthority(input)).rejects.toThrow(/futureProjectField/);
+  });
   it('still rejects unrecognized fields in the environment being backed up', async () => {
     const { input, spec, files } = fixture();
     Object.assign(spec.environments.production, { futureField: true });
