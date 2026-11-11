@@ -777,15 +777,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
   alwaysRunBootstrap?: boolean;
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
-  const providerValidation = firstProviderSpecValidationFailure(spec);
-  const invalidSpec = providerValidation ? { kind: 'invalid_spec' as const, message: providerValidation.message,
-    hint: providerValidation.hint, details: providerValidation.details } : undefined;
   // Loading a plan is read-only. Inspect its scope before admitting isolated
   // operations on existing credentials or retained execution recovery.
   const planService = new PlanService();
 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
+  // Validate only the plan's environment; credential plans span environments.
+  const validationEnvironment = 'error' in loaded || (loaded.document.scope ?? 'full') === 'credentials'
+    ? undefined : loaded.document.environmentName;
+  const providerValidation = firstProviderSpecValidationFailure(spec, validationEnvironment);
+  const invalidSpec = providerValidation ? { kind: 'invalid_spec' as const, message: providerValidation.message,
+    hint: providerValidation.hint, details: providerValidation.details } : undefined;
   if ('error' in loaded) {
     return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
   }

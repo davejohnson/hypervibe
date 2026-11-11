@@ -59,6 +59,18 @@ describe('reviewed recurring backup authority', () => {
       if (change === 'matching' || change === 'omitted-provider') expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target });
       else await expect(verifyManagedBackupAuthority(input)).rejects.toThrow();
     });
+  it('is not blocked by fields a newer spec writer added to another environment', async () => {
+    const { input, spec, files } = fixture();
+    Object.assign(spec.environments, { gcp: { hosting: { provider: 'cloudrun', futureEngineField: 'opentofu' }, services: {} } });
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
+  });
+  it('still rejects unrecognized fields in the environment being backed up', async () => {
+    const { input, spec, files } = fixture();
+    Object.assign(spec.environments.production, { futureField: true });
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    await expect(verifyManagedBackupAuthority(input)).rejects.toThrow(/futureField/);
+  });
   it('accepts only the published program and exact default-branch resource bindings', async () => {
     const { input } = fixture();
     expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
