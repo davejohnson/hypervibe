@@ -552,6 +552,23 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Hypervibe chooses the region from the app\'s other environments (us-east-1 otherwise) and states it.',
     ],
   },
+  azure: {
+    provider: 'azure',
+    displayName: 'Microsoft Azure',
+    tokenType: 'One browser sign-in to Azure (an Owner of the subscription); Hypervibe then creates and stores its own limited deploy access',
+    setupUrl: 'https://login.microsoftonline.com/',
+    setupUrls: [{ label: 'Microsoft sign-in (Hypervibe opens it for you with hv_connections provider="azure" action="connect")', url: 'https://login.microsoftonline.com/' }],
+    permissions: [
+      'One-time setup, approved on Hypervibe\'s page right after sign-in: registers the Azure services the app uses, creates resource group hv-<project>, and app hypervibe-deploy-<project> with GitHub sign-in for keyless CI and a client secret for this computer.',
+      'The deploy identity gets roles on hv-<project> only, never the subscription: Contributor, Key Vault Secrets Officer, and Role Based Access Control Administrator limited to AcrPull, Key Vault Secrets User and Storage Blob Data Contributor for service principals.',
+    ],
+    credentialExample: 'hv_connections provider="azure" action="connect"',
+    notes: [
+      'No Azure CLI to install: Microsoft\'s page names the sign-in "Microsoft Azure CLI" because Hypervibe uses that public sign-in. The session stays in memory and is used once.',
+      'With several subscriptions, Hypervibe asks which one the app runs in (and is billed to); with one, it uses it.',
+      'Hypervibe chooses the region from the app\'s other environments (East US 2 otherwise) and states it. The client secret lasts a year; running connect again renews it.',
+    ],
+  },
   gcs: {
     provider: 'gcs',
     displayName: 'Google Cloud Storage',
