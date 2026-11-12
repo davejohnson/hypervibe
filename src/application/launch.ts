@@ -1,9 +1,10 @@
+import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
-import type { ActionReceipt } from '../domain/plan/converge.executor.js';
+import { ConvergeExecutor, type ActionReceipt } from '../domain/plan/converge.executor.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { cloudflareFor } from './infrastructure-engine-domain.js';
@@ -13,9 +14,11 @@ import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.exe
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
-import { isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
+  ENGINE_PLAN_SCOPE,
+  type InfrastructurePlanResult,
   isEngineManaged,
   planInfrastructureEngine,
   releaseEngineServices,
@@ -34,13 +37,13 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[]; includedAccess: string[] }
-  | { status: 'needs_access'; accessId: 'storage' | 'storage-s3' | 'memorystore' | 'queues' | 'workers' | 'ci-release'; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_access'; accessId: 'gcp-setup' | 'gcp-region' | 'storage' | 'storage-s3' | 'memorystore' | 'queues' | 'workers' | 'ci-release'; access: string; grants: Record<string, unknown> }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
-  | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
+  | { status: 'needs_confirmation'; planId: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
-  | { status: 'pending'; message: string; receipts: ActionReceipt[] }
+  | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; confirmActions?: string[] }
   | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
@@ -108,9 +111,9 @@ export async function launchEnvironment(ctx: CommandContext, params: Parameters<
     return await runLaunch(ctx, params);
   } catch (error) {
     if (!isNetworkError(error)) throw error;
-    // Only reads are retried automatically; a dropped write is safe to repeat because every
-    // run re-observes what exists and adopts or skips instead of duplicating.
-    return { status: 'pending', message: 'The internet connection dropped while talking to Google or Cloudflare. Nothing was duplicated; run hv_launch again once the connection is stable.', receipts: [] };
+    // Saved infrastructure applies retain their exact continuation identity below.
+    // A failure elsewhere stops the journey without asserting a write's outcome.
+    return { status: 'pending', message: 'The connection dropped while talking to Google or Cloudflare. Check hv_status before continuing the launch.', receipts: [] };
   }
 }
 
@@ -121,6 +124,8 @@ async function runLaunch(ctx: CommandContext, params: {
   environmentName: string;
   billingAccountName?: string;
   confirmActions?: string[];
+  /** Exact persisted plan returned for review; its approval never transfers to another plan. */
+  planId?: string;
   /** Access ids from needs_access results the user approved (for example "storage", "ci-release"). */
   approveAccess?: string[];
   /** Stop after connecting and granting access, or after infrastructure, instead of releasing code. */
@@ -131,18 +136,45 @@ async function runLaunch(ctx: CommandContext, params: {
   const environmentSpec = params.spec.environments[params.environmentName];
   if (!environmentSpec) return { status: 'blocked', message: `The spec has no environment "${params.environmentName}".` };
   if (!isEngineManaged(environmentSpec)) {
-    return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Set hosting.engine="opentofu" with hv_spec first.' };
+    return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Choose hosting.provider="cloudrun" with hv_spec first.' };
   }
 
-  // Extra Google Cloud access the app's resources need. A new project lists it with the billing
-  // choice, so choosing the billing account approves it once instead of one prompt per resource.
-  const resourceAccess = neededResourceAccess(environmentSpec);
-  const approvedAccess = new Set<string>([...(params.approveAccess ?? []), ...(params.billingAccountName ? resourceAccess.map((entry) => entry.id) : [])]);
+  const validation = firstProviderSpecValidationFailure(params.spec, params.environmentName);
+  if (validation) return { status: 'blocked', message: validation.message, details: validation.details };
 
-  // 1. Connect GCP, asking only for the billing account.
+  if (params.confirmActions?.length && !params.planId) {
+    return { status: 'blocked', message: 'Infrastructure approval requires the planId returned with those confirmActions. Run hv_launch without confirmation inputs to review a plan.' };
+  }
+  let reviewedPlan: InfrastructurePlanResult | undefined;
+  if (params.planId) {
+    const loaded = new ConvergeExecutor().loadPlan(params.planId);
+    if ('error' in loaded) return { status: 'blocked', message: loaded.error };
+    const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+    if (loaded.document.scope !== ENGINE_PLAN_SCOPE || loaded.run.projectId !== params.project.id
+      || loaded.document.environmentName !== params.environmentName || !environment || loaded.run.environmentId !== environment.id) {
+      return { status: 'blocked', message: 'The saved plan belongs to a different project, environment or lifecycle scope. Review a new hv_launch plan.' };
+    }
+    if (loaded.document.specRevision !== params.specRevision) return { status: 'blocked', message: 'The spec changed after this plan was reviewed. Run hv_launch without confirmation inputs to review the current changes.' };
+    reviewedPlan = { planRunId: params.planId, environmentName: loaded.document.environmentName,
+      specRevision: loaded.document.specRevision, actions: loaded.document.actions,
+      confirmActions: loaded.document.actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
+      warnings: loaded.document.warnings ?? [] };
+    if (params.confirmActions?.length) {
+      const expected = reviewedPlan.actions.filter((action) => reviewedPlan!.confirmActions.includes(action.id)).map(approvalToken).sort();
+      if (JSON.stringify([...params.confirmActions].sort()) !== JSON.stringify(expected)) {
+        return { status: 'blocked', message: 'confirmActions must match the exact actions returned for this saved planId. Review that plan before applying it.' };
+      }
+    }
+  }
+
+  // Account selection and infrastructure/access approval are separate authorities.
+  const resourceAccess = neededResourceAccess(environmentSpec);
+  const approvedAccess = new Set<string>(params.approveAccess ?? []);
+
+  // 1. Select billing, then review and approve the exact project setup plan.
   // Only a connection scoped to this repository counts; global ones point at other projects.
   if (!await engineGcpAdapter(params.project)) {
-    const preview = await runGcpBootstrap({ project: params.project });
+    const preview = await runGcpBootstrap({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'GCP setup preview failed.'), details: preview };
     const target = (preview as { target?: { projectId?: string } }).target?.projectId;
     const accounts = ((preview as { openBillingAccounts?: Array<{ name: string; displayName?: string }> }).openBillingAccounts ?? []);
@@ -158,8 +190,26 @@ async function runLaunch(ctx: CommandContext, params: {
         includedAccess: resourceAccess.map((entry) => entry.id),
       };
     }
-    const confirmed = await runGcpBootstrap({ project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: true });
-    if (!confirmed.success) return { status: 'blocked', message: String(confirmed.error ?? 'GCP setup failed.'), details: confirmed };
+    const setupApproved = approvedAccess.has('gcp-setup');
+    const setup = await runGcpBootstrap({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved });
+    if (!setup.success) return { status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup };
+    if (!setupApproved) return {
+      status: 'needs_access', accessId: 'gcp-setup',
+      access: 'Create the Google Cloud project prerequisites and attach the selected billing account through this reviewed OpenTofu plan. Billing selection does not approve infrastructure or permissions.',
+      grants: setup,
+    };
+  }
+
+  // A connected project can host several environments in different regions.
+  // Each regional repository belongs to retained project-shared engine state.
+  const region = environmentSpec.hosting.region ?? 'us-central1';
+  if (!isCloudPreparedForRegion(ctx.repos.projects.findById(params.project.id) ?? params.project, region)) {
+    const confirm = approvedAccess.has('gcp-region');
+    const prepared = await runCloudPrepare({ project: params.project, provider: 'cloudrun',
+      gcpProjectId: await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm });
+    if (!prepared.success) return { status: 'blocked', message: String(prepared.error ?? 'Regional Google Cloud setup failed.'), details: prepared };
+    if (!confirm) return { status: 'needs_access', accessId: 'gcp-region',
+      access: `Prepare build resources in ${region} using this saved OpenTofu plan. Shared resources in other regions are retained.`, grants: prepared };
   }
 
   // 1a. DNS access for a custom domain: open the one-step connect page instead of explaining tokens.
@@ -175,115 +225,79 @@ async function runLaunch(ctx: CommandContext, params: {
     }
   }
 
-  // 1b. Extra access some resources need (bucket lifecycle), shown before it is granted.
-  if (Object.keys(environmentSpec.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), gcsAccess: 'lifecycle' });
-    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The storage access preview failed.'), details: preview };
-    if (!approvedAccess.has('storage')) {
-      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
-      return {
-        status: 'needs_access',
-        accessId: 'storage',
-        access: 'Let Hypervibe create and manage Cloud Storage buckets in this project, and let the app read and write their files.',
-        grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
-      };
-    }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), gcsAccess: 'lifecycle', adminAuth: 'default', confirm: true });
-    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting storage access failed.'), details: granted };
-  }
-
-  if (Object.values(environmentSpec.storage ?? {}).some((storage) => storage.access === 's3')
-    && !isCloudPreparedForStorageS3(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
-    const gcpProjectId = await scopedGcpProjectId(params.project);
-    if (!approvedAccess.has('storage-s3')) {
-      return {
-        status: 'needs_access', accessId: 'storage-s3',
-        access: 'Let Hypervibe create S3-style access keys for your app, so code written for S3 or Railway buckets works with Google Cloud Storage unchanged.',
-        grants: { deploymentIdentity: ['roles/storage.hmacKeyAdmin'] },
-      };
-    }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId, gcsAccess: 's3', adminAuth: 'default', confirm: true });
-    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting S3-compatible access failed.'), details: granted };
-  }
-  if (environmentSpec.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), memorystoreAccess: 'lifecycle' });
-    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The Redis access preview failed.'), details: preview };
-    if (!approvedAccess.has('memorystore')) {
-      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
-      return {
-        status: 'needs_access', accessId: 'memorystore',
-        access: 'Let Hypervibe create a private Redis cache in this project and connect your app to it over the project network.',
-        grants: { deploymentIdentity: plan.grantRoles, apis: plan.enableApis },
-      };
-    }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), memorystoreAccess: 'lifecycle', adminAuth: 'default', confirm: true });
-    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting Redis access failed.'), details: granted };
-  }
-
-  if (Object.values(environmentSpec.services).some((service) => service.onDemand) && !isCloudPreparedForWorkerWake(ctx.repos.projects.findById(params.project.id) ?? params.project)) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), workerAccess: 'lifecycle' });
-    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The on-demand worker access preview failed.'), details: preview };
-    if (!approvedAccess.has('workers')) {
-      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
-      return {
-        status: 'needs_access', accessId: 'workers',
-        access: 'Let Hypervibe run background workers only while they have work: a small scheduled Google Workflow checks for pending work every minute and starts or stops the worker. Your app identity gets read-only access to the database for that check.',
-        grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles, appRuntimeOnItself: plan.runtimeSelfGrantRoles, apis: plan.enableApis },
-      };
-    }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), workerAccess: 'lifecycle', adminAuth: 'default', confirm: true });
-    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting on-demand worker access failed.'), details: granted };
-  }
-
-  if (Object.keys(environmentSpec.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(params.project.id) ?? params.project, 'cloudrun')) {
-    const preview = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), queueAccess: 'lifecycle' });
-    if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'The queue access preview failed.'), details: preview };
-    if (!approvedAccess.has('queues')) {
-      const plan = (preview as { plan?: Record<string, unknown> }).plan ?? {};
-      return {
-        status: 'needs_access', accessId: 'queues',
-        access: 'Let Hypervibe create Pub/Sub queues in this project, and let your app send and receive their messages.',
-        grants: { deploymentIdentity: plan.grantRoles, appRuntime: plan.runtimeGrantRoles },
-      };
-    }
-    const granted = await runCloudPrepare({ project: params.project, provider: 'cloudrun', gcpProjectId: await scopedGcpProjectId(params.project), queueAccess: 'lifecycle', adminAuth: 'default', confirm: true });
-    if (!granted.success) return { status: 'blocked', message: String(granted.error ?? 'Granting queue access failed.'), details: granted };
+  // Each access approval applies its saved engine preview; never refresh that
+  // preview between the user's approval and application.
+  const accessRequests = [
+    { id: 'storage' as const, needed: Object.keys(environmentSpec.storage ?? {}).length > 0,
+      ready: isCloudPreparedForStorage, options: { gcsAccess: 'lifecycle' as const },
+      description: 'Let Hypervibe manage the app storage buckets and let the app read and write its files.' },
+    { id: 'storage-s3' as const, needed: Object.values(environmentSpec.storage ?? {}).some((storage) => storage.access === 's3'),
+      ready: isCloudPreparedForStorageS3, options: { gcsAccess: 's3' as const },
+      description: 'Let Hypervibe manage S3-compatible credentials for the app storage.' },
+    { id: 'memorystore' as const, needed: Boolean(environmentSpec.cache),
+      ready: isCloudPreparedForCache, options: { memorystoreAccess: 'lifecycle' as const },
+      description: 'Let Hypervibe manage a private Redis cache and connect the app to it.' },
+    { id: 'workers' as const, needed: Object.values(environmentSpec.services).some((service) => service.onDemand),
+      ready: isCloudPreparedForWorkerWake, options: { workerAccess: 'lifecycle' as const },
+      description: 'Let Hypervibe manage the scheduled checks and permissions for workers that run only while they have work.' },
+    { id: 'queues' as const, needed: Object.keys(environmentSpec.queues ?? {}).length > 0,
+      ready: (project: Project) => isCloudPreparedForQueues(project, 'cloudrun'), options: { queueAccess: 'lifecycle' as const },
+      description: 'Let Hypervibe manage Pub/Sub queues and let the app send and receive messages.' },
+  ];
+  for (const request of accessRequests) {
+    if (!request.needed || request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project)) continue;
+    const confirm = approvedAccess.has(request.id);
+    const result = await runCloudPrepare({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project, provider: 'cloudrun',
+      gcpProjectId: await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
+    if (!result.success) return { status: 'blocked', message: String(result.error ?? 'Google Cloud access setup failed.'), details: result };
+    if (!confirm) return { status: 'needs_access', accessId: request.id, access: request.description, grants: result };
   }
 
   if (params.stopAfter === 'prepare') return { status: 'ready', phase: 'prepare', infrastructureRounds: 0 };
 
   // 2. Infrastructure, in as many reviewed rounds as staging requires.
-  const approved = new Set(params.confirmActions ?? []);
   let rounds = 0;
   let certificatePending = false;
   for (; rounds < 6; rounds++) {
-    const planned = await planInfrastructureEngine(ctx, params);
+    const usingReviewedPlan = reviewedPlan !== undefined;
+    const planned = reviewedPlan ?? await planInfrastructureEngine(ctx, params);
+    reviewedPlan = undefined;
     if ('blocked' in planned) return { status: 'blocked', message: planned.blocked.join('\n') };
     const pending = planned.actions.filter((action) => action.type !== 'noop');
     const onlyCertificate = pending.length > 0 && pending.every((action) => action.metadata?.operation === 'gcpDomainReady');
     if (pending.length === 0 || (onlyCertificate && certificatePending)) break;
     const tokens = planned.actions.filter((action) => planned.confirmActions.includes(action.id)).map(approvalToken);
-    const missing = tokens.filter((token) => !approved.has(token));
-    if (missing.length) {
+    const approvedExactly = usingReviewedPlan && JSON.stringify([...(params.confirmActions ?? [])].sort()) === JSON.stringify([...tokens].sort());
+    if (tokens.length && !approvedExactly) {
       return {
         status: 'needs_confirmation',
+        planId: planned.planRunId,
         confirmActions: tokens,
         changes: pending.map(summarize),
         estimatedMonthlyCost: estimateMonthlyCost(environmentSpec),
       };
     }
-    const applied = await applyInfrastructureEngine(ctx, {
-      project: params.project, spec: params.spec, specRevision: params.specRevision,
-      planId: planned.planRunId, confirmActions: planned.confirmActions,
-    });
+    let applied: Awaited<ReturnType<typeof applyInfrastructureEngine>>;
+    try {
+      applied = await applyInfrastructureEngine(ctx, {
+        project: params.project, spec: params.spec, specRevision: params.specRevision,
+        planId: planned.planRunId, confirmActions: planned.confirmActions,
+      });
+    } catch (error) {
+      if (!isNetworkError(error)) throw error;
+      return { status: 'pending', planId: planned.planRunId, confirmActions: tokens,
+        message: 'The infrastructure apply lost its connection. Continue with this same planId and its approved confirmActions so the saved operation can be checked.', receipts: [] };
+    }
     if (applied.kind === 'blocked') return { status: 'blocked', message: applied.reason };
+    if (applied.result.error) return { status: 'blocked', message: applied.result.error };
     const receipts = applied.result.receipts;
     const failed = receipts.find((receipt) => receipt.status === 'failed' || receipt.status === 'blocked');
     if (failed) return { status: 'blocked', message: failed.error ?? failed.message ?? `${failed.actionId} did not complete.`, details: receipts };
     const stillPending = receipts.filter((receipt) => receipt.status === 'pending');
+    if (!applied.result.success && !stillPending.length) return { status: 'blocked', message: 'The saved infrastructure plan did not complete. Inspect its results before continuing.', details: receipts };
     // A slow certificate must not hold back the app itself; anything else stops here.
     if (stillPending.some((receipt) => !receipt.actionId.startsWith('domain-ready:'))) {
-      return { status: 'pending', message: 'Some changes are still settling. Run hv_launch again in a few minutes.', receipts };
+      return { status: 'pending', planId: planned.planRunId, confirmActions: tokens, message: 'Some changes are still settling. Continue with this same planId and its approved confirmActions.', receipts };
     }
     certificatePending = stillPending.length > 0;
   }
@@ -349,19 +363,17 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const binding = (environment.platformBindings as { engine?: EngineBinding; services?: Record<string, { serviceId?: string }> });
   let ci = binding.engine?.ci;
   if (ci?.repository !== repository) {
-    if (!params.approveAccess?.includes('ci-release')) {
-      return {
-        status: 'needs_access',
-        accessId: 'ci-release',
-        access: `Let GitHub Actions in ${repository} release new versions of this app on every push, without storing any key in GitHub. It can only push images and update the running app.`,
-        grants: previewCiReleaseAccess(context.gcpProjectId, repository, context.runtimeServiceAccountEmail) as unknown as Record<string, unknown>,
-      };
-    }
     try {
+      const confirm = params.approveAccess?.includes('ci-release') === true;
       const granted = await grantCiReleaseAccess({
-        adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository,
-        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+        projectId: params.project.id, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository,
+        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, confirm,
       });
+      if (!confirm) return {
+        status: 'needs_access', accessId: 'ci-release',
+        access: `Let GitHub Actions in ${repository} push images and release this app without storing a key in GitHub.`,
+        grants: { ...previewCiReleaseAccess(context.gcpProjectId, repository, context.runtimeServiceAccountEmail), planId: granted.planId, actions: granted.actions },
+      };
       ci = { repository, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
     } catch (error) {
       return { status: 'blocked', message: error instanceof Error ? error.message : String(error) };

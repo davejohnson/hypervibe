@@ -1,19 +1,23 @@
 /**
- * Runs the real pinned OpenTofu binary. Skipped unless HYPERVIBE_TOFU_BINARY
- * points at tofu 1.13.9. Uses only the built-in terraform_data resource, so it
+ * Runs the managed pinned OpenTofu binary in ordinary acceptance. Uses only
+ * the built-in terraform_data resource, so it
  * needs no cloud account; the Cloud Run validation step downloads the pinned
  * Google provider and verifies its checksum.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EngineConfiguration, EngineStateIdentity, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { buildCloudRunConfiguration, gcpEngineBackend } from '../../../providers/gcp/tofu/gcp-engine.backend.js';
+import { buildArtifactRegistryConfiguration } from '../../../providers/gcp/tofu/gcp-project.backend.js';
 import { OpenTofuEngine } from '../engine.js';
+import { ensureEngineBinary } from '../install.js';
+import { buildCiReleaseConfiguration } from '../../../providers/gcp/tofu/gcp-ci.backend.js';
+import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration, defaultGcpPreparationInput, gcpSetupBackend } from '../../../providers/gcp/tofu/gcp-setup.backend.js';
+import { composeGcpProjectConfiguration } from '../../../../domain/services/gcp-project-setup.service.js';
 import { engineStatePaths, loadOrCreateStatePassphrase } from '../workspace.js';
 
-const binary = process.env.HYPERVIBE_TOFU_BINARY;
 const SECRET = 'hv-representative-secret-7f3a9c';
 const cipher = { encrypt: (v: string) => Buffer.from(v).toString('base64'), decrypt: (v: string) => Buffer.from(v, 'base64').toString() };
 
@@ -39,16 +43,58 @@ function config(resources: Record<string, Record<string, unknown>>): EngineConfi
 
 const auth = { env: { TF_VAR_secret: SECRET }, redact: [SECRET] };
 
-describe.skipIf(!binary)('OpenTofu engine (live binary)', () => {
+describe('OpenTofu engine (real binary, no cloud writes)', () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hv-engine-'));
-  const engine = new OpenTofuEngine({ binary: binary!, cipher, dataDir, pluginCacheDir: path.join(dataDir, 'plugins'), timeoutMs: 300_000 });
+  let engine: OpenTofuEngine;
+  beforeAll(async () => {
+    const previous = process.env.HYPERVIBE_DATA_DIR;
+    process.env.HYPERVIBE_DATA_DIR = dataDir;
+    try {
+      const installed = await ensureEngineBinary();
+      if (!installed.ok) throw new Error(installed.error);
+      engine = new OpenTofuEngine({ binary: installed.binary, cipher, dataDir, pluginCacheDir: path.join(dataDir, 'plugins'), timeoutMs: 300_000 });
+    } finally {
+      if (previous === undefined) delete process.env.HYPERVIBE_DATA_DIR;
+      else process.env.HYPERVIBE_DATA_DIR = previous;
+    }
+  }, 300_000);
+  afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const state: EngineStateIdentity = { provider: 'test', projectId: 'p1', environmentId: 'e1', partition: 'environment' };
   const paths = engineStatePaths(state, dataDir);
   fs.mkdirSync(path.join(dataDir, 'plugins'), { recursive: true });
 
+  it('validates project-shared keyless CI infrastructure with the pinned provider', async () => {
+    const configuration = buildCiReleaseConfiguration({ projectId: 'demo-project', projectNumber: '123456789',
+      repository: 'owner/app', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' });
+    expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
+  it('validates bootstrap plus later worker and CI access as one shared resource graph', async () => {
+    const projectId = 'demo-project';
+    const deployServiceAccountEmail = `hypervibe-deploy@${projectId}.iam.gserviceaccount.com`;
+    const runtimeServiceAccountEmail = `hypervibe-runtime@${projectId}.iam.gserviceaccount.com`;
+    const bootstrap = buildGcpBootstrapConfiguration({ projectId, billingAccountName: 'billingAccounts/ABCDEF-123456-ABCDEF',
+      deployServiceAccountEmail, runtimeServiceAccountEmail });
+    const worker = defaultGcpPreparationInput(projectId, deployServiceAccountEmail, runtimeServiceAccountEmail);
+    worker.enableApis.push('workflows.googleapis.com');
+    const configuration = composeGcpProjectConfiguration({ bootstrap,
+      workers: buildGcpPreparationConfiguration(worker),
+      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456789', repository: 'owner/app', runtimeServiceAccountEmail }),
+    });
+    expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
+  it('validates the project-shared Artifact Registry with deletion protection against the pinned provider', async () => {
+    const configuration = buildArtifactRegistryConfiguration({ projectId: 'demo-project', region: 'us-central1' });
+    expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
   it('validates generated Cloud Run configuration against the pinned Google provider', async () => {
     const configuration = buildCloudRunConfiguration({
       projectId: 'demo-project', region: 'us-central1',
+      environmentId: 'env-secret-container',
+      secrets: [{ secretId: 'web-api-key', labels: { 'managed-by': 'hypervibe', 'hv-environment': 'env-secret-container' } }],
+      adopt: { secrets: ['web-api-key'] },
       services: [{
         logicalName: 'web', resourceName: 'web-staging', workload: 'web',
         initialImage: `us-docker.pkg.dev/demo-project/app/web@sha256:${'a'.repeat(64)}`,

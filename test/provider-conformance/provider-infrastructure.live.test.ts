@@ -2,16 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import {
   chmodSync,
-  cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
+import { assertFixtureHttpResponse } from './lifecycle-live-harness.js';
+import { assertFixtureActionScope, assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
+import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
+import { supportsLoadBalancer } from '../../src/domain/ports/load-balancer.port.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
   databaseProviderContracts,
@@ -35,6 +37,15 @@ import {
   successfulRestoreDrillEvidence,
   type JsonObject,
 } from './infrastructure-live-harness.js';
+import {
+  applyWithCloudflareInventory,
+  captureCloudflareFixtureInventory,
+  newCloudflareCleanupJournal,
+  readCloudflareCleanupJournal,
+  saveCloudflareCleanupJournal,
+  verifyCloudflareFixtureAbsent,
+  type CloudflareCleanupJournal,
+} from './cloudflare-cleanup-harness.js';
 
 type InfrastructureSelection =
   | 'cloudsql-recovery'
@@ -63,6 +74,7 @@ let workspace = '';
 let dataDirectory = '';
 let projectName = '';
 let repository = '';
+let preparedOriginSpec: JsonObject | undefined;
 let loadBalancerHostname = '';
 let resourcesMayExist = false;
 let workflowReviewStarted = false;
@@ -70,9 +82,30 @@ let workflowInstalled = false;
 let restoreDrillRunStarted = false;
 let restoreDrillRunTerminal = false;
 let restoreDrillCleanupBlockedReason = '';
-let temporaryWorkspace = false;
+const temporaryWorkspace = false;
+let fixtureInterrupted = false;
 let loadBalancerPhaseStarted = false;
 let resumedWorkspace = false;
+let loadBalancerContractFailed = false;
+let cloudflareJournal: CloudflareCleanupJournal | undefined;
+const cloudflareJournalPath = () => path.join(dataDirectory, 'cloudflare-load-balancer-fixture.json');
+const saveCloudflareInventory = (journal: CloudflareCleanupJournal) => saveCloudflareCleanupJournal(cloudflareJournalPath(), journal);
+
+/** Read the durable ids even when CLI apply failed before returning its result. */
+async function captureCloudflareInventory(): Promise<void> {
+  if (!cloudflareJournal) throw new Error('The Cloudflare fixture has no durable cleanup journal.');
+  await captureCloudflareFixtureInventory({ journal: cloudflareJournal,
+    databaseFile: path.join(dataDirectory, 'hypervibe.db'), bindingsFile: path.join(workspace, '.hypervibe/bindings.json'),
+    save: saveCloudflareInventory });
+}
+
+async function verifyCloudflareCleanup(): Promise<void> {
+  if (!cloudflareJournal) throw new Error('Cloudflare cleanup cannot be verified without its saved native ids.');
+  await import('../../src/adapters/providers/cloudflare/cloudflare.adapter.js');
+  const adapter = await providerRegistry.createAdapter('cloudflare', requiredCredentials(cloudflareCredentials));
+  if (!supportsLoadBalancer(adapter)) throw new Error('The registered Cloudflare adapter cannot verify exact load-balancer resource absence.');
+  await verifyCloudflareFixtureAbsent(cloudflareJournal, adapter, saveCloudflareInventory);
+}
 
 function positiveDuration(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -263,11 +296,15 @@ function loadBalancerSpec(params: {
   loadBalancer: boolean;
   healthCheckPath?: string;
 }): JsonObject {
-  return buildLoadBalancerLiveSpec({
-    projectName,
-    hostname: loadBalancerHostname,
-    ...params,
-  });
+  if (!preparedOriginSpec) throw new Error('Prepared origin desired state is unavailable.');
+  const original = preparedOriginSpec.environments[LOAD_BALANCER_ENVIRONMENT];
+  if (!original || !original.services?.['origin-a'] || !original.services?.['origin-b']) throw new Error('The prepared platform must declare origin-a and origin-b.');
+  const desired = buildLoadBalancerLiveSpec({ projectName, hostname: loadBalancerHostname, ...params }).environments[LOAD_BALANCER_ENVIRONMENT];
+  const { domain: _domain, loadBalancer: _loadBalancer, ...retained } = original;
+  return { ...preparedOriginSpec, environments: { ...preparedOriginSpec.environments, [LOAD_BALANCER_ENVIRONMENT]: {
+    ...retained, ...(params.loadBalancer ? { domain: desired.domain, loadBalancer: desired.loadBalancer } : {}),
+  } } };
+
 }
 
 async function setSpec(spec: JsonObject): Promise<void> {
@@ -300,10 +337,25 @@ function assertPlanCanApply(planEnvelope: JsonObject): void {
 }
 
 async function apply(planEnvelope: JsonObject): Promise<JsonObject> {
-  return runHypervibe(['apply'], {
+  if (selection === 'cloudflare-load-balancer') assertFixtureActionScope(planEnvelope.data.actions ?? [], ['load-balancer']);
+  const performApply = () => runHypervibe(['apply'], {
     project: projectName,
     planId: planEnvelope.data.planId,
     confirmActions: actionIdsRequiringConfirmation(planEnvelope),
+  });
+  if (selection !== 'cloudflare-load-balancer') return performApply();
+  if (!cloudflareJournal) throw new Error('Cloudflare apply requires its durable fixture journal.');
+  return applyWithCloudflareInventory({ journal: cloudflareJournal, save: saveCloudflareInventory,
+    actions: nonNoopActions(planEnvelope).filter((action) => action.resource?.kind === 'load-balancer'),
+    capture: captureCloudflareInventory,
+    apply: async () => {
+      const result = await performApply();
+      if (terminalReceiptFailures(result).length || result.data.applied !== true) {
+        cloudflareJournal!.phase = 'cleanup-required';
+        saveCloudflareInventory(cloudflareJournal!);
+      }
+      return result;
+    },
   });
 }
 
@@ -317,6 +369,7 @@ async function convergeDirect(
 ): Promise<JsonObject> {
   const maxCycles = options.maxCycles ?? 8;
   for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+    if (fixtureInterrupted && !options.cleanupOnly) throw new Error('Fixture interrupted; durable cleanup is required.');
     const currentPlan = await plan(environmentName);
     assertPlanCanApply(currentPlan);
     if (options.cleanupOnly) {
@@ -532,6 +585,7 @@ async function waitForPublicHealth(): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastCheck: JsonObject | undefined;
   while (Date.now() < deadline) {
+    if (fixtureInterrupted) throw new Error('Fixture interrupted; cleanup will preserve unverified native ids.');
     const health = await runHypervibe(['health'], {
       project: projectName,
       url: `https://${loadBalancerHostname}`,
@@ -539,7 +593,11 @@ async function waitForPublicHealth(): Promise<void> {
       timeoutMs: 30_000,
     });
     lastCheck = health.data.check;
-    if (lastCheck?.ok === true) return;
+    if (lastCheck?.ok === true) {
+      const response = await fetch(`https://${loadBalancerHostname}/`, { signal: AbortSignal.timeout(30_000), redirect: 'error' });
+      assertFixtureHttpResponse(response.status, await response.json(), 'live');
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 15_000));
   }
   throw new Error(
@@ -607,6 +665,8 @@ async function safeCleanupDiagnostics(environmentName: string): Promise<string> 
     ...(binding ? { loadBalancerBinding: binding } : {}),
     workspace,
     dataDirectory,
+    ...(cloudflareJournal ? { cleanupJournal: cloudflareJournalPath(), cleanupPhase: cloudflareJournal.phase,
+      savedCloudflareResources: cloudflareJournal.resources, unresolvedCreates: cloudflareJournal.pendingCreates.map(({ kind }) => kind) } : {}),
   });
 }
 
@@ -711,6 +771,11 @@ async function cleanupRecovery(assertExpectedLifecycle = false): Promise<void> {
 }
 
 async function cleanupLoadBalancer(assertExpectedLifecycle = false): Promise<void> {
+  await captureCloudflareInventory();
+  if (!cloudflareJournal) throw new Error('Cloudflare cleanup has no saved inventory.');
+  cloudflareJournal.phase = 'cleaning';
+  saveCloudflareInventory(cloudflareJournal);
+  let cloudflareAbsenceVerified = false;
   if (loadBalancerPhaseStarted) {
     await setSpec(loadBalancerSpec({ services: true, loadBalancer: false }));
     const teardownPlan = await plan(LOAD_BALANCER_ENVIRONMENT);
@@ -735,16 +800,20 @@ async function cleanupLoadBalancer(assertExpectedLifecycle = false): Promise<voi
     expect((withoutLoadBalancer.data.unmanaged as JsonObject[] ?? []).filter(
       (item) => item.kind === 'load-balancer'
     )).toEqual([]);
+    await verifyCloudflareCleanup();
+    cloudflareAbsenceVerified = true;
     loadBalancerPhaseStarted = false;
   }
 
-  await setSpec(loadBalancerSpec({ services: false, loadBalancer: false }));
+  // Origins are prepared managed-release test-platform resources; this profile never mutates them.
+  await setSpec(loadBalancerSpec({ services: true, loadBalancer: false }));
   await convergeDirect(LOAD_BALANCER_ENVIRONMENT, { cleanupOnly: true });
   const verified = await plan(LOAD_BALANCER_ENVIRONMENT);
   expect(nonNoopActions(verified).filter((action) => (
     action.resource?.kind === 'load-balancer'
     || action.resource?.kind === 'service'
   ))).toEqual([]);
+  if (!cloudflareAbsenceVerified) await verifyCloudflareCleanup();
   resourcesMayExist = false;
 }
 
@@ -822,7 +891,9 @@ async function runLoadBalancerContract(): Promise<void> {
     resourcesMayExist = true;
     await cleanupLoadBalancer();
     resumedWorkspace = false;
+    return; // Resuming retained evidence means cleanup-only, never a fresh fixture.
   }
+  assertFixtureLifecycleConsent(process.env.HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE);
   resourcesMayExist = true;
   await setSpec(loadBalancerSpec({ services: true, loadBalancer: false }));
   await convergeDirect(LOAD_BALANCER_ENVIRONMENT);
@@ -847,6 +918,9 @@ async function runLoadBalancerContract(): Promise<void> {
     (action) => action.resource?.kind === 'load-balancer'
   )).toEqual([]);
 
+  const noopApplied = await apply(noop);
+  expect((noopApplied.data.receipts as JsonObject[]).every((receipt) => receipt.status === 'skipped_noop')).toBe(true);
+  if (fixtureInterrupted) throw new Error('Fixture interrupted before update.');
   await setSpec(loadBalancerSpec({
     services: true,
     loadBalancer: true,
@@ -857,6 +931,7 @@ async function runLoadBalancerContract(): Promise<void> {
     (action) => action.resource?.kind === 'load-balancer'
   )).not.toContainEqual(expect.objectContaining({ type: 'create' }));
   await convergeDirect(LOAD_BALANCER_ENVIRONMENT);
+  await waitForPublicHealth();
 
   const verifiedUpdate = await plan(LOAD_BALANCER_ENVIRONMENT);
   expect(nonNoopActions(verifiedUpdate).filter(
@@ -882,86 +957,55 @@ liveDescribe('live recovery and load-balancer infrastructure contract', () => {
     }
 
     if (selection === 'cloudsql-recovery') {
-      const workspaceInput = process.env.HYPERVIBE_LIVE_REPOSITORY_WORKTREE?.trim();
-      const dataDirectoryInput = process.env.HYPERVIBE_LIVE_DATA_DIR?.trim();
-      repository = process.env.HYPERVIBE_TEST_GITHUB_REPOSITORY?.trim() ?? '';
-      if (!workspaceInput || !path.isAbsolute(workspaceInput)) {
-        throw new Error('HYPERVIBE_LIVE_REPOSITORY_WORKTREE must be an absolute disposable GitHub checkout.');
-      }
-      if (!dataDirectoryInput || !path.isAbsolute(dataDirectoryInput)) {
-        throw new Error('HYPERVIBE_LIVE_DATA_DIR must be an absolute persistent cleanup-state directory.');
-      }
-      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
-        throw new Error('HYPERVIBE_TEST_GITHUB_REPOSITORY must be owner/repository.');
-      }
-      workspace = path.resolve(workspaceInput);
-      dataDirectory = path.resolve(dataDirectoryInput);
-      mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-      chmodSync(dataDirectory, 0o700);
-      await verifyRecoveryRepository();
-      await setSpec(recoverySpec({
-        github: false,
-        replica: true,
-        restoreDrill: false,
-        database: true,
-      }));
-      await connectProvider('cloudsql', providerCredentials('database', 'cloudsql'));
-      await connectProvider('cloudrun', providerCredentials('hosting', 'cloudrun'));
-      await connectProvider('github', managedWorkflowGitHubCredentials, repository);
-      return;
+      throw new Error('Cloud SQL resilience and restore-drill infrastructure are unavailable in the GCP engine profile. This historical fixture cannot run or count as live proof.');
     }
-
     loadBalancerHostname = process.env.HYPERVIBE_TEST_CLOUDFLARE_LOAD_BALANCER_HOSTNAME?.trim().toLowerCase() ?? '';
     if (!/^hv-conformance-[a-z0-9-]+\.[a-z0-9.-]+$/.test(loadBalancerHostname)) {
       throw new Error(
         'HYPERVIBE_TEST_CLOUDFLARE_LOAD_BALANCER_HOSTNAME must be an isolated subdomain beginning with hv-conformance-.'
       );
     }
-    const resumeWorkspace = process.env.HYPERVIBE_LIVE_REPOSITORY_WORKTREE?.trim();
-    const resumeDataDirectory = process.env.HYPERVIBE_LIVE_DATA_DIR?.trim();
-    if (Boolean(resumeWorkspace) !== Boolean(resumeDataDirectory)) {
-      throw new Error(
-        'Set both HYPERVIBE_LIVE_REPOSITORY_WORKTREE and HYPERVIBE_LIVE_DATA_DIR to resume preserved Cloudflare cleanup state, or omit both for a fresh run.'
-      );
+    const preparedWorkspace = process.env.HYPERVIBE_LIVE_REPOSITORY_WORKTREE?.trim();
+    const preparedDataDirectory = process.env.HYPERVIBE_LIVE_DATA_DIR?.trim();
+    if (!preparedWorkspace || !preparedDataDirectory || !path.isAbsolute(preparedWorkspace) || !path.isAbsolute(preparedDataDirectory)) {
+      throw new Error('Cloudflare conformance requires a prepared dedicated checkout and persistent state directory with two verified managed-release Railway origins.');
     }
-    if (resumeWorkspace && resumeDataDirectory) {
+    workspace = preparedWorkspace; dataDirectory = preparedDataDirectory;
+    const specPath = path.join(workspace, '.hypervibe/spec.json');
+    if (!existsSync(specPath)) throw new Error('The prepared origin repository has no committed Hypervibe specification.');
+    const prepared = projectSpecSchema.parse(JSON.parse(readFileSync(specPath, 'utf8')));
+    projectName = prepared.project;
+    preparedOriginSpec = prepared;
+    repository = process.env.HYPERVIBE_TEST_GITHUB_REPOSITORY?.trim() ?? '';
+    const databaseFile = path.join(dataDirectory, 'hypervibe.db');
+    if (!existsSync(databaseFile)) throw new Error('The prepared origin platform state is missing.');
+    const db = new Database(databaseFile, { readonly: true, fileMustExist: true });
+    try {
+      const project = db.prepare('SELECT id FROM projects WHERE name = ?').get(projectName) as { id: string } | undefined;
+      const environment = project && db.prepare('SELECT platform_bindings FROM environments WHERE project_id = ? AND name = ?')
+        .get(project.id, LOAD_BALANCER_ENVIRONMENT) as { platform_bindings: string } | undefined;
+      const binding = environment && JSON.parse(environment.platform_bindings);
+      const marker = process.env.HYPERVIBE_LIVE_FIXTURE_MARKER;
+      if (!marker || !project || !binding?.projectId || !binding.environmentId) throw new Error('The exact dedicated origin platform marker and native bindings are required.');
+      readFixtureTarget(marker, { profile: 'cloudflare-load-balancer', project: projectName, internalProjectId: project.id,
+        nativeProjectId: binding.projectId, nativeEnvironmentId: binding.environmentId, repository });
+    } finally { db.close(); }
+    if (existsSync(cloudflareJournalPath())) {
       resumedWorkspace = true;
-      if (!path.isAbsolute(resumeWorkspace) || !path.isAbsolute(resumeDataDirectory)) {
-        throw new Error('Resumed Cloudflare workspace and data-directory paths must be absolute.');
-      }
-      workspace = path.resolve(resumeWorkspace);
-      dataDirectory = path.resolve(resumeDataDirectory);
-      const specPath = path.join(workspace, '.hypervibe/spec.json');
-      if (!existsSync(specPath)) {
-        throw new Error('The resumed Cloudflare workspace has no .hypervibe/spec.json cleanup authority.');
-      }
-      projectName = projectSpecSchema.parse(
-        JSON.parse(readFileSync(specPath, 'utf8'))
-      ).project;
-      const bindingsPath = path.join(workspace, '.hypervibe/bindings.json');
-      if (existsSync(bindingsPath)) {
-        loadBalancerPhaseStarted = Boolean(safeLoadBalancerBinding(
-          JSON.parse(readFileSync(bindingsPath, 'utf8')),
-          LOAD_BALANCER_ENVIRONMENT
-        ));
-      }
-    } else {
-      temporaryWorkspace = true;
-      workspace = mkdtempSync(path.join(tmpdir(), 'hypervibe-infrastructure-live-'));
-      dataDirectory = path.join(workspace, '.hypervibe-data');
-      projectName = `hv-conformance-cloudflare-${Date.now().toString(36)}`;
-      cpSync(path.join(import.meta.dirname, 'fixture'), workspace, { recursive: true });
-      await runProcess('git', ['init', '--initial-branch=main'], workspace);
+      cloudflareJournal = readCloudflareCleanupJournal(cloudflareJournalPath(), newCloudflareCleanupJournal(projectName, LOAD_BALANCER_ENVIRONMENT, loadBalancerHostname));
+      loadBalancerPhaseStarted = cloudflareJournal.resources.length > 0 || cloudflareJournal.pendingCreates.length > 0;
     }
     mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
     chmodSync(dataDirectory, 0o700);
+    cloudflareJournal ??= newCloudflareCleanupJournal(projectName, LOAD_BALANCER_ENVIRONMENT, loadBalancerHostname);
+    saveCloudflareInventory(cloudflareJournal);
     await connectProvider('railway', providerCredentials('hosting', 'railway'));
     await connectProvider('cloudflare', cloudflareCredentials, loadBalancerHostname);
   }, 2 * 60_000);
 
   afterAll(async () => {
     if (!resourcesMayExist) {
-      if (selection === 'cloudflare-load-balancer' && temporaryWorkspace && workspace) {
+      if (selection === 'cloudflare-load-balancer' && temporaryWorkspace && workspace && !loadBalancerContractFailed) {
         rmSync(workspace, { recursive: true, force: true });
       }
       return;
@@ -979,13 +1023,24 @@ liveDescribe('live recovery and load-balancer infrastructure contract', () => {
         + `${error instanceof Error ? error.message : String(error)} Diagnostics: ${diagnostics}`
       );
     }
-    if (selection === 'cloudflare-load-balancer' && temporaryWorkspace && workspace) {
+    if (selection === 'cloudflare-load-balancer' && loadBalancerContractFailed) {
+      process.stdout.write(`\nCloudflare fixture failure evidence preserved: workspace=${workspace} dataDirectory=${dataDirectory} journal=${cloudflareJournalPath()}\n`);
+    } else if (selection === 'cloudflare-load-balancer' && temporaryWorkspace && workspace) {
       rmSync(workspace, { recursive: true, force: true });
     }
   }, 60 * 60_000);
 
-  it('creates, verifies, updates, noops, and cleans up through reviewed desired state', async () => {
+  it('checks the declared infrastructure lifecycle or resumes saved exact cleanup', async () => {
     if (selection === 'cloudsql-recovery') await runRecoveryContract();
-    else await runLoadBalancerContract();
+    else {
+      const stop = () => {
+        fixtureInterrupted = true;
+        if (cloudflareJournal) { cloudflareJournal.phase = 'cleanup-required'; saveCloudflareInventory(cloudflareJournal); }
+      };
+      process.once('SIGINT', stop); process.once('SIGTERM', stop);
+      try { await runLoadBalancerContract(); }
+      catch (error) { loadBalancerContractFailed = true; throw error; }
+      finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
+    }
   }, 90 * 60_000);
 });

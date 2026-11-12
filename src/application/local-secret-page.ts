@@ -1,7 +1,7 @@
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { CommandContext } from './context.js';
-import { type EngineBinding, engineSecretId, isEngineManaged, resolveEngineContext, writeSecretVersion } from './infrastructure-engine.js';
+import { type EngineBinding, engineSecretId, isEngineManaged, observeSecret, resolveEngineContext, writeSecretVersion } from './infrastructure-engine.js';
 import { contextRows, type ConnectContext } from './local-connect-page.js';
 import { escapeHtml, servePastePage, type LocalPasteResult } from './local-paste-page.js';
 import { requestingAgent } from './requesting-agent.js';
@@ -127,6 +127,10 @@ export async function collectSecretInBrowser(ctx: CommandContext, params: {
   const declared = Object.entries(params.spec.secrets ?? {}).some(([name, secret]) => name === params.key && secret.environments.includes(params.environmentName));
   if (!imported.includes(params.key) && !declared) {
     return { status: 'blocked', message: `${params.key} is not a runtime setting of ${params.environmentName}. Declare it with hv_spec first.` };
+  }
+  const container = await observeSecret(await engine.adapter.engineAccessToken(), engine.gcpProjectId, engineSecretId(params.environmentName, params.key));
+  if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== engine.environment.id.toLowerCase()) {
+    return { status: 'blocked', message: container.state === 'unknown' ? container.reason : `The owned container for ${params.key} is not ready. Run hv_plan and apply the reviewed OpenTofu container action before collecting its value.` };
   }
   const context: ConnectContext = { ...params.context, agent: params.context?.agent ?? requestingAgent(), project: params.context?.project ?? params.project.name,
     environment: params.context?.environment ?? params.environmentName };

@@ -1609,8 +1609,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
-    /** Opt-in: OpenTofu plans and applies this environment's infrastructure (Cloud Run pilot). */
-    engine: z.literal('opentofu').optional(),
+    /** Compatibility field for saved specs; Cloud Run always uses OpenTofu. */
+    engine: z.literal('opentofu').optional().describe('Optional compatibility field. Cloud Run always uses OpenTofu; other hosting providers cannot select it.'),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

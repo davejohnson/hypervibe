@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   EngineAuthentication,
   EngineConfiguration,
@@ -108,6 +109,9 @@ export interface GcpCloudRunEngineInput {
    * instead of being reported as an unmanaged change.
    */
   retiredServices?: string[];
+  /** Containers only. Secret values and versions never enter engine configuration or state. */
+  secrets?: Array<{ secretId: string; labels: Record<string, string> }>;
+  retiredSecrets?: string[];
   /** Cloud SQL Postgres owned by the engine. Users and passwords stay with Hypervibe. */
   database?: GcpCloudSqlInput;
   /** A database this environment previously created that is no longer desired. */
@@ -125,7 +129,7 @@ export interface GcpCloudRunEngineInput {
    * Existing resources Hypervibe itself attempted to create (exact recorded
    * identity and ownership label) that engine state does not track yet.
    */
-  adopt?: { databaseInstance?: string; buckets?: string[] };
+  adopt?: { databaseInstance?: string; buckets?: string[]; secrets?: string[] };
   /** Environment id stamped on owned resources so adoption can prove ownership. */
   environmentId?: string;
   /** Memorystore Redis owned by the engine; Hypervibe publishes REDIS_URL. */
@@ -139,6 +143,10 @@ export interface GcpCloudRunEngineInput {
   /** One-off job that runs the release (migration) command before services switch images. */
   releaseJob?: GcpCloudRunServiceInput;
   retiredReleaseJob?: boolean;
+}
+
+export function secretEngineKey(secretId: string): string {
+  return `secret_${createHash('sha256').update(secretId).digest('hex').slice(0, 24)}`;
 }
 
 export const RELEASE_JOB_KEY = 'release_command';
@@ -275,7 +283,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
       if (!/^[A-Za-z0-9_-]{1,255}$/.test(ref.secretId) || !/^(latest|[1-9][0-9]*)$/.test(ref.version)) {
         throw new Error(`Secret reference for ${name} is invalid.`);
       }
-      return { name, value_source: [{ secret_key_ref: [{ secret: ref.secretId, version: ref.version }] }] };
+      return { name, value_source: [{ secret_key_ref: [{ secret: (input.secrets ?? []).some((entry) => entry.secretId === ref.secretId) ? `\${google_secret_manager_secret.${secretEngineKey(ref.secretId)}.secret_id}` : ref.secretId, version: ref.version }] }] };
     }),
   ];
   const isWorker = service.workload === 'worker';
@@ -690,7 +698,24 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     const key = engineKey(service.logicalName);
     resources[`google_cloud_run_v2_service.${key}`] ??= { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true };
   }
+  const secretContainers: Record<string, unknown> = {};
+  for (const secret of input.secrets ?? []) {
+    if (!/^[A-Za-z0-9_-]{1,255}$/.test(secret.secretId)) throw new Error('Secret container id is invalid.');
+    if (secret.labels['managed-by'] !== 'hypervibe' || !input.environmentId || secret.labels['hv-environment'] !== input.environmentId.toLowerCase()) throw new Error('Secret container ownership does not match the environment.');
+    const key = secretEngineKey(secret.secretId);
+    if (secretContainers[key]) throw new Error('Duplicate secret container.');
+    secretContainers[key] = { project: input.projectId, secret_id: secret.secretId, labels: secret.labels,
+      replication: [{ auto: [{}] }], deletion_protection: false };
+    resources[`google_secret_manager_secret.${key}`] = { actionId: `secret-container:${secret.secretId}`, kind: 'secret', name: secret.secretId, dataBearing: true };
+  }
+  for (const secretId of input.retiredSecrets ?? []) {
+    resources[`google_secret_manager_secret.${secretEngineKey(secretId)}`] ??= { actionId: `secret-container:${secretId}`, kind: 'secret', name: secretId, dataBearing: true };
+  }
   const imports: Record<string, string> = {};
+  for (const secretId of input.adopt?.secrets ?? []) {
+    if (!(input.secrets ?? []).some((entry) => entry.secretId === secretId)) throw new Error('Only a desired secret container can be adopted.');
+    imports[`google_secret_manager_secret.${secretEngineKey(secretId)}`] = `projects/${input.projectId}/secrets/${secretId}`;
+  }
   if (input.adopt?.databaseInstance) {
     if (input.adopt.databaseInstance !== input.database?.instanceName) throw new Error('Only the desired database instance can be adopted.');
     imports['google_sql_database_instance.db'] = `projects/${input.projectId}/instances/${input.adopt.databaseInstance}`;
@@ -704,6 +729,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     ...(Object.keys(imports).length ? { imports } : {}),
     files: {
       ...(Object.keys(imports).length ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id })) } } : {}),
+      'secrets.tf.json': Object.keys(secretContainers).length ? { resource: { google_secret_manager_secret: secretContainers } } : {},
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
       // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
       'jobs.tf.json': Object.keys(jobs).length || Object.keys(schedules).length ? {

@@ -1,0 +1,16 @@
+{
+  "provider": "registry.opentofu.org/hashicorp/google-beta",
+  "version": "8.9.0",
+  "engineVersion": "1.13.9",
+  "platforms": [
+    "darwin_arm64",
+    "darwin_amd64",
+    "linux_amd64",
+    "linux_arm64"
+  ],
+  "command": "tofu providers lock -platform=darwin_arm64 -platform=darwin_amd64 -platform=linux_amd64 -platform=linux_arm64",
+  "registryMetadata": "https://registry.opentofu.org/v1/providers/hashicorp/google-beta/8.9.0/download/darwin/arm64",
+  "releaseChecksums": "https://github.com/opentofu/terraform-provider-google-beta/releases/download/v8.9.0/terraform-provider-google-beta_8.9.0_SHA256SUMS",
+  "verifiedSigningKeyId": "0C0AF313E5FD9F80",
+  "note": "Generated through provider lock signature verification. Both zip archive (zh) and extracted package (h1) hashes are retained; execution continues to use readonly lock files."
+}

@@ -3,8 +3,9 @@
 Hypervibe helps vibe coders deploy and operate apps on Google Cloud, AWS and Azure.
 It owns the DevOps journey; OpenTofu is the chosen infrastructure lifecycle engine.
 This document defines the target architecture and the boundaries that implementation
-must preserve. **The OpenTofu engine is not yet integrated in this checkout.**
-An architectural decision is not evidence of an implemented or supported cloud path.
+must preserve. GCP selects the managed OpenTofu engine automatically. No legacy
+GCP infrastructure writer or opt-in engine choice is supported. Implementation
+and local checks alone do not establish a verified live cloud journey.
 
 Detailed contracts for existing Railway apps, integrations and operations are in
 [retained operational contracts](docs/development/operational-contracts.md). That
@@ -60,13 +61,17 @@ expose narrow operational capabilities where the engine is not the right owner.
 | --- | --- |
 | Desired app, environment policy, exact approval and result reporting | Hypervibe application layer |
 | New cloud resource lifecycle and native resource state | OpenTofu with pinned provider plugins |
-| Account discovery, sign-in, authorized bootstrap and credential refresh | Hypervibe connection capabilities |
+| Account discovery, sign-in and credential refresh | Hypervibe connection capabilities |
+| GCP project setup, billing attachment, APIs, identities, IAM and build resources | Project-shared OpenTofu state with exact setup approval |
 | Source build, immutable release, rollout, logs and app checks | Hypervibe deployment and operations capabilities |
 | SQL tasks, backup/restore execution and third-party APIs | Explicit Hypervibe operational/integration capabilities |
 | Existing Railway lifecycle | Retained Railway capability until explicitly replaced |
 
-Bootstrap may use cloud APIs to establish authorized account access or prerequisites;
-it must not become a second CRUD engine or hide billable writes from the plan.
+GCP bootstrap discovers access through read-only APIs and delegates infrastructure
+prerequisites to saved OpenTofu plans. Billing selection and infrastructure/access
+approvals are distinct. Builds and operational helpers may not create missing
+repositories, buckets, job runners or permissions. Missing prerequisites block
+until the reviewed engine workflow creates them.
 Engine and API operations share exact scope, redaction, approvals and result stages.
 Generic orchestration routes by capability, not provider-name branches. New plugins
 must declare supported work and fail explicitly for unsupported work.

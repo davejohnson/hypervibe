@@ -1,3 +1,6 @@
+import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
+import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
@@ -48,15 +51,14 @@ import {
 const DOMAIN_OPERATIONS = new Set([DOMAIN_VERIFY_OPERATION, DOMAIN_DNS_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_DNS_REMOVE_OPERATION]);
 
 /**
- * OpenTofu-managed GCP environments (pilot).
+ * OpenTofu-managed GCP environments.
  *
- * Opt-in per environment with `hosting.engine: "opentofu"`. OpenTofu owns the
- * Cloud Run services; Hypervibe owns Secret Manager secrets and their values,
+ * Cloud Run environments always use OpenTofu. OpenTofu owns the
+ * Cloud Run services and Secret Manager containers; Hypervibe owns secret values,
  * image builds and releases, health and bindings. The legacy Cloud Run service
  * writer never runs for these environments.
  */
 export const ENGINE_SECRET_OPERATION = 'gcpSecretManagerEnsure';
-export const ENGINE_SECRET_DELETE_OPERATION = 'gcpSecretManagerDelete';
 export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export const ENGINE_RELEASE_OPERATION = 'engineImageRelease';
 export const ENGINE_STORAGE_ACCESS_BLOCKER = 'Storage buckets need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=true, or run hv_connections provider="cloudrun" action="prepare" gcsAccess="lifecycle" (preview, then confirm).';
@@ -74,9 +76,6 @@ const ENGINE_DATABASE_NAME = 'app';
 export const ENGINE_HOLDING_IMAGE = 'us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7';
 const DEFAULT_REGION = 'us-central1';
 
-export function isEngineManaged(environmentSpec: EnvironmentSpec | undefined): boolean {
-  return environmentSpec?.hosting.engine === 'opentofu';
-}
 
 // Traffic handoffs (domainTarget) to an engine-managed environment verify its exact live web service.
 registerEngineWebServiceResolver(async ({ project, environment, environmentName, service }) => {
@@ -94,78 +93,6 @@ registerEngineWebServiceResolver(async ({ project, environment, environmentName,
   }
   return { provider: 'cloudrun', providerProjectId: context.gcpProjectId, providerEnvironmentId: context.region, serviceId: binding.serviceId, resourceUid: value.uid, url: value.uri };
 });
-
-/** Desired state the pilot cannot yet manage. Anything listed blocks planning instead of being ignored. */
-export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
-  const environment = spec.environments[environmentName];
-  if (!environment) return [`Spec has no environment "${environmentName}".`];
-  const problems: string[] = [];
-  if (environment.hosting.provider !== 'cloudrun') problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
-  const unsupported: Array<[string, unknown]> = [
-    ['loadBalancer', environment.loadBalancer],
-    ['domainTarget', environment.domainTarget], ['domainRecreateRevision', environment.domainRecreateRevision],
-    ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
-    ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
-    ['email', environment.email?.enabled ? environment.email : undefined],
-    ['deploy.trigger="native"', environment.deploy?.trigger === 'native' ? environment.deploy : undefined],
-    ['deploy.promoteFrom', environment.deploy?.promoteFrom], ['deploy.promotionTests', environment.deploy?.promotionTests],
-  ];
-  for (const [field, value] of unsupported) {
-    if (value !== undefined && value !== null && !(typeof value === 'object' && Object.keys(value as object).length === 0)) {
-      problems.push(`${field} is not yet managed by the OpenTofu engine; remove it from this environment or use the standard lifecycle.`);
-    }
-  }
-  if (environment.migrations?.mode === 'tool') problems.push('migrations.mode="tool" is not yet supported by the OpenTofu engine; use "releaseCommand".');
-  if (environment.migrations?.mode === 'releaseCommand' && !environment.migrations.command?.trim()) problems.push('migrations.mode="releaseCommand" needs a command.');
-  if (environment.domain) {
-    if (environment.domainProxy) problems.push('domainProxy must be off: Google issues the certificate and needs DNS-only records.');
-    if (domainServiceFor(environment) === undefined) problems.push('A custom domain needs exactly one public web service to point at.');
-  }
-  for (const [name, storage] of Object.entries(environment.storage ?? {})) {
-    if (storage.provider !== 'gcs') problems.push(`Storage ${name}: the OpenTofu engine manages buckets only with provider "gcs".`);
-    if (storage.purpose === 'backup') problems.push(`Storage ${name}: backup destinations are not yet managed by the OpenTofu engine.`);
-    for (const service of storage.injectInto) {
-      if (!environment.services[service]) problems.push(`Storage ${name}: injectInto names undeclared service ${service}.`);
-    }
-  }
-  if (environment.cache && environment.cache.provider !== 'memorystore') {
-    problems.push('The OpenTofu engine manages caches only with provider "memorystore".');
-  }
-  const database = environment.database;
-  if (database) {
-    if (database.provider !== 'cloudsql') problems.push('The OpenTofu engine manages databases only with provider "cloudsql".');
-    for (const field of ['seedCommand', 'resilience', 'credentialAliases', 'freshInitialization'] as const) {
-      if (database[field] !== undefined) problems.push(`database.${field} is not yet supported by the OpenTofu engine.`);
-    }
-  }
-  for (const [name, service] of Object.entries(environment.services)) {
-    if (service.workloadKind === 'cron' && (!service.cronSchedule || !service.startCommand)) {
-      problems.push(`Scheduled job ${name} needs cronSchedule and startCommand (the command each run executes).`);
-    }
-    if (service.workloadKind !== 'web' && service.cpu && Number(service.cpu) < 1) {
-      // Worker pools and jobs keep CPU always allocated, which Cloud Run allows only from 1 vCPU.
-      problems.push(`Service ${name}: background workers and scheduled jobs on Cloud Run need at least 1 vCPU (cpu "${service.cpu}" is rejected by Google).`);
-    }
-    if (service.onDemand && !environment.database) {
-      problems.push(`Service ${name}: an on-demand worker counts pending work in the app database, so the environment needs a database.`);
-    }
-    if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
-    if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
-  }
-  for (const [key, secret] of Object.entries(spec.secrets)) {
-    if (secret.ownership !== 'hypervibe' && secret.environments.includes(environmentName)) {
-      problems.push(`Secret ${key}: externally supplied secrets are not yet supported by the OpenTofu engine; only Hypervibe-generated secrets are.`);
-    }
-  }
-  return problems;
-}
-
-function domainServiceFor(environment: EnvironmentSpec): string | undefined {
-  const candidates = Object.entries(environment.services)
-    .filter(([, service]) => service.workloadKind !== 'worker' && service.workloadKind !== 'cron' && service.public !== false)
-    .map(([name]) => name);
-  return candidates.length === 1 ? candidates[0] : undefined;
-}
 
 export function engineSecretKeys(spec: ProjectSpec, environmentName: string): string[] {
   return Object.entries(spec.secrets)
@@ -201,6 +128,12 @@ export interface EngineBinding {
   rotation?: { startedAt: string; keys: string[]; databaseGeneration?: number };
   /** Runtime secrets copied from a migration source into Secret Manager. */
   importedSecrets?: string[];
+  /** Import names awaiting approved container creation and direct value transfer. */
+  pendingImportedSecrets?: string[];
+  /** Container identities tracked in the environment engine state. */
+  secrets?: string[];
+  /** Non-secret credential metadata bound to an acknowledged exact Secret Manager version. */
+  secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
   /** Keyless CI release trust granted for this exact repository. */
   ci?: { repository: string; provider: string; releaseIdentity: string };
   /** Evidence of a verified migration copy; re-runs release without copying again. */
@@ -269,7 +202,7 @@ export async function resolveEngineContext(
   }
   const services = (environment.platformBindings as { services?: Record<string, unknown> }).services ?? {};
   if (Object.keys(services).length > 0 && bindings.engine?.kind !== 'opentofu') {
-    return { blocked: `Environment ${environmentName} has services managed by the standard lifecycle. Adopting them into the OpenTofu engine needs an explicit import, which is not available yet.` };
+    return { blocked: `Environment ${environmentName} has old GCP service bindings without OpenTofu ownership. Hypervibe cannot safely change those resources; explicit adoption is unavailable.` };
   }
   let auth: EngineAuthentication;
   try {
@@ -309,6 +242,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.importedSecrets ?? []), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
     ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
   const secretEnv = Object.fromEntries(secretKeys
+    .filter((key) => context.secretVersions?.[key])
     .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: context.secretVersions?.[key] ?? 'latest' }]));
   // S3-compatible keys go only to the services that use that bucket.
   const s3SecretEnvFor = (service: string) => Object.fromEntries(Object.entries(environmentSpec.storage ?? {})
@@ -363,20 +297,29 @@ export async function secretManagerFetch(token: string, url: string, init: Reque
   return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
 }
 
-interface ObservedSecret { labels: Record<string, string>; hasEnabledVersion: boolean; latestVersion?: string }
+interface ObservedSecret { resourceName?: string; labels: Record<string, string>; containerLabels?: Record<string, string>; hasEnabledVersion: boolean; latestVersion?: string }
 
 export async function observeSecret(token: string, gcpProjectId: string, secretId: string): Promise<Observed<ObservedSecret>> {
   const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}`;
   const secret = await secretManagerFetch(token, base);
   if (secret.status === 404) return { state: 'absent' };
   if (!secret.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${secret.status} for ${secretId}.` };
-  const body = await secret.json() as { labels?: Record<string, string> };
+  const body = await secret.json() as { name?: string; labels?: Record<string, string> };
+  const resourceName = body.name ?? `projects/${gcpProjectId}/secrets/${secretId}`;
   const version = await secretManagerFetch(token, `${base}/versions/latest`);
-  if (version.status === 404) return { state: 'present', value: { labels: body.labels ?? {}, hasEnabledVersion: false } };
+  if (version.status === 404) return { state: 'present', value: { resourceName, labels: body.labels ?? {}, hasEnabledVersion: false } };
   if (!version.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${version.status} for ${secretId} versions.` };
   const versionBody = await version.json() as { state?: string; name?: string };
+  if (versionBody.name && !versionBody.name.startsWith(`${resourceName}/versions/`)) return { state: 'unknown', reason: `Secret Manager returned a version for a different secret than ${secretId}.` };
   const latestVersion = versionBody.name?.split('/').pop();
-  return { state: 'present', value: { labels: body.labels ?? {}, hasEnabledVersion: versionBody.state === 'ENABLED',
+  const containerLabels = body.labels ?? {};
+  const environment = containerLabels['hv-environment'] ? new EnvironmentRepository().findById(containerLabels['hv-environment']) : undefined;
+  const metadata = (environment?.platformBindings as { engine?: EngineBinding } | undefined)?.engine?.secretMetadata?.[secretId];
+  if (metadata && (metadata.gcpProjectId !== gcpProjectId || metadata.version !== latestVersion)) {
+    return { state: 'unknown', reason: `Secret ${secretId} has an unrecognized version; its credential metadata cannot be reused. Inspect the interrupted value write before retrying.` };
+  }
+  return { state: 'present', value: { resourceName, labels: metadata ? { ...metadata.labels, 'managed-by': containerLabels['managed-by']!, 'hv-environment': containerLabels['hv-environment']! } : containerLabels, containerLabels,
+    hasEnabledVersion: versionBody.state === 'ENABLED',
     ...(latestVersion && /^[1-9][0-9]*$/.test(latestVersion) ? { latestVersion } : {}) } };
 }
 
@@ -407,12 +350,7 @@ async function ensureSecret(token: string, action: PlanAction): Promise<ActionRe
     }
     if (observed.value.hasEnabledVersion) return { success: true, message: `Secret ${secretId} already has a value; it was preserved.` };
   } else {
-    const created = await secretManagerFetch(token, `${base}?secretId=${secretId}`, {
-      method: 'POST', body: JSON.stringify({ replication: { automatic: {} }, labels }),
-    });
-    if (!created.ok && created.status !== 409) {
-      return { success: false, message: `Creating secret ${secretId} failed (HTTP ${created.status}).`, error: `HTTP ${created.status}` };
-    }
+    return { success: false, status: 'blocked', message: `Secret container ${secretId} is absent. Run hv_plan and apply its OpenTofu container action first.` };
   }
   // Hypervibe generates and writes the value; it never enters plans, engine state or output.
   const value = crypto.randomBytes(32).toString('base64url');
@@ -430,22 +368,6 @@ async function ensureSecret(token: string, action: PlanAction): Promise<ActionRe
     return { success: false, status: 'pending', message: `Secret ${secretId} was written but could not be verified yet.` };
   }
   return { success: true, message: `Secret ${secretId} was created with a Hypervibe-generated value.` };
-}
-
-async function deleteSecret(token: string, action: PlanAction): Promise<ActionResult> {
-  const { gcpProjectId, secretId, labels } = action.metadata as { gcpProjectId: string; secretId: string; labels: Record<string, string> };
-  const observed = await observeSecret(token, gcpProjectId, secretId);
-  if (observed.state === 'absent') return { success: true, message: `Secret ${secretId} is already absent.` };
-  if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
-  if (observed.value.labels['hv-environment'] !== labels['hv-environment'] || observed.value.labels['managed-by'] !== 'hypervibe') {
-    return { success: false, status: 'blocked', message: `Secret ${secretId} is not owned by this Hypervibe environment.` };
-  }
-  const response = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}`, { method: 'DELETE' });
-  if (!response.ok && response.status !== 404) return { success: false, message: `Deleting secret ${secretId} failed (HTTP ${response.status}).`, error: `HTTP ${response.status}` };
-  const after = await observeSecret(token, gcpProjectId, secretId);
-  return after.state === 'absent'
-    ? { success: true, message: `Secret ${secretId} was deleted.` }
-    : { success: false, status: 'pending', message: `Deletion of ${secretId} could not be confirmed yet.` };
 }
 
 // ---------------------------------------------------------------- Database login (Hypervibe-owned)
@@ -470,30 +392,47 @@ export async function waitForSqlOperation(token: string, gcpProjectId: string, o
   return 'unknown';
 }
 
-/** Creates or updates a Hypervibe-labelled secret and adds one version. The value is never returned. */
+/** Records only non-secret operational metadata; the engine owns container metadata. */
+export function recordSecretVersionMetadata(gcpProjectId: string, secretId: string, version: string, labels: Record<string, string>): boolean {
+  const repo = new EnvironmentRepository();
+  const environment = repo.findById(labels['hv-environment'] ?? '');
+  if (!environment || !/^[1-9][0-9]*$/.test(version)) return false;
+  const engine = (environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
+  repo.updatePlatformBindings(environment.id, { engine: { ...engine,
+    secretMetadata: { ...engine.secretMetadata, [secretId]: { gcpProjectId, version, labels } } } });
+  return true;
+}
+
+/** Writes a version only after the approved engine has created the owned container. */
 export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
-  const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets`;
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
-  if (observed.state === 'absent') {
-    const created = await secretManagerFetch(token, `${base}?secretId=${secretId}`, { method: 'POST', body: JSON.stringify({ replication: { automatic: {} }, labels }) });
-    if (!created.ok && created.status !== 409) return { success: false, message: `Creating secret ${secretId} failed (HTTP ${created.status}).`, error: `HTTP ${created.status}` };
-  } else {
-    if (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labels['hv-environment']) {
-      return { success: false, status: 'blocked', message: `Secret ${secretId} is not owned by this Hypervibe environment.` };
-    }
-    const patched = await secretManagerFetch(token, `${base}/${secretId}?updateMask=labels`, { method: 'PATCH', body: JSON.stringify({ labels }) });
-    if (!patched.ok) return { success: false, message: `Updating secret ${secretId} failed (HTTP ${patched.status}).`, error: `HTTP ${patched.status}` };
+  if (observed.state === 'absent') return { success: false, status: 'blocked', message: `Secret container ${secretId} is absent. Run hv_plan and apply its OpenTofu container action first.` };
+  if (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labels['hv-environment']) {
+    return { success: false, status: 'blocked', message: `Secret ${secretId} is not owned by this Hypervibe environment.` };
   }
+  const environment = new EnvironmentRepository().findById(labels['hv-environment'] ?? '');
+  if (!environment) return { success: false, status: 'blocked', message: 'The secret environment cannot be verified locally.' };
+  // A lost addVersion acknowledgement must not let an old generation describe a new value.
+  const currentBinding = (environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
+  new EnvironmentRepository().updatePlatformBindings(environment.id, { engine: { ...currentBinding, secretMetadata: {
+    ...currentBinding.secretMetadata, [secretId]: { gcpProjectId, version: observed.value.latestVersion ?? 'pending', labels: observed.value.labels },
+  } } });
   let added: Response;
   try {
-    added = await secretManagerFetch(token, `${base}/${secretId}:addVersion`, {
+    added = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}:addVersion`, {
       method: 'POST', body: JSON.stringify({ payload: { data: Buffer.from(value).toString('base64') } }),
     });
   } catch {
     return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
   }
   if (!added.ok) return { success: false, message: `Writing ${secretId} failed (HTTP ${added.status}).`, error: `HTTP ${added.status}` };
+  const result = await added.json() as { name?: string };
+  const prefix = `${observed.value.resourceName}/versions/`;
+  const version = result.name?.startsWith(prefix) ? result.name.slice(prefix.length) : undefined;
+  if (!version || !recordSecretVersionMetadata(gcpProjectId, secretId, version, labels)) {
+    return { success: false, status: 'pending', message: `The new version of ${secretId} could not be recorded with its credential metadata. Inspect the version before retrying.` };
+  }
   return undefined;
 }
 
@@ -523,6 +462,12 @@ async function ensureStorageS3Key(token: string, action: PlanAction): Promise<Ac
   const { gcpProjectId, storageName, runtimeServiceAccountEmail, secretIds, labels } = action.metadata as {
     gcpProjectId: string; storageName: string; runtimeServiceAccountEmail: string; secretIds: Record<string, string>; labels: Record<string, string>;
   };
+  for (const secretId of Object.values(secretIds)) {
+    const container = await observeSecret(token, gcpProjectId, secretId);
+    if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== labels['hv-environment']) {
+      return { success: false, status: 'blocked', message: 'Create the owned S3 credential containers with hv_plan/hv_apply before generating an access key.' };
+    }
+  }
   let created: Response;
   try {
     created = await fetch(`https://storage.googleapis.com/storage/v1/projects/${gcpProjectId}/hmacKeys?serviceAccountEmail=${encodeURIComponent(runtimeServiceAccountEmail)}`, {
@@ -696,7 +641,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
 }): Promise<InfrastructurePlanResult | { blocked: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
-  if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} is not managed by the OpenTofu engine (hosting.engine="opentofu").`] };
+  if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} does not use Cloud Run, the provider managed by OpenTofu.`] };
   const problems = engineEnvironmentProblems(spec, environmentName);
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
@@ -771,6 +716,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   }
   // Secrets imported from a migration source must exist; Hypervibe never invents their values.
   const importedSecrets = engineBinding.importedSecrets ?? [];
+  const pendingImportedSecrets = engineBinding.pendingImportedSecrets ?? [];
   for (const key of importedSecrets) {
     const secretId = engineSecretId(environmentName, key);
     const observed = await observeSecret(token, context.gcpProjectId, secretId);
@@ -803,7 +749,27 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : []),
-    ...(cacheSpec ? [cacheSecretId] : []), ...s3SecretIds, ...importedSecrets.map((key) => engineSecretId(environmentName, key))]);
+    ...(cacheSpec ? [cacheSecretId] : []), ...s3SecretIds, ...[...importedSecrets, ...pendingImportedSecrets].map((key) => engineSecretId(environmentName, key))]);
+  // Legacy owned containers enter engine state in one reviewed import round before retirement.
+  const existingIds = existing.state === 'present' ? existing.value : [];
+  const untrackedRetired = existingIds.filter((id) => !desiredIds.has(id) && !engineBinding.secrets?.includes(id));
+  const retiredSecrets = (engineBinding.secrets ?? []).filter((id) => !desiredIds.has(id));
+  const containers: NonNullable<GcpCloudRunEngineInput['secrets']> = [];
+  const adoptSecrets: string[] = [];
+  for (const secretId of [...new Set([...desiredIds, ...untrackedRetired, ...retiredSecrets])].sort()) {
+    const observed = await observeSecret(token, context.gcpProjectId, secretId);
+    if (observed.state === 'unknown') return { blocked: [observed.reason] };
+    if (observed.state === 'present') {
+      const ownership = observed.value.containerLabels ?? observed.value.labels;
+      if (ownership['managed-by'] !== 'hypervibe' || ownership['hv-environment'] !== labels['hv-environment']) {
+        return { blocked: [`Secret Manager already has ${secretId}, but its ownership does not match this environment.`] };
+      }
+      if (desiredIds.has(secretId) || untrackedRetired.includes(secretId)) {
+        adoptSecrets.push(secretId);
+        containers.push({ secretId, labels: ownership });
+      }
+    } else if (desiredIds.has(secretId)) containers.push({ secretId, labels });
+  }
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
   // Custom domain: Hypervibe verifies ownership and writes DNS before OpenTofu maps it.
@@ -823,7 +789,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
   const boundServices = Object.keys((context.environment.platformBindings as { services?: Record<string, unknown> }).services ?? {});
   const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
-    ...(adopt ? { adopt } : {}),
+    adopt: { ...adopt, secrets: adoptSecrets },
+    secrets: containers, retiredSecrets,
     environmentId: context.environment.id,
     ...buildEngineInput(spec, environmentName, {
       ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
@@ -888,11 +855,10 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
 
-  const secretIds = secretActions.filter((a) => a.type !== 'noop').map((a) => a.id);
   const domainPrerequisites = domainActions.before.filter((a) => a.type !== 'noop').map((a) => a.id);
   const serviceActions = planned.actions.map((action) => {
     if (action.type !== 'create' && action.type !== 'update' && action.type !== 'replace') return action;
-    const extra = [...secretIds, ...(action.id.startsWith('domain:') ? domainPrerequisites : [])];
+    const extra = action.id.startsWith('domain:') ? domainPrerequisites : [];
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
   });
   const engineDomainAction = desiredDomain ? serviceActions.find((a) => a.id === `domain:${desiredDomain}`) : undefined;
@@ -900,25 +866,17 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     ? { ...action, dependsOn: [engineDomainAction.id] } : action);
   const domainRemovals = retiredDomains.map((domain) => planDomainDnsRemoval(domainContext, domain,
     serviceActions.filter((a) => a.id === `domain:${domain}` && a.type === 'destroy').map((a) => a.id)));
-  // Secrets are deleted only after every service that could read them is gone.
-  const existingIds = existing.state === 'present' ? existing.value : [];
-  const deletes: PlanAction[] = existingIds.filter((id) => !desiredIds.has(id)).map((secretId) => ({
-    id: `secret-delete:${secretId}`,
-    type: 'destroy',
-    resource: { kind: 'secret', name: secretId, provider: 'gcp' },
-    verified: true,
-    reason: `Secret ${secretId} is no longer declared for this environment and will be permanently deleted.`,
-    dataBearing: true,
-    requiresConfirm: true,
-    dependsOn: serviceActions.filter((a) => a.type === 'destroy').map((a) => a.id),
-    metadata: { operation: ENGINE_SECRET_DELETE_OPERATION, gcpProjectId: context.gcpProjectId, secretId, labels },
-  }));
+  const secretDependencies = (ids: string[]) => serviceActions.filter((action) => action.type !== 'noop' && ids.includes(action.id.replace(/^secret-container:/, '')) && action.id.startsWith('secret-container:')).map((action) => action.id);
+  for (const action of secretActions) {
+    const dependencies = secretDependencies([String(action.metadata?.secretId)]);
+    if (dependencies.length && action.type !== 'noop') action.dependsOn = dependencies;
+  }
   const databaseAction = serviceActions.find((action) => action.id === 'database:postgres');
   const credentialActions = databaseSpec
     ? await planDatabaseCredential({
       token, context, environmentName, instanceName, databaseSecretId, labels, observation: databaseCredential,
       desiredGeneration: databaseSpec.passwordGeneration ?? 1,
-      dependsOn: databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : [],
+      dependsOn: [...(databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : []), ...secretDependencies([databaseSecretId])],
       servicesUpdating: serviceActions.some((action) => action.id.startsWith('service:') && action.type !== 'noop'),
     })
     : [];
@@ -945,7 +903,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       id: `storage-s3-key:${storageName}`, type: 'create', verified: true,
       resource: { kind: 'secret', name: `${storageName} S3 access key`, provider: 'gcp' },
       reason: `Hypervibe will create an S3-compatible access key for the app's runtime identity and store it in Secret Manager, so code written for S3 can use the ${storageName} bucket unchanged.`,
-      ...(bucketAction && bucketAction.type !== 'noop' ? { dependsOn: [bucketAction.id] } : {}),
+      dependsOn: [...(bucketAction && bucketAction.type !== 'noop' ? [bucketAction.id] : []), ...secretDependencies(S3_COMPATIBLE_SECRET_KEYS.map((key) => engineSecretId(environmentName, `${storageName}_${key}`)))],
       metadata: { operation: ENGINE_STORAGE_S3_KEY_OPERATION, gcpProjectId: context.gcpProjectId, storageName,
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
         secretIds: Object.fromEntries(S3_COMPATIBLE_SECRET_KEYS.map((key) => [key, engineSecretId(environmentName, `${storageName}_${key}`)])),
@@ -956,12 +914,12 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     id: 'cache-credential:redis', type: 'create', verified: true,
     resource: { kind: 'secret', name: ENGINE_CACHE_URL_KEY, provider: 'gcp' },
     reason: `Hypervibe will store the Redis connection URL in Secret Manager (${cacheSecretId}) so services can use it.`,
-    ...(cacheAction && cacheAction.type !== 'noop' ? { dependsOn: [cacheAction.id] } : {}),
+    dependsOn: [...(cacheAction && cacheAction.type !== 'noop' ? [cacheAction.id] : []), ...secretDependencies([cacheSecretId])],
     metadata: { operation: ENGINE_CACHE_CREDENTIAL_OPERATION, gcpProjectId: context.gcpProjectId, region: context.region,
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
-  // Array order matters: prerequisites precede the engine segment so it runs only once they complete.
-  const actions = [...secretActions, ...domainActions.before, ...serviceActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...deletes, ...domainRemovals];
+  // The complete engine segment creates containers before operational value writes.
+  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...domainRemovals];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -1077,7 +1035,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
       const metadata = action.metadata as { gcpProjectId?: string } | undefined;
       if (metadata?.gcpProjectId !== context.gcpProjectId) return { success: false, status: 'blocked', message: 'Secret target changed; re-run hv_plan.' };
       if (operation === ENGINE_SECRET_OPERATION) return ensureSecret(token, action);
-      if (operation === ENGINE_SECRET_DELETE_OPERATION) return deleteSecret(token, action);
+      if (operation === 'gcpSecretManagerDelete') return { success: false, status: 'blocked', message: 'Secret containers are managed by OpenTofu. Run hv_plan again.' };
       if (typeof operation === 'string' && DOMAIN_OPERATIONS.has(operation)) {
         const result = await executeDomainAction({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, action);
         if (operation === DOMAIN_DNS_REMOVE_OPERATION && result.success) {
@@ -1121,6 +1079,13 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
           diagnostics: ['blocked' in current ? current.blocked : 'A service changed since this plan (for example, a release). Nothing was applied; re-run hv_plan so the new state is kept.'],
         };
       }
+      for (const member of members.filter((entry) => entry.id.startsWith('secret-container:'))) {
+        const observed = await observeSecret(token, context.gcpProjectId, member.resource.name);
+        const changed = observed.state === 'unknown'
+          || (observed.state === 'present' && (member.type === 'create' || observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labelValue(context.environment.id)))
+          || (observed.state === 'absent' && member.type !== 'create' && member.type !== 'destroy');
+        if (changed) return { outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])), diagnostics: [`Secret container ${member.resource.name} changed identity or ownership after planning. Run hv_plan again.`] };
+      }
       // Record the attempted database identity first, so an interrupted create is found, not duplicated.
       if (reviewed.cache?.instanceName && members.some((member) => member.id === 'cache:redis' && member.type !== 'destroy')) {
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
@@ -1133,6 +1098,16 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
         ctx.repos.environments.updatePlatformBindings(current.id, {
           engine: { ...engineBinding, kind: 'opentofu', database: { instanceName: reviewed.database.instanceName } },
         });
+      }
+      const secretMembers = members.filter((member) => member.id.startsWith('secret-container:') && member.type !== 'destroy');
+      if (secretMembers.length) {
+        const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        const binding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
+        const secretMetadata = { ...binding.secretMetadata };
+        // A provider-confirmed absent container has no surviving versions to describe.
+        for (const member of secretMembers) if (member.type === 'create') delete secretMetadata[member.resource.name];
+        ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...binding, secretMetadata,
+          secrets: [...new Set([...(binding.secrets ?? []), ...secretMembers.map((member) => member.resource.name)])].sort() } });
       }
       const outcome = await engine.apply({
         backend: gcpEngineBackend, auth: context.auth, state: context.state, planId: reviewed.planId,
@@ -1160,6 +1135,13 @@ async function recordServiceBindings(
   for (const member of members) {
     const addresses = engineSegmentOf(member)?.addresses ?? [];
     if (!addresses.every((address) => outcomes[address] === 'succeeded')) continue;
+    if (member.id.startsWith('secret-container:')) {
+      const remaining = (engine.secrets ?? []).filter((id) => id !== member.resource.name);
+      const secretMetadata = { ...engine.secretMetadata };
+      if (member.type === 'destroy') delete secretMetadata[member.resource.name];
+      engine = { ...engine, secretMetadata, secrets: member.type === 'destroy' ? remaining : [...remaining, member.resource.name].sort() };
+      continue;
+    }
     if (member.id.startsWith('queue:')) {
       const remaining = (engine.queues ?? []).filter((entry) => entry !== member.resource.name);
       engine = { ...engine, queues: member.type === 'destroy' ? remaining : [...remaining, member.resource.name].sort() };

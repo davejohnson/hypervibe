@@ -56,16 +56,15 @@ replace them with remembered permission tables or dashboard procedures.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
 
-An environment with `hosting.engine: "opentofu"` (experimental GCP path; use it
-only when the spec already has it or the user asks) is driven end to end by
-`hv_launch`: it connects GCP, creates or updates the Cloud Run services, Cloud
+Google Cloud uses OpenTofu as its only infrastructure engine. Select
+`hosting.provider: "cloudrun"`; Hypervibe chooses the engine automatically. Do
+not ask the user to choose an engine or offer a legacy GCP path. `hv_launch` connects GCP, creates or updates the Cloud Run services, Cloud
 SQL database, storage buckets and custom domain in reviewed rounds, releases
 the committed local code and verifies it. Ask the user only at its stop points:
-`needs_billing_choice` (show its `plannedSteps`, including any resource access
-listed there; choosing the account approves them), `needs_access` (an existing
-project needs one more permission: explain it, then pass its `accessId` in
-`approveAccess`) and `needs_confirmation` (show the changes and estimated
-monthly cost, then pass exactly `confirmActions`). Call it again after
+`needs_billing_choice` (ask which billing account should pay; the choice does
+not approve infrastructure or permissions), `needs_access` (show its saved OpenTofu setup plan and exact permissions,
+then pass its `accessId` in `approveAccess` after approval) and `needs_confirmation` (show the changes and estimated
+monthly cost, then pass its exact `planId` and `confirmActions`). Call it again after
 `pending`.
 
 Keep running costs low by default. A background worker that polls a database

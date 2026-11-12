@@ -25,8 +25,8 @@ Users should not need to learn its configuration language or operate its state.
 Hypervibe must automatically provision pinned, private engine dependencies;
 the target deployment journey requires no separate installation of OpenTofu,
 Terraform, cloud CLIs or Docker. The current npm installation requires Node.js
-and npm, and the new engine installation is not yet integrated. Keep that limit
-visible until the packaged journey is proven.
+and npm. GCP selects the managed engine automatically; do not offer an engine
+choice. Keep installation and live-verification limits explicit.
 
 Focus new cloud work on GCP, AWS and Azure. Preserve Railway for existing apps.
 The unused GCP prototype does not justify a compatibility or import-migration

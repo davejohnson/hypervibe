@@ -13,47 +13,9 @@ import path from 'path';
  * hv_deploy, so a release and an infrastructure apply can never overwrite
  * each other.
  */
-export const CI_RELEASE_ACCOUNT_ID = 'hypervibe-release';
-export const CI_POOL_ID = 'hypervibe-github';
-export const CI_PROVIDER_ID = 'github';
-export const CI_RELEASE_PROJECT_ROLES = ['roles/run.developer', 'roles/artifactregistry.writer'] as const;
-
-export function ciReleaseIdentity(gcpProjectId: string): string {
-  return `${CI_RELEASE_ACCOUNT_ID}@${gcpProjectId}.iam.gserviceaccount.com`;
-}
-
-export function ciWorkloadIdentityProvider(projectNumber: string): string {
-  return `projects/${projectNumber}/locations/global/workloadIdentityPools/${CI_POOL_ID}/providers/${CI_PROVIDER_ID}`;
-}
-
-type Json = Record<string, unknown>;
-
-async function google(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
-}
-
-async function waitOperation(token: string, base: string, operation: { name?: string; done?: boolean }): Promise<void> {
-  if (operation.done || !operation.name) return;
-  for (let attempt = 0; attempt < 40; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const polled = await google(token, `${base}/${operation.name}`);
-    if (polled.ok && (await polled.json() as { done?: boolean }).done) return;
-  }
-  throw new Error('A Google Cloud setup operation did not finish in time.');
-}
-
-async function addBinding(token: string, resourceUrl: string, role: string, member: string, getMethod: 'GET' | 'POST'): Promise<void> {
-  const read = await google(token, `${resourceUrl}:getIamPolicy`, getMethod === 'POST'
-    ? { method: 'POST', body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) } : {});
-  if (!read.ok) throw new Error(`Reading access for ${resourceUrl.split('/').pop()} failed (HTTP ${read.status}).`);
-  const policy = await read.json() as { bindings?: Array<{ role: string; members: string[] }>; etag?: string; version?: number };
-  const bindings = policy.bindings ?? [];
-  const binding = bindings.find((entry) => entry.role === role && !(entry as { condition?: unknown }).condition);
-  if (binding?.members.includes(member)) return;
-  if (binding) binding.members.push(member); else bindings.push({ role, members: [member] });
-  const write = await google(token, `${resourceUrl}:setIamPolicy`, { method: 'POST', body: JSON.stringify({ policy: { ...policy, bindings } }) });
-  if (!write.ok) throw new Error(`Granting ${role} failed (HTTP ${write.status}).`);
-}
+import { buildCiReleaseConfiguration, CI_RELEASE_PROJECT_ROLES, ciReleaseIdentity, ciWorkloadIdentityProvider } from '../adapters/providers/gcp/tofu/gcp-ci.backend.js';
+import { runGcpProjectSetup } from '../domain/services/gcp-project-setup.service.js';
+export { CI_RELEASE_ACCOUNT_ID, CI_POOL_ID, CI_PROVIDER_ID, CI_RELEASE_PROJECT_ROLES, ciReleaseIdentity, ciWorkloadIdentityProvider } from '../adapters/providers/gcp/tofu/gcp-ci.backend.js';
 
 export interface CiReleaseAccessPreview {
   releaseIdentity: string;
@@ -73,72 +35,32 @@ export function previewCiReleaseAccess(gcpProjectId: string, repository: string,
   };
 }
 
-/** Creates the release identity and keyless GitHub trust. Idempotent; uses a one-time admin token. */
+/** Plans or applies the exact reviewed CI identity configuration through OpenTofu. */
 export async function grantCiReleaseAccess(params: {
+  projectId: string;
   adminToken: string;
   gcpProjectId: string;
   repository: string;
   runtimeServiceAccountEmail: string;
-}): Promise<{ projectNumber: string; provider: string; releaseIdentity: string }> {
-  const { adminToken: token, gcpProjectId: project, repository } = params;
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('CI releases need the exact GitHub owner/repository.');
-  const projectResponse = await google(token, `https://cloudresourcemanager.googleapis.com/v3/projects/${project}`);
-  if (!projectResponse.ok) throw new Error(`Could not read GCP project ${project} (HTTP ${projectResponse.status}).`);
-  const projectNumber = String((await projectResponse.json() as Json).name ?? '').replace('projects/', '');
-
-  for (const service of ['iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com']) {
-    const enabled = await google(token, `https://serviceusage.googleapis.com/v1/projects/${project}/services/${service}:enable`, { method: 'POST', body: '{}' });
-    if (!enabled.ok) throw new Error(`Enabling ${service} failed (HTTP ${enabled.status}).`);
-    await waitOperation(token, 'https://serviceusage.googleapis.com/v1', await enabled.json() as { name?: string; done?: boolean });
-  }
-
-  const releaseIdentity = ciReleaseIdentity(project);
-  const account = await google(token, `https://iam.googleapis.com/v1/projects/${project}/serviceAccounts`, {
-    method: 'POST', body: JSON.stringify({ accountId: CI_RELEASE_ACCOUNT_ID, serviceAccount: { displayName: 'Hypervibe CI releases (image updates only)' } }),
+  confirm?: boolean;
+}) {
+  const response = await fetchWithRetry(`https://cloudresourcemanager.googleapis.com/v3/projects/${params.gcpProjectId}`, {
+    headers: { Authorization: `Bearer ${params.adminToken}` },
   });
-  if (!account.ok && account.status !== 409) throw new Error(`Creating the release identity failed (HTTP ${account.status}).`);
-
-  const poolsBase = `https://iam.googleapis.com/v1/projects/${project}/locations/global/workloadIdentityPools`;
-  const pool = await google(token, `${poolsBase}?workloadIdentityPoolId=${CI_POOL_ID}`, {
-    method: 'POST', body: JSON.stringify({ displayName: 'Hypervibe GitHub Actions', description: 'Keyless CI releases managed by Hypervibe' }),
+  if (!response.ok) throw new Error(`Could not read the GCP project (HTTP ${response.status}).`);
+  const body = await response.json() as { name?: string; projectId?: string; state?: string };
+  if (!/^projects\/[0-9]+$/.test(body.name ?? '') || body.projectId !== params.gcpProjectId || body.state !== 'ACTIVE') {
+    throw new Error('The CI setup project identity could not be verified.');
+  }
+  const projectNumber = body.name!.slice('projects/'.length);
+  const configuration = buildCiReleaseConfiguration({ ...params, projectId: params.gcpProjectId, projectNumber });
+  const result = await runGcpProjectSetup({
+    projectId: params.projectId, gcpProjectId: params.gcpProjectId,
+    auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: params.adminToken }, redact: [params.adminToken] },
+    contribution: { id: 'ci-release', configuration }, confirm: params.confirm,
   });
-  if (pool.ok) await waitOperation(token, 'https://iam.googleapis.com/v1', await pool.json() as { name?: string });
-  else if (pool.status !== 409) throw new Error(`Creating the GitHub trust pool failed (HTTP ${pool.status}).`);
-
-  const providerBody = {
-    displayName: 'GitHub Actions',
-    oidc: { issuerUri: 'https://token.actions.githubusercontent.com' },
-    attributeMapping: { 'google.subject': 'assertion.sub', 'attribute.repository': 'assertion.repository', 'attribute.ref': 'assertion.ref' },
-    // Google rejects tokens from any other repository before IAM is even consulted.
-    attributeCondition: `assertion.repository == '${repository}'`,
-  };
-  const provider = await google(token, `${poolsBase}/${CI_POOL_ID}/providers?workloadIdentityPoolProviderId=${CI_PROVIDER_ID}`, { method: 'POST', body: JSON.stringify(providerBody) });
-  if (provider.ok) await waitOperation(token, 'https://iam.googleapis.com/v1', await provider.json() as { name?: string });
-  else if (provider.status === 409) {
-    const patched = await google(token, `${poolsBase}/${CI_POOL_ID}/providers/${CI_PROVIDER_ID}?updateMask=attributeCondition,attributeMapping`, { method: 'PATCH', body: JSON.stringify(providerBody) });
-    if (!patched.ok) throw new Error(`Updating the GitHub trust failed (HTTP ${patched.status}).`);
-  } else throw new Error(`Creating the GitHub trust failed (HTTP ${provider.status}).`);
-
-  const accountUrl = `https://iam.googleapis.com/v1/projects/${project}/serviceAccounts/${releaseIdentity}`;
-  const principal = `principalSet://iam.googleapis.com/projects/${projectNumber}/locations/global/workloadIdentityPools/${CI_POOL_ID}/attribute.repository/${repository}`;
-  // New service accounts take a moment to become visible to IAM policy calls.
-  for (let attempt = 0; ; attempt++) {
-    try { await addBinding(token, accountUrl, 'roles/iam.workloadIdentityUser', principal, 'POST'); break; }
-    catch (error) { if (attempt >= 10) throw error; await new Promise((resolve) => setTimeout(resolve, 4000)); }
-  }
-  // IAM can take a little while to recognize a brand-new service account as a policy member.
-  const withRetry = async (grant: () => Promise<void>) => {
-    for (let attempt = 0; ; attempt++) {
-      try { await grant(); return; }
-      catch (error) { if (attempt >= 10) throw error; await new Promise((resolve) => setTimeout(resolve, 4000)); }
-    }
-  };
-  for (const role of CI_RELEASE_PROJECT_ROLES) {
-    await withRetry(() => addBinding(token, `https://cloudresourcemanager.googleapis.com/v1/projects/${project}`, role, `serviceAccount:${releaseIdentity}`, 'POST'));
-  }
-  await withRetry(() => addBinding(token, `https://iam.googleapis.com/v1/projects/${project}/serviceAccounts/${params.runtimeServiceAccountEmail}`,
-    'roles/iam.serviceAccountUser', `serviceAccount:${releaseIdentity}`, 'POST'));
-  return { projectNumber, provider: ciWorkloadIdentityProvider(projectNumber), releaseIdentity };
+  if (!result.success) throw new Error(result.error ?? 'CI infrastructure setup did not complete.');
+  return { ...result, projectNumber, provider: ciWorkloadIdentityProvider(projectNumber), releaseIdentity: ciReleaseIdentity(params.gcpProjectId) };
 }
 
 export interface ReleaseWorkflowInput {

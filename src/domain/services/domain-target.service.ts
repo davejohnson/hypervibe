@@ -1,3 +1,4 @@
+import { isEngineManaged } from './infrastructure-engine-selection.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -61,7 +62,7 @@ export async function observeDomainTarget(params: {
       || targetSpec.domainTarget || targetSpec.maintenance?.enabled) {
       return unknown('The target must be an available public web service without another traffic handoff or active maintenance.');
     }
-    if (targetSpec.hosting.engine === 'opentofu') {
+    if (isEngineManaged(targetSpec)) {
       if (!engineWebServiceResolver) return unknown('The OpenTofu engine is not available to verify the target.');
       const observed = await engineWebServiceResolver({ project: params.project, environment: target, environmentName: desired.environment, service: desired.service });
       if ('unknown' in observed) return unknown(observed.unknown);

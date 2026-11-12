@@ -183,7 +183,7 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(workflow).toContain('hypervibe-no-evidence-artifact-match');
   });
 
-  it('blocks restore-drill workflow reconciliation until its named credential secret exists', async () => {
+  it('blocks Cloud SQL restore-drill publication until engine support exists', async () => {
     const drillProject = new ProjectRepository().create({
       name: 'restore-drill-example',
       defaultPlatform: 'cloudrun',
@@ -234,15 +234,11 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(result.actions[0]).toMatchObject({
       id: GITHUB_INFRASTRUCTURE_ACTION_ID,
       type: 'update',
-      metadata: { blockedReason: 'github_restore_drill_secret_missing' },
+      metadata: { blockedReason: 'database_restore_drill_unsupported' },
     });
-    expect(result.actions[0].metadata?.desiredFiles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ path: '.github/hypervibe/cloudsql-restore-drill.mjs' }),
-      expect.objectContaining({ path: '.github/workflows/hypervibe-db-restore-drill-production.yml' }),
-    ]));
-    expect(result.warnings).toContainEqual(expect.stringContaining(
-      'githubActions.repository=true'
-    ));
+    const desiredFiles = result.actions[0].metadata?.desiredFiles as Array<{ path: string }>;
+    expect(desiredFiles.some((file) => file.path.includes('restore-drill'))).toBe(false);
+    expect(result.warnings).toContainEqual(expect.stringContaining('does not compile managed database restore drills'));
 
     secrets.mockResolvedValue(['HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS']);
     const ready = await planGitHubInfrastructure({
@@ -253,9 +249,9 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(ready.actions[0]).toMatchObject({
       id: GITHUB_INFRASTRUCTURE_ACTION_ID,
       type: 'update',
-      billable: true,
+      metadata: { blockedReason: 'database_restore_drill_unsupported' },
     });
-    expect(ready.actions[0].metadata?.blockedReason).toBeUndefined();
+    expect(secrets).not.toHaveBeenCalled();
   });
 
   it('plans and applies a declared Actions secret through the repository-only lifecycle', async () => {

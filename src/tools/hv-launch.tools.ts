@@ -10,18 +10,19 @@ import { projectField, envField } from './schemas.js';
 export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_launch',
-    'Take an OpenTofu-managed environment (hosting.engine="opentofu") from spec to a working app in one guided command: connect GCP, create or update infrastructure in as many reviewed rounds as needed, release the current code, and verify health and the custom domain. It stops only for decisions a person must make: choosing a billing account (status=needs_billing_choice → ask, then call again with billingAccountName) and approving actions that cost money or delete data (status=needs_confirmation → show the changes and estimated monthly cost, then call again with exactly confirmActions). Call it again after pending results. Never substitute provider CLIs for a stop point.',
+    'Take a Cloud Run environment from spec to a working app in one guided command: connect GCP, create or update infrastructure in as many reviewed rounds as needed, release the current code, and verify health and the custom domain. It stops only for decisions a person must make: choosing a billing account (status=needs_billing_choice → ask, then call again with billingAccountName) and approving actions that cost money or delete data (status=needs_confirmation → show the changes and estimated monthly cost, then call again with the returned planId and exactly confirmActions). Call it again after pending results. Never substitute provider CLIs for a stop point.',
     {
       project: projectField,
       env: envField,
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
-      approveAccess: z.array(z.enum(['storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional()
+      approveAccess: z.array(z.enum(['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional()
         .describe('accessId values from needs_access results, passed only after the user approved that exact access.'),
+      planId: z.string().min(1).optional().describe('Exact saved planId returned by needs_confirmation or pending. Required when supplying infrastructure confirmActions.'),
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, confirmActions, approveAccess }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, planId, confirmActions, approveAccess }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
@@ -30,14 +31,14 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
         project, spec: specResult.spec, specRevision: specResult.revision, environmentName,
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
         ...(billingAccountName ? { billingAccountName } : {}),
-        ...(confirmActions ? { confirmActions } : {}),
+        ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}),
         ...(approveAccess ? { approveAccess } : {}),
       });
       if (!result) return commandError('INTERNAL', 'hv_launch returned no result.');
       switch (result.status) {
         case 'needs_billing_choice':
           return commandSuccess(result, {
-            hint: 'Show plannedSteps (including any access the app needs) and ask which billing account should pay for this app; choosing one approves those steps. Then call hv_launch again with billingAccountName.',
+            hint: 'Ask which billing account should pay for this app, then call hv_launch again with billingAccountName. This selects billing only; show and obtain approval for the saved infrastructure plan at needs_access.',
             agentInstruction: { action: 'ask_user', message: 'Show the billing accounts by display name and ask the user to pick one. Never choose a billing account for them.' },
             next: ['hv_launch'],
           });
@@ -57,13 +58,13 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
           });
         case 'needs_confirmation':
           return commandSuccess(result, {
-            hint: `Show these changes and the estimated monthly cost in plain language. After the user approves, call hv_launch again with confirmActions ${JSON.stringify(result.confirmActions)}.`,
+            hint: `Show these changes and the estimated monthly cost in plain language. After the user approves, call hv_launch again with planId ${JSON.stringify(result.planId)} and confirmActions ${JSON.stringify(result.confirmActions)}.`,
             agentInstruction: { action: 'ask_user', message: 'Summarize what will be created or deleted and the estimated cost, and ask for approval. Do not approve on the user\'s behalf.' },
             next: ['hv_launch'],
           });
         case 'pending':
           return commandSuccess(result, {
-            hint: 'Some changes are still settling. Call hv_launch again in a few minutes.',
+            hint: result.planId ? `Continue hv_launch with planId ${JSON.stringify(result.planId)} and the same approved confirmActions ${JSON.stringify(result.confirmActions ?? [])}.` : 'Some changes are still settling. Call hv_launch again in a few minutes.',
             agentInstruction: { action: 'stop_and_report', message: 'Report what is done and what is still settling.' },
             next: ['hv_launch', 'hv_status'],
           });

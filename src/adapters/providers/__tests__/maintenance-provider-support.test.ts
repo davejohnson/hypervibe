@@ -9,7 +9,6 @@ import { RailwayAdapter } from '../railway/railway.adapter.js';
 describe('hosting maintenance provider support', () => {
   it.each([
     ['railway', new RailwayAdapter()],
-    ['cloudrun', new CloudRunAdapter()],
     ['azure-container-apps', new AzureContainerAppsAdapter()],
   ])('%s exposes the provider-neutral reversible workload contract', (provider, adapter) => {
     expect(adapter.capabilities.supportsMaintenance).toBe(true);
@@ -23,5 +22,10 @@ describe('hosting maintenance provider support', () => {
     expect(adapter.capabilities.supportsMaintenance).not.toBe(true);
     expect(supportsWorkloadMaintenance(adapter)).toBe(false);
     expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.maintenance).toBeUndefined();
+  });
+
+  it('does not advertise Cloud Run maintenance while engine support is unavailable', () => {
+    expect(new CloudRunAdapter().capabilities.supportsMaintenance).toBe(false);
+    expect(providerRegistry.getMetadata('cloudrun')?.lifecycle?.hosting?.maintenance).toBeUndefined();
   });
 });

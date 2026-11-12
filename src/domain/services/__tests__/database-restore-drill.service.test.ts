@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/rds.adapter.js';
 import type { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
@@ -65,18 +65,29 @@ function repos(componentValue: unknown = component) {
 }
 
 describe('database restore-drill compiler', () => {
-  it('resolves the exact bound primary through provider metadata', () => {
-    const result = compileDatabaseRestoreDrillFiles({ project, spec, ...repos() });
+  const metadata = providerRegistry.getMetadata('cloudsql')!;
+  const originalOrchestration = metadata.orchestration;
+  beforeEach(() => {
+    // Synthetic compiler contract only; no real provider currently implements
+    // engine-owned restore drills. Retain shared identity-boundary coverage.
+    metadata.orchestration = { ...originalOrchestration, databaseRestoreDrill: {
+      resolveSource: ({ component }) => typeof component.bindings.database !== 'string'
+        ? { status: 'binding_missing', message: 'A database identity is required.' }
+        : { status: 'resolved', databaseName: component.bindings.database, source: {
+          provider: 'cloudsql', primaryExternalId: component.externalId!,
+          providerScope: { projectId: 'gcp-project', region: 'us-central1' }, resourceIdentity: {},
+        } },
+      buildWorkflow: (target) => ({ files: [{ path: 'contract-fixture.json', content: JSON.stringify(target), review: { title: 'Contract fixture', summary: 'No provider operation' } }], requiredSecrets: [] }),
+    } };
+  });
+  afterEach(() => { metadata.orchestration = originalOrchestration; });
 
+  it('resolves the exact bound primary through a synthetic provider contract', () => {
+    const result = compileDatabaseRestoreDrillFiles({ project, spec, ...repos() });
     expect(result.issues).toEqual([]);
-    expect(result.requiredSecrets).toEqual(['HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS']);
-    expect(result.files.map((file) => file.path)).toEqual([
-      '.github/hypervibe/cloudsql-restore-drill.mjs',
-      '.github/workflows/hypervibe-db-restore-drill-production.yml',
-    ]);
-    const workflow = result.files.find((file) => file.path.endsWith('.yml'))?.content ?? '';
-    expect(workflow).toContain('HYPERVIBE_DRILL_CONFIG_B64');
-    expect(workflow).not.toContain('SELECT count(*) FROM users');
+    expect(result.requiredSecrets).toEqual([]);
+    expect(result.files.map((file) => file.path)).toEqual(['contract-fixture.json']);
+    expect(JSON.parse(result.files[0].content).source.primaryExternalId).toBe('production-postgres');
   });
 
   it('fails closed when the durable primary binding is unavailable', () => {
@@ -101,7 +112,7 @@ describe('database restore-drill compiler', () => {
     expect(result.issues).toEqual([
       expect.objectContaining({
         code: 'database_restore_drill_binding_missing',
-        message: expect.stringContaining('exact connection and database identities'),
+        message: 'A database identity is required.',
       }),
     ]);
   });
@@ -153,21 +164,6 @@ describe('database restore-drill compiler', () => {
     expect(result.files).toEqual([]);
     expect(result.issues).toEqual([
       expect.objectContaining({ code: 'database_restore_drill_binding_missing' }),
-    ]);
-  });
-
-  it.each([
-    { instanceId: 'different-primary' },
-    { providerScope: { projectId: 'different-project', region: 'us-central1' } },
-    { providerScope: { projectId: 'gcp-project', region: 'europe-west1' } },
-    { connectionName: 'gcp-project:us-central1:different-primary' },
-  ])('rejects contradictory Cloud SQL source bindings %j', (identity) => {
-    const result = compileDatabaseRestoreDrillFiles({
-      project, spec, ...repos({ ...component, bindings: { ...component.bindings, ...identity } }),
-    });
-    expect(result.files).toEqual([]);
-    expect(result.issues).toEqual([
-      expect.objectContaining({ code: 'database_restore_drill_identity_invalid' }),
     ]);
   });
 

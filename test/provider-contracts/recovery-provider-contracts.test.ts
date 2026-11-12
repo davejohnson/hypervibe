@@ -12,7 +12,7 @@ import type { BranchDeployTarget } from '../../src/domain/ports/ci-deploy.port.j
  */
 const databases = [
   { provider: 'railway', checkpoint: true, drill: false, drillExecutor: false },
-  { provider: 'cloudsql', checkpoint: false, drill: false, drillExecutor: true },
+  { provider: 'cloudsql', checkpoint: false, drill: false, drillExecutor: false },
   { provider: 'rds', checkpoint: false, drill: false, drillExecutor: false },
   { provider: 'azure-postgres', checkpoint: false, drill: false, drillExecutor: false },
 ] as const;

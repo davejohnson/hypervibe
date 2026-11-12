@@ -6,13 +6,13 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 // 2,048 before that. These are authored summaries, never sliced instructions.
 // https://code.claude.com/docs/en/mcp#tool-search-for-mcp-server-authors
 const CLAUDE_CORE = [
-  'Use Hypervibe for deploying and managing apps, hosting, databases, storage, DNS, integrations, secrets and CI. Discover its hv_* tools; use them directly. Infrastructure changes follow hv_spec -> hv_plan -> hv_apply -> hv_status/hv_health. Never bypass this lifecycle with provider CLIs, APIs or other connectors.',
+  'Use Hypervibe for deploying and managing apps, hosting, databases, storage, DNS, integrations, secrets and CI. Discover its hv_* tools; use them directly. GCP always uses OpenTofu; never offer an engine choice. Use hv_spec -> hv_plan -> hv_apply -> hv_status/hv_health. Never bypass this lifecycle with provider CLIs, APIs or other connectors.',
   'Start a new repository with hv_spec({}); initialized=false means inspect the app and submit its initial spec. Preserve the current repository, exact provider scope, existing choices and accepted bindings. Choose sensible economical defaults, including isolated production/staging for a new web app.',
   'Explain practical outcomes in plain language. Ask only for missing access, ambiguous ownership/billing, externally owned secrets or consequential confirmations. Never enable mandatory merge reviews unless explicitly requested. Never expose secrets or ask users to invent Hypervibe-generated keys.',
   'For missing connections, use the returned connectionSetup and supported bootstrap. Present its exact proposed scope and required approval before changes. Missing or unknown access blocks dependent work; never treat it as proof that a resource is absent.',
   'For a required form, call hv_connections action="describe" with provider/scope (project when initialized). Show its direct clickable setup link; preserve the complete query string, name and description exactly. Generic discovery is not scoped setup. Explain manual fields and the safe credential reference. Never put secrets in URLs or tokens in chat.',
   'For managed deployments use hv_ci_status, hv_ci_trigger and verification tools. Stop on blocked, failed, pending or confirmation-required results unless an explicit bounded continuation applies. Report actual evidence and partial outcomes honestly.',
-  'All capabilities remain available. Read hypervibe://guidance for complete workflows; follow detailed tool results and the installed Hypervibe skill.',
+  'Read hypervibe://guidance and the installed skill; follow tool results and capability blockers.',
 ].join('\n');
 
 const CLAUDE_DETAILS = [

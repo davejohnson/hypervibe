@@ -1,4 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { assertFixtureHttpResponse, readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal } from './lifecycle-live-harness.js';
+import { readRailwayFixtureInventory } from './fixture-native-inventory.js';
+import { assertFixtureLifecycleConsent, fixturePreview, readFixtureTarget, type FixturePreview } from './fixture-authorization.js';
+import { assertRailwayFixturePlan, loadRailwayFixturePreview, type RailwayFixtureStage } from './railway-fixture-authorization.js';
 import { spawn } from 'node:child_process';
 import {
   chmodSync,
@@ -10,9 +15,6 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import '../../src/application/providers.js';
-import type { Environment } from '../../src/domain/entities/environment.entity.js';
-import { supportsWorkloadMaintenance } from '../../src/domain/ports/maintenance.port.js';
-import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
   cacheProviderContracts,
@@ -45,7 +47,30 @@ let dataDirectory = '';
 let repository = '';
 let projectName = '';
 let commitSha = '';
-let resourcesMayExist = false;
+let nativeProjectId = '';
+let journal: FixtureJournal;
+let journalFile = '';
+let previewFile = '';
+let firstPlan: JsonObject | undefined;
+let fixtureStage: RailwayFixtureStage = 'create';
+const mode = process.env.HYPERVIBE_LIVE_MODE ?? 'preview';
+
+function assertFixturePlan(planEnvelope: JsonObject): void {
+  const fixture = contract!.managedWorkflow!;
+  assertRailwayFixturePlan(planEnvelope, { repository, environment: fixture.environmentName, service: fixture.serviceName,
+    storage: Object.keys(fixture.storage ?? {}), queues: Object.keys(fixture.queues ?? {}) }, fixtureStage);
+}
+const cleanupOnly = process.env.HYPERVIBE_LIVE_CLEANUP_ONLY === '1';
+
+async function nativeInventory() {
+  return readRailwayFixtureInventory(process.env.HYPERVIBE_TEST_RAILWAY_TOKEN!, nativeProjectId);
+}
+async function rememberInventory() {
+  const resources = new Map(journal.resources.map((resource) => [resourceKey(resource), resource]));
+  for (const resource of await nativeInventory()) resources.set(resourceKey(resource), resource);
+  journal.resources = [...resources.values()];
+  saveFixtureJournal(journalFile, journal);
+}
 
 function positiveDuration(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -130,7 +155,7 @@ async function runProcess(
         return;
       }
       reject(new Error(
-        `${executable} ${args.join(' ')} failed (exit ${code}): ${stderr.slice(0, 2000)}`
+        `Fixture process failed (exit ${code}); raw diagnostics are omitted.`
       ));
     });
   });
@@ -170,14 +195,14 @@ async function runHypervibe(
       } catch {
         reject(new Error(
           `Hypervibe ${command.join(' ')} returned non-JSON output (exit ${code}). `
-          + `${stderr.slice(0, 2000)} ${stdout.slice(0, 2000)}`
+          + 'Raw command output is omitted.'
         ));
         return;
       }
       if (code !== 0 || envelope.ok !== true) {
         reject(new Error(
           `Hypervibe ${command.join(' ')} failed (exit ${code}): `
-          + JSON.stringify(envelope.error ?? envelope).slice(0, 4000)
+          + String(envelope.error?.code ?? 'unknown')
         ));
         return;
       }
@@ -239,6 +264,8 @@ function fixtureSpec(params: {
         ...(params.includeService !== false && fixture.cache
           ? { cache: fixture.cache }
           : {}),
+        ...(params.includeService !== false && fixture.storage ? { storage: fixture.storage } : {}),
+        ...(params.includeService !== false && fixture.queues ? { queues: fixture.queues } : {}),
         email: { enabled: false },
         envVars: params.includeService === false
           ? {}
@@ -290,20 +317,6 @@ function datastoreConnectionProfiles(
   return profiles;
 }
 
-function expectedDestroyActionIds(
-  fixture: ManagedWorkflowFixture
-): string[] {
-  return [
-    `service:${fixture.serviceName}:destroy`,
-    ...(fixture.database
-      ? [`database:${fixture.database.provider}:destroy`]
-      : []),
-    ...(fixture.cache
-      ? [`cache:${fixture.cache.provider}:destroy`]
-      : []),
-  ];
-}
-
 async function setSpec(spec: JsonObject): Promise<void> {
   await runHypervibe(['spec', 'set'], {
     project: projectName,
@@ -321,11 +334,18 @@ async function plan(): Promise<JsonObject> {
 }
 
 async function apply(planEnvelope: JsonObject): Promise<JsonObject> {
-  return runHypervibe(['apply'], {
-    project: projectName,
-    planId: planEnvelope.data.planId,
-    confirmActions: actionIdsRequiringConfirmation(planEnvelope),
-  });
+  assertFixtureLifecycleConsent(process.env.HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE);
+  assertFixturePlan(planEnvelope);
+  await rememberInventory(); // Persist exact native ids before every attempted mutation.
+  try {
+    return await runHypervibe(['apply'], {
+      project: projectName,
+      planId: planEnvelope.data.planId,
+      confirmActions: actionIdsRequiringConfirmation(planEnvelope),
+    });
+  } finally {
+    await rememberInventory(); // A failed acknowledgement can still have created resources.
+  }
 }
 
 function assertPlanCanApply(planEnvelope: JsonObject): void {
@@ -345,8 +365,10 @@ async function applyCurrentSpec(): Promise<{
   plan: JsonObject;
   apply: JsonObject;
 }> {
-  const planEnvelope = await plan();
+  const planEnvelope = firstPlan ?? await plan();
+  firstPlan = undefined;
   assertPlanCanApply(planEnvelope);
+  assertFixturePlan(planEnvelope);
   return {
     plan: planEnvelope,
     apply: await apply(planEnvelope),
@@ -442,22 +464,7 @@ async function waitForWorkflowRun(
   const unsuccessfulJobs = (jobs.data.jobs as JsonObject[] ?? [])
     .filter((job) => !['success', 'skipped'].includes(job.conclusion));
   if (run.conclusion !== 'success' || unsuccessfulJobs.length > 0) {
-    const logs = await runHypervibe(['ci', 'status'], {
-      project: projectName,
-      repo: repository,
-      include: ['logs'],
-      runId: run.id,
-      logLines: 200,
-    });
-    throw new Error(
-      `Managed workflow ${run.id} failed: `
-      + JSON.stringify({
-        conclusion: run.conclusion,
-        jobs: unsuccessfulJobs,
-        logs: logs.data.logs,
-        diagnostics: logs.data.diagnostics,
-      }).slice(0, 12_000)
-    );
+    throw new Error(`Managed workflow ${run.id} did not complete successfully. Inspect its protected GitHub logs; provider output is not copied into fixture evidence.`);
   }
 
   const artifacts = await runHypervibe(['ci', 'status'], {
@@ -481,7 +488,7 @@ async function waitForWorkflowRun(
   return run;
 }
 
-async function verifyHealth(): Promise<void> {
+async function verifyHealth(revision: 'create' | 'update'): Promise<void> {
   const fixture = contract!.managedWorkflow!;
   const status = await runHypervibe(['status'], {
     project: projectName,
@@ -508,87 +515,8 @@ async function verifyHealth(): Promise<void> {
     timeoutMs: 30_000,
   });
   expect(health.data.check).toMatchObject({ ok: true });
-}
-
-async function verifyOptInMaintenanceLifecycle(): Promise<void> {
-  if (process.env.HYPERVIBE_LIVE_MAINTENANCE !== '1') return;
-  const fixture = contract!.managedWorkflow!;
-  if (contract!.maintenance === 'unsupported') {
-    throw new Error(
-      `${contract!.provider} does not expose a live-ready maintenance contract.`
-    );
-  }
-  const bindingsPath = path.join(workspace, '.hypervibe/bindings.json');
-  if (!existsSync(bindingsPath)) {
-    throw new Error('The live maintenance scenario requires repo-backed provider bindings.');
-  }
-  const bindings = JSON.parse(readFileSync(bindingsPath, 'utf8')) as JsonObject;
-  const platformBindings = bindings.environments?.[fixture.environmentName]
-    ?.platformBindings as Record<string, unknown> | undefined;
-  const serviceId = (
-    platformBindings?.services as Record<string, JsonObject> | undefined
-  )?.[fixture.serviceName]?.serviceId;
-  if (!platformBindings || typeof serviceId !== 'string') {
-    throw new Error(
-      `The live maintenance scenario could not resolve the exact ${fixture.serviceName} service binding.`
-    );
-  }
-  const registered = providerRegistry.get(contract!.provider);
-  if (!registered) {
-    throw new Error(`Provider ${contract!.provider} is not registered.`);
-  }
-  const adapter = await registered.factory(requiredCredentials(contract!.credentials));
-  if (!supportsWorkloadMaintenance(adapter)) {
-    throw new Error(
-      `Provider ${contract!.provider} does not implement the workload-maintenance port.`
-    );
-  }
-  const now = new Date();
-  const environment: Environment = {
-    id: `live-${fixture.environmentName}`,
-    projectId: projectName,
-    name: fixture.environmentName,
-    platformBindings,
-    createdAt: now,
-    updatedAt: now,
-  };
-  const snapshot = await adapter.observeMaintenanceWorkload(
-    environment,
-    serviceId,
-    fixture.service.workloadKind
-  );
-  expect(snapshot).toMatchObject({
-    serviceId,
-    workloadKind: fixture.service.workloadKind,
-    state: 'running',
-    wasRunning: true,
-  });
-
-  try {
-    const entry = await adapter.suspendMaintenanceWorkload(environment, snapshot);
-    expect(entry).toMatchObject({
-      success: true,
-      data: { applied: 1, skipped: 0 },
-    });
-    await expect(adapter.observeMaintenanceWorkload(
-      environment,
-      serviceId,
-      fixture.service.workloadKind
-    )).resolves.toMatchObject({ state: 'suspended' });
-    await expect(adapter.suspendMaintenanceWorkload(environment, snapshot))
-      .resolves.toMatchObject({
-        success: true,
-        data: { applied: 0, skipped: 1 },
-      });
-  } finally {
-    await expect(adapter.resumeMaintenanceWorkload(environment, snapshot))
-      .resolves.toMatchObject({ success: true });
-  }
-  await expect(adapter.observeMaintenanceWorkload(
-    environment,
-    serviceId,
-    fixture.service.workloadKind
-  )).resolves.toMatchObject({ state: 'running' });
+  const response = await fetch(new URL('/', publicUrl), { signal: AbortSignal.timeout(30_000), redirect: 'error' });
+  assertFixtureHttpResponse(response.status, await response.json(), revision);
 }
 
 async function verifyCommittedFixture(): Promise<void> {
@@ -617,8 +545,7 @@ async function verifyCommittedFixture(): Promise<void> {
   projectName = parsed.project;
   const expected = fixtureSpec({});
   if (
-    JSON.stringify(rawDocument) !== JSON.stringify(expected)
-    || JSON.stringify(parsed) !== JSON.stringify(expected)
+    JSON.stringify(parsed) !== JSON.stringify(expected)
   ) {
     throw new Error(
       'The committed .hypervibe/spec.json does not match the canonical managed-workflow fixture documented for this provider.'
@@ -686,8 +613,37 @@ liveDescribe('live managed provider workflow contract', () => {
     mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
     chmodSync(dataDirectory, 0o700);
 
-    await verifyCommittedFixture();
-    await setSpec(fixtureSpec({}));
+    if (cleanupOnly) {
+      const marker = process.env.HYPERVIBE_LIVE_FIXTURE_MARKER;
+      if (!marker) throw new Error('Cleanup-only requires its exact dedicated fixture marker.');
+      projectName = JSON.parse(readFileSync(marker, 'utf8')).project;
+    } else await verifyCommittedFixture();
+    const databaseFile = path.join(dataDirectory, 'hypervibe.db');
+    if (!existsSync(databaseFile)) throw new Error('The prepared dedicated Hypervibe test project is missing.');
+    const db = new Database(databaseFile, { readonly: true, fileMustExist: true });
+    try {
+      const project = db.prepare('SELECT id FROM projects WHERE name = ?').get(projectName) as { id: string } | undefined;
+      const environment = project && db.prepare('SELECT platform_bindings FROM environments WHERE project_id = ? AND name = ?')
+        .get(project.id, contract.managedWorkflow.environmentName) as { platform_bindings: string } | undefined;
+      const bindings = environment && JSON.parse(environment.platform_bindings);
+      if (!project || !bindings?.projectId || !bindings.environmentId) throw new Error('Prepare the exact dedicated native Railway project/environment through Hypervibe before running this fixture.');
+      nativeProjectId = bindings.projectId;
+      const marker = process.env.HYPERVIBE_LIVE_FIXTURE_MARKER;
+      if (!marker || !path.isAbsolute(marker)) throw new Error('HYPERVIBE_LIVE_FIXTURE_MARKER must identify the prepared dedicated test platform.');
+      readFixtureTarget(marker, { profile: 'railway', project: projectName, internalProjectId: project.id,
+        nativeProjectId, nativeEnvironmentId: bindings.environmentId, repository });
+    } finally { db.close(); }
+    journalFile = path.join(dataDirectory, `railway-${projectName}-fixture-evidence.json`);
+    previewFile = path.join(dataDirectory, `railway-${projectName}-fixture-plan.json`);
+    if (!['preview', 'run'].includes(mode)) throw new Error('HYPERVIBE_LIVE_MODE must be preview or run.');
+    if (cleanupOnly && !existsSync(journalFile)) throw new Error('Cleanup-only requires the existing durable fixture journal.');
+    journal = existsSync(journalFile) ? readFixtureJournal(journalFile) : {
+      version: 1, profile: 'railway', project: projectName, environment: contract.managedWorkflow.environmentName,
+      phase: 'prepared', resources: [], checks: { created: false, noop: false, updated: false, absent: false },
+    };
+    if (journal.profile !== 'railway' || journal.project !== projectName || journal.environment !== contract.managedWorkflow.environmentName
+      || journal.resources.some((resource) => !resource.address.startsWith(`railway/${nativeProjectId}/`))) throw new Error('Fixture journal native scope does not match this prepared target.');
+    saveFixtureJournal(journalFile, journal);
     const connectedProviders = new Set<string>();
     for (const profile of [
       contract,
@@ -704,57 +660,14 @@ liveDescribe('live managed provider workflow contract', () => {
     );
   }, 2 * 60_000);
 
-  afterAll(async () => {
-    if (!contract?.managedWorkflow || !resourcesMayExist) return;
-    await setSpec(fixtureSpec({ includeService: false }));
-    const teardown = await applyCurrentSpec();
-    assertNoTerminalApplyFailure(teardown.apply);
-    for (const actionId of expectedDestroyActionIds(contract.managedWorkflow)) {
-      const destroyReceipt = (
-        teardown.apply.data.receipts as JsonObject[] ?? []
-      ).find((receipt) => receipt.actionId === actionId);
-      expect(destroyReceipt).toMatchObject({ status: 'succeeded' });
-    }
-    await convergeReviewedInfrastructure(teardown.apply);
-
-    const verified = await plan();
-    const incomplete = nonNoopActions(verified).filter(
-      (action) => ['service', 'database', 'cache'].includes(
-        action.resource?.kind
-      )
-    );
-    expect(incomplete).toEqual([]);
-    expect(
-      (verified.data.unmanaged as JsonObject[] ?? [])
-        .filter((item) => ['service', 'database', 'cache'].includes(item.kind))
-    ).toEqual([]);
-    resourcesMayExist = false;
-  }, 40 * 60_000);
-
-  it('creates, exact-SHA deploys, verifies, updates, noops, and tears down through Hypervibe', async () => {
+  it(cleanupOnly ? 'resumes exact native cleanup without claiming full lifecycle proof'
+    : mode === 'preview' ? 'saves the exact Railway fixture preview without applying'
+    : 'creates, exact-SHA deploys, verifies, updates, noops, and proves native absence', async () => {
+    const interrupted = new AbortController();
+    const stop = () => interrupted.abort();
+    process.once('SIGINT', stop); process.once('SIGTERM', stop);
     const fixture = contract!.managedWorkflow!;
-    resourcesMayExist = true;
-
-    const first = await applyCurrentSpec();
-    expect(nonNoopActions(first.plan).length).toBeGreaterThan(0);
-    assertNoTerminalApplyFailure(first.apply);
-    await convergeReviewedInfrastructure(first.apply);
-    if (fixture.database) {
-      const query = await runHypervibe(['db', 'query'], {
-        project: projectName,
-        env: fixture.environmentName,
-        sql: 'SELECT 1::int AS healthy',
-      });
-      expect(query.data).toMatchObject({
-        rowCount: 1,
-        access: {
-          provider: fixture.database.provider,
-          cleanup: expect.not.stringMatching(/^failed$/),
-        },
-      });
-      expect(query.data.rows).toEqual([{ healthy: 1 }]);
-    }
-
+    const release = async () => {
     const workflows = await runHypervibe(['ci', 'status'], {
       project: projectName,
       repo: repository,
@@ -802,34 +715,68 @@ liveDescribe('live managed provider workflow contract', () => {
       conclusion: 'success',
       event: 'workflow_dispatch',
     });
-    await verifyHealth();
-    await verifyOptInMaintenanceLifecycle();
-
-    const noop = await plan();
-    expect(nonNoopActions(noop)).toEqual([]);
-    const noopApply = await apply(noop);
-    assertNoTerminalApplyFailure(noopApply);
-    expect((noopApply.data.receipts as JsonObject[]).every(
-      (receipt) => receipt.status === 'skipped_noop'
-    )).toBe(true);
-
-    await setSpec(fixtureSpec({ revision: 'update' }));
-    const update = await applyCurrentSpec();
-    expect(nonNoopActions(update.plan)).not.toContainEqual(
-      expect.objectContaining({
-        type: 'create',
-        resource: expect.objectContaining({
-          kind: 'service',
-          name: fixture.serviceName,
-        }),
-      })
-    );
-    assertNoTerminalApplyFailure(update.apply);
-    const verifiedUpdate = await plan();
-    expect(
-      nonNoopActions(verifiedUpdate).filter(
-        (action) => action.resource?.kind === 'service'
-      )
-    ).toEqual([]);
-  }, 60 * 60_000);
+    };
+    try {
+      const target = { profile: 'railway', project: projectName, environment: fixture.environmentName };
+      if (!cleanupOnly && mode === 'preview') {
+        if (journal.phase !== 'prepared' || (await nativeInventory()).length) throw new Error('Preview requires an empty prepared dedicated fixture.');
+        await setSpec(fixtureSpec({ revision: 'create' }));
+        const planned = await plan();
+        assertPlanCanApply(planned); assertFixturePlan(planned);
+        const preview = fixturePreview(planned, target);
+        writeFileSync(previewFile, `${JSON.stringify(preview, null, 2)}\n`, { mode: 0o600 });
+        process.stdout.write(`\nRailway fixture preview saved: ${previewFile}\nPlan: ${preview.planId}\nNo provider apply or release was executed.\n`);
+        return;
+      }
+      assertFixtureLifecycleConsent(process.env.HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE);
+      if (!cleanupOnly) {
+        if (!existsSync(previewFile)) throw new Error('Preview the dedicated Railway fixture before authorizing its lifecycle.');
+        const preview = JSON.parse(readFileSync(previewFile, 'utf8')) as FixturePreview;
+        const db = new Database(path.join(dataDirectory, 'hypervibe.db'), { readonly: true, fileMustExist: true });
+        try {
+          firstPlan = loadRailwayFixturePreview({ preview, target, approvedPlanId: process.env.HYPERVIBE_LIVE_APPROVED_PLAN_ID,
+            load: (planId) => {
+              const saved = db.prepare('SELECT plan FROM runs WHERE id = ?').get(planId) as { plan: string } | undefined;
+              return saved && JSON.parse(saved.plan);
+            } });
+          assertPlanCanApply(firstPlan); assertFixturePlan(firstPlan);
+        } finally { db.close(); }
+      }
+      await runDisposableFixture({ journal, save: (value) => saveFixtureJournal(journalFile, value), cleanupOnly,
+        signal: interrupted.signal, driver: {
+          inventory: nativeInventory,
+          observe: async (resource) => {
+            if (resource.provider !== 'railway' || !resource.address.startsWith(`railway/${nativeProjectId}/`)) return 'unknown';
+            try { return (await nativeInventory()).some((current) => resourceKey(current) === resourceKey(resource)) ? 'present' : 'absent'; }
+            catch { return 'unknown'; }
+          },
+          assertNoop: async () => {
+            const noop = await plan(); assertPlanCanApply(noop);
+            expect(nonNoopActions(noop)).toEqual([]);
+            const result = await apply(noop); assertNoTerminalApplyFailure(result);
+            expect((result.data.receipts as JsonObject[]).every((receipt) => receipt.status === 'skipped_noop')).toBe(true);
+          },
+          converge: async (revision) => {
+            fixtureStage = revision;
+            if (!(revision === 'create' && firstPlan)) await setSpec(fixtureSpec({ revision, includeService: revision !== 'absent' }));
+            const desired = await applyCurrentSpec();
+            assertNoTerminalApplyFailure(desired.apply);
+            await convergeReviewedInfrastructure(desired.apply);
+            if (revision !== 'absent') {
+              try { await release(); } finally { await rememberInventory(); }
+            }
+          },
+          verifyRunning: async (revision) => {
+            await verifyHealth(revision);
+            if (fixture.database) {
+              const query = await runHypervibe(['db', 'query'], { project: projectName, env: fixture.environmentName, sql: 'SELECT 1::int AS healthy' });
+              expect(query.data.rows).toEqual([{ healthy: 1 }]);
+            }
+          },
+        },
+      });
+    } finally {
+      process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
+    }
+  }, 90 * 60_000);
 });

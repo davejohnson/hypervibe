@@ -27,12 +27,15 @@ Terraform, cloud CLIs or Docker to deploy an app.
 
 ### Current status
 
-This repository is being reset around that direction. The OpenTofu engine and
-its automatic installation are **not integrated here yet**. The existing provider
-adapters and their detailed feature documents describe the earlier implementation;
-they do not prove a working OpenTofu deployment on any cloud. Each new cloud path
-must be verified from installation through a running app before it is described
-as supported.
+Google Cloud infrastructure uses the managed OpenTofu engine. Cloud Run selects
+it automatically; there is no alternate GCP provisioning path. Hypervibe installs
+its pinned engine and provider plugins, then plans and applies reviewed changes.
+Railway keeps its existing workflow. AWS and Azure engine deployment remain
+unavailable until their complete paths are implemented and verified.
+
+Local and provider-contract checks do not establish a live deployment. See the
+[engine implementation and evidence](docs/opentofu-engine.md) for the current
+boundary and historical live evidence.
 
 New cloud development focuses on **Google Cloud, AWS and Azure**. **Railway stays
 available for existing apps**; this reset does not require moving those apps.

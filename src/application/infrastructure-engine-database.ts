@@ -8,7 +8,7 @@ import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import {
-  observeSecret, secretManagerFetch, sqlAdmin, waitForSqlOperation, writeSecretVersion,
+  observeSecret, recordSecretVersionMetadata, sqlAdmin, waitForSqlOperation, writeSecretVersion,
 } from './infrastructure-engine.js';
 
 /**
@@ -61,11 +61,12 @@ export async function observeDatabaseCredential(token: string, gcpProjectId: str
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') return { blocked: observed.reason };
   if (observed.state === 'absent') return { ready: false, generation: 0 };
-  if (observed.value.labels['hv-environment'] !== environmentLabel) {
+  if (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== environmentLabel) {
     return { blocked: `Secret Manager already has ${secretId}, but it is not owned by this Hypervibe environment.` };
   }
   const labels = observed.value.labels;
   const login = labels['hv-db-login'];
+  if (observed.value.hasEnabledVersion && (!isLogin(login) || !labels['hv-db-instance'])) return { blocked: `The enabled version of ${secretId} has no verified database credential metadata.` };
   const ready = observed.value.hasEnabledVersion && labels['hv-db-instance'] === instanceName && isLogin(login);
   return {
     ready,
@@ -143,6 +144,8 @@ async function verifyLogin(serviceAccount: Record<string, unknown>, connectionNa
 
 export async function executeDatabaseCredential(token: string, serviceAccount: Record<string, unknown>, action: PlanAction): Promise<ActionResult> {
   const meta = action.metadata as unknown as DatabaseCredentialMetadata;
+  const container = await observeSecret(token, meta.gcpProjectId, meta.secretId);
+  if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== meta.labels['hv-environment']) return { success: false, status: 'blocked', message: 'The owned database secret container must be created by hv_plan/hv_apply before changing database logins.' };
   const instanceResponse = await sqlAdmin(token, meta.gcpProjectId, `instances/${meta.instanceName}`);
   if (instanceResponse.status === 404) return { success: false, status: 'blocked', message: `Database instance ${meta.instanceName} does not exist yet.` };
   if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Cloud SQL returned HTTP ${instanceResponse.status} for ${meta.instanceName}.` };
@@ -203,10 +206,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     const observed = await observeSecret(token, meta.gcpProjectId, meta.secretId);
     if (observed.state !== 'present') return { success: false, status: 'pending', message: `${meta.secretId} could not be read after revoking ${retired}.` };
     const { 'hv-db-retire': _retire, ...labels } = observed.value.labels;
-    const patched = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${meta.gcpProjectId}/secrets/${meta.secretId}?updateMask=labels`, {
-      method: 'PATCH', body: JSON.stringify({ labels }),
-    });
-    if (!patched.ok) return { success: false, status: 'pending', message: `The old password was revoked, but ${meta.secretId} could not be updated yet.` };
+    if (!observed.value.latestVersion || !recordSecretVersionMetadata(meta.gcpProjectId, meta.secretId, observed.value.latestVersion, labels)) return { success: false, status: 'pending', message: 'The old password was revoked, but its exact version metadata could not be recorded.' };
     return { success: true, message: `The previous password for ${retired} no longer works. Rotation is complete.` };
   } catch (error) {
     const reason = error instanceof Error ? error.message.split('\n')[0] : 'unknown error';
