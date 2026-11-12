@@ -12,6 +12,7 @@ import { CommandRegistry } from '../commands.js';
 import { registerHvLaunchTools } from '../../tools/hv-launch.tools.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import * as infrastructure from '../infrastructure-engine.js';
+import * as dnsHosting from '../dns-hosting.js';
 import * as engineSecrets from '../engine-secrets.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.js';
 import * as preparation from '../../domain/services/cloud-prepare.execute.js';
@@ -49,6 +50,27 @@ function fixture(secrets: Record<string, unknown> = {}) {
 }
 
 describe('launch exact saved-plan approval', () => {
+  it('routes an approved saved DNS artifact to its own engine without replanning hosting', async () => {
+    const f = fixture();
+    const environment = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;
+    const segment = { id: 'dns-segment', engine: 'opentofu' as const, planDigest: 'reviewed', configurationDigest: 'reviewed-config', engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
+    const action: PlanAction = { id: 'dns:google_dns_record_set.fixture', type: 'create', verified: true, requiresConfirm: true,
+      resource: { kind: 'domain', provider: 'dns-gcp', name: 'app.example.com' }, reason: 'Reviewed DNS change',
+      metadata: { operation: 'dnsEngine', domain: 'app.example.com', engineSegment: { ...segment, addresses: ['google_dns_record_set.fixture'] } } };
+    const saved = dnsHosting.persistDnsPlanRun(f.ctx, { project: f.project, environment, environmentName: 'staging', specRevision: 1,
+      prepared: { actions: [action], ready: false, descriptor: { version: 1, planId: 'private-dns-artifact', segment,
+        state: { provider: 'dns-gcp', projectId: f.project.id, environmentId: environment.id, partition: 'environment' },
+        zone: { provider: 'gcp', zoneId: 'dns-zone', zoneName: 'example.com', scope: { projectId: 'dns-project' } },
+        owner: 'gcp-domain', domain: 'app.example.com', connectionId: 'dns-connection', zoneFingerprint: 'reviewed-zone', payloadEncrypted: 'private-payload' } },
+      source: { kind: 'gcp-domain' } });
+    if ('blocked' in saved) throw new Error(saved.blocked.join(' '));
+    const apply = vi.spyOn(dnsHosting, 'applyDnsPlan').mockResolvedValue({ kind: 'blocked', reason: 'SAVED_DNS_APPLY_REACHED' });
+    const result = await launchEnvironment(f.ctx, { project: f.project, spec: f.spec, specRevision: 1,
+      environmentName: 'staging', planId: saved.planRunId, confirmActions: saved.confirmActions });
+    expect(result).toMatchObject({ status: 'blocked', message: 'SAVED_DNS_APPLY_REACHED' });
+    expect(apply).toHaveBeenCalledWith(f.ctx, expect.objectContaining({ planId: saved.planRunId }));
+    expect(f.plan).not.toHaveBeenCalled(); expect(f.apply).not.toHaveBeenCalled();
+  });
   it('reviews missing outside-key containers before asking the user for their values', async () => {
     const f = fixture({ ACME_API_KEY: { ownership: 'delegated', principal: 'owner@example.com', environments: ['staging'] } });
     const reviewed = f.saved('Create the owned container before collecting ACME_API_KEY');

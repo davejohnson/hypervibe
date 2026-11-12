@@ -236,6 +236,15 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     const segment = first.actions[0]!.metadata!.engineSegment as any;
     const applied = await engine.apply({ backend: builtinBackend, auth, state, planId: 'plan-1', segment, approvedAddresses: segment.addresses });
     expect(applied.outcomes).toEqual({ 'terraform_data.app': 'succeeded' });
+    const inspected = await engine.inspectState({ backend: builtinBackend, configuration, auth, state,
+      project: value => {
+        const resources = (value as { values: { root_module: { resources: Array<{ address: string; values: { id: string } }> } } }).values.root_module.resources;
+        return resources.map(resource => ({ address: resource.address, id: resource.values.id }));
+      } });
+    expect(inspected).toEqual({ ok: true, present: true, value: [{ address: 'terraform_data.app', id: expect.any(String) }] });
+    expect(JSON.stringify(inspected)).not.toContain(SECRET);
+    expect(await engine.inspectState({ backend: builtinBackend, configuration, auth, state,
+      project: () => { throw Error(`malformed private state ${SECRET}`); } })).toMatchObject({ ok: false, stage: 'state inspection' });
 
     const stateBytes = fs.readFileSync(paths.statePath, 'utf8');
     expect(stateBytes).not.toContain(SECRET);

@@ -242,7 +242,7 @@ function isApex(domain: string): boolean {
   return dnsZoneScopeForDomain(domain) === domain;
 }
 
-function desiredDnsRecords(domain: string, owner: string): DesiredDnsRecord[] {
+export function desiredPagesDnsRecords(domain: string, owner: string): DesiredDnsRecord[] {
   return isApex(domain)
     ? [
         ...GITHUB_PAGES_IPV4.map((content) => ({ name: domain, type: 'A', content, proxied: false as const })),
@@ -333,7 +333,7 @@ async function planPagesDns(params: {
   const domain = params.pages.customDomain;
   if (!domain) return { actions: [], warnings: [], blocked: [] };
   const id = dnsActionId(domain);
-  const desired = desiredDnsRecords(domain, params.owner);
+  const desired = desiredPagesDnsRecords(domain, params.owner);
   const result = cloudflareAdapter(domain);
   if ('error' in result) {
     return {
@@ -408,7 +408,6 @@ async function planPagesDns(params: {
             ? `GitHub Pages DNS must point ${domain} at ${params.owner}.github.io`
             : `Remove Hypervibe-managed GitHub Pages DNS from ${domain}`,
         ...((replacingExisting || !enabled) && !inSync ? { requiresConfirm: true } : {}),
-        ...(!enabled && !inSync ? { dependsOn: [params.pageActionId] } : {}),
         metadata: {
           operation: GITHUB_PAGES_DNS_OPERATION,
           repository: params.repository,
@@ -559,7 +558,14 @@ export async function planGitHubPages(params: {
     ? new Date(attemptedAt + GITHUB_PAGES_CERTIFICATE_ATTEMPT_COOLDOWN_MS).toISOString()
     : undefined;
   const inSync = enabled ? baseInSync && httpsInSync : current === null;
-  const dnsDependency = enabled
+  // GitHub requires attaching the hostname before DNS points at Pages, otherwise
+  // another repository could claim it. Certificate activation follows DNS later.
+  // https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site
+  const needsAttachment = enabled && !baseInSync;
+  if (needsAttachment) {
+    for (const action of dns.actions) action.dependsOn = [...new Set([...(action.dependsOn ?? []), GITHUB_PAGES_ACTION_ID])];
+  }
+  const dnsDependency = !needsAttachment
     ? dns.actions.find((action) => action.type !== 'noop')?.id
     : undefined;
   const pageAction: PlanAction = {
@@ -598,7 +604,7 @@ export async function planGitHubPages(params: {
     },
   };
   return {
-    actions: enabled ? [...dns.actions, pageAction] : [pageAction, ...dns.actions],
+    actions: enabled && !needsAttachment ? [...dns.actions, pageAction] : [pageAction, ...dns.actions],
     warnings: [...dns.warnings, ...pagesWarnings],
     blocked: dns.blocked,
   };
@@ -724,6 +730,16 @@ export async function applyGitHubPages(params: {
     }
   }
   if (!desired.enabled) {
+    if (current && desired.customDomain) {
+      const environment = params.project && params.environmentName
+        ? new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName) : null;
+      const marker = (environment?.platformBindings.github as { pagesDnsRemoved?: { domain?: string; repository?: string; planId?: string } } | undefined)?.pagesDnsRemoved;
+      if (params.action.metadata?.dnsEngineRemoved !== true || !marker?.planId || params.action.metadata?.dnsRemovalPlanId !== marker.planId
+        || marker.domain !== desired.customDomain || marker.repository !== repository) {
+        return { success: false, status: 'blocked', message: 'Keep the Pages hostname claimed until its DNS removal is verified',
+          error: 'Run hv_plan and apply the saved DNS removal stage before detaching GitHub Pages.' };
+      }
+    }
     if (current) await adapter.deletePagesSite(parts.owner, parts.repo);
     if (await adapter.getPagesConfig(parts.owner, parts.repo)) {
       return { success: false, message: 'GitHub Pages deletion was not verified', error: 'The Pages site still exists.' };
@@ -866,83 +882,11 @@ export async function applyGitHubPagesBindingCleanup(params: {
   };
 }
 
-function parseRecordArray(value: unknown): DnsRecordSnapshot[] | null {
-  if (!Array.isArray(value)) return null;
-  const records: DnsRecordSnapshot[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
-    const record = item as Record<string, unknown>;
-    if (
-      typeof record.id !== 'string'
-      || typeof record.name !== 'string'
-      || typeof record.type !== 'string'
-      || typeof record.content !== 'string'
-      || typeof record.proxied !== 'boolean'
-    ) return null;
-    records.push({ id: record.id, name: record.name, type: record.type, content: record.content, proxied: record.proxied });
-  }
-  return records.sort((a, b) => `${a.name}:${a.type}:${a.content}:${a.id}`.localeCompare(`${b.name}:${b.type}:${b.content}:${b.id}`));
-}
-
-export async function applyGitHubPagesDns(params: {
+/** Historical saved plans cannot bypass the shared infrastructure engine boundary. */
+export async function applyGitHubPagesDns(_params: {
   spec: ProjectSpec;
   action: PlanAction;
-}): Promise<{ success: boolean; status?: 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
-  const pages = params.spec.github?.pages;
-  const domain = pages?.customDomain;
-  const repository = typeof params.action.metadata?.repository === 'string' ? params.action.metadata.repository : undefined;
-  const reviewedEnabled = params.action.metadata?.enabled;
-  const parts = repository ? repoParts(repository) : null;
-  if (!pages || !domain || !repository || !parts || reviewedEnabled !== pages.enabled || params.action.resource.name !== domain) {
-    return { success: false, status: 'blocked', message: 'GitHub Pages DNS action has stale identity', error: 'Re-run hv_plan.' };
-  }
-  const result = cloudflareAdapter(domain);
-  if ('error' in result) {
-    return { success: false, status: 'blocked', message: 'Cloudflare connection is unavailable', error: result.error };
-  }
-  const zoneId = typeof params.action.metadata?.zoneId === 'string' ? params.action.metadata.zoneId : undefined;
-  const observed = parseRecordArray(params.action.metadata?.observedRecords);
-  if (!zoneId || !observed) {
-    return { success: false, status: 'blocked', message: 'GitHub Pages DNS was not safely observed during planning', error: 'Re-run hv_plan.' };
-  }
-  const desired = desiredDnsRecords(domain, parts.owner);
-  const current = dnsSnapshot((await result.adapter.listDnsRecords(zoneId)).filter((record) => (
-    recordAtManagedName(record, desired) && isAddressRecord(record)
-  )));
-  if (!sameJson(current, observed)) {
-    return { success: false, status: 'blocked', message: `DNS for ${domain} changed after planning`, error: 'Re-run hv_plan.' };
-  }
-  for (const record of recordsToDelete(current, desired, pages.enabled)) {
-    await result.adapter.deleteDnsRecord(zoneId, record.id);
-  }
-  if (pages.enabled) {
-    const remaining = dnsSnapshot((await result.adapter.listDnsRecords(zoneId)).filter((record) => (
-      recordAtManagedName(record, desired) && isAddressRecord(record)
-    )));
-    for (const record of desired) {
-      const exists = remaining.some((candidate) => (
-        recordTuple(candidate) === recordTuple(record)
-      ));
-      if (!exists) {
-        await result.adapter.createDnsRecord(zoneId, record);
-      }
-    }
-  }
-  const finalRecords = dnsSnapshot((await result.adapter.listDnsRecords(zoneId)).filter((record) => (
-    recordAtManagedName(record, desired) && isAddressRecord(record)
-  )));
-  const success = pages.enabled
-    ? dnsInSync(finalRecords, desired)
-    : finalRecords.every((record) => !desired.some((candidate) => (
-      recordTuple(candidate, false) === recordTuple(record, false)
-    )));
-  if (!success) {
-    return { success: false, message: `GitHub Pages DNS for ${domain} was not verified`, error: 'Provider read-back differs from desired state.' };
-  }
-
-  return {
-    success: true,
-    message: pages.enabled ? `Configured GitHub Pages DNS for ${domain}` : `Removed GitHub Pages DNS for ${domain}`,
-    data: { repository, domain, recordCount: finalRecords.length },
-  };
+}): Promise<{ success: boolean; status?: 'blocked'; message: string; error?: string }> {
+  return { success: false, status: 'blocked', message: 'GitHub Pages DNS needs a reviewed infrastructure engine plan',
+    error: 'Re-run hv_plan with the exact DNS provider and zone selected. Apply the saved DNS stage before continuing GitHub Pages.' };
 }

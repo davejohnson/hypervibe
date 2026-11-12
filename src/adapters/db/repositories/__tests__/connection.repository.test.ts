@@ -52,6 +52,14 @@ afterEach(() => {
 });
 
 describe('ConnectionRepository scope safety', () => {
+  it('never selects another repository when no scope is known and global is unverified', () => {
+    create('cloudflare');
+    const other = create('cloudflare', 'other/repository');
+    repository.updateStatus(other.id, 'verified');
+    expect(repository.findBestVerifiedMatch('cloudflare')).toBeNull();
+    expect(repository.findBestVerifiedMatchFromHints('cloudflare', [])).toBeNull();
+  });
+
   it('normalizes literal global scopes before persistence', () => {
     const connection = create('github', ' global ');
 

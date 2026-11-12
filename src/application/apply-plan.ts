@@ -1,4 +1,4 @@
-import { isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+import { domainServiceFor, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyServiceInstanceAction } from '../domain/services/service-instance.service.js';
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
@@ -35,6 +35,10 @@ import {
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { applyInfrastructureEngine } from './infrastructure-engine.js';
+import { applyDnsPlan } from './dns-hosting.js';
+import { hasOwnedDnsRecords } from './dns-engine.js';
+import { verifyDnsTrafficAbsent } from './dns-absence.js';
+import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
 import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
@@ -70,6 +74,7 @@ import {
   resolveGitHubInfrastructureRepository,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
+  isRepositoryDnsEnvironment,
 } from '../domain/services/github-infrastructure.service.js';
 import {
   applyGitHubPages,
@@ -807,6 +812,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
+  if (planScope === 'dns-engine') {
+    if (invalidSpec) return invalidSpec;
+    const outcome = await applyDnsPlan(ctx, { project, spec, specRevision: params.specRevision,
+      planId, confirmActions: params.confirmActions ?? [] });
+    return outcome.kind === 'blocked'
+      ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: outcome.reason }] }
+      : { ...outcome, actionScopedWarnings: [] };
+  }
   if (planScope === 'infrastructure-engine') {
     if (invalidSpec) return invalidSpec;
     const engineOutcome = await applyInfrastructureEngine(ctx, { project, spec, specRevision: params.specRevision,
@@ -825,6 +838,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const repositoryDnsOnly = planScope === 'full' && isRepositoryDnsEnvironment(spec, envName);
+  if (repositoryDnsOnly && environment && (Object.keys(environment.platformBindings)
+    .some(key => !['github', 'dnsEngine'].includes(key))
+    || ctx.repos.components.findByEnvironmentId(environment.id).length > 0)) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'This environment has existing or unknown bound hosting resources. Preserve and reconcile those resources before applying a repository-only Pages plan.' }] };
+  }
   try {
     const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
     if (pendingVariables && (planScope !== 'full' || envName !== pendingVariables
@@ -846,7 +866,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   // These exceptions depend on the validated persisted scope and, for retained
   // tasks, its exact acknowledged execution. User-supplied scope labels cannot
   // authorize infrastructure through the credential/recovery executor.
-  if (isEngineManaged(spec.environments[envName]) && planScope !== 'credentials' && !observationOrCleanup) {
+  if (isEngineManaged(spec.environments[envName]) && planScope !== 'credentials' && !observationOrCleanup && !repositoryDnsOnly) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'cloudrun',
       reason: 'Cloud Run infrastructure requires an OpenTofu plan. Run hv_plan again before applying this older plan.' }] };
   }
@@ -896,7 +916,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const rawEnvironmentSpec = spec.environments[envName];
   const envSpec = rawEnvironmentSpec && planScope === 'backup-provisioning'
     ? withBackupStorageDefaults(rawEnvironmentSpec) : rawEnvironmentSpec;
-  if (!envSpec) {
+  if (!envSpec || repositoryDnsOnly) {
     if (secretsOnly) return { kind: 'env_missing', envName };
     return shouldPlanGitHubInfrastructure(spec, envName)
       || shouldPlanGitHubDelegatedSecrets(spec, envName)
@@ -2728,6 +2748,9 @@ async function applyDomain(
     const metadata = asRecord(action.metadata);
     const bindings = parseHostingBindings(environment);
     const domainBinding = bindings.domainDns;
+    if (hasOwnedDnsRecords(environment, 'hosting-domain')) return {
+      success: false, status: 'blocked', message: 'Preserve the hosting domain claim until its owned DNS is removed by a reviewed OpenTofu plan.',
+    };
     const reviewedRecordIds = stringArrayField(metadata, 'dnsRecordIds').sort();
     const currentRecordIds = (domainBinding?.records ?? []).map((record) => record.id).sort();
     const bindingMatches = action.metadata?.operation === DOMAIN_DETACH_OPERATION
@@ -2740,6 +2763,7 @@ async function applyDomain(
       && stringField(metadata, 'environmentId') === domainBinding.environmentId
       && stringField(metadata, 'providerDomainId') === domainBinding.providerDomainId
       && stringField(metadata, 'zoneId') === domainBinding.zoneId
+      && (domainBinding.dnsEngineRemoved !== true || metadata?.dnsEngineRemoved === true)
       && JSON.stringify(reviewedRecordIds) === JSON.stringify(currentRecordIds);
     if (!bindingMatches) {
       return {
@@ -2750,10 +2774,26 @@ async function applyDomain(
       };
     }
 
+    let verifiedDnsAbsence: { zoneFingerprint: string; connectionId: string } | undefined;
+    if (metadata?.dnsCancellationVerified === true) {
+      const proof = asRecord(metadata.dnsCancellationProof);
+      const zoneFingerprint = stringField(proof, 'zoneFingerprint');
+      const connectionId = stringField(proof, 'connectionId');
+      if (domainBinding.dnsStagePending !== true || !domainBinding.dnsSelection || domainBinding.zoneId
+        || !Array.isArray(domainBinding.records) || domainBinding.records.length !== 0 || !zoneFingerprint || !connectionId) {
+        return { success: false, status: 'blocked', message: 'The pending attachment or reviewed DNS absence evidence changed. Run hv_plan again.' };
+      }
+      const absence = await verifyDnsTrafficAbsent({ ctx, project, domain: action.resource.name,
+        zone: dnsZoneIdentity(domainBinding.dnsSelection), connectionScope: domainBinding.dnsSelection.connectionScope,
+        expected: { zoneFingerprint, connectionId } });
+      if (!absence.ready) return { success: false, status: 'blocked', message: absence.reason };
+      verifiedDnsAbsence = { zoneFingerprint: absence.zoneFingerprint, connectionId: absence.connectionId };
+    }
     const result = await teardownCustomDomain({
       project,
       environment,
       domain: action.resource.name,
+      verifiedDnsAbsence,
     });
     if (!result.success) {
       return {
@@ -2780,7 +2820,7 @@ async function applyDomain(
     });
     return {
       success: true,
-      message: `Detached domain ${action.resource.name} and removed its managed DNS records`,
+      message: `Detached domain ${action.resource.name} after verifying DNS cleanup or absence`,
       data: result as unknown as Record<string, unknown>,
     };
   }
@@ -2796,6 +2836,18 @@ async function applyDomain(
     };
   }
   const metadata = asRecord(action.metadata);
+  if (metadata?.operation === 'domainDnsReady' && metadata.dnsEngineReady === true) {
+    const adapter = await ctx.adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+    if (!adapter.success || !adapter.adapter?.observe) return { success: false, status: 'blocked', message: 'The hosting certificate cannot be observed.' };
+    const observed = await adapter.adapter.observe(environment);
+    const binding = parseHostingBindings(environment).domainDns;
+    const matches = observed.services.filter(service => service.externalId === binding?.serviceId && service.customDomains.includes(action.resource.name));
+    const status = matches.length === 1 ? matches[0]!.customDomainStatus?.[action.resource.name] : undefined;
+    if (!binding?.providerDomainId || status?.providerDomainId !== binding.providerDomainId) return { success: false, status: 'blocked', message: 'The exact hosting domain identity changed. Run hv_plan again.' };
+    return status.providerVerified === true
+      ? { success: true, message: 'The provider verified the custom domain and its DNS.' }
+      : { success: false, status: 'pending', message: 'DNS is configured; hosting certificate verification is still pending.' };
+  }
   if (metadata?.operation === DOMAIN_ADOPT_OPERATION) {
     const providerDomainId = stringField(metadata, 'providerDomainId');
     const projectId = stringField(metadata, 'projectId');
@@ -2967,8 +3019,10 @@ async function applyDomain(
     project,
     environment,
     domain: action.resource.name,
+    serviceName: domainServiceFor(environmentSpec),
     trafficProxied: effectiveDomainProxy,
     recreate: recreateRequested,
+    dnsZone: environmentSpec.dns?.zone.name,
   });
   if (
     result.customDomainAttached
@@ -2993,6 +3047,11 @@ async function applyDomain(
         }
         : {}),
       domainDns: {
+        ...(bindings.domainDns?.name === action.resource.name ? bindings.domainDns : {}),
+        ...(!bindings.domainDns && environmentSpec.dns && !hasOwnedDnsRecords(environment, 'hosting-domain')
+          ? { dnsStagePending: true, dnsSelection: { provider: environmentSpec.dns.provider, zone: environmentSpec.dns.zone,
+            ...(environmentSpec.dns.connectionScope ? { connectionScope: environmentSpec.dns.connectionScope } : {}) } }
+          : {}),
         name: action.resource.name,
         proxied: effectiveDomainProxy,
         ...(result.customDomainId ? { providerDomainId: result.customDomainId } : {}),
@@ -3000,7 +3059,7 @@ async function applyDomain(
         ...(serviceBinding?.serviceId ? { serviceId: serviceBinding.serviceId } : {}),
         ...(bindings.environmentId ? { environmentId: bindings.environmentId } : {}),
         ...(result.zone?.id ? { zoneId: result.zone.id } : {}),
-        records: (result.dnsRecords ?? []).map((record) => ({
+        records: (bindings.domainDns?.name === action.resource.name ? bindings.domainDns.records : undefined) ?? (result.dnsRecords ?? []).map((record) => ({
           id: record.id,
           name: record.name,
           type: record.type,
@@ -3016,7 +3075,7 @@ async function applyDomain(
     return {
       success: true,
       status: 'pending',
-      message: `Configured DNS for ${action.resource.name}; ${action.resource.provider} domain verification is pending`,
+      message: `Recorded the hosting attachment for ${action.resource.name}; run hv_plan to review its DNS records through OpenTofu`,
       data: result as unknown as Record<string, unknown>,
     };
   }

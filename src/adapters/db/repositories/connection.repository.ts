@@ -144,7 +144,7 @@ export class ConnectionRepository {
     }
 
     if (!scopeHint) {
-      return this.findAllByProvider(provider).find((connection) => connection.status === 'verified') ?? null;
+      return null;
     }
 
     const candidates = this.findAllByProvider(provider)
