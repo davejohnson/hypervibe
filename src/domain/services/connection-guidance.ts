@@ -535,6 +535,23 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'AWS shows a new secret access key only once. Store it outside the repository and rotate it regularly.',
     ],
   },
+  aws: {
+    provider: 'aws',
+    displayName: 'Amazon Web Services',
+    tokenType: 'One browser sign-in to AWS (any administrator, including the root user); Hypervibe then creates and stores its own limited deploy access',
+    setupUrl: 'https://signin.aws.amazon.com/',
+    setupUrls: [{ label: 'AWS sign-in (Hypervibe opens it for you with hv_connections provider="aws" action="connect")', url: 'https://signin.aws.amazon.com/' }],
+    permissions: [
+      'One-time setup, approved on Hypervibe\'s page right after sign-in: a hypervibe-deploy policy and hypervibe-deploy-<project> role, a hypervibe-app-boundary policy capping every app role, GitHub OIDC for keyless CI, and a hypervibe-local user that can only assume deploy roles.',
+      'The deploy role manages Lambda, ECS/Fargate, Aurora/RDS, S3, EventBridge Scheduler, Step Functions, CodeBuild and Parameter Store under /hypervibe/*; it creates IAM roles only under /hypervibe/app/ with the boundary and cannot change the boundary.',
+    ],
+    credentialExample: 'hv_connections provider="aws" action="connect"',
+    notes: [
+      'No AWS CLI or access keys to create: the sign-in session stays in memory and is used once. The local key is created by setup, stored encrypted and never shown.',
+      'If AWS shows "400 Bad Request" after "Continue with an active session", the browser holds an expired AWS session: click "Sign out of AWS" on Hypervibe\'s page, then sign in again.',
+      'Hypervibe chooses the region from the app\'s other environments (us-east-1 otherwise) and states it.',
+    ],
+  },
   gcs: {
     provider: 'gcs',
     displayName: 'Google Cloud Storage',

@@ -111,6 +111,13 @@ requires explicit intent to adopt and the exact reviewed mapping.
 - Prefer provider-owned bootstrap and local authentication when offered. Perform
   the agent's supported setup work; leave browser consent, MFA, payment details,
   and ambiguous account or billing choices to the user.
+- AWS: `hv_connections provider="aws" action="connect"` opens one AWS sign-in;
+  the person approves the listed changes on that page. Hypervibe picks the region
+  and account; do not ask. If AWS shows "400 Bad Request", it is an expired AWS
+  session in that browser: tell them to click "Sign out of AWS" on the page and
+  sign in again.
+- Decide routine choices (region, sizes, names) and state them; ask only for what
+  only the person can do.
 - Follow each result's `agentInstruction`. After blocked, failed, pending, or
   confirmation-required work, report the stopping point and next decision.
   Continue only within an explicit bounded continuation, or the user's explicit

@@ -10,6 +10,8 @@ import { acquireManagedDatabaseAccess } from '../domain/services/database-access
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
+import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { isAwsEngineEnvironment, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import {
   ENGINE_DATABASE_URL_KEY,
   engineBucketName,
@@ -134,6 +136,62 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
   return target as EnvironmentSpec;
 }
 
+/** The runtime settings worth copying from a running source: not managed, not named for the source, not pointing at its data. */
+async function sourceSettings(ctx: CommandContext, params: { project: Project; from: string; to: string; spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment }):
+Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[] } | { blocked: string }> {
+  const values: Record<string, string> = {};
+  for (const serviceName of Object.keys(params.sourceSpec.services)) {
+    const service = ctx.repos.services.findByProjectAndName(params.project.id, serviceName);
+    if (!service) continue;
+    const read = await readHostingEnvVars({ project: params.project, environment: params.sourceEnvironment, service });
+    if (!read.success) return { blocked: `Could not read ${serviceName}'s settings on ${read.provider}: ${read.error}` };
+    for (const [key, value] of Object.entries(read.variables)) if (value) values[key] ??= value;
+  }
+  const declared = new Set([...Object.keys(params.spec.environments[params.to]!.envVars), ...Object.entries(params.spec.secrets)
+    .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key)]);
+  const candidates = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
+  const leftOut = candidates.filter((key) => scopedToEnvironment(key, params.from));
+  return { values, keys: candidates.filter((key) => !leftOut.includes(key)), leftOut };
+}
+
+/**
+ * Migration into an AWS engine environment. Runtime settings are copied into
+ * Parameter Store after the user sees their names; the services read them on
+ * the next infrastructure apply. Copying data to AWS is not built yet.
+ */
+async function migrateToAws(ctx: CommandContext, params: {
+  project: Project; from: string; to: string; importSecrets?: boolean; copyData?: boolean; cutover?: boolean;
+  spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment;
+}): Promise<MigrateResult> {
+  const context = await resolveAwsEngineContext(ctx, params.project, params.to);
+  if ('blocked' in context) return { status: 'blocked', message: context.blocked };
+  const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const engine = () => (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
+  if (!engine().importedSecrets) {
+    const settings = await sourceSettings(ctx, params);
+    if ('blocked' in settings) return { status: 'blocked', message: settings.blocked };
+    const { values, keys, leftOut } = settings;
+    if (!params.importSecrets) {
+      return {
+        status: 'needs_secret_import', keys, ...(leftOut.length ? { leftOut } : {}),
+        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into AWS Parameter Store for ${params.to}. Values are copied directly and never shown.`
+          + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
+      };
+    }
+    const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+    for (const key of keys) {
+      try {
+        await ssm.send(new PutParameterCommand({ Name: `${context.parameterPath}${key}`, Type: 'SecureString', Value: values[key]!, Overwrite: true }));
+      } catch (error) {
+        return { status: 'blocked', message: `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}); nothing was recorded as imported. Run the migration again.` };
+      }
+    }
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine(), kind: 'opentofu', importedSecrets: keys } });
+  }
+  const imported = engine().importedSecrets ?? [];
+  return { status: 'blocked', message: `${imported.length} runtime setting(s) are in AWS Parameter Store for ${params.to}. Run hv_plan scope="infrastructure" and hv_apply so the services read them, then hv_deploy. Copying data to AWS is not available yet.` };
+}
+
 export async function migrateEnvironment(ctx: CommandContext, params: {
   project: Project;
   from: string;
@@ -172,6 +230,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     specResult = store.merge(params.project, { environments: { [params.to]: proposed } });
   }
   let spec = specResult.spec;
+  if (isAwsEngineEnvironment(spec, params.to)) return migrateToAws(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),

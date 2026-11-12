@@ -40,6 +40,7 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
+import { isAwsEngineEnvironment, planAwsTeardown } from '../application/infrastructure-engine-aws.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
@@ -768,22 +769,30 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure']).optional().describe('Default full. infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"): Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it never releases code (use hv_deploy). backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"): Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it never releases code (use hv_deploy). backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
+      deleteFinalSnapshot: z.boolean().optional().describe('scope="teardown" only: also delete the database\'s final snapshot (or, for an environment already torn down, plan deleting just that snapshot). Default keeps it so the data can be restored.'),
       secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs, deleteFinalSnapshot }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      if (scope === 'infrastructure') {
+      if (scope === 'infrastructure' || scope === 'teardown') {
         const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
-        if (supplied) return commandError('VALIDATION', 'scope="infrastructure" takes only project and env.', { next: ['hv_plan'] });
+        if (supplied) return commandError('VALIDATION', `scope="${scope}" takes only project and env.`, { next: ['hv_plan'] });
         const specResult = specStore.get(project);
         if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
         const environmentName = commandEnvironment(specResult.spec, env);
-        const planned = await planInfrastructureEngine(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName });
+        if (deleteFinalSnapshot !== undefined && scope !== 'teardown') return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+        if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName)) {
+          return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS environments only.', { next: ['hv_spec'] });
+        }
+        const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
+        const planned = scope === 'teardown'
+          ? await planAwsTeardown(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
+          : await planInfrastructureEngine(ctx, plannerParams);
         if ('blocked' in planned) {
           return commandError('VALIDATION', 'The infrastructure plan is blocked.', {
             details: { blocked: planned.blocked },
@@ -794,7 +803,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const pending = planned.actions.filter((action) => action.type !== 'noop');
         return commandSuccess({
           planId: planned.planRunId,
-          scope: 'infrastructure',
+          scope,
           environment: planned.environmentName,
           specRevision: planned.specRevision,
           actions: pending.map(({ metadata: _metadata, ...action }) => action),
