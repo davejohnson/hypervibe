@@ -22,6 +22,6 @@ export function liveFixtureCoverage(): Array<{ capability: string; status: strin
 
 export function selectLiveFixtureProfile(id: string) {
   const profile = liveFixtureProfiles.find((entry) => entry.id === id);
-  if (!profile) throw new Error(`Live fixture ${id} is unavailable. AWS and Azure infrastructure remain planned; they cannot count as passing live tests.`);
+  if (!profile) throw new Error(`Live fixture ${id} is unavailable. AWS and Azure have no complete profile in this runner; they cannot count as passing live tests.`);
   return profile;
 }
