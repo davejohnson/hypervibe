@@ -14,7 +14,8 @@ and receipts. This page records the Azure-specific decisions and why they were m
 | OpenTofu authenticates as the deploy identity (read-only probe) | Built; `tofu validate` passes; not yet run live |
 | Testing-profile configuration: web, database, storage, secrets | Built; `tofu validate` passes with `azurerm` 5.11.0; never planned or applied |
 | `hv_plan` for Azure environments | Blocked with a clear message (see below) |
-| Writing secrets to Key Vault, the app's database login, image builds, releases | Not built |
+| Key Vault secret store (`azureKeyVaultSecretStore`: observe presence, write values) | Built; unit-tested with mocked HTTP; not wired into plans yet |
+| The app's database login, image builds, releases | Not built |
 | Workers (KEDA), cron (Container Apps Jobs), production profile, teardown, CI | Not built |
 
 Plans stay blocked until Hypervibe can also write the environment's secrets, create
@@ -124,6 +125,11 @@ A testing environment costs about **$21/month idle**, almost all of it the datab
   charges $0.03 per 10,000 operations and nothing per secret. Vaults are soft-deleted
   for 7 days; purging needs subscription-level access, so vault names carry a stable
   per-environment suffix and a deleted vault is left to expire.
+  `src/application/azure-secret-store.ts` writes values as the deploy identity (Key Vault
+  Secrets Officer) under the names the Container Apps reference (`DATABASE_URL` →
+  `database-url`) and reports presence without reading values. It has the same shape
+  (`name`, `observe`, `write`) as the provider-neutral `EngineSecretStore` in #608;
+  once that merges, `engineSecretStore()` dispatches Azure environments to it.
 - **Runtime identity.** A user-assigned managed identity per environment, created
   before the app so its pull and secret roles exist when the first revision starts.
   The configuration sets `AZURE_CLIENT_ID` so `DefaultAzureCredential` uses it. Storage
@@ -178,8 +184,9 @@ Prices are list prices for `eastus2` from the
 ## Next
 
 1. Live: sign in and run setup once; run the read-only engine probe.
-2. Key Vault secret writes, the app's database login (Entra token), ACR Tasks builds
-   and releases; then unblock `hv_plan` for testing environments.
+2. Hook `azureKeyVaultSecretStore` into `engineSecretStore()` (#608), the app's database
+   login (Entra token), ACR Tasks builds and releases; then unblock `hv_plan` for
+   testing environments.
 3. Workers (Container Apps with KEDA scale rules, scaled to zero), cron (Container
    Apps Jobs), teardown, the production profile, CI.
 
