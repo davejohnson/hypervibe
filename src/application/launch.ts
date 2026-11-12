@@ -1,5 +1,6 @@
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
+import { collectOutsideKeys } from './engine-secrets.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
@@ -43,6 +44,7 @@ export type LaunchResult =
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; planId: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
+  | { status: 'needs_secrets'; keys: string[]; url?: string; message: string }
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
   | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; confirmActions?: string[] }
@@ -266,8 +268,19 @@ async function runLaunch(ctx: CommandContext, params: {
   let certificatePending = false;
   for (; rounds < 6; rounds++) {
     const usingReviewedPlan = reviewedPlan !== undefined;
-    const planned = reviewedPlan ?? await planInfrastructureEngine(ctx, params);
+    let planned = reviewedPlan ?? await planInfrastructureEngine(ctx, params);
     reviewedPlan = undefined;
+    // Collect only after planning has verified the owned containers. A saved
+    // container plan must finish before its values or dependent work can begin.
+    if ('blocked' in planned && planned.missingOutsideKeys?.length) {
+      const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+      const imported = (environment?.platformBindings as { engine?: EngineBinding } | undefined)?.engine?.importedSecrets;
+      const collected = await collectOutsideKeys(ctx, { project: params.project, spec: params.spec, environmentName: params.environmentName,
+        keys: planned.missingOutsideKeys, ...(imported ? { importedSecrets: imported } : {}),
+        ...(params.sourceDirectory ? { sourceDirectory: params.sourceDirectory } : {}), purpose: `launch ${params.environmentName}` });
+      if (collected.status !== 'collected') return collected;
+      planned = await planInfrastructureEngine(ctx, params);
+    }
     if ('blocked' in planned) return { status: 'blocked', message: planned.blocked.join('\n') };
     const pending = planned.actions.filter((action) => action.type !== 'noop');
     const onlyCertificate = pending.length > 0 && pending.every((action) => action.metadata?.operation === 'gcpDomainReady');

@@ -51,7 +51,7 @@ const LOCK = `<svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="
 const COPY_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M13 7V4.5A1.5 1.5 0 0 0 11.5 3h-7A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13H7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`;
 const CHECK_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-function pageShell(params: { tabTitle: string; body: string; agent: string; storedWhere: string; checkedAgainst?: string; scriptNonce?: string; expiresMinutes?: number }): string {
+export function pageShell(params: { tabTitle: string; body: string; agent: string; storedWhere: string; checkedAgainst?: string; scriptNonce?: string; expiresMinutes?: number }): string {
   const agent = escapeHtml(params.agent);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="same-origin">
@@ -98,7 +98,7 @@ details{border-top:1px solid var(--frame);padding-top:.85rem}summary{cursor:poin
 <li>${escapeHtml(params.storedWhere)}. Never sent to chat, ${agent} or any Hypervibe server.</li>
 <li>${params.checkedAgainst ? `Checked against ${escapeHtml(params.checkedAgainst)} before saving. ` : ''}Link expires in ${params.expiresMinutes ?? 30} minutes.</li>
 </ul></section>
-</div>${params.scriptNonce ? `<script nonce="${params.scriptNonce}">document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){var i=b.innerHTML;b.innerHTML=${JSON.stringify(CHECK_ICON)};b.title='Copied';setTimeout(function(){b.innerHTML=i;b.title='Copy'},1500)})})})</script>` : ''}</body></html>`;
+</div>${params.scriptNonce ? `<script nonce="${params.scriptNonce}">document.querySelectorAll('form:not(#keys)').forEach(function(f){f.addEventListener('submit',function(e){var b=e.submitter||f.querySelector('button[type=submit]');setTimeout(function(){f.querySelectorAll('button').forEach(function(x){x.disabled=true});if(b){b.textContent=b.getAttribute('data-busy')||'Working…'}},0)})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){var i=b.innerHTML;b.innerHTML=${JSON.stringify(CHECK_ICON)};b.title='Copied';setTimeout(function(){b.innerHTML=i;b.title='Copy'},1500)})})})</script>` : ''}</body></html>`;
 }
 
 export function renderPastePage(spec: PastePageSpec, state: { nonce: string; scriptNonce?: string; error?: string; connected?: string }): string {
@@ -139,7 +139,7 @@ interface ActivePage {
 
 const active = new Map<string, ActivePage>();
 
-function openInBrowser(url: string): void {
+export function openInBrowser(url: string): void {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
   execFile(command, [url], () => {});
 }
@@ -229,6 +229,8 @@ export interface PasteField {
   allowGenerate?: boolean;
   /** A note such as "Delete the old key in Anthropic after this". */
   noteHtml?: string;
+  /** A local file that already has this value (".env.staging"); the page offers to use it without showing it. */
+  fromFile?: string;
 }
 
 export interface MultiPastePageSpec {
@@ -267,7 +269,10 @@ function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; 
     const link = field.link ? `<p><a class="button" href="${escapeHtml(field.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(field.link.label)} ↗</a></p>
 <p class="muted">${field.link.hintHtml}</p>${field.link.copy ? `<p class="copyrow"><span class="muted">${escapeHtml(field.link.copy.label)}</span> <code class="copy">${escapeHtml(field.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(field.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}`
       : `<p class="muted">Paste the new value from wherever it was issued${field.allowGenerate ? ', or generate one if it is a secret only your app uses' : ''}.</p>`;
-    return `<li class="field" data-field="${id}">${head}<div class="entry">${link}
+    const fromFile = field.fromFile
+      ? `<p class="fromfile"><button type="submit" name="fromfile" value="${id}" class="secondary">Use the value in ${escapeHtml(field.fromFile)}</button> <span class="muted small">or paste a different one below.</span></p>`
+      : '';
+    return `<li class="field" data-field="${id}">${head}<div class="entry">${fromFile}${link}
 <div class="inputrow">
   <label class="sr" for="v-${id}">${id}</label>
   <input id="v-${id}" type="password" name="value:${id}" placeholder="Paste the new ${id}" spellcheck="false" autocapitalize="off">
@@ -285,7 +290,7 @@ ${rows}
 <p class="muted small">Save each key as you go, or fill them in and save all at once.</p>
 <form id="keys" method="post" action="/connect/${state.nonce}" autocomplete="off"><input type="hidden" name="nonce" value="${state.nonce}">
 <ol class="fields">${items}</ol>
-${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*">Save all</button></p>` : ''}
+${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*">Save all</button>${spec.fields.filter((field) => field.fromFile && !state.saved[field.id]).length > 1 ? ' <button type="submit" name="fromfile" value="*" class="secondary">Use every value found in .env files</button>' : ''}</p>` : ''}
 </form>
 <script nonce="${state.scriptNonce}">${MULTI_SCRIPT}</script>`;
   return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere, scriptNonce: state.scriptNonce, expiresMinutes: 60 })
@@ -302,7 +307,7 @@ export async function serveMultiPastePage(params: {
   scope: string;
   spec: MultiPastePageSpec;
   /** Checks and saves one field; generate=true asks Hypervibe to create a random value. */
-  accept: (field: string, value: string | { generate: true }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  accept: (field: string, value: string | { generate: true } | { fromFile: true }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
   waitMs?: number;
   openBrowser?: (url: string) => void;
 }): Promise<LocalPasteResult & { saved?: string[] }> {
@@ -341,10 +346,13 @@ export async function serveMultiPastePage(params: {
         if (form.get('nonce') !== nonce) { reply(400); return; }
         const open = params.spec.fields.filter((candidate) => !saved[candidate.id]);
         const generateId = form.get('generate');
+        const fromFileId = form.get('fromfile');
         const saveId = form.get('save');
         const targets = generateId
           ? open.filter((candidate) => candidate.id === generateId && candidate.allowGenerate)
-          : saveId === '*' ? open.filter((candidate) => form.get(`value:${candidate.id}`)?.trim()) : open.filter((candidate) => candidate.id === saveId);
+          : fromFileId
+            ? open.filter((candidate) => candidate.fromFile && (fromFileId === '*' || candidate.id === fromFileId))
+            : saveId === '*' ? open.filter((candidate) => form.get(`value:${candidate.id}`)?.trim()) : open.filter((candidate) => candidate.id === saveId);
         if (!targets.length) {
           const first = saveId === '*' ? open[0] : undefined;
           if (first) errors[first.id] = 'Paste at least one value, then save.';
@@ -353,8 +361,8 @@ export async function serveMultiPastePage(params: {
         let failed = false;
         for (const target of targets) {
           const value = form.get(`value:${target.id}`)?.trim() ?? '';
-          if (!generateId && !value) { errors[target.id] = `Paste the new ${target.id}, or leave it for later.`; failed = true; continue; }
-          const outcome = await params.accept(target.id, generateId ? { generate: true } : value);
+          if (!generateId && !fromFileId && !value) { errors[target.id] = `Paste the new ${target.id}, or leave it for later.`; failed = true; continue; }
+          const outcome = await params.accept(target.id, generateId ? { generate: true } : fromFileId ? { fromFile: true } : value);
           if (!outcome.ok) { errors[target.id] = outcome.error; failed = true; continue; }
           delete errors[target.id];
           saved[target.id] = outcome.message;

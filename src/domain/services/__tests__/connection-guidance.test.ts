@@ -42,6 +42,7 @@ describe('connection guidance', () => {
       expect(
         record.credentialExample.includes('credentialsRef=')
         || record.credentialExample.includes('credentials=')
+        || record.credentialExample.includes('action="connect"')
         || providerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true
         || secretManagerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true,
         provider

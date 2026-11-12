@@ -85,11 +85,16 @@ export const serviceSpecSchema = z.object({
    * Run a background worker only while it has work: it scales to zero when
    * idle and starts within about a minute of new work. pendingWorkQuery is one
    * read-only SELECT against the app database that returns a single count of
-   * queued plus in-progress work.
+   * queued plus in-progress work. nextWorkAtQuery returns the single earliest
+   * time future work becomes due (or NULL); databases that pause when idle
+   * need it, so work scheduled for later starts on time without keeping the
+   * database awake.
    */
   onDemand: z.object({
     pendingWorkQuery: z.string().min(1).max(2000)
       .regex(/^\s*(select|with)\b[^;]*;?\s*$/i, 'Use one SELECT statement that returns a single count, for example SELECT count(*) FROM jobs WHERE status IN (\'queued\', \'running\').'),
+    nextWorkAtQuery: z.string().min(1).max(2000)
+      .regex(/^\s*(select|with)\b[^;]*;?\s*$/i, 'Use one SELECT statement that returns a single timestamp, for example SELECT min(run_at) FROM jobs WHERE status = \'queued\'.').optional(),
   }).strict().optional(),
   /**
    * Per-service compatibility aliases for Hypervibe-managed database URLs.

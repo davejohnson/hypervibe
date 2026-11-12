@@ -2,6 +2,7 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
+import { applyAwsInfrastructureEngine, isAwsEngineEnvironment, planAwsInfrastructureEngine } from './infrastructure-engine-aws.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
@@ -15,6 +16,7 @@ import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/qu
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
+import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
 import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
@@ -411,6 +413,41 @@ export function recordSecretVersionMetadata(gcpProjectId: string, secretId: stri
   return true;
 }
 
+/** A plan stops on missing outside keys with the one command that collects them all. */
+export function missingOutsideKeysMessage(environmentName: string, keys: string[]): string {
+  return `${environmentName} needs ${keys.length === 1 ? 'a key' : `${keys.length} keys`} Hypervibe cannot create: ${keys.join(', ')}. `
+    + `Run hv_secrets action="collect" env="${environmentName}" to add ${keys.length === 1 ? 'it' : 'them all'} on one local page (hv_launch does this itself), then plan again.`;
+}
+
+/** Google Secret Manager as an environment's secret store. */
+export async function gcpSecretStore(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
+  const context = await resolveEngineContext(ctx, project, spec, environmentName);
+  if ('blocked' in context) return context;
+  const labels = { 'managed-by': 'hypervibe', 'hv-environment': labelValue(context.environment.id), 'hv-imported': 'true' };
+  const observe: EngineSecretStore['observe'] = async (key) => {
+    const secretId = engineSecretId(environmentName, key);
+    const observed = await observeSecret(await context.adapter.engineAccessToken(), context.gcpProjectId, secretId);
+    if (observed.state === 'unknown') return { unknown: observed.reason };
+    if (observed.state === 'absent') return { unknown: `Secret container ${secretId} is absent. Run hv_plan and apply its OpenTofu container action first, or continue with hv_launch.` };
+    const ownership = observed.value.containerLabels ?? observed.value.labels;
+    if (ownership['managed-by'] !== 'hypervibe' || ownership['hv-environment'] !== labels['hv-environment']) {
+      return { unknown: `Secret ${secretId} is not owned by this Hypervibe environment.` };
+    }
+    return observed.value.hasEnabledVersion && observed.value.latestVersion ? 'present' : 'absent';
+  };
+  // Finish approved container creation before asking the user to paste private values.
+  // This also covers explicit key requests, which can bypass the missing-value scan.
+  const binding = (context.environment.platformBindings as { engine?: EngineBinding }).engine;
+  for (const key of engineOutsideKeys(spec, environmentName, binding?.importedSecrets)) {
+    const observed = await observe(key);
+    if (typeof observed === 'object') return { blocked: observed.unknown };
+  }
+  return {
+    name: 'Google Secret Manager', observe,
+    write: async (key, value) => (await writeSecretVersion(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key), labels, value))?.message,
+  };
+}
+
 /** Writes a version only after the approved engine has created the owned container. */
 export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
   const observed = await observeSecret(token, gcpProjectId, secretId);
@@ -646,10 +683,11 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   spec: ProjectSpec;
   specRevision: number;
   environmentName: string;
-}): Promise<InfrastructurePlanResult | { blocked: string[] }> {
+}): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
-  if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} does not use Cloud Run, the provider managed by OpenTofu.`] };
+  if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} is not managed by the OpenTofu engine. Use Cloud Run or select hosting.engine="opentofu" for AWS.`] };
+  if (isAwsEngineEnvironment(spec, environmentName)) return planAwsInfrastructureEngine(ctx, params);
   const problems = engineEnvironmentProblems(spec, environmentName);
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
@@ -722,17 +760,28 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     cacheReady = observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.labels['hv-cache-instance'] === cacheInstanceName;
     if (cacheReady && observed.state === 'present' && observed.value.latestVersion) secretVersions[ENGINE_CACHE_URL_KEY] = observed.value.latestVersion;
   }
-  // Secrets imported from a migration source must exist; Hypervibe never invents their values.
-  const importedSecrets = engineBinding.importedSecrets ?? [];
+  // Outside values arrive only after the engine creates their reviewed containers.
+  // Migration imports keep their private transfer stage instead of opening a collection page.
   const pendingImportedSecrets = engineBinding.pendingImportedSecrets ?? [];
+  const importedSecrets = engineOutsideKeys(spec, environmentName, engineBinding.importedSecrets)
+    .filter((key) => !pendingImportedSecrets.includes(key));
+  const missingKeys: string[] = [];
+  let outsideContainersMissing = false;
   for (const key of importedSecrets) {
     const secretId = engineSecretId(environmentName, key);
     const observed = await observeSecret(token, context.gcpProjectId, secretId);
     if (observed.state === 'unknown') return { blocked: [observed.reason] };
-    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) {
-      return { blocked: [`The imported secret ${key} is missing from Secret Manager. Run hv_migrate again to copy it from the source.`] };
-    }
+    if (observed.state === 'present') {
+      const ownership = observed.value.containerLabels ?? observed.value.labels;
+      if (ownership['managed-by'] !== 'hypervibe' || ownership['hv-environment'] !== labels['hv-environment']) {
+        return { blocked: [`Secret Manager already has ${secretId}, but its ownership does not match this environment.`] };
+      }
+    } else outsideContainersMissing = true;
+    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) { missingKeys.push(key); continue; }
     secretVersions[key] = observed.value.latestVersion;
+  }
+  if (missingKeys.length && !outsideContainersMissing) {
+    return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)], missingOutsideKeys: missingKeys };
   }
   // S3-compatible bucket access: Hypervibe-owned access keys, published before services are wired.
   const s3Storage = Object.entries(environmentSpec!.storage ?? {}).filter(([, storage]) => storage.access === 's3').map(([name]) => name);
@@ -983,6 +1032,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
+    ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
     ...(cacheSpec && !cacheReady && anyService
       ? ['Services are connected to Redis in the next infrastructure plan, once Hypervibe has published its URL.'] : []),
@@ -1096,6 +1146,8 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
+  // AWS plans carry their target; a teardown's snapshot cleanup runs after the environment left the spec.
+  if ((loaded.document as { engine?: { aws?: unknown } }).engine?.aws || isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
@@ -1366,6 +1418,10 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   const { spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
   if (!isEngineManaged(environmentSpec)) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
+  if (isAwsEngineEnvironment(spec, environmentName)) {
+    const { releaseAwsEngineServices } = await import('./infrastructure-engine-aws-release.js');
+    return releaseAwsEngineServices(ctx, params);
+  }
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);

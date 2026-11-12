@@ -47,7 +47,9 @@ profile. The Cloudflare inventory retains exact account/zone scope and IDs even
 when apply fails or removes local bindings; unresolved creation without a saved
 ID remains a cleanup failure.
 
-AWS and Azure infrastructure remain planned and explicitly unavailable. Legacy
+The [AWS engine](opentofu-engine-aws.md) has its own implementation and evidence,
+but no complete disposable lifecycle profile in this runner yet. Azure infrastructure
+remains planned and unavailable. Legacy
 GCP adapter lifecycle registrations are also planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
 are unavailable after the engine cutover. Selecting these unavailable profiles

@@ -1,14 +1,15 @@
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 
-/** GCP has one infrastructure engine, including specs saved before the engine field existed. */
+/** Cloud Run always uses OpenTofu; AWS keeps its explicit engine selection. */
 export function isEngineManaged(environment: EnvironmentSpec | undefined): boolean {
-  return environment?.hosting.provider === 'cloudrun';
+  return environment?.hosting.provider === 'cloudrun'
+    || (environment?.hosting.provider === 'aws' && environment.hosting.engine === 'opentofu');
 }
 
 /** Reject an explicit engine on providers for which that engine has no implementation. */
 export function engineSelectionProblem(environment: EnvironmentSpec): string | undefined {
   if (environment.hosting.engine !== undefined && !isEngineManaged(environment)) {
-    return `hosting.engine="${environment.hosting.engine}" is not supported with hosting.provider="${environment.hosting.provider}". OpenTofu currently manages only Cloud Run environments.`;
+    return `hosting.engine="${environment.hosting.engine}" is not supported with hosting.provider="${environment.hosting.provider}". OpenTofu currently manages Cloud Run and explicitly selected AWS environments.`;
   }
   return undefined;
 }
@@ -17,6 +18,8 @@ export function engineSelectionProblem(environment: EnvironmentSpec): string | u
 export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName];
   if (!environment) return [`Spec has no environment "${environmentName}".`];
+  // AWS validates its provider capabilities in the AWS engine planner.
+  if (environment.hosting.provider === 'aws' && isEngineManaged(environment)) return [];
   const problems: string[] = [];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   const unsupported: Array<[string, unknown]> = [
@@ -54,7 +57,11 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     if (database.engine !== 'postgres') problems.push('The OpenTofu engine manages Cloud SQL only with engine "postgres".');
     if (database.provider !== 'cloudsql') problems.push('The OpenTofu engine manages databases only with provider "cloudsql".');
     for (const field of ['seedCommand', 'resilience', 'credentialAliases', 'freshInitialization'] as const) {
-      if (database[field] !== undefined) problems.push(`database.${field} is not yet supported by the OpenTofu engine.`);
+      if (database[field] !== undefined) {
+        problems.push(field === 'seedCommand'
+          ? 'database.seedCommand is not yet supported by the OpenTofu engine: remove it from the spec and have the app seed an empty database when it starts (for example in its migrations).'
+          : `database.${field} is not yet supported by the OpenTofu engine.`);
+      }
     }
   }
   for (const [name, service] of Object.entries(environment.services)) {
@@ -70,11 +77,6 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     }
     if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
     if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
-  }
-  for (const [key, secret] of Object.entries(spec.secrets)) {
-    if (secret.ownership !== 'hypervibe' && secret.environments.includes(environmentName)) {
-      problems.push(`Secret ${key}: externally supplied secrets are not yet supported by the OpenTofu engine; only Hypervibe-generated secrets are.`);
-    }
   }
   return problems;
 }

@@ -63,9 +63,14 @@ SQL database, storage buckets and custom domain in reviewed rounds, releases
 the committed local code and verifies it. Ask the user only at its stop points:
 `needs_billing_choice` (ask which billing account should pay; the choice does
 not approve infrastructure or permissions), `needs_access` (show its saved OpenTofu setup plan and exact permissions,
-then pass its `accessId` in `approveAccess` after approval) and `needs_confirmation` (show the changes and estimated
-monthly cost, then pass its exact `planId` and `confirmActions`). Call it again after
-`pending`.
+then pass its `accessId` in `approveAccess` after approval), `needs_confirmation` (show the changes and estimated
+monthly cost, then pass its exact `planId` and `confirmActions`) and `needs_secrets` (keys only
+an outside service issues, such as API keys: a local page is open with a link to
+each key's page, and one-click use of a value already in `.env.<env>` or the
+shared `.env` (never shown); share the link and call again once they are saved). Declare
+such keys in the spec's `secrets` (ownership not `hypervibe`); never ask for
+their values in chat. `hv_secrets action="collect" env=<env>` opens the same page
+for any missing key, on GCP or AWS. Call `hv_launch` again after `pending`.
 
 Keep running costs low by default. A background worker that polls a database
 queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
@@ -139,6 +144,13 @@ describe that gap rather than claiming a proven live path.
 - Prefer provider-owned bootstrap and local authentication when offered. Perform
   the agent's supported setup work; leave browser consent, MFA, payment details,
   and ambiguous account or billing choices to the user.
+- AWS: `hv_connections provider="aws" action="connect"` opens one AWS sign-in;
+  the person approves the listed changes on that page. Hypervibe picks the region
+  and account; do not ask. If AWS shows "400 Bad Request", it is an expired AWS
+  session in that browser: tell them to click "Sign out of AWS" on the page and
+  sign in again.
+- Decide routine choices (region, sizes, names) and state them; ask only for what
+  only the person can do.
 - Follow each result's `agentInstruction`. After blocked, failed, pending, or
   confirmation-required work, report the stopping point and next decision.
   Continue only within an explicit bounded continuation, or the user's explicit

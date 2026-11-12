@@ -13,6 +13,7 @@ import { registerHvLaunchTools } from '../../tools/hv-launch.tools.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import * as infrastructure from '../infrastructure-engine.js';
 import * as dnsHosting from '../dns-hosting.js';
+import * as engineSecrets from '../engine-secrets.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.js';
 import * as preparation from '../../domain/services/cloud-prepare.execute.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
@@ -26,11 +27,11 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Network forbidden in saved-plan regression'); }));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
-function fixture() {
+function fixture(secrets: Record<string, unknown> = {}) {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'saved-launch', defaultPlatform: 'cloudrun' });
   const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging' });
-  const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} } } } });
+  const spec = projectSpecSchema.parse({ version: 1, project: project.name, secrets, environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} } } } });
   new ProjectSpecRepository().insert(project.id, 1, spec);
   const commands = new CommandRegistry(); registerHvLaunchTools(commands, ctx);
   vi.spyOn(infrastructure, 'engineGcpAdapter').mockResolvedValue(new CloudRunAdapter());
@@ -70,6 +71,43 @@ describe('launch exact saved-plan approval', () => {
     expect(apply).toHaveBeenCalledWith(f.ctx, expect.objectContaining({ planId: saved.planRunId }));
     expect(f.plan).not.toHaveBeenCalled(); expect(f.apply).not.toHaveBeenCalled();
   });
+  it('reviews missing outside-key containers before asking the user for their values', async () => {
+    const f = fixture({ ACME_API_KEY: { ownership: 'delegated', principal: 'owner@example.com', environments: ['staging'] } });
+    const reviewed = f.saved('Create the owned container before collecting ACME_API_KEY');
+    f.plan.mockResolvedValue(reviewed);
+    const collect = vi.spyOn(engineSecrets, 'collectOutsideKeys').mockResolvedValue({ status: 'blocked', message: 'Container is not ready' });
+    const result = await f.commands.execute('hv_launch', { project: f.project.name, env: 'staging' });
+    expect(result).toMatchObject({ ok: true, data: { status: 'needs_confirmation', planId: reviewed.planRunId } });
+    expect(collect.mock.calls.length).toBe(0);
+    expect(f.apply).not.toHaveBeenCalled();
+  });
+
+  it('applies the reviewed container plan, collects missing keys, and then replans before proceeding', async () => {
+    const f = fixture({ ACME_API_KEY: { ownership: 'delegated', principal: 'owner@example.com', environments: ['staging'] } });
+    const reviewed = f.saved('Reviewed outside-key container');
+    const next = f.saved('Wire the newly saved outside key');
+    f.apply.mockResolvedValue({ kind: 'executed', envName: 'staging', result: { success: true, applyRunId: 'applied', receipts: [] } });
+    f.plan.mockResolvedValueOnce({ blocked: ['ACME_API_KEY needs a value'], missingOutsideKeys: ['ACME_API_KEY'] }).mockResolvedValueOnce(next);
+    const collect = vi.spyOn(engineSecrets, 'collectOutsideKeys').mockResolvedValue({ status: 'collected', keys: ['ACME_API_KEY'] });
+    const result = await f.commands.execute('hv_launch', { project: f.project.name, env: 'staging', planId: reviewed.planRunId, confirmActions: reviewed.confirmActions });
+    expect(result).toMatchObject({ ok: true, data: { status: 'needs_confirmation', planId: next.planRunId } });
+    expect(collect.mock.calls.map(([, params]) => params.keys)).toEqual([['ACME_API_KEY']]);
+    expect(f.apply.mock.invocationCallOrder[0]).toBeLessThan(f.plan.mock.invocationCallOrder[0]!);
+    expect(f.plan.mock.invocationCallOrder[0]).toBeLessThan(collect.mock.invocationCallOrder[0]!);
+    expect(collect.mock.invocationCallOrder[0]).toBeLessThan(f.plan.mock.invocationCallOrder[1]!);
+    expect(f.apply).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an unrelated infrastructure blocker from starting outside-key collection', async () => {
+    const f = fixture({ ACME_API_KEY: { ownership: 'delegated', principal: 'owner@example.com', environments: ['staging'] } });
+    f.plan.mockResolvedValue({ blocked: ['Ownership is unknown'] });
+    const collect = vi.spyOn(engineSecrets, 'collectOutsideKeys').mockResolvedValue({ status: 'collected', keys: ['ACME_API_KEY'] });
+    const result = await f.commands.execute('hv_launch', { project: f.project.name, env: 'staging' });
+    expect(result).toMatchObject({ ok: false, error: { message: 'Ownership is unknown' } });
+    expect(collect.mock.calls.length).toBe(0);
+    expect(f.apply).not.toHaveBeenCalled();
+  });
+
   it('keeps billing selection separate from storage permission approval', async () => {
     const f = fixture();
     const spec = projectSpecSchema.parse({ ...f.spec, environments: { staging: {
