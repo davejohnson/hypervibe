@@ -8,7 +8,6 @@ import type { ActionReceipt } from '../domain/plan/converge.executor.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { cloudflareFor } from './infrastructure-engine-domain.js';
-import { AZURE_PLAN_NOT_BUILT } from './infrastructure-engine-azure.js';
 import { connectCloudflareInBrowser } from './local-connect-page.js';
 import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
@@ -137,7 +136,9 @@ async function runLaunch(ctx: CommandContext, params: {
     return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Set hosting.engine="opentofu" with hv_spec first.' };
   }
   // Azure has its own access (hv_connections provider="azure" action="connect"); never fall through to Google Cloud setup.
-  if (environmentSpec.hosting.provider === 'azure') return { status: 'blocked', message: AZURE_PLAN_NOT_BUILT };
+  if (environmentSpec.hosting.provider === 'azure') {
+    return { status: 'blocked', message: 'hv_launch does not run Azure environments yet. Connect with hv_connections provider="azure" action="connect", then run hv_plan scope="infrastructure", hv_apply and hv_deploy.' };
+  }
 
   // Extra Google Cloud access the app's resources need. A new project lists it with the billing
   // choice, so choosing the billing account approves it once instead of one prompt per resource.

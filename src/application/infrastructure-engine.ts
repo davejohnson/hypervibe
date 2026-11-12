@@ -1,6 +1,6 @@
 import { createCommandContext } from './context.js';
 import { applyAwsInfrastructureEngine, isAwsEngineEnvironment, planAwsInfrastructureEngine } from './infrastructure-engine-aws.js';
-import { AZURE_PLAN_NOT_BUILT, isAzureEngineEnvironment, planAzureInfrastructureEngine } from './infrastructure-engine-azure.js';
+import { applyAzureInfrastructureEngine, isAzureEngineEnvironment, planAzureInfrastructureEngine } from './infrastructure-engine-azure.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
@@ -1079,6 +1079,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   // AWS plans carry their target; a teardown's snapshot cleanup runs after the environment left the spec.
+  if ((loaded.document as { engine?: { azure?: unknown } }).engine?.azure) return applyAzureInfrastructureEngine(ctx, params);
   if ((loaded.document as { engine?: { aws?: unknown } }).engine?.aws || isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string } } };
   const environmentName = document.environmentName;
@@ -1284,7 +1285,10 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
     const { releaseAwsEngineServices } = await import('./infrastructure-engine-aws-release.js');
     return releaseAwsEngineServices(ctx, params);
   }
-  if (isAzureEngineEnvironment(spec, environmentName)) return { blocked: AZURE_PLAN_NOT_BUILT };
+  if (isAzureEngineEnvironment(spec, environmentName)) {
+    const { releaseAzureEngineServices } = await import('./infrastructure-engine-azure-release.js');
+    return releaseAzureEngineServices(ctx, params);
+  }
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);
