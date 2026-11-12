@@ -68,3 +68,11 @@ class NodeSha256 {
   update(data: string | Uint8Array) { this.hash.update(data); }
   async digest() { return new Uint8Array(this.hash.digest()); }
 }
+
+describe('AWS teardown spec cleanup', () => {
+  it('removes the environment and its secrets, keeping secrets other environments use', async () => {
+    const { specWithoutEnvironment } = await import('../infrastructure-engine-aws.js');
+    const spec = { secrets: { ONLY: { ownership: 'hypervibe', environments: ['demo'] }, SHARED: { ownership: 'hypervibe', environments: ['demo', 'prod'] }, OTHER: { environments: ['prod'] } } } as never;
+    expect(specWithoutEnvironment(spec, 'demo')).toEqual({ environments: { demo: null }, secrets: { ONLY: null, SHARED: { environments: ['prod'] } } });
+  });
+});

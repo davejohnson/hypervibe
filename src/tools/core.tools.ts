@@ -771,9 +771,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
+      deleteFinalSnapshot: z.boolean().optional().describe('scope="teardown" only: also delete the database\'s final snapshot (or, for an environment already torn down, plan deleting just that snapshot). Default keeps it so the data can be restored.'),
       secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs, deleteFinalSnapshot }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       if (scope === 'infrastructure' || scope === 'teardown') {
         const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
@@ -781,11 +782,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const specResult = specStore.get(project);
         if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
         const environmentName = commandEnvironment(specResult.spec, env);
-        if (scope === 'teardown' && !isAwsEngineEnvironment(specResult.spec, environmentName)) {
+        if (deleteFinalSnapshot !== undefined && scope !== 'teardown') return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+        if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName)) {
           return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS environments only.', { next: ['hv_spec'] });
         }
         const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
-        const planned = scope === 'teardown' ? await planAwsTeardown(ctx, plannerParams) : await planInfrastructureEngine(ctx, plannerParams);
+        const planned = scope === 'teardown'
+          ? await planAwsTeardown(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
+          : await planInfrastructureEngine(ctx, plannerParams);
         if ('blocked' in planned) {
           return commandError('VALIDATION', 'The infrastructure plan is blocked.', {
             details: { blocked: planned.blocked },

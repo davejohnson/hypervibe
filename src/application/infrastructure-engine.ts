@@ -1054,7 +1054,8 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  if (isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
+  // AWS plans carry their target; a teardown's snapshot cleanup runs after the environment left the spec.
+  if ((loaded.document as { engine?: { aws?: unknown } }).engine?.aws || isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string } } };
   const environmentName = document.environmentName;
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {

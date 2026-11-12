@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { RDSClient, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
+import { RDSClient, DeleteDBClusterSnapshotCommand, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
 import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { DeleteParametersCommand, GetParameterCommand, GetParametersByPathCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
@@ -36,6 +36,7 @@ export const AWS_PARAMETER_OPERATION = 'awsParameterEnsure';
 export const AWS_DATABASE_LOGIN_OPERATION = 'awsDatabaseLoginEnsure';
 export const AWS_BUCKET_EMPTY_OPERATION = 'awsBucketEmpty';
 export const AWS_TEARDOWN_CLEANUP_OPERATION = 'awsTeardownCleanup';
+export const AWS_SNAPSHOT_DELETE_OPERATION = 'awsSnapshotDelete';
 const APP_DATABASE = 'app';
 const APP_LOGIN = 'app_owner';
 const WAKER_LOGIN = 'hv_waker';
@@ -56,6 +57,9 @@ export interface AwsEngineBinding {
   /** Waker login secrets Hypervibe has written (workers can be added after the app login exists). */
   wakerLogins?: string[];
   services?: Record<string, { url?: string; resource: string }>;
+  /** Set once a teardown removed the environment; its database's final snapshot, while it exists. */
+  tornDownAt?: string;
+  finalSnapshot?: { identifier: string; region: string };
 }
 
 export interface AwsEngineContext {
@@ -234,13 +238,44 @@ async function awsEngineConfigurationFor(context: AwsEngineContext, spec: Projec
  */
 export async function planAwsTeardown(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; specRevision: number; environmentName: string;
+  /** Also delete the database's final snapshot, so nothing of the environment remains. */
+  deleteFinalSnapshot?: boolean;
 }): Promise<InfrastructurePlanResult | { blocked: string[] }> {
   const { project, spec, environmentName } = params;
+  const existing = ctx.repos.environments.findByProjectAndName(project.id, environmentName);
+  const tornDown = existing ? awsBinding(existing) : {};
+  if (!spec.environments[environmentName]) {
+    // Already torn down: only its final snapshot can remain.
+    if (!tornDown.tornDownAt) return { blocked: [`${environmentName} is not an environment in the spec.`] };
+    if (!tornDown.finalSnapshot) return { blocked: [`${environmentName} was torn down and nothing of it remains on AWS.`] };
+    if (!params.deleteFinalSnapshot) return { blocked: [`${environmentName} was torn down; only its final database snapshot (${tornDown.finalSnapshot.identifier}) remains. Plan again with deleteFinalSnapshot=true to delete it.`] };
+  }
   const context = await resolveAwsEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
   const access = await awsAccessCurrent(context.credentials, context.connection.accountId);
   if (access === 'outdated') return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
   if (typeof access === 'object') return { blocked: [access.unknown] };
+  const snapshotAction = (identifier: string, dependsOn: string[]): PlanAction => ({
+    id: 'database-snapshot:final', type: 'destroy', verified: true, dataBearing: true, requiresConfirm: true,
+    resource: { kind: 'database', name: identifier, provider: 'aws' },
+    reason: `Hypervibe will permanently delete the final database snapshot ${identifier}; the database can no longer be restored.`,
+    ...(dependsOn.length ? { dependsOn } : {}),
+    metadata: { operation: AWS_SNAPSHOT_DELETE_OPERATION, accountId: context.connection.accountId, identifier },
+  });
+  const record = (actions: PlanAction[], warnings: string[], engine: Record<string, unknown>) => {
+    const document = {
+      kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
+      observedFingerprint: null, actions, unmanaged: [], warnings,
+      engine: { state: context.state, teardown: true, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix }, ...engine },
+    } as unknown as PlanRunDocument;
+    const runRepo = new RunRepository();
+    const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+    runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings, confirmActions: actions.map((action) => action.id) };
+  };
+  if (!spec.environments[environmentName]) {
+    return record([snapshotAction(tornDown.finalSnapshot!.identifier, [])], ['Deleting the snapshot cannot be undone.'], { planId: `snapshot-${crypto.randomUUID()}` });
+  }
   const imported = ((context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets) ?? [];
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...engineSecretKeys(spec, environmentName), ...imported]);
   if (built.blocked) return { blocked: built.blocked };
@@ -270,23 +305,43 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'aws' },
     reason: `Hypervibe will delete this environment's settings in Parameter Store (${context.parameterPath}), the task revisions its releases registered and its build logs.`,
     ...(engineActions.length ? { dependsOn: engineActions.map((action) => action.id) } : {}),
-    metadata: { operation: AWS_TEARDOWN_CLEANUP_OPERATION, accountId, parameterPath: context.parameterPath, families, logGroups: [`/hypervibe/${context.prefix}/builds`] },
+    metadata: { operation: AWS_TEARDOWN_CLEANUP_OPERATION, accountId, parameterPath: context.parameterPath, families, logGroups: [`/hypervibe/${context.prefix}/builds`],
+      ...(built.input.database && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.prefix}-postgres-final` } : {}) },
   };
-  const actions = [...emptyActions, ...engineActions, cleanup];
+  const destroysDatabase = engineActions.some((action) => action.id === 'database:postgres');
+  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(`${context.prefix}-postgres-final`, ['database:postgres'])] : [];
+  if (snapshot.length) cleanup.dependsOn = [...(cleanup.dependsOn ?? []), snapshot[0]!.id];
+  const actions = [...emptyActions, ...engineActions, ...snapshot, cleanup];
   const warnings = [
     `Removes AWS environment ${environmentName} in ${context.connection.region} (account ${accountId}). This cannot be undone.`,
-    ...(built.input.database ? [`The database keeps a final snapshot (${context.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month until deleted.`] : []),
+    ...(destroysDatabase ? [snapshot.length
+      ? 'The database\'s final snapshot is deleted too, so its data cannot be restored.'
+      : `The database keeps a final snapshot (${context.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month. Plan with deleteFinalSnapshot=true to remove it as well.`] : []),
     `Hypervibe's access to this account stays, for other environments of ${project.name}.`,
   ];
-  const document = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
-    engine: { planId, state: context.state, teardown: true, aws: { accountId, region: context.connection.region, prefix: context.prefix } },
-  } as unknown as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return { planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings, confirmActions: actions.map((action) => action.id) };
+  return record(actions, warnings, { planId });
+}
+
+/** A spec patch removing an environment, including from the secrets that target it (a secret targeting only it goes too). */
+export function specWithoutEnvironment(spec: ProjectSpec, environmentName: string): Record<string, unknown> {
+  const secrets = Object.fromEntries(Object.entries(spec.secrets)
+    .filter(([, secret]) => (secret.environments as string[] | undefined)?.includes(environmentName))
+    .map(([key, secret]) => {
+      const remaining = (secret.environments as string[]).filter((name) => name !== environmentName);
+      return [key, remaining.length ? { environments: remaining } : null];
+    }));
+  return { environments: { [environmentName]: null }, ...(Object.keys(secrets).length ? { secrets } : {}) };
+}
+
+async function deleteFinalSnapshot(context: AwsEngineContext, identifier: string): Promise<ActionResult> {
+  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
+  try {
+    await rds.send(new DeleteDBClusterSnapshotCommand({ DBClusterSnapshotIdentifier: identifier }));
+  } catch (error) {
+    if (!(error instanceof Error && error.name === 'DBClusterSnapshotNotFoundFault')) throw error;
+    return { success: true, message: `Snapshot ${identifier} no longer exists.` };
+  }
+  return { success: true, message: `Deleted the final database snapshot ${identifier}.` };
 }
 
 async function emptyBucket(context: AwsEngineContext, bucket: string): Promise<ActionResult> {
@@ -506,7 +561,8 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; aws?: { accountId: string; region: string; prefix: string } } };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
-  if (!reviewed?.aws || !isAwsEngineEnvironment(params.spec, environmentName)) return { kind: 'blocked', reason: 'This plan is not an AWS engine plan. Re-run hv_plan.' };
+  const snapshotOnly = Boolean((reviewed as { teardown?: boolean } | undefined)?.teardown) && !params.spec.environments[environmentName];
+  if (!reviewed?.aws || (!snapshotOnly && !isAwsEngineEnvironment(params.spec, environmentName))) return { kind: 'blocked', reason: 'This plan is not an AWS engine plan. Re-run hv_plan.' };
   const context = await resolveAwsEngineContext(ctx, params.project, environmentName);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.aws.accountId !== context.connection.accountId
@@ -524,6 +580,15 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       if (metadata?.accountId !== context.connection.accountId) return { success: false, status: 'blocked', message: 'AWS target changed; re-run hv_plan.' };
       try {
         if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureParameter(ssm, action);
+        if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {
+          const deleted = await deleteFinalSnapshot(context, (action.metadata as { identifier: string }).identifier);
+          if (deleted.success) {
+            const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+            const { finalSnapshot: _snapshot, ...remaining } = awsBinding(current);
+            ctx.repos.environments.updatePlatformBindings(current.id, { aws: remaining });
+          }
+          return deleted;
+        }
         if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(context, (action.metadata as { bucket: string }).bucket);
         if (metadata.operation === AWS_TEARDOWN_CLEANUP_OPERATION) {
           const removed = await removeLeftovers(context, action.metadata as { parameterPath: string; families: string[]; logGroups: string[] });
@@ -531,9 +596,11 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
             // Nothing of this environment remains on AWS; forget its bindings so a later plan starts fresh.
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const { aws: _aws, engine: _engine, ...rest } = current.platformBindings as Record<string, unknown>;
-            ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, aws: {}, engine: {} });
+            const kept = (action.metadata as { finalSnapshot?: string }).finalSnapshot;
+            ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, engine: {},
+              aws: { tornDownAt: new Date().toISOString(), ...(kept ? { finalSnapshot: { identifier: kept, region: context.connection.region } } : {}) } });
             // The environment is gone; removing it from the spec keeps the next plan from recreating it.
-            new SpecStore().merge(params.project, { environments: { [environmentName]: null } });
+            new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, environmentName));
           }
           return removed;
         }
