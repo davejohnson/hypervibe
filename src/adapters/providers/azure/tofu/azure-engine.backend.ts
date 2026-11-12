@@ -1,6 +1,6 @@
 import type { EngineAuthentication, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { AzureEngineCredentials } from '../azure-engine.adapter.js';
-import { buildAzureConfiguration, type AzureEngineInput } from './azure-engine.config.js';
+import { buildAzureConfiguration, type AzureEngineInput, type AzureSharedInput } from './azure-engine.config.js';
 
 /** Pinned hashicorp/azurerm provider (released 2026-10-23, at least two weeks old when pinned) and its lock hashes. */
 export const AZURERM_PROVIDER_VERSION = '5.11.0';
@@ -42,6 +42,16 @@ const RANDOM_PROVIDER_LOCK_HASHES = [
   'h1:zHgFWtRBgOycqhw8HdLSvMVNWGJtIjOAPYOcAdE7cL0=',
 ];
 
+/** hashicorp/time (released 2026-09-11): waits for new role assignments to apply before the first revision starts. */
+export const TIME_PROVIDER_VERSION = '0.14.2';
+const TIME_PROVIDER_LOCK_HASHES = [
+  'h1:0lkmuDlyUBEK2vAxb9r8jY8kMpqYbMoSb4GWnSbA9iY=', 'h1:4ccOXW03+ENKJieXGwTfMvRlkpT9o+ra6dw240C1UFE=', 'h1:8+b7rm7aVI0cNDoegUPuEKNAQeEC9jYHaaqgVWGvGag=',
+  'h1:BzLQYmKbF3aM81kS9GZQ0mnJPU/bVFa3Jgk9ZIFJP80=', 'h1:EHyMvebIwqieUVzq6WbbheNWUHRgy8B5hhRv++V10qA=', 'h1:ICdTbU+IeBH2xihtoYENxmLIGfObCbcb8l2XK2abJGw=',
+  'h1:JKIAzWzVxRY6Q+ybCjmZ6DnMfkyp/zdZmWkTIB1JzOo=', 'h1:JkTAWz5bbrSgrnkkF5XhoMbSLSihtDDb5V+SYAZYOes=', 'h1:TNzAoSy5lcv/8pjzlb4nz+m92N3G/osbU+FV+uh0SQs=',
+  'h1:XJLK9UX0/LxUM7Z4pxB1tf6TP8iCz0bxM87ot4wq1ns=', 'h1:bkdzFk//GNj0iHkXgupa0XqwNjYx3O6+czgIi+IkXjA=', 'h1:cbpg0fadPwbhtL0EMnPj+AkwpPUvflGGeYB31SKTHdw=',
+  'h1:hv6Fp4zk1JQ7Dj+cmUJZmuI3aLEGjw4VSFyqgUvisDg=', 'h1:oMHgtUYEDs1DJrTXNPgSNoQ0f+0FZ+nAYJWJYpHBtAI=', 'h1:qdSn+kIg2bcZkgGLJ5zQ1K03qoRWYYBxGv6J7SWlShY=',
+];
+
 /**
  * OpenTofu runs as the project's deploy identity. azurerm takes the client
  * secret itself (it has no way to accept a pre-issued access token), so the
@@ -63,13 +73,14 @@ export function azureResourceGroupId(subscriptionId: string, resourceGroup: stri
   return `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
 }
 
-export const azureEngineBackend: InfrastructureEngineBackend<AzureEngineInput> = {
+export const azureEngineBackend: InfrastructureEngineBackend<AzureEngineInput | AzureSharedInput> = {
   provider: 'azure',
   engine: 'opentofu',
   capabilities: ['hosting'],
   providerRequirements: {
     azurerm: { source: 'hashicorp/azurerm', version: AZURERM_PROVIDER_VERSION, lockHashes: AZURERM_PROVIDER_LOCK_HASHES },
     random: { source: 'hashicorp/random', version: RANDOM_PROVIDER_VERSION, lockHashes: RANDOM_PROVIDER_LOCK_HASHES },
+    time: { source: 'hashicorp/time', version: TIME_PROVIDER_VERSION, lockHashes: TIME_PROVIDER_LOCK_HASHES },
   },
   buildConfiguration: buildAzureConfiguration,
   // Reads only: who OpenTofu authenticated as, and that it can see exactly the project's resource group.

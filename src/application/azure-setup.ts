@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import os from 'os';
+import { azureProjectVaultName } from '../adapters/providers/azure/tofu/azure-engine.config.js';
 import { ARM_SCOPE, GRAPH_SCOPE, azureTokenFor, type AzureSignInSession } from './azure-sign-in.js';
 
 /**
@@ -62,6 +63,8 @@ export function deployRoleGrants(): AzureRoleGrant[] {
   return [
     { role: AZURE_ROLES.contributor, label: 'Contributor' },
     { role: AZURE_ROLES.keyVaultSecretsOfficer, label: 'Key Vault Secrets Officer' },
+    // Teardown empties storage before deleting it; accounts have no shared keys.
+    { role: AZURE_ROLES.storageBlobDataContributor, label: 'Storage Blob Data Contributor' },
     { role: AZURE_ROLES.roleBasedAccessControlAdministrator, label: 'Role Based Access Control Administrator (only AcrPull, Key Vault Secrets User and Storage Blob Data Contributor, only for service principals)', condition: appRoleAssignmentCondition() },
   ];
 }
@@ -135,6 +138,7 @@ export interface AzureSetupPlan {
   signedInAs: string;
   resourceGroup: string;
   appName: string;
+  vaultName: string;
   repository?: string;
   environments: string[];
   changes: AzureSetupChange[];
@@ -187,6 +191,14 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
   changes.push({ id: 'resource-group', state: existingGroup.status === 200 ? 'ok' : 'create',
     change: `Resource group ${group} in ${target.location}: holds everything Hypervibe builds for ${target.project}` });
 
+  // The project's Key Vault exists before any plan, so outside keys can be collected first (like Parameter Store on AWS).
+  const vaultName = azureProjectVaultName(subscriptionId, target.project);
+  const vault = existingGroup.status === 200
+    ? ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}${groupScope(subscriptionId, group)}/providers/Microsoft.KeyVault/vaults/${vaultName}?api-version=2023-07-01`), `Reading Key Vault ${vaultName}`, [200, 404])
+    : undefined;
+  changes.push({ id: 'key-vault', state: vault?.status === 200 ? 'ok' : 'create',
+    change: `Key Vault ${vaultName}: your app's secrets, one name prefix per environment (free; a few cents per 10,000 reads)` });
+
   const app = ensure(await rest(fetchImpl, tokens.graph, 'GET', `${appUrl(appName)}?$select=id,appId`), `Reading app ${appName}`, [200, 404]);
   const appId = app.status === 200 ? String(app.body.appId) : undefined;
   const principal = appId ? ensure(await rest(fetchImpl, tokens.graph, 'GET', `${GRAPH}/servicePrincipals(appId='${appId}')?$select=id`), 'Reading the deploy identity', [200, 404]) : undefined;
@@ -219,7 +231,7 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
     change: `A client secret for ${appName}, valid one year: lets this computer deploy; stored encrypted here and never shown` });
   return {
     tenantId, subscriptionId, subscriptionName: target.subscription.displayName, location: target.location, signedInAs: session.username,
-    resourceGroup: group, appName, ...(target.repository ? { repository: target.repository } : {}), environments: target.environments,
+    resourceGroup: group, appName, vaultName, ...(target.repository ? { repository: target.repository } : {}), environments: target.environments,
     changes, ready: changes.every((change) => change.state === 'ok'),
   };
 }
@@ -248,6 +260,10 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
   const scope = groupScope(subscriptionId, plan.resourceGroup);
   ensure(await rest(fetchImpl, tokens.arm, 'PUT', `${ARM}${scope}?api-version=2021-04-01`, { location: plan.location, tags: { 'managed-by': 'hypervibe' } }),
     `Creating resource group ${plan.resourceGroup}`, [200, 201]);
+  ensure(await rest(fetchImpl, tokens.arm, 'PUT', `${ARM}${scope}/providers/Microsoft.KeyVault/vaults/${plan.vaultName}?api-version=2023-07-01`, {
+    location: plan.location, tags: { 'managed-by': 'hypervibe' },
+    properties: { tenantId: plan.tenantId, sku: { family: 'A', name: 'standard' }, enableRbacAuthorization: true, softDeleteRetentionInDays: 7, publicNetworkAccess: 'Enabled' },
+  }), `Creating Key Vault ${plan.vaultName}`, [200, 201]);
 
   ensure(await rest(fetchImpl, tokens.graph, 'PATCH', appUrl(plan.appName), {
     displayName: plan.appName, signInAudience: 'AzureADMyOrg', tags: ['hypervibe'],

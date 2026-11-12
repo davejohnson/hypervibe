@@ -559,8 +559,8 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: 'https://login.microsoftonline.com/',
     setupUrls: [{ label: 'Microsoft sign-in (Hypervibe opens it for you with hv_connections provider="azure" action="connect")', url: 'https://login.microsoftonline.com/' }],
     permissions: [
-      'One-time setup, approved on Hypervibe\'s page right after sign-in: registers the Azure services the app uses, creates resource group hv-<project>, and app hypervibe-deploy-<project> with GitHub sign-in for keyless CI and a client secret for this computer.',
-      'The deploy identity gets roles on hv-<project> only, never the subscription: Contributor, Key Vault Secrets Officer, and Role Based Access Control Administrator limited to AcrPull, Key Vault Secrets User and Storage Blob Data Contributor for service principals.',
+      'One-time setup, approved on Hypervibe\'s page right after sign-in: registers the Azure services the app uses, creates resource group hv-<project> with the project Key Vault, and app hypervibe-deploy-<project> with GitHub sign-in for keyless CI and a client secret for this computer.',
+      'The deploy identity gets roles on hv-<project> only, never the subscription: Contributor, Key Vault Secrets Officer, Storage Blob Data Contributor, and Role Based Access Control Administrator limited to AcrPull, Key Vault Secrets User and Storage Blob Data Contributor for service principals.',
     ],
     credentialExample: 'hv_connections provider="azure" action="connect"',
     notes: [

@@ -69,7 +69,7 @@ describe('Azure setup plan', () => {
     ]);
     const plan = await planAzureSetup(session(), target, azure.fetchImpl);
     expect(plan.changes.map((change) => [change.id, change.state])).toEqual([
-      ['resource-providers', 'create'], ['resource-group', 'create'], ['deploy-identity', 'create'], ['github-oidc', 'create'], ['roles', 'create'], ['local-secret', 'create'],
+      ['resource-providers', 'create'], ['resource-group', 'create'], ['key-vault', 'create'], ['deploy-identity', 'create'], ['github-oidc', 'create'], ['roles', 'create'], ['local-secret', 'create'],
     ]);
     expect(plan.changes[0]!.change).toContain('Microsoft.App');
     expect(azure.calls.filter((call) => call.method !== 'GET' && !call.url.startsWith('https://login.'))).toEqual([]);
@@ -87,7 +87,7 @@ describe('Azure setup plan', () => {
 describe('Azure setup apply', () => {
   const plan: AzureSetupPlan = {
     tenantId: TENANT, subscriptionId: SUB, subscriptionName: 'Pay-As-You-Go', location: 'eastus2', signedInAs: 'owner@example.com',
-    resourceGroup: 'hv-billforge', appName: 'hypervibe-deploy-billforge', repository: 'acme/billforge', environments: ['test'], changes: [], ready: false,
+    resourceGroup: 'hv-billforge', appName: 'hypervibe-deploy-billforge', vaultName: 'hv-billforge-abc123', repository: 'acme/billforge', environments: ['test'], changes: [], ready: false,
   };
 
   it('creates the identity, waits for it to reach Resource Manager, scopes roles to the group and returns the secret once', async () => {
@@ -95,6 +95,7 @@ describe('Azure setup apply', () => {
     const azure = fakeAzure([
       ['POST', /\/providers\/Microsoft\.[A-Za-z]+\/register\?/, () => json(200)],
       ['PUT', /\/resourceGroups\/hv-billforge\?/, () => json(201)],
+      ['PUT', /\/vaults\/hv-billforge-abc123\?/, () => json(201)],
       ['PATCH', /applications\(uniqueName='hypervibe-deploy-billforge'\)$/, () => json(201)],
       ['GET', /applications\(uniqueName='hypervibe-deploy-billforge'\)\?/, () => json(200, { id: 'app-object', appId: 'client-id' })],
       ['GET', /servicePrincipals\(appId='client-id'\)/, () => json(404)],
@@ -120,7 +121,7 @@ describe('Azure setup apply', () => {
 
   it('keeps an existing secret instead of creating another', async () => {
     const azure = fakeAzure([
-      ['POST', /\/register\?/, () => json(200)], ['PUT', /\/resourceGroups\/hv-billforge\?/, () => json(200)],
+      ['POST', /\/register\?/, () => json(200)], ['PUT', /\/resourceGroups\/hv-billforge\?/, () => json(200)], ['PUT', /\/vaults\//, () => json(200)],
       ['PATCH', /applications\(uniqueName=/, () => json(204)], ['GET', /applications\(uniqueName=/, () => json(200, { id: 'app-object', appId: 'client-id' })],
       ['GET', /servicePrincipals\(appId=/, () => json(200, { id: 'sp-object' })], ['GET', /federatedIdentityCredentials$/, () => json(200, { value: [{ subject: 'repo:acme/billforge:environment:test' }] })],
       ['PUT', /\/roleAssignments\//, () => json(409, { error: { code: 'RoleAssignmentExists' } })],
