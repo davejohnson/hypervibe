@@ -2107,6 +2107,7 @@ providerRegistry.register({
     },
     maturity: {
       lifecycle: {
+        dns: { status: 'ready-for-live', reason: 'Pinned OpenTofu DNS configuration and scoped read-only API contracts; live DNS lifecycle remains unverified.' },
         'load-balancer': {
           status: 'ready-for-live',
           reason: 'Mocked monitor/pool/load-balancer lifecycle is complete; the opt-in live contract has no recorded evidence.',
@@ -2114,6 +2115,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
+      dns: { engine: 'opentofu', records: ['A', 'AAAA', 'CNAME', 'TXT', 'CAA', 'MX'] },
       loadBalancer: {
         topology: 'monitor-pool-balancer',
         minimumOrigins: 2,

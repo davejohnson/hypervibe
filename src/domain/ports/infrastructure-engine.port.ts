@@ -65,7 +65,7 @@ export interface EngineResourceMapping {
   billable?: boolean;
 }
 
-/** Files of one generated engine configuration. Values must not include secrets. */
+/** Private generated configuration. Provider verification values may be sensitive; never export the raw document. */
 export interface EngineConfiguration {
   /** Relative file name -> JSON-serializable configuration document. */
   files: Record<string, unknown>;

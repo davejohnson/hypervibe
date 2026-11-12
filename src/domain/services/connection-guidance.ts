@@ -181,6 +181,30 @@ export function credentialFieldsFromSchema(
 }
 
 const GUIDANCE: Record<string, ConnectionGuidance> = {
+  'gcp-dns': {
+    provider: 'gcp-dns', displayName: 'Google Cloud DNS', tokenType: 'A verified Google connection or application default credentials for the exact DNS project',
+    setupUrl: 'https://docs.cloud.google.com/dns/docs/access-control',
+    permissions: ['Read the selected managed zone and its record sets; create and read DNS changes; create, update and delete record sets only in the selected zone. Connection verification also lists managed zones.'],
+    credentialExample: 'hv_connections provider="gcp-dns" action="connect" scope="owner/repository" credentialsRef=".env#HYPERVIBE_GCP_DNS_CREDENTIALS"',
+    notes: ['Prefer an existing verified scoped Google connection. Hypervibe resolves available default credentials privately; no separate OpenTofu or cloud CLI operation is required.',
+      'Select the exact DNS project and managed-zone name in environment.dns. DNS changes require a saved approved OpenTofu plan. Zone creation and DNSSEC changes are unavailable.'],
+  },
+  route53: {
+    provider: 'route53', displayName: 'Amazon Route 53', tokenType: 'An AWS default credential chain or scoped IAM access credentials, including a session token when required',
+    setupUrl: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/access-control-managing-permissions.html',
+    permissions: ['Verify the account with sts:GetCallerIdentity. Allow route53:GetHostedZone, ListResourceRecordSets, GetDNSSEC and ChangeResourceRecordSets for the exact hosted zone, plus GetChange for its changes.'],
+    credentialExample: 'hv_connections provider="route53" action="connect" scope="owner/repository" credentialsRef=".env#HYPERVIBE_ROUTE53_CREDENTIALS"',
+    notes: ['An existing compatible verified AWS connection can be reused after its native account matches. Hosting can use another provider.',
+      'Select the exact hosted-zone ID and account in environment.dns; Hypervibe manages the pinned OpenTofu runtime.'],
+  },
+  'azure-dns': {
+    provider: 'azure-dns', displayName: 'Azure DNS', tokenType: 'A saved service principal with subscriptionId, tenantId, clientId and clientSecret',
+    setupUrl: 'https://learn.microsoft.com/en-us/azure/dns/dns-protect-zones-recordsets',
+    permissions: ['Read the subscription identity and exact public DNS zone; grant record management permissions scoped to that zone, for example the DNS Zone Contributor role.'],
+    credentialExample: 'hv_connections provider="azure-dns" action="connect" scope="owner/repository" credentialsRef=".env#HYPERVIBE_AZURE_DNS_CREDENTIALS"',
+    notes: ['Azure DNS currently requires a service principal that works with both observation and the engine. Generic default-chain authentication is unavailable.',
+      'Select the full zone ARM ID, subscription and resource group in environment.dns. Hypervibe does not automatically register resource providers or create zones.'],
+  },
   appstoreconnect: {
     provider: 'appstoreconnect',
     displayName: 'App Store Connect',

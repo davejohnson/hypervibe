@@ -118,6 +118,7 @@ import {
   githubInfrastructureConnectionBlock,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
+  isRepositoryDnsEnvironment,
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
 import {
@@ -1701,6 +1702,14 @@ export class PlanService {
     }
     const scope = options?.scope ?? 'full';
     const selectedEnvironment = specResult.spec.environments[environmentName];
+    if (scope === 'full' && isRepositoryDnsEnvironment(specResult.spec, environmentName)) {
+      const existing = this.envRepo.findByProjectAndName(project.id, environmentName);
+      if (existing && (Object.keys(existing.platformBindings).some(key => !['github', 'dnsEngine'].includes(key))
+        || this.componentRepo.findByEnvironmentId(existing.id).length > 0)) {
+        return { error: 'This environment has existing or unknown bound hosting resources. Preserve and reconcile those resources before using it for repository-only Pages DNS.' };
+      }
+      return this.planRepositoryInfrastructure(project, environmentName, specResult, options);
+    }
     const selectionProblem = selectedEnvironment && engineSelectionProblem(selectedEnvironment);
     if (selectionProblem) return { error: selectionProblem };
     const retainedEnvironment = scope === 'full' ? this.envRepo.findByProjectAndName(project.id, environmentName) : undefined;

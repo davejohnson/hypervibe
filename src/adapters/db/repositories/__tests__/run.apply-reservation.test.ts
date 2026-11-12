@@ -169,4 +169,29 @@ describe('apply-run reservation persistence', () => {
       plan: { planRunId: planRunId('generic-create') },
     })).toThrow('Apply runs must be created with RunRepository.reserveApply().');
   });
+
+  it('serializes a shared native resource across projects and releases the lock after completion', () => {
+    const repository = new RunRepository();
+    const otherProjectId = new ProjectRepository().create({ name: 'other-resource-owner' }).id;
+    const otherEnvironmentId = new EnvironmentRepository().create({ projectId: otherProjectId, name: 'production' }).id;
+    const first = repository.reserveApply({ projectId, environmentId, planRunId: planRunId('dns-first'), environmentName: 'production', specRevision: 1,
+      lockResourceKeys: ['dns-zone:exact-native-zone', 'dns-zone:exact-native-zone'] });
+    if (!first.reserved) throw new Error('Expected first reservation.');
+    expect(first.run.plan).toHaveProperty('lockResourceKeys', ['dns-zone:exact-native-zone']);
+    const input = { projectId: otherProjectId, environmentId: otherEnvironmentId, planRunId: 'other-dns-plan', environmentName: 'production', specRevision: 1,
+      lockResourceKeys: ['dns-zone:exact-native-zone'] };
+    expect(repository.reserveApply(input)).toMatchObject({ reserved: false, reason: 'resource_in_progress', conflictingRunId: first.run.id });
+    repository.updateStatus(first.run.id, 'failed');
+    expect(repository.reserveApply(input)).toMatchObject({ reserved: true });
+  });
+
+  it('keeps ordinary environment locks project-scoped when checking global resource locks', () => {
+    const repository = new RunRepository();
+    const otherProjectId = new ProjectRepository().create({ name: 'independent-resource-owner' }).id;
+    const otherEnvironmentId = new EnvironmentRepository().create({ projectId: otherProjectId, name: 'production' }).id;
+    expect(repository.reserveApply({ projectId, environmentId, planRunId: planRunId('dns-zone-one'), environmentName: 'production', specRevision: 1,
+      lockEnvironmentIds: ['shared-environment-label'], lockResourceKeys: ['dns-zone:one'] }).reserved).toBe(true);
+    expect(repository.reserveApply({ projectId: otherProjectId, environmentId: otherEnvironmentId, planRunId: 'independent-dns-plan', environmentName: 'production', specRevision: 1,
+      lockEnvironmentIds: ['shared-environment-label'], lockResourceKeys: ['dns-zone:two'] }).reserved).toBe(true);
+  });
 });

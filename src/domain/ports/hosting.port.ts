@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { serviceInstanceIntentsSchema } from './service-instance.port.js';
+import { dnsSpecSchema } from '../spec/dns.schema.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type {
@@ -369,6 +370,10 @@ export const hostingBindingsSchema = z.object({
   previousDatabase: previousDatabaseSchema.optional(),
   previousCache: previousCacheSchema.optional(),
   domainDns: z.object({
+    dnsEngineRemoved: z.boolean().optional(),
+    /** Fresh attachment awaiting its first DNS stage; this is not DNS ownership. */
+    dnsStagePending: z.boolean().optional(),
+    dnsSelection: dnsSpecSchema.optional(),
     name: z.string().optional(),
     proxied: z.boolean().optional(),
     recreateRevision: z.string().optional(),

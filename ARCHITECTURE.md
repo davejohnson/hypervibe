@@ -61,6 +61,8 @@ expose narrow operational capabilities where the engine is not the right owner.
 | --- | --- |
 | Desired app, environment policy, exact approval and result reporting | Hypervibe application layer |
 | New cloud resource lifecycle and native resource state | OpenTofu with pinned provider plugins |
+| Records in an explicitly selected existing Cloudflare, Cloud DNS, Route 53 or Azure DNS zone | Shared saved OpenTofu DNS plan and encrypted state; Hypervibe owns scoped observation, consumer dependencies and exact adoption approval |
+| DNS security policy and certificate readiness | Hypervibe observation and blockers; zone creation, DNSSEC/registrar changes and automatic CAA policy mutations are unavailable |
 | Account discovery, sign-in and credential refresh | Hypervibe connection capabilities |
 | GCP project setup, billing attachment, APIs, identities, IAM and build resources | Project-shared OpenTofu state with exact setup approval |
 | Source build, immutable release, rollout, logs and app checks | Hypervibe deployment and operations capabilities |
@@ -75,6 +77,13 @@ until the reviewed engine workflow creates them.
 Engine and API operations share exact scope, redaction, approvals and result stages.
 Generic orchestration routes by capability, not provider-name branches. New plugins
 must declare supported work and fail explicitly for unsupported work.
+
+DNS selection is independent of hosting. The four existing-zone DNS backends
+have ordinary CI configuration checks with their actual pinned providers; their
+installed live lifecycle remains unverified. See the
+[DNS evidence record](docs/development/provider-evidence.md#existing-zone-dns-evidence)
+for the precise coverage. Historical direct DNS adapter methods are not invoked
+by managed domain, Pages or email record workflows; writes use saved engine plans.
 
 ## Engine Runtime And Installation
 

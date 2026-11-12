@@ -18,16 +18,13 @@ import type { Project } from '../entities/project.entity.js';
 import type { ActionResult } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import { SENDGRID_DELIVERY_EVENTS, type EnvironmentSpec } from '../spec/spec.schema.js';
-import { findCloudflareZone, getCloudflareAdapterFromHints } from './cloudflare-ops.service.js';
-import { cloudflareScopeHintsForDomain, normalizeDomainName } from './domain-scope.js';
+import { normalizeDomainName } from './domain-scope.js';
 import {
   EMAIL_OPERATIONS,
   deliveryEventsUrl,
   emailAuthorizationConfigHash,
   emailConfigHash,
   emailDeliveryEventsConfigHash,
-  emailDnsConfigHash,
-  emailForwardingConfigHash,
   emailInboundConfigHash,
   emailRuntimeConfigHash,
   emailRuntimeKeysForService,
@@ -414,127 +411,15 @@ async function applyAuthorization(params: {
   return { success: true, message: `SendGrid sender ${address} is verified`, data: { address, senderId: externalId } };
 }
 
-function sendGridDnsRecords(auth: SendGridDomainAuthentication): Array<{
-  type: string;
-  name: string;
-  content: string;
-  priority?: number;
-}> {
-  return [auth.dns.dkim1, auth.dns.dkim2, auth.dns.mail_cname]
-    .filter((record): record is NonNullable<typeof record> => Boolean(record))
-    .map((record) => ({
-      type: record.type.toUpperCase(),
-      name: record.host.toLowerCase().replace(/\.$/, ''),
-      content: record.data.toLowerCase().replace(/\.$/, ''),
-    }));
-}
-
-async function applyDns(params: {
+/** Historical DNS actions never authorize direct provider record writes. */
+async function applyDns(_params: {
   project: Project;
   environment: Environment;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
 }): Promise<ActionResult> {
-  const metadata = asRecord(params.action.metadata);
-  const expectedHash = emailDnsConfigHash(params.environmentSpec);
-  const domain = params.environmentSpec.domain
-    ? normalizeDomainName(params.environmentSpec.domain)
-    : undefined;
-  if (
-    !domain
-    || params.action.resource.provider !== 'cloudflare'
-    || params.action.resource.name !== domain
-    || stringValue(metadata, 'domain') !== domain
-    || stringValue(metadata, 'configHash') !== expectedHash
-  ) {
-    return staleAction('Email DNS target changed.');
-  }
-
-  const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
-  if ('error' in sendgrid) {
-    return { success: false, status: 'blocked', message: 'SendGrid connection unavailable', error: sendgrid.error };
-  }
-  const authMatches = exactDomainMatches(await sendgrid.adapter.listDomainAuthentications(), domain);
-  if (authMatches.length !== 1) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: `Cannot resolve one SendGrid domain authentication for ${domain}`,
-      error: authMatches.length === 0 ? 'Apply the authorization action first.' : 'Resolve duplicate SendGrid domain authentications.',
-    };
-  }
-  const records = sendGridDnsRecords(authMatches[0]);
-  if (params.environmentSpec.email.inbound) {
-    records.push({
-      type: 'MX',
-      name: params.environmentSpec.email.inbound.hostname.toLowerCase(),
-      content: 'mx.sendgrid.net',
-      priority: 10,
-    });
-  }
-
-  const cloudflare = getCloudflareAdapterFromHints(cloudflareScopeHintsForDomain(domain));
-  if ('error' in cloudflare) {
-    return { success: false, status: 'blocked', message: 'Cloudflare connection unavailable', error: cloudflare.error };
-  }
-  const zone = await findCloudflareZone(cloudflare.adapter, domain);
-  if (!zone) {
-    return { success: false, status: 'blocked', message: `Cloudflare zone not found for ${domain}`, error: 'Connect the DNS zone that owns this domain.' };
-  }
-  const liveRecords = await cloudflare.adapter.listDnsRecords(zone.id);
-  for (const record of records) {
-    const matches = liveRecords.filter((candidate) =>
-      candidate.type.toUpperCase() === record.type
-      && candidate.name.toLowerCase().replace(/\.$/, '') === record.name
-    );
-    if (matches.length > 1) {
-      return { success: false, status: 'blocked', message: `Multiple Cloudflare records match ${record.type} ${record.name}`, error: 'Resolve duplicate DNS identities before applying.' };
-    }
-  }
-
-  const operation = stringValue(metadata, 'operation');
-  const recordBindings: Array<Record<string, unknown>> = [];
-  if (operation === EMAIL_OPERATIONS.dnsAdopt) {
-    for (const record of records) {
-      const match = liveRecords.find((candidate) =>
-        candidate.type.toUpperCase() === record.type
-        && candidate.name.toLowerCase().replace(/\.$/, '') === record.name
-        && candidate.content.toLowerCase().replace(/\.$/, '') === record.content
-        && (record.priority === undefined || candidate.priority === record.priority)
-      );
-      if (!match) return staleAction(`The reviewed ${record.type} ${record.name} DNS adoption candidate changed.`);
-      recordBindings.push({ id: match.id, type: record.type, name: record.name, priority: record.priority ?? null });
-    }
-  } else {
-    for (const record of records) {
-      const result = await cloudflare.adapter.upsertDnsRecord(
-        zone.id,
-        record.name,
-        record.type,
-        record.content,
-        { proxied: false, ...(record.priority !== undefined ? { priority: record.priority } : {}) }
-      );
-      const verified = result.record.content.toLowerCase().replace(/\.$/, '') === record.content
-        && (record.priority === undefined || result.record.priority === record.priority);
-      if (!verified) {
-        return { success: false, message: `Cloudflare did not verify ${record.type} ${record.name}`, error: 'The provider receipt did not match the requested DNS record.' };
-      }
-      recordBindings.push({ id: result.record.id, type: record.type, name: record.name, priority: record.priority ?? null });
-    }
-  }
-
-  updateEmailBinding(params.environment, 'dns', {
-    configHash: expectedHash,
-    provider: 'cloudflare',
-    zoneId: zone.id,
-    records: recordBindings,
-    updatedAt: new Date().toISOString(),
-  });
-  return {
-    success: true,
-    message: `${operation === EMAIL_OPERATIONS.dnsAdopt ? 'Recorded' : 'Synchronized'} ${records.length} SendGrid DNS record(s) in Cloudflare`,
-    data: { domain, records: recordBindings },
-  };
+  return { success: false, status: 'blocked', message: 'Email DNS needs a reviewed infrastructure engine plan',
+    error: 'Re-run hv_plan with the exact DNS provider and zone selected. Apply the saved DNS stage before email verification.' };
 }
 
 function routeMatches(route: SendGridInboundParseRoute, expectedUrl: string, inbound: NonNullable<EnvironmentSpec['email']['inbound']>): boolean {
@@ -787,40 +672,13 @@ function forwardingAliasDestination(environmentSpec: EnvironmentSpec, alias: str
   return entry?.[1].toLowerCase();
 }
 
-async function applyForwardingDns(params: {
+async function applyForwardingDns(_params: {
   environment: Environment;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
 }): Promise<ActionResult> {
-  const metadata = asRecord(params.action.metadata);
-  const domain = forwardingDomain(params.environmentSpec);
-  if (
-    !domain
-    || params.action.resource.provider !== 'cloudflare'
-    || params.action.resource.name !== domain
-    || stringValue(metadata, 'domain') !== domain
-    || stringValue(metadata, 'configHash') !== emailForwardingConfigHash(params.environmentSpec)
-  ) return staleAction('Forwarding DNS target changed.');
-  const context = await resolveCloudflareEmailContext(domain);
-  if ('error' in context) return { success: false, status: 'blocked', message: 'Cloudflare email context unavailable', error: context.error };
-  const operation = stringValue(metadata, 'operation');
-  const settings = await context.adapter.getEmailRoutingSettings(context.zone.id);
-  if (operation === EMAIL_OPERATIONS.forwardingDnsAdopt) {
-    if (!settings.enabled) return staleAction('The reviewed Email Routing DNS adoption candidate changed.');
-  } else if (!settings.enabled) {
-    await context.adapter.enableEmailRoutingDns(context.zone.id);
-  }
-  const verified = await context.adapter.getEmailRoutingSettings(context.zone.id);
-  if (!verified.enabled) {
-    return { success: false, message: `Cloudflare did not enable Email Routing for ${domain}`, error: 'Provider read-back still reports disabled.' };
-  }
-  updateForwardingBinding(params.environment, 'dns', {
-    zoneId: context.zone.id,
-    accountId: context.accountId,
-    enabled: true,
-    updatedAt: new Date().toISOString(),
-  });
-  return { success: true, message: `Cloudflare Email Routing DNS is enabled for ${domain}`, data: { domain } };
+  return { success: false, status: 'blocked', message: 'Email Routing DNS requires an infrastructure engine capability',
+    error: 'Automatic Email Routing DNS activation is unavailable until its exact provider records can be included in a reviewed engine plan. Existing routing and bindings were preserved.' };
 }
 
 async function applyForwardingDestination(params: {

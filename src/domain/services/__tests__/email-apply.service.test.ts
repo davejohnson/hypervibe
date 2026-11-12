@@ -353,7 +353,7 @@ describe('declarative email apply', () => {
     });
   });
 
-  it('applies staging email DNS through a Cloudflare connection scoped to the parent zone', async () => {
+  it('blocks legacy email DNS writes until their exact engine plan is reviewed', async () => {
     const connections = new ConnectionRepository();
     const cloudflare = connections.create({
       provider: 'cloudflare',
@@ -454,17 +454,9 @@ describe('declarative email apply', () => {
       },
     });
 
-    expect(result.success).toBe(true);
-    expect(findZone).toHaveBeenNthCalledWith(1, 'staging.invoiceperfect.com');
-    expect(findZone).toHaveBeenNthCalledWith(2, 'invoiceperfect.com');
-    expect(upsertDnsRecord).toHaveBeenCalledTimes(4);
-    expect(upsertDnsRecord).toHaveBeenCalledWith(
-      'zone-1',
-      'ci-mail.staging.invoiceperfect.com',
-      'MX',
-      'mx.sendgrid.net',
-      { proxied: false, priority: 10 }
-    );
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(findZone).not.toHaveBeenCalled();
+    expect(upsertDnsRecord).not.toHaveBeenCalled();
   });
 
   it('creates and verifies the exact service-targeted inbound parse route', async () => {

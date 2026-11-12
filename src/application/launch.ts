@@ -7,8 +7,10 @@ import type { PlanAction } from '../domain/plan/plan.types.js';
 import { ConvergeExecutor, type ActionReceipt } from '../domain/plan/converge.executor.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
-import { cloudflareFor } from './infrastructure-engine-domain.js';
 import { connectCloudflareInBrowser } from './local-connect-page.js';
+import { resolveDnsConnection } from '../adapters/dns-observation/connections.js';
+import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
+import { applyDnsPlan } from './dns-hosting.js';
 import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
@@ -150,7 +152,7 @@ async function runLaunch(ctx: CommandContext, params: {
     const loaded = new ConvergeExecutor().loadPlan(params.planId);
     if ('error' in loaded) return { status: 'blocked', message: loaded.error };
     const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
-    if (loaded.document.scope !== ENGINE_PLAN_SCOPE || loaded.run.projectId !== params.project.id
+    if (![ENGINE_PLAN_SCOPE, 'dns-engine'].includes(loaded.document.scope ?? '') || loaded.run.projectId !== params.project.id
       || loaded.document.environmentName !== params.environmentName || !environment || loaded.run.environmentId !== environment.id) {
       return { status: 'blocked', message: 'The saved plan belongs to a different project, environment or lifecycle scope. Review a new hv_launch plan.' };
     }
@@ -212,16 +214,20 @@ async function runLaunch(ctx: CommandContext, params: {
       access: `Prepare build resources in ${region} using this saved OpenTofu plan. Shared resources in other regions are retained.`, grants: prepared };
   }
 
-  // 1a. DNS access for a custom domain: open the one-step connect page instead of explaining tokens.
+  // DNS access is scoped independently from the hosting project.
   const domainName = environmentSpec.domain?.trim().toLowerCase();
-  if (domainName && 'error' in await cloudflareFor(domainName)) {
+  if (domainName) {
+    if (!environmentSpec.dns) return { status: 'blocked', message: 'Set environment.dns to the exact DNS provider and zone for this domain. Hosting does not select DNS.' };
     const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
-    const connected = await connectCloudflareInBrowser({ domain: domainName, waitMs: 3 * 60 * 1000, context: {
-      project: params.project.name, ...(repository ? { repository } : {}), environment: params.environmentName,
-      purpose: `serve the ${params.environmentName} environment at ${domainName}`,
-    } });
-    if (connected.status !== 'connected') {
-      return { status: 'needs_connection', provider: 'cloudflare', ...(connected.url ? { url: connected.url } : {}), message: connected.message };
+    const connection = await resolveDnsConnection({ context: ctx, zone: dnsZoneIdentity(environmentSpec.dns),
+      connectionScope: environmentSpec.dns.connectionScope, scopeHints: [repository, domainName, environmentSpec.dns.zone.name].filter((value): value is string => Boolean(value)) });
+    if ('blocked' in connection) {
+      if (environmentSpec.dns.provider !== 'cloudflare') return { status: 'needs_connection', provider: environmentSpec.dns.provider, message: connection.blocked };
+      const connected = await connectCloudflareInBrowser({ domain: domainName, waitMs: 3 * 60 * 1000, context: {
+        project: params.project.name, ...(repository ? { repository } : {}), environment: params.environmentName,
+        purpose: `serve the ${params.environmentName} environment at ${domainName}`,
+      } });
+      if (connected.status !== 'connected') return { status: 'needs_connection', provider: 'cloudflare', ...(connected.url ? { url: connected.url } : {}), message: connected.message };
     }
   }
 
@@ -279,7 +285,10 @@ async function runLaunch(ctx: CommandContext, params: {
     }
     let applied: Awaited<ReturnType<typeof applyInfrastructureEngine>>;
     try {
-      applied = await applyInfrastructureEngine(ctx, {
+      const loaded = new ConvergeExecutor().loadPlan(planned.planRunId);
+      if ('error' in loaded) return { status: 'blocked', message: loaded.error };
+      const apply = loaded.document.scope === 'dns-engine' ? applyDnsPlan : applyInfrastructureEngine;
+      applied = await apply(ctx, {
         project: params.project, spec: params.spec, specRevision: params.specRevision,
         planId: planned.planRunId, confirmActions: planned.confirmActions,
       });

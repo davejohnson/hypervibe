@@ -113,6 +113,47 @@ describe('engine segments', () => {
 });
 
 describe('engine plan documents', () => {
+  it('admits a separately saved DNS engine segment without authorizing other lifecycle actions', async () => {
+    const { planRunDocumentSchema } = await import('../converge.executor.js');
+    const action = { ...engineAction('dns'), resource: { kind: 'domain', name: 'app.example.com', provider: 'dns-cloudflare' } };
+    const { addresses: _addresses, ...reviewedSegment } = segment(['cloudflare_dns_record.app']);
+    const descriptor = { version: 1, planId: 'plan-1', segment: reviewedSegment,
+      state: { provider: 'dns-cloudflare', projectId, environmentId, partition: 'environment' },
+      zone: { provider: 'cloudflare', zoneId: 'a'.repeat(32), zoneName: 'example.com', scope: { accountId: 'b'.repeat(32) } },
+      owner: 'hosting-domain:app.example.com', domain: 'app.example.com', connectionId: 'connection-1',
+      zoneFingerprint: 'fingerprint', payloadEncrypted: 'encrypted-payload' };
+    const document = { kind: 'hv_plan', scope: 'dns-engine', environmentName: 'staging', specRevision: 1,
+      observedFingerprint: null, dns: { descriptor }, actions: [action] };
+    expect(planRunDocumentSchema.safeParse(document).success).toBe(true);
+    expect(planRunDocumentSchema.safeParse({ ...document, actions: [action, {
+      id: 'service:other', type: 'create', resource: { kind: 'service', name: 'other', provider: 'railway' },
+      reason: 'unrelated', verified: true,
+    }] }).success).toBe(false);
+    expect(planRunDocumentSchema.safeParse({ ...document, dns: { descriptor: { ...descriptor,
+      segment: { ...reviewedSegment, id: 'other-segment' } } } }).success).toBe(false);
+    const reconciliation = { id: 'dns-reconcile:hosting', type: 'update',
+      resource: { kind: 'domain', name: descriptor.domain, provider: 'dns-cloudflare' },
+      verified: true, reason: 'Verify exact existing DNS and update local ownership', metadata: { operation: 'dnsOwnershipReconcile' } };
+    expect(planRunDocumentSchema.safeParse({ ...document, actions: [reconciliation] }).success).toBe(true);
+    expect(planRunDocumentSchema.safeParse({ ...document, actions: [reconciliation, action] }).success).toBe(false);
+    expect(planRunDocumentSchema.safeParse({ ...document, actions: [{ ...reconciliation,
+      resource: { ...reconciliation.resource, name: 'another.example.com' } }] }).success).toBe(false);
+    const { buildDnsConfiguration, dnsEngineBackend } = await import('../../../adapters/dns/tofu/dns-engine.backend.js');
+    const { parseEnginePlan, translateEnginePlan } = await import('../../../adapters/engine/opentofu/plan-mapping.js');
+    const configuration = buildDnsConfiguration({ zone: descriptor.zone as import('../../ports/dns.port.js').DnsZoneIdentity, records: [
+      { key: 'existing', name: 'existing.example.com', type: 'A', values: ['192.0.2.1'], ttl: 300, authority: { kind: 'absent' } },
+      { key: 'new', name: 'new.example.com', type: 'A', values: ['192.0.2.2'], ttl: 300, authority: { kind: 'absent' } },
+    ] });
+    const addresses = Object.keys(configuration.resources);
+    const translated = translateEnginePlan({ provider: dnsEngineBackend(descriptor.zone as import('../../ports/dns.port.js').DnsZoneIdentity).provider,
+      configuration, segment: reviewedSegment,
+      parsed: parseEnginePlan(JSON.stringify({ resource_changes: addresses.map((address, index) => ({ address,
+        type: 'cloudflare_dns_record', change: { actions: [index === 0 ? 'no-op' : 'create'], before: null, after: {} } })) })),
+    });
+    expect(translated.actions.some(action => action.type === 'noop' && !action.metadata?.engineSegment)).toBe(true);
+    expect(planRunDocumentSchema.safeParse({ ...document, actions: translated.actions }).success).toBe(true);
+  });
+
   it('accept every action shape the OpenTofu stage persists', async () => {
     const { planRunDocumentSchema } = await import('../converge.executor.js');
     const hv = (id: string, kind: PlanAction['resource']['kind'], operation: string, type: PlanAction['type'] = 'create'): PlanAction =>

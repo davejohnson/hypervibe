@@ -846,9 +846,9 @@ function planForwarding(params: {
   return actions;
 }
 
-function desiredDnsRecords(
+export function desiredEmailDnsRecords(
   environmentSpec: EnvironmentSpec,
-  state: EmailIntegrationState
+  state: Pick<EmailIntegrationState, 'domainAuthentications'>
 ): Array<{ type: string; name: string; content: string; priority?: number }> | undefined {
   if (!environmentSpec.domain || state.domainAuthentications.status === 'unknown') return undefined;
   const domain = normalizeDomainName(environmentSpec.domain);
@@ -857,6 +857,9 @@ function desiredDnsRecords(
   );
   if (matches.length > 1) return undefined;
   if (matches.length !== 1) return undefined;
+  // This workflow supports automated-security domain authentication. A partial
+  // response or a legacy record layout cannot become a smaller desired DNS set.
+  if (matches[0].legacy !== false || !matches[0].dns?.dkim1 || !matches[0].dns?.dkim2 || !matches[0].dns?.mail_cname) return undefined;
   const records: Array<{ type: string; name: string; content: string; priority?: number }> = [
     matches[0].dns.dkim1,
     matches[0].dns.dkim2,
@@ -866,7 +869,7 @@ function desiredDnsRecords(
       .map((record) => ({
         type: record.type.toUpperCase(),
         name: record.host.toLowerCase().replace(/\.$/, ''),
-        content: record.data.toLowerCase().replace(/\.$/, ''),
+        content: record.type.toUpperCase() === 'TXT' ? record.data : record.data.toLowerCase().replace(/\.$/, ''),
       }));
   if (environmentSpec.email.inbound) {
     records.push({
@@ -1111,7 +1114,7 @@ export async function planEmail(params: {
     const domain = normalizeDomainName(environmentSpec.domain);
     const dnsBinding = asRecord(bindings.dns);
     const configHash = emailDnsConfigHash(environmentSpec)!;
-    const desired = desiredDnsRecords(environmentSpec, state);
+    const desired = desiredEmailDnsRecords(environmentSpec, state);
     let type: PlanAction['type'] = 'update';
     let operation: string = EMAIL_OPERATIONS.dnsSync;
     let verified = false;
@@ -1153,6 +1156,10 @@ export async function planEmail(params: {
         operation,
         domain,
         configHash,
+        ...(desired && state.domainAuthentications.status === 'known' ? {
+          desiredRecords: desired,
+          authorizationId: String(state.domainAuthentications.items.find(auth => normalizeDomainName(auth.domain) === domain)!.id),
+        } : {}),
         ...(environmentSpec.email.inbound
           ? { inboundHostname: environmentSpec.email.inbound.hostname.toLowerCase() }
           : {}),

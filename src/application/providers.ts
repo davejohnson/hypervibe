@@ -21,6 +21,7 @@ import '../adapters/providers/azure/azure-blob.adapter.js';
 // Product and infrastructure providers
 import '../adapters/providers/stripe/stripe.adapter.js';
 import '../adapters/providers/cloudflare/cloudflare.adapter.js';
+import '../adapters/dns-observation/registration.js';
 import '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import '../adapters/providers/github/github.adapter.js';
 import '../adapters/providers/database/database.adapter.js';

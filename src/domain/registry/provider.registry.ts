@@ -15,6 +15,7 @@ export type ProviderLifecycleCapability =
   | 'cache'
   | 'storage'
   | 'queue'
+  | 'dns'
   | 'load-balancer';
 export type ProviderImplementationStatus = 'supported' | 'ready-for-live' | 'planned';
 
@@ -197,6 +198,8 @@ export interface ProviderMetadata {
   };
   orchestration?: ProviderOrchestrationMetadata;
   lifecycle?: {
+    /** DNS records are managed independently from cloud infrastructure hosting. */
+    dns?: { engine: 'opentofu'; records: readonly ('A' | 'AAAA' | 'CNAME' | 'TXT' | 'CAA' | 'MX')[] };
     /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
     hosting?: {
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
@@ -467,6 +470,7 @@ export class ProviderRegistry {
 
   private declaredLifecycleCapabilities(provider: RegisteredProvider): ProviderLifecycleCapability[] {
     const capabilities: ProviderLifecycleCapability[] = [];
+    if (provider.metadata.lifecycle?.dns) capabilities.push('dns');
     if (
       provider.metadata.category === 'deployment'
       && provider.metadata.lifecycle?.hosting !== undefined

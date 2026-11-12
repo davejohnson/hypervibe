@@ -45,8 +45,14 @@ import {
 } from './infrastructure-engine-database.js';
 import {
   DOMAIN_DNS_OPERATION, DOMAIN_DNS_REMOVE_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_VERIFY_OPERATION,
-  executeDomainAction, planDomain, planDomainDnsRemoval, type DomainPlanActions,
+  executeDomainAction, planDomain, observeDomainMapping, type DomainPlanActions,
 } from './infrastructure-engine-domain.js';
+import { getDnsBindingIdentity, getDnsBindingSelection, getDnsOwnedDomain, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
+import { persistDnsPlanRun } from './dns-hosting.js';
+import { verifyDnsTrafficAbsent } from './dns-absence.js';
+import { verifyGcpDomainEngineOwnership } from './gcp-domain-ownership.js';
+import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
+import type { DnsZoneIdentity } from '../domain/ports/dns.port.js';
 
 const DOMAIN_OPERATIONS = new Set([DOMAIN_VERIFY_OPERATION, DOMAIN_DNS_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_DNS_REMOVE_OPERATION]);
 
@@ -115,6 +121,8 @@ export interface EngineBinding {
   kind?: 'opentofu';
   database?: { instanceName: string; connectionName?: string };
   domains?: string[];
+  /** Retained before attempting a mapping, including cancellation before DNS starts. */
+  domainClaims?: Record<string, { zone: DnsZoneIdentity; connectionScope?: string }>;
   storage?: string[];
   cache?: { instanceName: string };
   queues?: string[];
@@ -772,17 +780,61 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   }
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
-  // Custom domain: Hypervibe verifies ownership and writes DNS before OpenTofu maps it.
+  // DNS and hosting use separate saved engine stages: proof, claim, traffic, readiness.
   const desiredDomain = environmentSpec!.domain?.trim().toLowerCase().replace(/\.$/, '');
   const domainService = desiredDomain ? domainServiceFor(environmentSpec!) : undefined;
-  const domainContext = { adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region };
+  const domainContext = { adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region,
+    ...(domainService ? { serviceName: serviceResourceName(context, environmentName, domainService) } : {}) };
   let domainActions: DomainPlanActions = { before: [], after: [] };
   if (desiredDomain && domainService) {
-    domainActions = await planDomain(domainContext, desiredDomain, environmentSpec!.services[domainService]!.healthCheckPath ?? '/');
+    if (!environmentSpec!.dns) return { blocked: ['Set environment.dns to the exact DNS provider and zone for this custom domain. Hosting and DNS can use different providers.'] };
+    domainActions = await planDomain(domainContext, desiredDomain, environmentSpec!.services[domainService]!.healthCheckPath ?? '/', environmentSpec!.dns.zone.name);
     if (domainActions.blocked) return { blocked: [domainActions.blocked] };
+    if (domainActions.mappingPresent) {
+      const observed = await observeDomainMapping(domainContext, desiredDomain);
+      const ownership = await verifyGcpDomainEngineOwnership(context, desiredDomain, observed);
+      if (!ownership.ready) return { blocked: [ownership.reason ?? 'The live domain mapping is not owned by the saved engine state.'] };
+    }
+    if (!domainActions.ownershipPresent || domainActions.mappingPresent) {
+      const prepared = await prepareDnsEnginePlan({ ctx, project, environment: context.environment, environmentSpec: environmentSpec!,
+        owner: 'gcp-domain', domain: desiredDomain, records: domainActions.dnsRecords ?? [], retainExistingTypes: ['TXT'] });
+      if (prepared.blocked) return { blocked: prepared.blocked };
+      if (!prepared.ready) return persistDnsPlanRun(ctx, { project, environment: context.environment, environmentName,
+        specRevision: params.specRevision, prepared, source: { kind: 'gcp-domain', environmentName, domain: desiredDomain,
+          gcpProjectId: context.gcpProjectId, region: context.region, serviceName: domainContext.serviceName,
+          sourceFingerprint: domainActions.sourceFingerprint, remove: false } });
+    }
   }
-  const retiredDomains = [...new Set([...(engineBinding.domains ?? []), ...unfinishedDomainRemovals(context.environment.id)])]
+  const ownedDomain = getDnsOwnedDomain(context.environment, 'gcp-domain');
+  const retiredDomains = [...new Set([...(engineBinding.domains ?? []), ...(ownedDomain ? [ownedDomain] : []), ...unfinishedDomainRemovals(context.environment.id)])]
     .filter((domain) => domain !== desiredDomain).sort();
+  const cancelledDomainProofs: Record<string, { zoneFingerprint: string; connectionId: string }> = {};
+  for (const domain of retiredDomains) {
+    if (!getDnsBindingIdentity(context.environment)) {
+      const selected = engineBinding.domainClaims?.[domain];
+      if (!selected) return { blocked: ['The retired domain has no verified engine DNS ownership or saved initial DNS selection. Explicitly adopt its exact DNS records before removing the hosting claim.'] };
+      const absence = await verifyDnsTrafficAbsent({ ctx, project, domain, ...selected });
+      if (!absence.ready) return { blocked: [absence.reason] };
+      cancelledDomainProofs[domain] = absence;
+      continue;
+    }
+    if (!hasOwnedDnsRecords(context.environment, 'gcp-domain')) {
+      const selected = getDnsBindingSelection(context.environment)!;
+      const absence = await verifyDnsTrafficAbsent({ ctx, project, domain, ...selected });
+      if (!absence.ready) return { blocked: [absence.reason] };
+      cancelledDomainProofs[domain] = absence;
+      continue;
+    }
+    const mapping = await observeDomainMapping(domainContext, domain);
+    if (mapping.state === 'unknown') return { blocked: [mapping.reason] };
+    const prepared = await prepareDnsEnginePlan({ ctx, project, environment: context.environment, environmentSpec: environmentSpec!,
+      owner: 'gcp-domain', domain, records: [], remove: true });
+    if (prepared.blocked) return { blocked: prepared.blocked };
+    if (!prepared.ready) return persistDnsPlanRun(ctx, { project, environment: context.environment, environmentName,
+      specRevision: params.specRevision, prepared, source: { kind: 'gcp-domain', environmentName, domain,
+        gcpProjectId: context.gcpProjectId, region: context.region,
+        sourceFingerprint: mapping.state === 'present' ? mapping.sourceFingerprint : 'absent', remove: true } });
+  }
 
   const binary = await ensureEngineBinary();
   if (!binary.ok) return { blocked: [binary.error] };
@@ -862,10 +914,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
   });
   const engineDomainAction = desiredDomain ? serviceActions.find((a) => a.id === `domain:${desiredDomain}`) : undefined;
-  const domainAfter = domainActions.after.map((action) => action.type !== 'noop' && engineDomainAction && engineDomainAction.type !== 'noop'
+  const domainAfter = (domainActions.mappingPresent ? domainActions.after : []).map((action) => action.type !== 'noop' && engineDomainAction && engineDomainAction.type !== 'noop'
     ? { ...action, dependsOn: [engineDomainAction.id] } : action);
-  const domainRemovals = retiredDomains.map((domain) => planDomainDnsRemoval(domainContext, domain,
-    serviceActions.filter((a) => a.id === `domain:${domain}` && a.type === 'destroy').map((a) => a.id)));
   const secretDependencies = (ids: string[]) => serviceActions.filter((action) => action.type !== 'noop' && ids.includes(action.id.replace(/^secret-container:/, '')) && action.id.startsWith('secret-container:')).map((action) => action.id);
   for (const action of secretActions) {
     const dependencies = secretDependencies([String(action.metadata?.secretId)]);
@@ -919,7 +969,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // The complete engine segment creates containers before operational value writes.
-  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...domainRemovals];
+  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -938,6 +988,9 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
+      domainClaims: { ...engineBinding.domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
+        [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
+      } : {}) }, cancelledDomainProofs,
     },
   } as PlanRunDocument;
   const runRepo = new RunRepository();
@@ -954,6 +1007,28 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
 }
 
 // ---------------------------------------------------------------- Apply
+
+/** Recheck the originating Google claim before an independently authenticated DNS apply. */
+export async function verifyGcpDnsSource(ctx: CommandContext, project: Project, spec: ProjectSpec,
+  source: Record<string, unknown>): Promise<{ ready: boolean; reason?: string }> {
+  const fail = (reason: string) => ({ ready: false, reason });
+  if (typeof source.environmentName !== 'string' || typeof source.domain !== 'string') return fail('The saved Google DNS source is incomplete.');
+  const environmentSpec = spec.environments[source.environmentName];
+  if (!environmentSpec || source.remove !== (environmentSpec.domain !== source.domain)) return fail('The custom-domain intent changed after review.');
+  const context = await resolveEngineContext(ctx, project, spec, source.environmentName);
+  if ('blocked' in context) return fail(context.blocked);
+  if (source.gcpProjectId !== context.gcpProjectId || source.region !== context.region) return fail('The Google project or region changed after review.');
+  const service = domainServiceFor(environmentSpec);
+  const domainContext = { adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region,
+    ...(!source.remove && service ? { serviceName: serviceResourceName(context, source.environmentName, service) } : {}) };
+  if (!source.remove && source.serviceName !== domainContext.serviceName) return fail('The custom-domain service changed after review.');
+  const observed = await observeDomainMapping(domainContext, source.domain);
+  if (observed.state === 'unknown') return fail(observed.reason);
+  const fingerprint = observed.state === 'present' ? observed.sourceFingerprint : 'absent';
+  if (fingerprint !== source.sourceFingerprint) return fail('The Google domain mapping changed after DNS planning. Run hv_plan again.');
+  if (observed.state === 'present') return verifyGcpDomainEngineOwnership(context, source.domain, observed);
+  return { ready: true };
+}
 
 export type WorkloadKind = 'services' | 'jobs' | 'workerPools';
 
@@ -1010,7 +1085,8 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string } } };
+  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
+    domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {
     return { kind: 'blocked', reason: 'This plan is not an OpenTofu engine plan for an engine-managed environment. Re-run hv_plan.' };
@@ -1078,6 +1154,32 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
           outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])),
           diagnostics: ['blocked' in current ? current.blocked : 'A service changed since this plan (for example, a release). Nothing was applied; re-run hv_plan so the new state is kept.'],
         };
+      }
+      for (const member of members.filter(action => action.id.startsWith('domain:'))) {
+        const domain = member.resource.name;
+        const observed = await observeDomainMapping({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, domain);
+        const stop = (reason: string) => ({ outcomes: Object.fromEntries(addresses.map(address => [address, 'not_started' as const])), diagnostics: [reason] });
+        if (observed.state === 'unknown') return stop(observed.reason);
+        if (member.type === 'create' && observed.state !== 'absent') return stop('A domain mapping appeared after review. No creation or adoption is authorized.');
+        if (observed.state === 'present') {
+          const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed);
+          if (!ownership.ready) return stop(ownership.reason ?? 'The exact mapping is not owned by this engine state.');
+        }
+        if (member.type === 'destroy') {
+          const selected = reviewed.domainClaims?.[domain] ?? getDnsBindingSelection(context.environment);
+          const expected = reviewed.cancelledDomainProofs?.[domain];
+          if (!selected || !expected) return stop('Domain removal needs reviewed native and public DNS absence. Run hv_plan again.');
+          const absence = await verifyDnsTrafficAbsent({ ctx, project: params.project, domain, ...selected, expected });
+          if (!absence.ready) return stop(absence.reason);
+        }
+      }
+      const attemptingDomains = members.filter(member => member.id.startsWith('domain:') && member.type !== 'destroy').map(member => member.resource.name);
+      if (attemptingDomains.length) {
+        const environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        const saved = (environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
+        ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...saved, kind: 'opentofu',
+          domains: [...new Set([...(saved.domains ?? []), ...attemptingDomains])],
+          domainClaims: { ...saved.domainClaims, ...reviewed.domainClaims } } });
       }
       for (const member of members.filter((entry) => entry.id.startsWith('secret-container:'))) {
         const observed = await observeSecret(token, context.gcpProjectId, member.resource.name);
@@ -1155,8 +1257,8 @@ async function recordServiceBindings(
     if (member.id.startsWith('domain:')) {
       const domain = member.resource.name;
       const remaining = (engine.domains ?? []).filter((entry) => entry !== domain);
-      // A removed mapping keeps the domain recorded until its DNS is removed too.
-      if (member.type !== 'destroy') engine = { ...engine, domains: [...remaining, domain].sort() };
+      // Planning removes and verifies owned DNS before releasing a hosting claim.
+      engine = { ...engine, domains: member.type === 'destroy' ? remaining : [...remaining, domain].sort() };
       continue;
     }
     if (member.id === 'release-job:migrations') {
