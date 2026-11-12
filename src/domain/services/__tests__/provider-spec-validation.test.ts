@@ -4,6 +4,7 @@ import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import {
   firstProviderSpecValidationFailure,
+  introducedProviderSpecValidationFailure,
   validateProjectSpecProviders,
 } from '../provider-spec-validation.js';
 
@@ -99,6 +100,20 @@ function workloadSpec(provider: string, workloadKind: 'web' | 'worker' | 'cron')
 }
 
 describe('validateProjectSpecProviders', () => {
+  it('rejects spec writes only for environments the write changes', () => {
+    const write = (environments: Record<string, unknown>) =>
+      projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments });
+    const production = { hosting: { provider: 'railway' }, services: {} };
+    const gcp = { hosting: { provider: 'cloudrun' }, services: {} };
+    const previous = write({ production, gcp });
+    const editProduction = write({ production: { ...production, domain: 'app.example.com' }, gcp });
+    expect(introducedProviderSpecValidationFailure(previous, editProduction)).toBeUndefined();
+    const editGcp = write({ production, gcp: { ...gcp, domain: 'gcp.example.com' } });
+    expect(introducedProviderSpecValidationFailure(previous, editGcp)).toMatchObject({ details: { path: 'environments.gcp.hosting.provider' } });
+    const addAws = write({ production, gcp, aws: { hosting: { provider: 'cloudrun' }, services: {} } });
+    expect(introducedProviderSpecValidationFailure(previous, addAws)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
+    expect(introducedProviderSpecValidationFailure(null, editProduction)).toMatchObject({ details: { maturityStatus: 'planned' } });
+  });
   it('scopes validation to the requested environment so another environment cannot block it', () => {
     const candidate = projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments: {
       production: { hosting: { provider: 'railway' }, services: {} },
