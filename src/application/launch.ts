@@ -1,4 +1,5 @@
 import type { CommandContext } from './context.js';
+import { collectOutsideKeys, engineOutsideKeys } from './engine-secrets.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
@@ -38,6 +39,7 @@ export type LaunchResult =
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
+  | { status: 'needs_secrets'; keys: string[]; url?: string; message: string }
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
   | { status: 'pending'; message: string; receipts: ActionReceipt[] }
@@ -251,6 +253,18 @@ async function runLaunch(ctx: CommandContext, params: {
   }
 
   if (params.stopAfter === 'prepare') return { status: 'ready', phase: 'prepare', infrastructureRounds: 0 };
+
+  // Keys only an outside service can issue: one local page for every missing one, before anything is built.
+  {
+    const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+    const imported = (environment?.platformBindings as { engine?: { importedSecrets?: string[] } } | undefined)?.engine?.importedSecrets;
+    if (engineOutsideKeys(params.spec, params.environmentName, imported).length) {
+      const collected = await collectOutsideKeys(ctx, { project: params.project, spec: params.spec, environmentName: params.environmentName,
+        ...(imported ? { importedSecrets: imported } : {}), ...(params.sourceDirectory ? { sourceDirectory: params.sourceDirectory } : {}), purpose: `launch ${params.environmentName}` });
+      if (collected.status === 'blocked') return collected;
+      if (collected.status === 'needs_secrets') return collected;
+    }
+  }
 
   // 2. Infrastructure, in as many reviewed rounds as staging requires.
   const approved = new Set(params.confirmActions ?? []);

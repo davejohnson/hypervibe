@@ -49,6 +49,12 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             agentInstruction: { action: 'ask_user', message: 'Ask the user to finish the one-step connect page in their browser (create a token in Cloudflare, paste it, click Connect).' },
             next: ['hv_launch'],
           });
+        case 'needs_secrets':
+          return commandSuccess(result, {
+            hint: 'A local page is open in the user\'s browser to add the keys the app needs from outside services. Share the link in case it did not open, then call hv_launch again once they have saved every key.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to add each listed key on the local page (each has a link to where it is created). Never ask for key values in chat.' },
+            next: ['hv_launch'],
+          });
         case 'needs_access':
           return commandSuccess(result, {
             hint: `Explain the access in plain language. After the user approves, call hv_launch again with approveAccess including "${result.accessId}" (keep any earlier approvals).`,

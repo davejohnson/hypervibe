@@ -229,6 +229,8 @@ export interface PasteField {
   allowGenerate?: boolean;
   /** A note such as "Delete the old key in Anthropic after this". */
   noteHtml?: string;
+  /** A local file that already has this value (".env.staging"); the page offers to use it without showing it. */
+  fromFile?: string;
 }
 
 export interface MultiPastePageSpec {
@@ -267,7 +269,10 @@ function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; 
     const link = field.link ? `<p><a class="button" href="${escapeHtml(field.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(field.link.label)} ↗</a></p>
 <p class="muted">${field.link.hintHtml}</p>${field.link.copy ? `<p class="copyrow"><span class="muted">${escapeHtml(field.link.copy.label)}</span> <code class="copy">${escapeHtml(field.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(field.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}`
       : `<p class="muted">Paste the new value from wherever it was issued${field.allowGenerate ? ', or generate one if it is a secret only your app uses' : ''}.</p>`;
-    return `<li class="field" data-field="${id}">${head}<div class="entry">${link}
+    const fromFile = field.fromFile
+      ? `<p class="fromfile"><button type="submit" name="fromfile" value="${id}" class="secondary">Use the value in ${escapeHtml(field.fromFile)}</button> <span class="muted small">or paste a different one below.</span></p>`
+      : '';
+    return `<li class="field" data-field="${id}">${head}<div class="entry">${fromFile}${link}
 <div class="inputrow">
   <label class="sr" for="v-${id}">${id}</label>
   <input id="v-${id}" type="password" name="value:${id}" placeholder="Paste the new ${id}" spellcheck="false" autocapitalize="off">
@@ -285,7 +290,7 @@ ${rows}
 <p class="muted small">Save each key as you go, or fill them in and save all at once.</p>
 <form id="keys" method="post" action="/connect/${state.nonce}" autocomplete="off"><input type="hidden" name="nonce" value="${state.nonce}">
 <ol class="fields">${items}</ol>
-${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*">Save all</button></p>` : ''}
+${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*">Save all</button>${spec.fields.filter((field) => field.fromFile && !state.saved[field.id]).length > 1 ? ' <button type="submit" name="fromfile" value="*" class="secondary">Use every value found in .env files</button>' : ''}</p>` : ''}
 </form>
 <script nonce="${state.scriptNonce}">${MULTI_SCRIPT}</script>`;
   return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere, scriptNonce: state.scriptNonce, expiresMinutes: 60 })
@@ -302,7 +307,7 @@ export async function serveMultiPastePage(params: {
   scope: string;
   spec: MultiPastePageSpec;
   /** Checks and saves one field; generate=true asks Hypervibe to create a random value. */
-  accept: (field: string, value: string | { generate: true }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  accept: (field: string, value: string | { generate: true } | { fromFile: true }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
   waitMs?: number;
   openBrowser?: (url: string) => void;
 }): Promise<LocalPasteResult & { saved?: string[] }> {
@@ -341,10 +346,13 @@ export async function serveMultiPastePage(params: {
         if (form.get('nonce') !== nonce) { reply(400); return; }
         const open = params.spec.fields.filter((candidate) => !saved[candidate.id]);
         const generateId = form.get('generate');
+        const fromFileId = form.get('fromfile');
         const saveId = form.get('save');
         const targets = generateId
           ? open.filter((candidate) => candidate.id === generateId && candidate.allowGenerate)
-          : saveId === '*' ? open.filter((candidate) => form.get(`value:${candidate.id}`)?.trim()) : open.filter((candidate) => candidate.id === saveId);
+          : fromFileId
+            ? open.filter((candidate) => candidate.fromFile && (fromFileId === '*' || candidate.id === fromFileId))
+            : saveId === '*' ? open.filter((candidate) => form.get(`value:${candidate.id}`)?.trim()) : open.filter((candidate) => candidate.id === saveId);
         if (!targets.length) {
           const first = saveId === '*' ? open[0] : undefined;
           if (first) errors[first.id] = 'Paste at least one value, then save.';
@@ -353,8 +361,8 @@ export async function serveMultiPastePage(params: {
         let failed = false;
         for (const target of targets) {
           const value = form.get(`value:${target.id}`)?.trim() ?? '';
-          if (!generateId && !value) { errors[target.id] = `Paste the new ${target.id}, or leave it for later.`; failed = true; continue; }
-          const outcome = await params.accept(target.id, generateId ? { generate: true } : value);
+          if (!generateId && !fromFileId && !value) { errors[target.id] = `Paste the new ${target.id}, or leave it for later.`; failed = true; continue; }
+          const outcome = await params.accept(target.id, generateId ? { generate: true } : fromFileId ? { fromFile: true } : value);
           if (!outcome.ok) { errors[target.id] = outcome.error; failed = true; continue; }
           delete errors[target.id];
           saved[target.id] = outcome.message;

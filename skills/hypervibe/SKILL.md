@@ -65,8 +65,13 @@ the committed local code and verifies it. Ask the user only at its stop points:
 listed there; choosing the account approves them), `needs_access` (an existing
 project needs one more permission: explain it, then pass its `accessId` in
 `approveAccess`) and `needs_confirmation` (show the changes and estimated
-monthly cost, then pass exactly `confirmActions`). Call it again after
-`pending`.
+monthly cost, then pass exactly `confirmActions`) and `needs_secrets` (keys only
+an outside service issues, such as API keys: a local page is open with a link to
+each key's page, and one-click use of a value already in `.env.<env>` or the
+shared `.env` (never shown); share the link and call again once they are saved). Declare
+such keys in the spec's `secrets` (ownership not `hypervibe`); never ask for
+their values in chat. `hv_secrets action="collect" env=<env>` opens the same page
+for any missing key, on GCP or AWS. Call `hv_launch` again after `pending`.
 
 Keep running costs low by default. A background worker that polls a database
 queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only

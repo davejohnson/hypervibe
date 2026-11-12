@@ -26,7 +26,8 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
-import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
+import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, missingOutsideKeysMessage, type InfrastructurePlanResult } from './infrastructure-engine.js';
+import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
 
 /**
  * The OpenTofu lifecycle for AWS environments: spec → configuration, Hypervibe-owned
@@ -204,6 +205,25 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   };
 }
 
+/** AWS Parameter Store as an environment's secret store. */
+export async function awsSecretStore(ctx: CommandContext, project: Project, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
+  const context = await resolveAwsEngineContext(ctx, project, environmentName);
+  if ('blocked' in context) return context;
+  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  return {
+    name: 'AWS Parameter Store',
+    observe: async (key) => parameterExists(ssm, `${context.parameterPath}${key}`),
+    write: async (key, value) => {
+      try {
+        await ssm.send(new PutParameterCommand({ Name: `${context.parameterPath}${key}`, Type: 'SecureString', Value: value, Overwrite: true }));
+        return undefined;
+      } catch (error) {
+        return `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}).`;
+      }
+    },
+  };
+}
+
 async function parameterExists(ssm: SSMClient, name: string): Promise<'present' | 'absent' | { unknown: string }> {
   try { await ssm.send(new GetParameterCommand({ Name: name })); return 'present'; } catch (error) {
     if (error instanceof ParameterNotFound) return 'absent';
@@ -277,7 +297,7 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   if (!spec.environments[environmentName]) {
     return record([snapshotAction(tornDown.finalSnapshot!.identifier, [])], ['Deleting the snapshot cannot be undone.'], { planId: `snapshot-${crypto.randomUUID()}` });
   }
-  const imported = ((context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets) ?? [];
+  const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...engineSecretKeys(spec, environmentName), ...imported]);
   if (built.blocked) return { blocked: built.blocked };
   const binary = await ensureEngineBinary();
@@ -431,7 +451,15 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // Hypervibe-owned generated secrets, observed in Parameter Store (present, absent or unknown).
   const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
   const generated = engineSecretKeys(spec, environmentName);
-  const imported = ((context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets) ?? [];
+  // Outside keys (declared in the spec or copied by a migration) must have a value; Hypervibe never invents them.
+  const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
+  const missingKeys: string[] = [];
+  for (const key of imported) {
+    const observed = await parameterExists(ssm, `${context.parameterPath}${key}`);
+    if (typeof observed === 'object') return { blocked: [observed.unknown] };
+    if (observed === 'absent') missingKeys.push(key);
+  }
+  if (missingKeys.length) return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)] };
   const secretActions: PlanAction[] = [];
   for (const key of generated) {
     const name = `${context.parameterPath}${key}`;
