@@ -2,7 +2,10 @@ import crypto from 'crypto';
 import { RDSClient, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
 import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { GetParameterCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { DeleteParametersCommand, GetParameterCommand, GetParametersByPathCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteTaskDefinitionsCommand, DeregisterTaskDefinitionCommand, ECSClient, ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
+import { CloudWatchLogsClient, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
@@ -19,6 +22,7 @@ import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunD
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { engineSegmentOf, type EngineAuthentication, type EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
@@ -30,6 +34,8 @@ import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, type Infr
  */
 export const AWS_PARAMETER_OPERATION = 'awsParameterEnsure';
 export const AWS_DATABASE_LOGIN_OPERATION = 'awsDatabaseLoginEnsure';
+export const AWS_BUCKET_EMPTY_OPERATION = 'awsBucketEmpty';
+export const AWS_TEARDOWN_CLEANUP_OPERATION = 'awsTeardownCleanup';
 const APP_DATABASE = 'app';
 const APP_LOGIN = 'app_owner';
 const WAKER_LOGIN = 'hv_waker';
@@ -200,6 +206,147 @@ async function parameterExists(ssm: SSMClient, name: string): Promise<'present' 
   }
 }
 
+/** The engine configuration for an environment as it stands: what plans compare against and teardown destroys. */
+async function awsEngineConfigurationFor(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, ownedSecretKeys: string[]) {
+  const environmentSpec = spec.environments[environmentName]!;
+  let engineVersion: string | undefined;
+  let tlsDefault: boolean | undefined;
+  if (environmentSpec.database) {
+    const major = (environmentSpec.database as { version?: number }).version ?? 17;
+    engineVersion = await newestAuroraVersion(context, major).catch(() => undefined);
+    if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
+    // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
+    tlsDefault = await tlsRequiredByDefault(context, engineVersion.split('.')[0]!).catch(() => undefined);
+  }
+  const binding = awsBinding(context.environment);
+  const databaseWired = Boolean(environmentSpec.database && binding.databaseLoginAt);
+  const secretKeys = [...ownedSecretKeys, ...(databaseWired ? [ENGINE_DATABASE_URL_KEY] : [])];
+  const input = buildAwsEngineInput(spec, environmentName, context, { ...(engineVersion ? { engineVersion } : {}), ...(tlsDefault ? { tlsRequiredByDefault: true } : {}), secretKeys });
+  return { binding, databaseWired, input, configuration: awsEngineBackend.buildConfiguration(input) };
+}
+
+/**
+ * Plans removing an AWS environment completely: OpenTofu destroys everything it
+ * created, after Hypervibe empties the storage buckets (deleting their files is
+ * confirmed separately). Then Hypervibe removes what it created outside OpenTofu:
+ * the environment's Parameter Store settings, task revisions registered by
+ * releases and the build log group. The database keeps a final snapshot.
+ */
+export async function planAwsTeardown(ctx: CommandContext, params: {
+  project: Project; spec: ProjectSpec; specRevision: number; environmentName: string;
+}): Promise<InfrastructurePlanResult | { blocked: string[] }> {
+  const { project, spec, environmentName } = params;
+  const context = await resolveAwsEngineContext(ctx, project, environmentName);
+  if ('blocked' in context) return { blocked: [context.blocked] };
+  const access = await awsAccessCurrent(context.credentials, context.connection.accountId);
+  if (access === 'outdated') return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
+  if (typeof access === 'object') return { blocked: [access.unknown] };
+  const imported = ((context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets) ?? [];
+  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...engineSecretKeys(spec, environmentName), ...imported]);
+  if (built.blocked) return { blocked: built.blocked };
+  const binary = await ensureEngineBinary();
+  if (!binary.ok) return { blocked: [binary.error] };
+  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const planId = crypto.randomUUID();
+  const planned = await engine.plan({ backend: awsEngineBackend, configuration: built.configuration, auth: context.auth, state: context.state, planId, destroy: true });
+  if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
+  if (planned.blockers.length) return { blocked: planned.blockers };
+
+  const accountId = context.connection.accountId;
+  const destroying = planned.actions.filter((action) => action.type !== 'noop');
+  const emptyActions: PlanAction[] = (built.input.storage ?? [])
+    .filter((bucket) => destroying.some((action) => action.id === `storage:${bucket.name}`))
+    .map((bucket) => ({
+      id: `storage-empty:${bucket.name}`, type: 'destroy', verified: true, dataBearing: true, requiresConfirm: true,
+      resource: { kind: 'storage', name: bucket.name, provider: 'aws' },
+      reason: `Hypervibe will permanently delete every file in ${bucket.bucket} so the bucket can be removed.`,
+      metadata: { operation: AWS_BUCKET_EMPTY_OPERATION, accountId, bucket: bucket.bucket },
+    }));
+  const engineActions = destroying.map((action) => action.id.startsWith('storage:') && emptyActions.some((empty) => empty.id === `storage-empty:${action.resource.name}`)
+    ? { ...action, dependsOn: [...(action.dependsOn ?? []), `storage-empty:${action.resource.name}`] } : action);
+  const families = [...(built.input.workers ?? []), ...(built.input.jobs ?? [])].map((task) => task.resourceName);
+  const cleanup: PlanAction = {
+    id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
+    resource: { kind: 'secret', name: 'environment leftovers', provider: 'aws' },
+    reason: `Hypervibe will delete this environment's settings in Parameter Store (${context.parameterPath}), the task revisions its releases registered and its build logs.`,
+    ...(engineActions.length ? { dependsOn: engineActions.map((action) => action.id) } : {}),
+    metadata: { operation: AWS_TEARDOWN_CLEANUP_OPERATION, accountId, parameterPath: context.parameterPath, families, logGroups: [`/hypervibe/${context.prefix}/builds`] },
+  };
+  const actions = [...emptyActions, ...engineActions, cleanup];
+  const warnings = [
+    `Removes AWS environment ${environmentName} in ${context.connection.region} (account ${accountId}). This cannot be undone.`,
+    ...(built.input.database ? [`The database keeps a final snapshot (${context.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month until deleted.`] : []),
+    `Hypervibe's access to this account stays, for other environments of ${project.name}.`,
+  ];
+  const document = {
+    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
+    observedFingerprint: null, actions, unmanaged: [], warnings,
+    engine: { planId, state: context.state, teardown: true, aws: { accountId, region: context.connection.region, prefix: context.prefix } },
+  } as unknown as PlanRunDocument;
+  const runRepo = new RunRepository();
+  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+  runRepo.updateStatus(run.id, 'succeeded');
+  return { planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings, confirmActions: actions.map((action) => action.id) };
+}
+
+async function emptyBucket(context: AwsEngineContext, bucket: string): Promise<ActionResult> {
+  const s3 = new S3Client({ region: context.connection.region, credentials: context.credentials });
+  let deleted = 0;
+  for (;;) {
+    let listed;
+    try {
+      listed = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket, MaxKeys: 1000 }));
+    } catch (error) {
+      if (error instanceof Error && error.name === 'NoSuchBucket') return { success: true, message: `${bucket} no longer exists.` };
+      throw error;
+    }
+    const objects = [...(listed.Versions ?? []), ...(listed.DeleteMarkers ?? [])].map((entry) => ({ Key: entry.Key!, ...(entry.VersionId ? { VersionId: entry.VersionId } : {}) }));
+    if (!objects.length) return { success: true, message: `Deleted ${deleted} file version(s) from ${bucket}.` };
+    const result = await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects, Quiet: true } }));
+    if (result.Errors?.length) return { success: false, message: `${result.Errors.length} file(s) in ${bucket} could not be deleted (${result.Errors[0]!.Code ?? 'error'}).` };
+    deleted += objects.length;
+  }
+}
+
+async function removeLeftovers(context: AwsEngineContext, metadata: { parameterPath: string; families: string[]; logGroups: string[] }): Promise<ActionResult> {
+  const { region } = context.connection;
+  const credentials = context.credentials;
+  const ssm = new SSMClient({ region, credentials });
+  const names: string[] = [];
+  let token: string | undefined;
+  do {
+    const page = await ssm.send(new GetParametersByPathCommand({ Path: metadata.parameterPath, Recursive: true, WithDecryption: false, NextToken: token }));
+    names.push(...(page.Parameters ?? []).map((parameter) => parameter.Name!));
+    token = page.NextToken;
+  } while (token);
+  for (let index = 0; index < names.length; index += 10) await ssm.send(new DeleteParametersCommand({ Names: names.slice(index, index + 10) }));
+  const ecs = new ECSClient({ region, credentials });
+  let revisions = 0;
+  for (const family of metadata.families) {
+    for (const status of ['ACTIVE', 'INACTIVE'] as const) {
+      const arns: string[] = [];
+      let next: string | undefined;
+      do {
+        const page = await ecs.send(new ListTaskDefinitionsCommand({ familyPrefix: family, status, nextToken: next }));
+        // familyPrefix also matches longer family names; keep only this exact family.
+        arns.push(...(page.taskDefinitionArns ?? []).filter((arn) => arn.split('/').pop()!.replace(/:\d+$/, '') === family));
+        next = page.nextToken;
+      } while (next);
+      if (status === 'ACTIVE') for (const arn of arns) await ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: arn }));
+      const deletable = arns;
+      for (let index = 0; index < deletable.length; index += 10) await ecs.send(new DeleteTaskDefinitionsCommand({ taskDefinitions: deletable.slice(index, index + 10) }));
+      revisions += status === 'ACTIVE' ? arns.length : 0;
+    }
+  }
+  const logs = new CloudWatchLogsClient({ region, credentials });
+  for (const logGroupName of metadata.logGroups) {
+    try { await logs.send(new DeleteLogGroupCommand({ logGroupName })); } catch (error) {
+      if (!(error instanceof Error && error.name === 'ResourceNotFoundException')) throw error;
+    }
+  }
+  return { success: true, message: `Deleted ${names.length} setting(s) from Parameter Store, ${revisions} released task revision(s) and the build logs.` };
+}
+
 export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; specRevision: number; environmentName: string;
 }): Promise<InfrastructurePlanResult | { blocked: string[] }> {
@@ -232,20 +379,9 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     });
   }
 
-  let engineVersion: string | undefined;
-  let tlsDefault: boolean | undefined;
-  if (environmentSpec.database) {
-    const major = (environmentSpec.database as { version?: number }).version ?? 17;
-    engineVersion = await newestAuroraVersion(context, major).catch(() => undefined);
-    if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
-    // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
-    tlsDefault = await tlsRequiredByDefault(context, engineVersion.split('.')[0]!).catch(() => undefined);
-  }
-  const binding = awsBinding(context.environment);
-  const databaseWired = Boolean(environmentSpec.database && binding.databaseLoginAt);
-  const secretKeys = [...generated, ...imported, ...(databaseWired ? [ENGINE_DATABASE_URL_KEY] : [])];
-  const input = buildAwsEngineInput(spec, environmentName, context, { ...(engineVersion ? { engineVersion } : {}), ...(tlsDefault ? { tlsRequiredByDefault: true } : {}), secretKeys });
-  const configuration = awsEngineBackend.buildConfiguration(input);
+  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported]);
+  if (built.blocked) return { blocked: built.blocked };
+  const { binding, databaseWired, input, configuration } = built;
 
   const binary = await ensureEngineBinary();
   if (!binary.ok) return { blocked: [binary.error] };
@@ -388,6 +524,19 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       if (metadata?.accountId !== context.connection.accountId) return { success: false, status: 'blocked', message: 'AWS target changed; re-run hv_plan.' };
       try {
         if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureParameter(ssm, action);
+        if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(context, (action.metadata as { bucket: string }).bucket);
+        if (metadata.operation === AWS_TEARDOWN_CLEANUP_OPERATION) {
+          const removed = await removeLeftovers(context, action.metadata as { parameterPath: string; families: string[]; logGroups: string[] });
+          if (removed.success) {
+            // Nothing of this environment remains on AWS; forget its bindings so a later plan starts fresh.
+            const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+            const { aws: _aws, engine: _engine, ...rest } = current.platformBindings as Record<string, unknown>;
+            ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, aws: {}, engine: {} });
+            // The environment is gone; removing it from the spec keeps the next plan from recreating it.
+            new SpecStore().merge(params.project, { environments: { [environmentName]: null } });
+          }
+          return removed;
+        }
         if (metadata.operation === AWS_DATABASE_LOGIN_OPERATION) {
           // The cluster OpenTofu just created, read from RDS: its ARN, endpoint and RDS-managed master secret.
           const identifier = (action.metadata as { clusterIdentifier: string }).clusterIdentifier;

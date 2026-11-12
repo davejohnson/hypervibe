@@ -284,7 +284,7 @@ export const planRunDocumentSchema = z.object({
 }).passthrough().superRefine((document, ctx) => {
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
-    'awsParameterEnsure', 'awsDatabaseLoginEnsure'];
+    'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
     if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha

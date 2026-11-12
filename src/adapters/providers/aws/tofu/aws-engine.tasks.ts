@@ -58,7 +58,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
       name: wakerName, type: 'EXPRESS', role_arn: '${aws_iam_role.runtime.arn}',
       definition: literal(JSON.stringify(wakerDefinition({
         cluster: '${aws_ecs_cluster.main.arn}', service: worker.resourceName,
-        databaseArn: '${aws_rds_cluster.postgres.arn}', databaseId: '${aws_rds_cluster.postgres.cluster_identifier}',
+        databaseArn: '${aws_rds_cluster.postgres.arn}', webFunctions: (input.services ?? []).map((service) => service.resourceName),
         secretArn: `\${aws_secretsmanager_secret.${key}_waker.arn}`, pendingWorkQuery: worker.pendingWorkQuery,
         ...(worker.nextWorkAtQuery ? { nextWorkAtQuery: worker.nextWorkAtQuery,
           timer: { name: `${wakerName}-next`, roleArn: '${aws_iam_role.runtime.arn}', machineArn: `arn:aws:states:${input.region}:${input.accountId}:stateMachine:${wakerName}` } } : {}),
@@ -96,6 +96,23 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     resources[`aws_scheduler_schedule.${key}`] = mapping;
   }
 
+  // A finished scheduled job may have queued work: it starts each on-demand worker's waker right away.
+  const wakers = workers.filter((worker) => worker.pendingWorkQuery && worker.nextWorkAtQuery);
+  const rules: Record<string, unknown> = {};
+  const targets: Record<string, unknown> = {};
+  if (jobs.length && wakers.length) {
+    rules.jobs_finished = { name: `${input.prefix}-jobs-finished`, description: 'Hypervibe: a scheduled job finished; check for queued work',
+      event_pattern: JSON.stringify({ source: ['aws.ecs'], 'detail-type': ['ECS Task State Change'],
+        detail: { lastStatus: ['STOPPED'], clusterArn: [`arn:aws:ecs:${input.region}:${input.accountId}:cluster/${input.prefix}`], group: jobs.map((job) => `family:${job.resourceName}`) } }) };
+    resources['aws_cloudwatch_event_rule.jobs_finished'] = shared;
+    for (const worker of wakers) {
+      const key = awsKey(worker.logicalName);
+      targets[`${key}_waker`] = { rule: '${aws_cloudwatch_event_rule.jobs_finished.name}', target_id: `${key}-waker`.slice(0, 64),
+        arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: '${aws_iam_role.runtime.arn}', input: JSON.stringify({ force: true }) };
+      resources[`aws_cloudwatch_event_target.${key}_waker`] = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true };
+    }
+  }
+
   files['tasks.tf.json'] = {
     resource: {
       aws_ecs_cluster: { main: { name: input.prefix } },
@@ -107,57 +124,73 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
       ...(Object.keys(machines).length ? { aws_sfn_state_machine: machines } : {}),
       ...(Object.keys(schedules).length ? { aws_scheduler_schedule: schedules } : {}),
       ...(Object.keys(secrets).length ? { aws_secretsmanager_secret: secrets } : {}),
+      ...(Object.keys(rules).length ? { aws_cloudwatch_event_rule: rules, aws_cloudwatch_event_target: targets } : {}),
     },
   };
 }
 
 interface WakerParams {
-  cluster: string; service: string; databaseArn: string; databaseId: string; secretArn: string; pendingWorkQuery: string;
+  cluster: string; service: string; databaseArn: string; secretArn: string; pendingWorkQuery: string;
+  /** Web functions whose requests can queue work. */
+  webFunctions?: string[];
   nextWorkAtQuery?: string; timer?: { name: string; roleArn: string; machineArn: string };
 }
 
 /**
- * The on-demand worker waker (Step Functions, JSONata). Every minute it counts
- * pending work, but only while the database is awake: a paused database has
- * no new work, and querying it would wake it. With nothing pending it sets a
- * one-time wake at the next due time, which counts even while paused. Any
- * failure keeps one worker running (fails open).
+ * The on-demand worker waker (Step Functions, JSONata). It counts pending work
+ * only when the app could have queued some: the worker is running, the web
+ * service had requests in the last five minutes, a scheduled job just finished
+ * (an ECS event starts it), or the next-due timer fired. Otherwise it leaves the
+ * database alone, because every count is activity that keeps a pausing
+ * database awake. With nothing pending it moves the one-time timer to the next
+ * due time. Any failure keeps one worker running (fails open).
  */
 export function wakerDefinition(params: WakerParams): Record<string, unknown> {
   const desired = (count: number) => ({ Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:ecs:updateService', End: true,
     Arguments: { Cluster: params.cluster, Service: params.service, DesiredCount: count } });
   const statement = (sql: string) => ({ ResourceArn: params.databaseArn, SecretArn: params.secretArn, Database: 'app', Sql: sql });
   const keepOne = [{ ErrorEquals: ['States.ALL'], Next: 'KeepOne' }];
+  const countOnFailure = [{ ErrorEquals: ['States.ALL'], Next: 'Count' }];
+  const timed = Boolean(params.timer && params.nextWorkAtQuery);
+  const webFunctions = params.webFunctions ?? [];
   const states: Record<string, unknown> = {
-    Route: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.force = true %}', Next: 'Count' }], Default: params.timer ? 'Awake' : 'Count' },
+    Route: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.force = true %}', Next: 'Count' }], Default: timed ? 'Running' : 'Count' },
     Count: { Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:rdsdata:executeStatement', Arguments: statement(params.pendingWorkQuery),
       Output: '{% {"count": $states.result.Records[0][0].LongValue} %}', Next: 'Decide', Catch: keepOne },
-    Decide: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.count > 0 %}', Next: 'One' }], Default: params.timer ? 'NextAt' : 'Zero' },
+    Decide: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.count > 0 %}', Next: 'One' }], Default: timed ? 'NextAt' : 'Zero' },
     One: desired(1), Zero: desired(0), KeepOne: desired(1),
   };
-  if (params.timer && params.nextWorkAtQuery) {
+  if (timed) {
     Object.assign(states, {
-      // Capacity is reported as 0 while paused; missing data counts as awake, so work is never skipped.
-      Awake: { Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:cloudwatch:getMetricData', Next: 'Asleep',
-        Arguments: {
-          StartTime: '{% $fromMillis($toMillis($now()) - 180000) %}', EndTime: '{% $now() %}',
-          MetricDataQueries: [{ Id: 'capacity', MetricStat: { Period: 60, Stat: 'Maximum', Metric: { Namespace: 'AWS/RDS', MetricName: 'ServerlessDatabaseCapacity',
-            Dimensions: [{ Name: 'DBClusterIdentifier', Value: params.databaseId }] } } }],
-        },
-        Output: '{% ($v := $states.result.MetricDataResults[0].Values; {"asleep": $count($v) > 0 and $max($v) = 0}) %}',
-        Catch: [{ ErrorEquals: ['States.ALL'], Next: 'Count' }] },
-      Asleep: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.asleep = true %}', Next: 'Zero' }], Default: 'Count' },
+      // A running worker is counted every minute, so it stops once its work is done.
+      Running: { Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:ecs:describeServices', Next: 'IsRunning', Catch: countOnFailure,
+        Arguments: { Cluster: params.cluster, Services: [params.service] },
+        Output: '{% {"running": $states.result.Services[0].DesiredCount > 0} %}' },
+      IsRunning: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.running = true %}', Next: 'Count' }], Default: webFunctions.length ? 'Requests' : 'Zero' },
       NextAt: { Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:rdsdata:executeStatement', Next: 'HasNext', Catch: keepOne,
-        Arguments: statement(`SELECT to_char(greatest(min(t)::timestamptz, now() + interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') FROM (SELECT min(t) AS t FROM (${params.nextWorkAtQuery.trim().replace(/;$/, '')}) AS next_work(t)) AS due HAVING min(t) IS NOT NULL`),
+        Arguments: statement(`SELECT to_char(greatest(min(t)::timestamptz, now() + interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') FROM (SELECT min(t) AS t FROM (${params.nextWorkAtQuery!.trim().replace(/;$/, '')}) AS next_work(t)) AS due HAVING min(t) IS NOT NULL`),
         Output: '{% {"at": $states.result.Records[0][0].StringValue} %}' },
       HasNext: { Type: 'Choice', Choices: [{ Condition: '{% $exists($states.input.at) %}', Next: 'Timer' }], Default: 'Zero' },
       Timer: { Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:scheduler:updateSchedule', Next: 'Zero', Catch: keepOne,
         Arguments: {
-          Name: params.timer.name, ScheduleExpression: '{% "at(" & $states.input.at & ")" %}', ScheduleExpressionTimezone: 'UTC',
+          Name: params.timer!.name, ScheduleExpression: '{% "at(" & $states.input.at & ")" %}', ScheduleExpressionTimezone: 'UTC',
           FlexibleTimeWindow: { Mode: 'OFF' }, State: 'ENABLED', ActionAfterCompletion: 'NONE',
-          Target: { Arn: params.timer.machineArn, RoleArn: params.timer.roleArn, Input: JSON.stringify({ force: true }) },
+          Target: { Arn: params.timer!.machineArn, RoleArn: params.timer!.roleArn, Input: JSON.stringify({ force: true }) },
         } },
     });
+    if (webFunctions.length) {
+      Object.assign(states, {
+        // Web requests are when new work is queued; Lambda reports them without touching the database.
+        Requests: { Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:cloudwatch:getMetricData', Next: 'Busy', Catch: countOnFailure,
+          Arguments: {
+            StartTime: '{% $fromMillis($toMillis($now()) - 300000) %}', EndTime: '{% $now() %}',
+            MetricDataQueries: webFunctions.map((name, index) => ({ Id: `web${index}`, MetricStat: { Period: 60, Stat: 'Sum',
+              Metric: { Namespace: 'AWS/Lambda', MetricName: 'Invocations', Dimensions: [{ Name: 'FunctionName', Value: name }] } } })),
+          },
+          Output: '{% {"requests": $sum($states.result.MetricDataResults.Values) > 0} %}' },
+        Busy: { Type: 'Choice', Choices: [{ Condition: '{% $states.input.requests = true %}', Next: 'Count' }], Default: 'Zero' },
+      });
+    }
   }
   return { QueryLanguage: 'JSONata', StartAt: 'Route', States: states };
 }

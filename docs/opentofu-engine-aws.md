@@ -15,7 +15,9 @@ records the AWS-specific decisions and why they were made.
 | Registry, runtime role, storage, database, app login | Built; applied live (billforge `aws`) |
 | Image builds and releases (`hv_deploy`) | Built; live verification in progress |
 | Web, worker, cron | Built; passes `tofu validate` |
-| CI releases, data migration, teardown | Not built |
+| Environment teardown (`hv_plan scope="teardown"`) | Built; live verification in progress |
+| Runtime settings copy (`hv_migrate`) | Built; not yet run live |
+| CI releases, data copy | Not built |
 
 ## Access
 
@@ -96,6 +98,24 @@ records the AWS-specific decisions and why they were made.
   creates them. Later releases update Lambda code and register a new task
   revision. Task definitions use `track_latest`, so released revisions are not
   drift, and scheduled jobs reference the family, so they run the latest.
+
+## Teardown
+
+`hv_plan scope="teardown"` removes a whole AWS environment as one reviewed
+plan; every action needs its own confirmation:
+
+1. Hypervibe empties each storage bucket. Buckets are created without
+   `force_destroy`, so deleting files is never a side effect of another change.
+2. OpenTofu destroys everything it created (`tofu plan -destroy`).
+3. Hypervibe removes what it created outside OpenTofu: the environment's
+   Parameter Store settings, task revisions registered by releases (deregistered,
+   then deleted) and the CodeBuild log group.
+4. The environment's bindings are cleared and it is removed from the spec, so the
+   next plan does not recreate it.
+
+The database keeps a final snapshot (`<prefix>-postgres-final`). Hypervibe's
+account access (deploy role, boundary, local key) stays, for the project's other
+environments.
 
 ## Provider pin
 

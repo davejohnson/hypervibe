@@ -44,19 +44,27 @@ describe('AWS tasks', () => {
     expect(() => schedulerCron('0 9 1 * 1')).toThrow(/both day of month and day of week/);
   });
 
-  it('starts on-demand workers at zero, counts only while the database is awake, wakes on time, and fails open', () => {
+  it('starts on-demand workers at zero, counts only after app activity so the database can pause, wakes on time, and fails open', () => {
     const config = buildAwsConfiguration({ ...base, database: { engineVersion: '18.6', minCapacity: 0, maxCapacity: 2 },
-      workers: [{ logicalName: 'worker', resourceName: 'hv-app-worker', initialImageUri: 'x', pendingWorkQuery: 'SELECT 1', nextWorkAtQuery: 'SELECT min(run_at) FROM jobs;' }], secretKeys: ['JWT_SECRET'] });
+      services: [{ logicalName: 'web', resourceName: 'hv-app-web', initialImageUri: 'x', public: true }],
+      workers: [{ logicalName: 'worker', resourceName: 'hv-app-worker', initialImageUri: 'x', pendingWorkQuery: 'SELECT 1', nextWorkAtQuery: 'SELECT min(run_at) FROM jobs;' }],
+      jobs: [{ logicalName: 'tick', resourceName: 'hv-app-tick', initialImageUri: 'x', schedule: '0 * * * *' }], secretKeys: ['JWT_SECRET'] });
     const tasks = (config.files['tasks.tf.json'] as { resource: Record<string, Record<string, Record<string, unknown>>> }).resource;
     expect(tasks.aws_ecs_service!.worker).toMatchObject({ desired_count: 0, lifecycle: [{ ignore_changes: ['desired_count'] }] });
     // Releases register revisions; the engine tracks the latest instead of reverting them.
     expect(tasks.aws_ecs_task_definition!.worker).toMatchObject({ track_latest: true });
     const definition = JSON.parse(String(tasks.aws_sfn_state_machine!.worker_waker!.definition).replaceAll('$${', '${'));
     expect(definition.QueryLanguage).toBe('JSONata');
-    expect(definition.States.Route.Default).toBe('Awake');
+    expect(definition.States.Route.Default).toBe('Running');
     expect(definition.States.Route.Choices[0]).toMatchObject({ Next: 'Count' });
-    expect(definition.States.Awake.Catch).toEqual([{ ErrorEquals: ['States.ALL'], Next: 'Count' }]);
-    expect(definition.States.Asleep.Choices[0].Next).toBe('Zero');
+    expect(definition.States.IsRunning).toMatchObject({ Choices: [{ Next: 'Count' }], Default: 'Requests' });
+    expect(definition.States.Requests.Arguments.MetricDataQueries[0].MetricStat.Metric).toMatchObject({ Namespace: 'AWS/Lambda', MetricName: 'Invocations', Dimensions: [{ Name: 'FunctionName', Value: 'hv-app-web' }] });
+    expect(definition.States.Requests.Catch).toEqual([{ ErrorEquals: ['States.ALL'], Next: 'Count' }]);
+    // Nothing about the database's own state decides whether to count: counting would keep it awake.
+    expect(JSON.stringify(definition)).not.toContain('ServerlessDatabaseCapacity');
+    expect(definition.States.Busy).toMatchObject({ Default: 'Zero' });
+    expect(tasks.aws_cloudwatch_event_rule!.jobs_finished!.event_pattern).toContain('family:hv-app-tick');
+    expect(tasks.aws_cloudwatch_event_target!.worker_waker).toMatchObject({ input: '{"force":true}' });
     expect(definition.States.Count.Catch).toEqual([{ ErrorEquals: ['States.ALL'], Next: 'KeepOne' }]);
     expect(definition.States.NextAt.Arguments.Sql).toContain('FROM (SELECT min(run_at) FROM jobs) AS next_work(t)');
     expect(definition.States.Timer).toMatchObject({ Catch: [{ ErrorEquals: ['States.ALL'], Next: 'KeepOne' }],
@@ -66,6 +74,6 @@ describe('AWS tasks', () => {
     const container = JSON.parse(String(tasks.aws_ecs_task_definition!.worker!.container_definitions))[0];
     expect(container.secrets).toEqual([{ name: 'JWT_SECRET', valueFrom: 'arn:aws:ssm:us-west-2:111122223333:parameter/hypervibe/env1/JWT_SECRET' }]);
     const runtime = (config.files['base.tf.json'] as { resource: { aws_iam_role_policy: { runtime: { policy: string } } } }).resource.aws_iam_role_policy.runtime.policy;
-    for (const sid of ['WakerCount', 'WakerScale', 'WakerTimer', 'WakerDatabaseAwake', 'StartWakers', 'PassSelf']) expect(runtime).toContain(sid);
+    for (const sid of ['WakerCount', 'WakerScale', 'WakerTimer', 'WakerWebRequests', 'StartWakers', 'PassSelf', 'RunTasks']) expect(runtime).toContain(sid);
   });
 });

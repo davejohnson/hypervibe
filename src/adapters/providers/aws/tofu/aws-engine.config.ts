@@ -149,7 +149,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: `arn:aws:secretsmanager:${account}:secret:hypervibe/${input.prefix}/*` },
       { Sid: 'WakerScale', Effect: 'Allow', Action: ['ecs:UpdateService', 'ecs:DescribeServices'], Resource: `arn:aws:ecs:${account}:service/${input.prefix}/*` },
       { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
-      { Sid: 'WakerDatabaseAwake', Effect: 'Allow', Action: 'cloudwatch:GetMetricData', Resource: '*' },
+      { Sid: 'WakerWebRequests', Effect: 'Allow', Action: 'cloudwatch:GetMetricData', Resource: '*' },
     );
   }
   files['base.tf.json'] = {
@@ -164,7 +164,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
         name: `${input.prefix}-runtime`, path: '/hypervibe/app/',
         permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
         assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole',
-          Principal: { Service: ['lambda.amazonaws.com', 'ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com'] } }] }),
+          Principal: { Service: ['lambda.amazonaws.com', 'ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com', 'events.amazonaws.com'] } }] }),
       } },
       aws_iam_role_policy: { runtime: { name: 'runtime', role: '${aws_iam_role.runtime.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: runtimeStatements }) } },
     },
