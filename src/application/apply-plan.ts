@@ -1,3 +1,4 @@
+import { isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
 import { applyServiceInstanceAction } from '../domain/services/service-instance.service.js';
 import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
@@ -807,6 +808,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
   if (planScope === 'infrastructure-engine') {
+    if (invalidSpec) return invalidSpec;
     const engineOutcome = await applyInfrastructureEngine(ctx, { project, spec, specRevision: params.specRevision,
       planId, confirmActions: params.confirmActions });
     return engineOutcome.kind === 'blocked'
@@ -841,6 +843,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
       component.id === bootstrapAction.metadata?.componentId
       && matchesDatabaseBootstrapObservationOrCleanup(component.bindings, bootstrapAction));
   if (invalidSpec && !observationOrCleanup && planScope !== 'credentials') return invalidSpec;
+  // These exceptions depend on the validated persisted scope and, for retained
+  // tasks, its exact acknowledged execution. User-supplied scope labels cannot
+  // authorize infrastructure through the credential/recovery executor.
+  if (isEngineManaged(spec.environments[envName]) && planScope !== 'credentials' && !observationOrCleanup) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'cloudrun',
+      reason: 'Cloud Run infrastructure requires an OpenTofu plan. Run hv_plan again before applying this older plan.' }] };
+  }
   if (loaded.document.inputRequired?.length) {
     return { kind: 'input_required', envName, requirements: loaded.document.inputRequired };
   }

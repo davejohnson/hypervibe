@@ -9,7 +9,6 @@ const DEFAULT_DELAY_MS = 2_000;
 const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const ACCOUNT_ID_PATTERN = PROJECT_ID_PATTERN;
 const SERVICE_NAME_PATTERN = /^[a-z][a-z0-9.-]*\.googleapis\.com$/;
-const OPERATION_NAME_PATTERN = /^operations\/[A-Za-z0-9._~-]+$/;
 const PROJECT_NAME_PATTERN = /^projects\/[1-9][0-9]*$/;
 const PARENT_PATTERN = /^(?:organizations|folders)\/[1-9][0-9]*$/;
 const BILLING_ACCOUNT_NAME_PATTERN = /^billingAccounts\/[A-Za-z0-9-]+$/;
@@ -181,85 +180,6 @@ export class GcpBootstrapClient {
     return payload === null ? null : this.parseProject(payload, projectId);
   }
 
-  async createProject(input: {
-    projectId: string;
-    displayName?: string;
-    parent?: string;
-  }): Promise<GcpProjectCreateOperation> {
-    this.assertProjectId(input.projectId);
-    if (input.parent !== undefined && !PARENT_PATTERN.test(input.parent)) {
-      throw new Error('GCP project parent must be an exact organization or folder resource name.');
-    }
-    if (input.displayName !== undefined && !input.displayName.trim()) {
-      throw new Error('GCP project display name must not be empty.');
-    }
-    const payload = await this.requestJson(
-      `${CLOUD_RESOURCE_MANAGER_BASE}/projects`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          projectId: input.projectId,
-          ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
-          ...(input.parent === undefined ? {} : { parent: input.parent }),
-        }),
-      },
-      'project creation'
-    );
-    const operation = this.parseOperation(payload, 'project creation');
-    return { name: operation.name };
-  }
-
-  async waitForProjectOperation(
-    operationName: string,
-    expected: { projectId: string; parent?: string }
-  ): Promise<GcpBootstrapProject> {
-    this.assertOperationName(operationName);
-    this.assertProjectId(expected.projectId);
-    if (expected.parent !== undefined && !PARENT_PATTERN.test(expected.parent)) {
-      throw new Error('GCP project parent must be an exact organization or folder resource name.');
-    }
-
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const payload = await this.requestJson(
-        `${CLOUD_RESOURCE_MANAGER_BASE}/${operationName}`,
-        { method: 'GET' },
-        'project operation lookup'
-      );
-      const operation = this.parseOperation(payload, 'project creation');
-      if (operation.name !== operationName) {
-        throw new Error('GCP project operation lookup returned a different operation identity.');
-      }
-      if (operation.done === true) {
-        if (operation.error !== undefined) {
-          throw new Error('GCP project creation operation failed.');
-        }
-        if (operation.response === undefined) {
-          throw new Error('GCP project creation operation completed without a project response.');
-        }
-        const acknowledged = this.parseProject(operation.response, expected.projectId);
-        if (expected.parent !== undefined && acknowledged.parent !== expected.parent) {
-          throw new Error('GCP project creation returned a different parent identity.');
-        }
-        if (acknowledged.state !== 'ACTIVE') {
-          throw new Error('GCP project creation completed without an active project.');
-        }
-        for (let observationAttempt = 0; observationAttempt < this.maxAttempts; observationAttempt += 1) {
-          const observed = await this.getProject(expected.projectId);
-          if (observed?.state === 'ACTIVE') {
-            if (expected.parent !== undefined && observed.parent !== expected.parent) {
-              throw new Error('GCP project observation returned a different parent identity.');
-            }
-            return observed;
-          }
-          await this.sleepBeforeRetry(observationAttempt);
-        }
-        throw new Error('GCP project creation was acknowledged but did not converge before the retry limit.');
-      }
-      await this.sleepBeforeRetry(attempt);
-    }
-    throw new Error('GCP project creation operation did not converge before the retry limit.');
-  }
-
   async listOpenBillingAccounts(): Promise<GcpBillingAccount[]> {
     const accounts: GcpBillingAccount[] = [];
     const identities = new Set<string>();
@@ -310,68 +230,6 @@ export class GcpBootstrapClient {
       'project billing lookup'
     );
     return payload === null ? null : this.parseProjectBillingInfo(payload, projectId);
-  }
-
-  async updateProjectBillingInfo(
-    projectId: string,
-    billingAccountName: string
-  ): Promise<GcpProjectBillingInfo> {
-    this.assertProjectId(projectId);
-    this.assertBillingAccountName(billingAccountName);
-    const payload = await this.requestJson(
-      `${CLOUD_BILLING_BASE}/projects/${encodeURIComponent(projectId)}/billingInfo`,
-      {
-        method: 'PUT',
-        body: JSON.stringify({ billingAccountName }),
-      },
-      'project billing update'
-    );
-    const acknowledged = this.parseProjectBillingInfo(payload, projectId);
-    if (acknowledged.billingAccountName !== billingAccountName
-      || acknowledged.billingEnabled !== true) {
-      throw new Error('GCP project billing update acknowledged a different billing state.');
-    }
-
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const observed = await this.getProjectBillingInfo(projectId);
-      if (observed?.billingEnabled === true
-        && observed.billingAccountName === billingAccountName) {
-        return observed;
-      }
-      await this.sleepBeforeRetry(attempt);
-    }
-    throw new Error('GCP project billing update did not converge before the retry limit.');
-  }
-
-  async enableService(
-    projectId: string,
-    serviceName: string
-  ): Promise<'enabled' | 'already_enabled'> {
-    this.assertProjectId(projectId);
-    this.assertServiceName(serviceName);
-    const project = await this.getProject(projectId);
-    if (project === null) {
-      throw new Error('GCP service enablement could not verify the target project.');
-    }
-    const expectedName = `${project.name}/services/${serviceName}`;
-    const initial = await this.getService(projectId, serviceName, expectedName);
-    if (initial?.state === 'ENABLED') return 'already_enabled';
-
-    const payload = await this.requestJson(
-      `${SERVICE_USAGE_BASE}/projects/${encodeURIComponent(projectId)}`
-        + `/services/${encodeURIComponent(serviceName)}:enable`,
-      { method: 'POST', body: JSON.stringify({}) },
-      'service enablement'
-    );
-    const operation = this.parseOperation(payload, 'service enablement');
-    await this.waitForServiceUsageOperation(operation.name);
-
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const observed = await this.getService(projectId, serviceName, expectedName);
-      if (observed?.state === 'ENABLED') return 'enabled';
-      await this.sleepBeforeRetry(attempt);
-    }
-    throw new Error('GCP service enablement did not converge before the retry limit.');
   }
 
   async getServiceState(
@@ -425,58 +283,6 @@ export class GcpBootstrapClient {
       'runtime service account IAM policy lookup'
     );
     return this.parseIamPolicy(payload, 'lookup');
-  }
-
-  async setServiceAccountIamPolicy(
-    projectId: string,
-    serviceAccountUniqueId: string,
-    policy: GcpIamPolicy
-  ): Promise<GcpIamPolicy> {
-    this.assertProjectId(projectId);
-    this.assertServiceAccountUniqueId(serviceAccountUniqueId);
-    const exactPolicy = this.parseIamPolicy(policy, 'update request');
-    const payload = await this.requestJson(
-      `${IAM_BASE}/projects/${encodeURIComponent(projectId)}`
-        + `/serviceAccounts/${serviceAccountUniqueId}:setIamPolicy`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ policy: exactPolicy, updateMask: 'bindings,etag' }),
-      },
-      'runtime service account IAM policy update'
-    );
-    return this.parseIamPolicy(payload, 'update');
-  }
-
-  async createServiceAccount(input: {
-    projectId: string;
-    accountId: string;
-    displayName?: string;
-    description?: string;
-  }): Promise<GcpServiceAccount> {
-    this.assertProjectId(input.projectId);
-    this.assertAccountId(input.accountId);
-    const payload = await this.requestJson(
-      `${IAM_BASE}/projects/${encodeURIComponent(input.projectId)}/serviceAccounts`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          accountId: input.accountId,
-          serviceAccount: {
-            ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
-            ...(input.description === undefined ? {} : { description: input.description }),
-          },
-        }),
-      },
-      'service account creation'
-    );
-    this.parseServiceAccount(payload, input.projectId, input.accountId);
-
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const observed = await this.getServiceAccount(input.projectId, input.accountId);
-      if (observed !== null) return observed;
-      await this.sleepBeforeRetry(attempt);
-    }
-    throw new Error('GCP service account creation did not converge before the retry limit.');
   }
 
   async createServiceAccountKey(
@@ -548,29 +354,6 @@ export class GcpBootstrapClient {
       await this.sleepBeforeRetry(attempt);
     }
     throw new Error('GCP service account key deletion did not converge before the retry limit.');
-  }
-
-  private async waitForServiceUsageOperation(operationName: string): Promise<void> {
-    this.assertOperationName(operationName);
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const payload = await this.requestJson(
-        `${SERVICE_USAGE_BASE}/${operationName}`,
-        { method: 'GET' },
-        'service enablement operation lookup'
-      );
-      const operation = this.parseOperation(payload, 'service enablement');
-      if (operation.name !== operationName) {
-        throw new Error('GCP service enablement lookup returned a different operation identity.');
-      }
-      if (operation.done === true) {
-        if (operation.error !== undefined) {
-          throw new Error('GCP service enablement operation failed.');
-        }
-        return;
-      }
-      await this.sleepBeforeRetry(attempt);
-    }
-    throw new Error('GCP service enablement operation did not converge before the retry limit.');
   }
 
   private async getService(
@@ -841,23 +624,6 @@ export class GcpBootstrapClient {
     }
   }
 
-  private parseOperation(
-    value: unknown,
-    operation: string
-  ): { name: string; done?: boolean; error?: unknown; response?: unknown } {
-    const record = this.asRecord(value, `GCP ${operation} returned an invalid operation response.`);
-    if (typeof record.name !== 'string' || !OPERATION_NAME_PATTERN.test(record.name)
-      || (record.done !== undefined && typeof record.done !== 'boolean')) {
-      throw new Error(`GCP ${operation} returned an invalid operation response.`);
-    }
-    return {
-      name: record.name,
-      ...(typeof record.done === 'boolean' ? { done: record.done } : {}),
-      ...(record.error === undefined ? {} : { error: record.error }),
-      ...(record.response === undefined ? {} : { response: record.response }),
-    };
-  }
-
   private assertServiceAccountKeyName(keyName: string): {
     projectId: string;
     accountId: string;
@@ -901,18 +667,6 @@ export class GcpBootstrapClient {
   private assertServiceName(serviceName: string): void {
     if (!SERVICE_NAME_PATTERN.test(serviceName)) {
       throw new Error('GCP service name must be an exact Google API service identifier.');
-    }
-  }
-
-  private assertOperationName(operationName: string): void {
-    if (!OPERATION_NAME_PATTERN.test(operationName)) {
-      throw new Error('GCP operation name must be an exact operation resource identity.');
-    }
-  }
-
-  private assertBillingAccountName(billingAccountName: string): void {
-    if (!BILLING_ACCOUNT_NAME_PATTERN.test(billingAccountName)) {
-      throw new Error('GCP billing account name must be an exact billing account identity.');
     }
   }
 

@@ -166,28 +166,13 @@ export function planDomainDnsRemoval(context: DomainContext, domain: string, dep
   };
 }
 
-async function enableSiteVerification(context: DomainContext): Promise<boolean> {
-  const token = await context.adapter.engineAccessToken();
-  const response = await fetchWithRetry(`https://serviceusage.googleapis.com/v1/projects/${context.gcpProjectId}/services/siteverification.googleapis.com:enable`, {
-    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}',
-  });
-  if (!response.ok) return false;
-  // Enablement propagates asynchronously; wait until the API answers.
-  for (let attempt = 0; attempt < 20; attempt++) {
-    if (await observeOwnership(context, '__probe__.invalid') !== 'api-disabled') return true;
-    await new Promise((resolve) => setTimeout(resolve, 6000));
-  }
-  return false;
-}
-
 export async function executeDomainAction(context: DomainContext, action: PlanAction): Promise<ActionResult> {
   const { domain, operation, healthPath } = action.metadata as { domain: string; operation: string; healthPath?: string };
   if (operation === DOMAIN_VERIFY_OPERATION) {
-    let ownership = await observeOwnership(context, domain);
+    const ownership = await observeOwnership(context, domain);
     if (ownership === 'present') return { success: true, message: `Google already recognizes Hypervibe as the owner of ${domain}.` };
     if (ownership === 'api-disabled') {
-      if (!await enableSiteVerification(context)) return { success: false, status: 'blocked', message: 'The Google Site Verification API could not be enabled for this project.' };
-      ownership = await observeOwnership(context, domain);
+      return { success: false, status: 'blocked', message: 'The Google Site Verification API is not enabled. Preview and approve project setup with hv_connections provider=cloudrun action=prepare before verifying the domain.' };
     }
     if (typeof ownership === 'object') return { success: false, status: 'blocked', message: ownership.unknown };
     const token = await context.adapter.siteVerificationAccessToken();

@@ -1,13 +1,16 @@
-# OpenTofu infrastructure engine (GCP pilot)
+# OpenTofu infrastructure engine for GCP
 
-Status: **pilot, opt-in per environment** (`hosting.engine: "opentofu"`). The
-complete Cloud Run journey has been demonstrated live (below). Environments
-without the flag use the standard lifecycle unchanged.
+Google Cloud uses OpenTofu as its only infrastructure engine. Cloud Run selects
+it automatically; `hosting.engine` is not a user choice. Default planning routes
+to the engine and unsupported work blocks without a legacy fallback.
+
+The dated live evidence below describes earlier revisions. It does not establish
+that this cutover has been deployed live. Current verification is recorded in
+the change's pull request.
 
 ## Decision
 
-Replace Hypervibe's hand-written GCP *resource lifecycle* code with OpenTofu and
-the Google provider, one capability at a time, while Hypervibe keeps the product:
+OpenTofu and the pinned Google provider own GCP infrastructure lifecycle, while Hypervibe keeps the product:
 deciding what to build, the spec, approvals, secret ownership, redaction,
 builds/releases, data operations and operation history. Users keep using
 `hv_spec` → `hv_plan` → `hv_apply` → verification and never see OpenTofu.
@@ -28,7 +31,7 @@ configuration, authentication, resource identities and deployment behavior.
 | Builds, releases, logs, DB queries, migrations, recovery, health | Hypervibe (retained adapters) |
 | Project identity, bindings, approval records, history | Hypervibe |
 
-## What is built on this branch
+## Implementation
 
 | Piece | File | Evidence |
 | --- | --- | --- |
@@ -97,15 +100,12 @@ must use the service `etag` on every write, so a concurrent engine apply and CI
 release cannot overwrite each other. If the live journey shows the provider cannot
 hold this split safely, releases move into the engine instead.
 
-## Findings about current behavior
+## Runtime secrets
 
-- **Cloud Run runtime secrets are plain environment values today.** No GCP code
-  writes Secret Manager references (`valueSource.secretKeyRef`). The engine backend
-  supports references only. Moving a secret to a reference needs the existing
-  approved secret workflow to create the Secret Manager secret and grant the runtime
-  identity `secretAccessor`. That is a prerequisite for the first Cloud Run journey.
-- The CI release writer replaces the whole container list from a fresh read. That is
-  safe for field preservation but racy without an etag.
+OpenTofu owns secret containers. Hypervibe keeps credential generation, private
+value storage and version publication inside its operational secret boundary.
+Raw credential values do not belong in public plans or generated configuration.
+Cloud Run receives Secret Manager references.
 
 ## Cross-cloud boundaries
 
@@ -129,37 +129,23 @@ deploy and verification belong to Hypervibe. Payment verification and
 organization admin consent may still need a person; Hypervibe links straight to
 that step and resumes afterward.
 
-The existing GCP bootstrap (`hv_connections action="bootstrap"`) already creates
-the deployment identity used above. It still depends on local Application Default
-Credentials for the one-time admin step; replacing that with a browser sign-in is
-open work, and the first Cloud Run milestone must include it.
+## GCP ownership
 
-## GCP method disposition
+Project bootstrap and preparation use a separate project-shared OpenTofu state
+for project/billing setup, APIs, identities, IAM, private build storage, image
+repositories and keyless CI trust. Billing choice does not approve these changes;
+the saved setup plan has its own confirmation.
 
-Replace with the engine once the matching capability is proven live:
-
-- `cloudrun.adapter.ts`: service create/update request construction in `deploy`
-  (service spec, IAM invoker, VPC access, scaling), `deleteService`,
-  `upsertCloudRunJob`/`upsertCloudSchedulerJob` and their delete/verify-deleted
-  helpers, `ensurePublicInvoker`, `ensureArtifactRepository`.
-- `cloudsql.adapter.ts`: instance/database create/update/delete and their polling.
-- `gcs.adapter.ts`, `memorystore.adapter.ts`, `pubsub.api.ts`: resource lifecycle.
-
-Retain (operational):
-
-- Builds and image digests (`buildImageForService`, `submitCloudBuild`), release
-  jobs and their execution, `runJob`, logs, deployments, `observe`, maintenance
-  suspend/resume, domain mapping status, runtime identity checks.
-- Cloud SQL password rotation, temporary access, queries, migrations, restore
-  drills and recovery. Hypervibe stays the credential writer.
-- GCS object transfer and data-deletion safeguards.
-- `gcp-bootstrap.client.ts` (project, billing, API enablement, deployment identity).
-  Moving parts of it into a project-shared engine state is a later, separately
-  approved change.
+Environment resources use environment-owned engine state. Operational helpers
+verify prerequisites and stop if they are absent or unknown. Builds do not
+create repositories; one-off tasks do not create runner infrastructure. Preserve
+sign-in, credential values, image builds/releases, logs, health, SQL and object
+transfer operations. Existing Railway infrastructure continues through its
+retained lifecycle.
 
 ## How it works for a user
 
-1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun", engine: "opentofu" }`.
+1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun" }`.
 2. `hv_connections action="bootstrap"`: preview, choose a billing account, confirm.
    Hypervibe creates the project, deployment and runtime identities and connections.
 3. `hv_plan scope="infrastructure"` → `hv_apply` (with confirmations for billable or

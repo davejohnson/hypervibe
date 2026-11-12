@@ -1,0 +1,29 @@
+{
+  "provider": "cloudrun",
+  "providerVersion": "8.9.0",
+  "reviewedAt": "2026-11-11",
+  "evidence": "Pinned official source and provider documentation; reconstructed offline transport responses, not recorded cloud traffic.",
+  "files": [
+    {
+      "file": "repository.proto",
+      "sourceUrl": "https://github.com/googleapis/googleapis/blob/1e3baa918084cc4097d4de7e1f81876671f8e7ff/google/devtools/artifactregistry/v1/repository.proto",
+      "sha256": "60f32241c5ec0f9e49f390bdf679b35f0712b054da7099b45fd5f9cb083fff92",
+      "extraction": "Complete upstream file, unchanged."
+    },
+    {
+      "file": "artifact_registry_repository.html.markdown",
+      "sourceUrl": "https://github.com/hashicorp/terraform-provider-google/blob/v8.9.0/website/docs/r/artifact_registry_repository.html.markdown",
+      "sha256": "15ddfc2335f7f0144aa87f15d2badd85c7ee187e9bdac8d52ae007706ac5ec81",
+      "extraction": "Complete upstream file, unchanged."
+    }
+  ],
+  "boundaries": [
+    "Release operations read the exact repository and require DOCKER format before submitting a build or uploading its source; absence and unknown reads cause no writes.",
+    "Repository infrastructure belongs only to the project-shared reviewed engine graph, with provider and engine deletion protection.",
+    "An existing repository without exact engine ownership is a collision to preserve and block, not permission to create, delete, or implicitly import."
+  ],
+  "limitations": [
+    "The source snapshots are reviewed semantics, not a complete compiled response-schema validator.",
+    "Configuration validation uses the pinned local provider without cloud calls; live creation, permissions and successful builds remain separately verified."
+  ]
+}

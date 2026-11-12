@@ -93,4 +93,3 @@ export async function checkKnownSecret(known: KnownSecret, value: string): Promi
   if (verdict === true) return undefined;
   return typeof verdict === 'string' ? verdict : `${known.service} did not accept that key. Copy it again and paste the whole value.`;
 }
-

@@ -104,26 +104,26 @@ describe('validateProjectSpecProviders', () => {
     const write = (environments: Record<string, unknown>) =>
       projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments });
     const production = { hosting: { provider: 'railway' }, services: {} };
-    const gcp = { hosting: { provider: 'cloudrun' }, services: {} };
-    const previous = write({ production, gcp });
-    const editProduction = write({ production: { ...production, domain: 'app.example.com' }, gcp });
+    const aws = { hosting: { provider: 'ecs' }, services: {} };
+    const previous = write({ production, aws });
+    const editProduction = write({ production: { ...production, domain: 'app.example.com' }, aws });
     expect(introducedProviderSpecValidationFailure(previous, editProduction)).toBeUndefined();
-    const editGcp = write({ production, gcp: { ...gcp, domain: 'gcp.example.com' } });
-    expect(introducedProviderSpecValidationFailure(previous, editGcp)).toMatchObject({ details: { path: 'environments.gcp.hosting.provider' } });
-    const addAws = write({ production, gcp, aws: { hosting: { provider: 'cloudrun' }, services: {} } });
-    expect(introducedProviderSpecValidationFailure(previous, addAws)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
+    const editAws = write({ production, aws: { ...aws, domain: 'aws.example.com' } });
+    expect(introducedProviderSpecValidationFailure(previous, editAws)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
+    const addAzure = write({ production, aws, azure: { hosting: { provider: 'azure-container-apps' }, services: {} } });
+    expect(introducedProviderSpecValidationFailure(previous, addAzure)).toMatchObject({ details: { path: 'environments.azure.hosting.provider' } });
     expect(introducedProviderSpecValidationFailure(null, editProduction)).toMatchObject({ details: { maturityStatus: 'planned' } });
   });
   it('scopes validation to the requested environment so another environment cannot block it', () => {
     const candidate = projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments: {
       production: { hosting: { provider: 'railway' }, services: {} },
-      gcp: { hosting: { provider: 'cloudrun' }, services: {} },
+      aws: { hosting: { provider: 'ecs' }, services: {} },
     } });
-    expect(firstProviderSpecValidationFailure(candidate)).toMatchObject({ details: { path: 'environments.gcp.hosting.provider' } });
+    expect(firstProviderSpecValidationFailure(candidate)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
     expect(firstProviderSpecValidationFailure(candidate, 'production')).toBeUndefined();
-    expect(firstProviderSpecValidationFailure(candidate, 'gcp')).toMatchObject({ details: { maturityStatus: 'planned' } });
+    expect(firstProviderSpecValidationFailure(candidate, 'aws')).toMatchObject({ details: { maturityStatus: 'planned' } });
   });
-  it.each(['cloudrun', 'ecs', 'azure-container-apps'])('reports %s as awaiting engine integration, not an unknown provider', provider => {
+  it.each(['ecs', 'azure-container-apps'])('reports %s as awaiting engine integration, not an unknown provider', provider => {
     expect(firstProviderSpecValidationFailure(spec(provider))).toMatchObject({
       message: expect.stringContaining('is planned'),
       hint: expect.stringContaining('OpenTofu'),
@@ -181,9 +181,9 @@ describe('validateProjectSpecProviders', () => {
 
   it('enforces Railway datastore hosting boundaries', () => {
     for (const capability of ['database', 'cache'] as const) {
-      const candidate = capability === 'database' ? spec('cloudrun', 'railway') : spec('cloudrun', undefined, 'railway');
+      const candidate = capability === 'database' ? spec('fixture-web-hosting', 'railway') : spec('fixture-web-hosting', undefined, 'railway');
       expect(validateProjectSpecProviders(candidate)).toContainEqual(expect.objectContaining({
-        field: capability + '.provider', provider: 'railway', capability, incompatibleHostingProvider: 'cloudrun', available: ['railway'],
+        field: capability + '.provider', provider: 'railway', capability, incompatibleHostingProvider: 'fixture-web-hosting', available: ['railway'],
       }));
     }
     expect(validateProjectSpecProviders(spec('railway', 'railway', 'railway'))).toEqual([]);
@@ -201,7 +201,7 @@ describe('validateProjectSpecProviders', () => {
   });
 
   it('validates queue lifecycle through hosting-provider metadata', () => {
-    expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'cloudrun', queues: true }))).toContainEqual(expect.objectContaining({ field: 'queues', provider: 'cloudrun', capability: 'queue' }));
+    expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'cloudrun', queues: true }))).toEqual([]);
     expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'railway', queues: true }))).toEqual([]);
     expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'ecs', queues: true }))).toContainEqual(
       expect.objectContaining({ field: 'queues', provider: 'ecs', capability: 'queue' })
@@ -260,7 +260,7 @@ describe('validateProjectSpecProviders', () => {
         },
       },
     });
-    expect(validateProjectSpecProviders(managedPubSub)).toContainEqual(expect.objectContaining({ field: 'queues', provider: 'cloudrun', capability: 'queue' }));
+    expect(validateProjectSpecProviders(managedPubSub)).toEqual([]);
   });
 
   it('validates provider-managed load-balancer lifecycle independently of hosting', () => {

@@ -1,3 +1,4 @@
+import { engineEnvironmentProblems, engineSelectionProblem, isEngineManaged } from './infrastructure-engine-selection.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import {
@@ -10,7 +11,7 @@ import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 
 export interface ProviderSpecIssue {
   environment: string;
-  field: 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
+  field: 'hosting.engine' | 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
   provider: string;
   service?: string;
   workloadKind?: WorkloadKind;
@@ -178,6 +179,22 @@ export function validateProjectSpecProviders(spec: ProjectSpec, environment?: st
     ? Object.entries(spec.environments)
     : Object.entries(spec.environments).filter(([name]) => name === environment);
   for (const [environment, environmentSpec] of environments) {
+    const selectionProblem = engineSelectionProblem(environmentSpec);
+    const engineProblems = selectionProblem ? [selectionProblem]
+      : isEngineManaged(environmentSpec) ? engineEnvironmentProblems(spec, environment) : [];
+    for (const message of engineProblems) {
+      issues.push({
+        environment, field: 'hosting.engine', provider: environmentSpec.hosting.provider,
+        capability: 'hosting', engine: 'opentofu', available: [],
+        configuration: {
+          path: `environments.${environment}.hosting`, message,
+          hint: 'Review the declared capabilities with hv_spec. Cloud Run infrastructure uses OpenTofu.',
+        },
+      });
+    }
+    // Engine capabilities are independent of the unshipped legacy provider writers.
+    // Do not promote those writers to mutation-ready to admit an engine environment.
+    if (selectionProblem || isEngineManaged(environmentSpec)) continue;
     if (!providerRegistry.supports(environmentSpec.hosting.provider, 'hosting')) {
       issues.push({
         environment,

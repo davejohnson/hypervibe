@@ -33,6 +33,21 @@ Review affected implementations when a shared boundary changes. For an
 adapter-local fix that preserves the shared contract, reuse verified evidence and
 investigate only the affected assumptions; do not restart a full provider review.
 
+Every implemented infrastructure provider needs a disposable live lifecycle
+profile through the installed Hypervibe workflow: create, verify the fixture app
+and resources, update, verify a noop, tear down, and independently confirm exact
+native resource absence. Capture identities before teardown and after partial
+applies. An empty plan, missing local binding, or successful delete request is
+not deletion evidence. Preserve recovery state and fail the run if cleanup is
+failed or unknown. Reusable test account/project prerequisites are separate from
+the environment resources created by each run.
+
+Keep profile coverage and the lifecycle harness's failure/cleanup checks in
+ordinary acceptance. Live runs require configured dedicated test access and
+exact infrastructure approval; missing access or an unimplemented provider must
+be reported explicitly, never counted as a live pass. Record the tested source
+revision with the complete lifecycle evidence before claiming support.
+
 ## DG-018
 
 Treat existing code, comments, mocks, and previous agent conclusions as hypotheses, not independent proof of provider behavior. Before fixing a provider bug, state the assumption being challenged, cite independent evidence, and identify a concrete counterexample that would falsify it. If evidence is unavailable, label the gap; do not present a guess as a verified fix.

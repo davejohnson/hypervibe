@@ -146,7 +146,7 @@ helper publication, not certification of every API operation in the repository.
 
 | Boundary | Executed counterexample and enforcement |
 | --- | --- |
-| Cloud SQL emitted drill | Rejected/uncertain clone, failed or unrelated operation, wrong instance identity, HTTP 200 null after deletion, and provider/credential error leakage. The generated script requires correlated terminal creation before unlabeled cleanup and emits value-free diagnostics. |
+| GCP engine ownership | The former Cloud SQL clone/delete drill compiler was removed during the OpenTofu cutover. Normal tests require unsupported results and zero emitted workflow files. Cloud Run arbitrary tasks, maintenance scaling/scheduler changes and logging IAM repair also stop before provider writes; status and logging reads remain available. |
 | Retained SQL and object bytes | Same-size replacement after read-back or before health/retention. Real PostgreSQL restore tests and real S3 SDK serialization bind format-2 proof to the verified native revision; final deletion inventory must still match it. |
 | Storage inventory | Missing object names/sizes and malformed or repeated pagination fail as unknown through real S3/Azure SDK transports and the GCS JSON API path. No object silently disappears or becomes zero bytes. |
 | Private helper admission | Public immutable GHCR helper without private credentials; Railway hosting with a non-Railway database; changed or ambiguous destination; missing explicit provider cleanup proof. Shared admission checks the supported pair and current desired selection before execution. |

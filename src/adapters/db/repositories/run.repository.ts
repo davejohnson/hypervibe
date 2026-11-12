@@ -170,6 +170,20 @@ export class RunRepository {
     return rows.map((row) => this.mapRow(row));
   }
 
+  /** Durable release provenance must not expire behind unrelated recent activity. */
+  findSuccessfulReleases(projectId: string, environmentIds: readonly string[]): Run[] {
+    if (environmentIds.length === 0) return [];
+    const rows = getDb().prepare(`
+      SELECT * FROM runs
+      WHERE project_id = ?
+        AND environment_id IN (${environmentIds.map(() => '?').join(', ')})
+        AND type = 'apply'
+        AND status = 'succeeded'
+      ORDER BY created_at DESC
+    `).all(projectId, ...environmentIds) as Record<string, unknown>[];
+    return rows.map((row) => this.mapRow(row)).filter((run) => run.receipts.some((receipt) => receipt.status === 'success' && receipt.step.startsWith('release:')));
+  }
+
   findRecent(limit = 20): Run[] {
     const db = getDb();
     const rows = db.prepare('SELECT * FROM runs ORDER BY created_at DESC LIMIT ?').all(limit) as Record<string, unknown>[];

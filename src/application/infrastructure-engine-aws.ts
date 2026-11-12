@@ -435,7 +435,7 @@ async function removeLeftovers(context: AwsEngineContext, metadata: { parameterP
 
 export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; specRevision: number; environmentName: string;
-}): Promise<InfrastructurePlanResult | { blocked: string[] }> {
+}): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName]!;
   const problems = awsEngineProblems(spec, environmentName);
@@ -459,7 +459,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     if (typeof observed === 'object') return { blocked: [observed.unknown] };
     if (observed === 'absent') missingKeys.push(key);
   }
-  if (missingKeys.length) return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)] };
+  if (missingKeys.length) return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)], missingOutsideKeys: missingKeys };
   const secretActions: PlanAction[] = [];
   for (const key of generated) {
     const name = `${context.parameterPath}${key}`;

@@ -23,7 +23,6 @@ import {
 import {
   databaseReplicaEnvKey,
 } from '../../../domain/services/database-env.js';
-import { buildCloudSqlRestoreDrillWorkflow, resolveCloudSqlRestoreDrillSource } from './cloudsql-restore-drill.workflow.js';
 
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
@@ -1001,12 +1000,6 @@ providerRegistry.register({
           status: 'planned',
           reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
         },
-      },
-    },
-    orchestration: {
-      databaseRestoreDrill: {
-        resolveSource: resolveCloudSqlRestoreDrillSource,
-        buildWorkflow: buildCloudSqlRestoreDrillWorkflow,
       },
     },
   },

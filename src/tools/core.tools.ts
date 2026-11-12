@@ -95,6 +95,7 @@ import { planProviderNativeDeploySources } from '../domain/services/provider-nat
 import { planMaintenance } from '../domain/services/maintenance-plan.service.js';
 import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
 import { eligibleCredentialRequirements } from '../application/credential-plan-handoff.js';
+import { hasDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -769,7 +770,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"): Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it never releases code (use hv_deploy). backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Cloud Run always plans infrastructure with OpenTofu; infrastructure is an explicit alias. For AWS, infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"). Both include Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; neither releases code (use hv_deploy). teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -779,16 +780,34 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs, deleteFinalSnapshot }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      if (scope === 'infrastructure' || scope === 'teardown') {
+      if (deleteFinalSnapshot !== undefined && scope !== 'teardown') {
+        return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+      }
+      const routingSpec = specStore.get(project);
+      const routingEnvironment = routingSpec ? commandEnvironment(routingSpec.spec, env) : env?.trim() || 'staging';
+      const cloudRunEnvironment = routingSpec?.spec.environments[routingEnvironment]?.hosting.provider === 'cloudrun';
+      const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, routingEnvironment);
+      const retainedExecution = Boolean(retainedEnvironment && ctx.repos.components.findByEnvironmentId(retainedEnvironment.id)
+        .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+      const retainedExecutionRecovery = retainedExecution && (scope === undefined || scope === 'full');
+      if (cloudRunEnvironment && retainedExecution && scope === 'infrastructure') {
+        return commandError('VALIDATION', 'An acknowledged database task needs observation or cleanup before new infrastructure. Run hv_plan without scope to recover its exact execution.', { next: ['hv_plan'] });
+      }
+      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'credentials') {
+        return commandError('VALIDATION', `scope="${scope}" is not supported for Cloud Run environments. Run hv_plan without scope to review OpenTofu infrastructure.`, { next: ['hv_plan'] });
+      }
+      if (scope === 'infrastructure' || scope === 'teardown' || (cloudRunEnvironment && scope !== 'credentials' && !retainedExecutionRecovery)) {
         const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
-        if (supplied) return commandError('VALIDATION', `scope="${scope}" takes only project and env.`, { next: ['hv_plan'] });
-        const specResult = specStore.get(project);
+        if (supplied) return commandError('VALIDATION', scope === 'teardown'
+          ? 'OpenTofu teardown planning takes only project, env, scope and deleteFinalSnapshot.'
+          : 'OpenTofu infrastructure planning takes only project, env and scope.', { next: ['hv_plan'] });
+        const specResult = routingSpec;
         if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
-        const environmentName = commandEnvironment(specResult.spec, env);
-        if (deleteFinalSnapshot !== undefined && scope !== 'teardown') return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+        const environmentName = routingEnvironment;
         if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName)) {
           return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS environments only.', { next: ['hv_spec'] });
         }
+        if (scope !== 'teardown') validateInstalledProviders(specResult.spec, environmentName);
         const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
         const planned = scope === 'teardown'
           ? await planAwsTeardown(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
@@ -842,12 +861,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
-      if (currentSpec) validateInstalledProviders(currentSpec, scope === 'credentials' ? undefined : plannedEnvironment);
+      if (currentSpec && scope !== 'credentials' && !retainedExecutionRecovery) validateInstalledProviders(currentSpec, plannedEnvironment);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
+      const preparedLocalEnv = currentSpec && !retainedExecutionRecovery && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
