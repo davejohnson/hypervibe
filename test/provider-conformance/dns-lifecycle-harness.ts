@@ -54,6 +54,13 @@ export function assertDnsFixtureActions(actions: Array<Record<string, any>>, mar
     if (action.type === 'noop') continue;
     if (action.resource?.kind !== 'domain' || !action.metadata) throw new Error('The DNS fixture cannot change app, project, service, secret or shared infrastructure.');
     const metadata = action.metadata;
+    if (metadata.operation === 'dnsOwnershipReconcile' || metadata.operation === 'gcpDomainForget') {
+      const provider = metadata.operation === 'dnsOwnershipReconcile' ? `dns-${marker.dns.provider}` : 'gcp';
+      if (action.type !== 'update' || action.resource.provider !== provider || action.resource.name !== marker.hostname
+        || metadata.domain !== marker.hostname || metadata.engineSegment
+        || metadata.operation === 'gcpDomainForget' && stage !== 'absent') throw new Error('The DNS observation stage is outside this exact fixture.');
+      continue;
+    }
     if (metadata.operation === 'dnsEngine') {
       const [selectedName = '', selectedType = ''] = typeof action.resource.name === 'string' ? action.resource.name.split(' ') : [];
       const allowed = marker.dns.provider === 'cloudflare' ? /^cloudflare_dns_record\./ : marker.dns.provider === 'gcp' ? /^google_dns_record_set\./

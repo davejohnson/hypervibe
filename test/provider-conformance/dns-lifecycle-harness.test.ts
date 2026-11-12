@@ -17,6 +17,15 @@ const action = { id: 'dns1', type: 'create', resource: { kind: 'domain', provide
   metadata: { operation: 'dnsEngine', domain: 'fixture.example.com', engineSegment: { id: 'dns1', addresses: ['cloudflare_dns_record.fixture'] } } };
 
 describe('disposable DNS fixture authorization and evidence', () => {
+  it('allows scoped read-only recovery receipts but never uses them to authorize another hostname', () => {
+    for (const operation of ['dnsOwnershipReconcile', 'gcpDomainForget']) {
+      const observation = { type: 'update', resource: { kind: 'domain', name: marker.hostname,
+        provider: operation === 'gcpDomainForget' ? 'gcp' : 'dns-cloudflare' }, metadata: { operation, domain: marker.hostname } };
+      expect(() => assertDnsFixtureActions([observation], marker, 'absent')).not.toThrow();
+      expect(() => assertDnsFixtureActions([{ ...observation, metadata: { operation, domain: 'other.example.com' } }], marker, 'absent')).toThrow();
+      expect(() => assertDnsFixtureActions([{ ...observation, metadata: { ...observation.metadata, engineSegment: { id: 'hidden-mutation' } } }], marker, 'absent')).toThrow();
+    }
+  });
   it('requires an exact prepared project, environment, DNS zone and scoped connection', () => {
     expect(dnsFixtureMarkerSchema.safeParse(marker).success).toBe(true);
     for (const invalid of [{ ...marker, hostname: 'example.com' }, { ...marker, profile: 'dns-gcp' },

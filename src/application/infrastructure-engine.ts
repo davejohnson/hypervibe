@@ -809,6 +809,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const retiredDomains = [...new Set([...(engineBinding.domains ?? []), ...(ownedDomain ? [ownedDomain] : []), ...unfinishedDomainRemovals(context.environment.id)])]
     .filter((domain) => domain !== desiredDomain).sort();
   const cancelledDomainProofs: Record<string, { zoneFingerprint: string; connectionId: string }> = {};
+  const domainClaims = { ...engineBinding.domainClaims };
   for (const domain of retiredDomains) {
     if (!getDnsBindingIdentity(context.environment)) {
       const selected = engineBinding.domainClaims?.[domain];
@@ -820,6 +821,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     }
     if (!hasOwnedDnsRecords(context.environment, 'gcp-domain')) {
       const selected = getDnsBindingSelection(context.environment)!;
+      domainClaims[domain] = selected;
       const absence = await verifyDnsTrafficAbsent({ ctx, project, domain, ...selected });
       if (!absence.ready) return { blocked: [absence.reason] };
       cancelledDomainProofs[domain] = absence;
@@ -916,6 +918,15 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const engineDomainAction = desiredDomain ? serviceActions.find((a) => a.id === `domain:${desiredDomain}`) : undefined;
   const domainAfter = (domainActions.mappingPresent ? domainActions.after : []).map((action) => action.type !== 'noop' && engineDomainAction && engineDomainAction.type !== 'noop'
     ? { ...action, dependsOn: [engineDomainAction.id] } : action);
+  const forgottenDomains: PlanAction[] = [];
+  for (const domain of retiredDomains.filter(name => !serviceActions.some(action => action.id === `domain:${name}` && action.type !== 'noop'))) {
+    const observed = await observeDomainMapping(domainContext, domain);
+    if (observed.state !== 'absent') return { blocked: [observed.state === 'unknown' ? observed.reason : 'The retired mapping remains present without a corresponding engine removal action. Preserve its state and refresh the plan.'] };
+    if (!cancelledDomainProofs[domain]) return { blocked: ['The cancelled domain still needs verified DNS cleanup before its ownership receipt can be retired.'] };
+    forgottenDomains.push({ id: `domain-forget:${domain}`, type: 'update', resource: { kind: 'domain', name: domain, provider: 'gcp' }, verified: true,
+      reason: 'Confirm the cancelled domain and traffic DNS are absent, then finish cleanup without changing infrastructure.',
+      metadata: { operation: 'gcpDomainForget', domain, gcpProjectId: context.gcpProjectId, region: context.region } });
+  }
   const secretDependencies = (ids: string[]) => serviceActions.filter((action) => action.type !== 'noop' && ids.includes(action.id.replace(/^secret-container:/, '')) && action.id.startsWith('secret-container:')).map((action) => action.id);
   for (const action of secretActions) {
     const dependencies = secretDependencies([String(action.metadata?.secretId)]);
@@ -969,7 +980,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // The complete engine segment creates containers before operational value writes.
-  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter];
+  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -988,7 +999,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
-      domainClaims: { ...engineBinding.domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
+      domainClaims: { ...domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
         [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
       } : {}) }, cancelledDomainProofs,
     },
@@ -1110,6 +1121,21 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
       const operation = action.metadata?.operation;
       const metadata = action.metadata as { gcpProjectId?: string } | undefined;
       if (metadata?.gcpProjectId !== context.gcpProjectId) return { success: false, status: 'blocked', message: 'Secret target changed; re-run hv_plan.' };
+      if (operation === 'gcpDomainForget') {
+        const domain = typeof action.metadata?.domain === 'string' ? action.metadata.domain : '';
+        const selected = reviewed.domainClaims?.[domain];
+        const expected = reviewed.cancelledDomainProofs?.[domain];
+        const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        if (!selected || !expected || hasOwnedDnsRecords(current, 'gcp-domain')) return { success: false, status: 'blocked', message: 'The cancelled domain still needs exact DNS cleanup evidence.' };
+        const observed = await observeDomainMapping({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, domain);
+        if (observed.state !== 'absent') return { success: false, status: 'blocked', message: 'The cancelled mapping is present or unknown. Its ownership is retained.' };
+        const absence = await verifyDnsTrafficAbsent({ ctx, project: params.project, domain, ...selected, expected });
+        if (!absence.ready) return { success: false, status: 'blocked', message: absence.reason };
+        const saved = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
+        const claims = { ...saved.domainClaims }; delete claims[domain];
+        ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...saved, domains: (saved.domains ?? []).filter(value => value !== domain), domainClaims: claims } });
+        return { success: true, message: 'Verified the cancelled domain is absent and finished its cleanup.' };
+      }
       if (operation === ENGINE_SECRET_OPERATION) return ensureSecret(token, action);
       if (operation === 'gcpSecretManagerDelete') return { success: false, status: 'blocked', message: 'Secret containers are managed by OpenTofu. Run hv_plan again.' };
       if (typeof operation === 'string' && DOMAIN_OPERATIONS.has(operation)) {
@@ -1259,6 +1285,10 @@ async function recordServiceBindings(
       const remaining = (engine.domains ?? []).filter((entry) => entry !== domain);
       // Planning removes and verifies owned DNS before releasing a hosting claim.
       engine = { ...engine, domains: member.type === 'destroy' ? remaining : [...remaining, domain].sort() };
+      if (member.type === 'destroy') {
+        const claims = { ...engine.domainClaims }; delete claims[domain];
+        engine.domainClaims = claims;
+      }
       continue;
     }
     if (member.id === 'release-job:migrations') {

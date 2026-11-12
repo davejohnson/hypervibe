@@ -189,8 +189,18 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
           const native = inspected.value[address];
           if (!native) continue;
           const nativeId = normalizeNativeId(identity, record, native);
+          const candidates = sorted([...record.values, ...(recovered.get(record.key)?.intent.values ?? []),
+            ...(attempt.managed.find(entry => entry.intent.key === record.key)?.intent.values ?? [])]);
+          let recoveredValues = candidates;
+          if (identity.provider === 'cloudflare') {
+            const observed = (await observeRecords(connection.observer, record.name, record.type)).find(entry => entry.nativeId === nativeId);
+            if (observed) {
+              if (observed.values.length !== 1 || !candidates.includes(observed.values[0]!)) return blocked('The interrupted Cloudflare record changed outside its reviewed before/after values. Preserve it and reconcile the external change.');
+              recoveredValues = observed.values;
+            }
+          }
           recovered.set(record.key, { owner: ownerOf(record.key), address, intent: { ...record,
-            values: sorted([...record.values, ...(recovered.get(record.key)?.intent.values ?? [])]),
+            values: recoveredValues,
             authority: { kind: 'managed', nativeId, preserveValues: record.authority.kind === 'absent' ? [] : record.authority.preserveValues } } });
         }
         previous = [...recovered.values()];

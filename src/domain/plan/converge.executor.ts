@@ -320,7 +320,7 @@ export const planRunDocumentSchema = z.object({
   }
   if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
-    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant'];
+    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
     if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha
@@ -806,15 +806,45 @@ export function orderActions(actions: PlanAction[]): PlanAction[] {
   return ordered;
 }
 
-/** Derive shared mutation authority from the validated native DNS descriptor, never plan-supplied lock keys. */
-function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
-  if (document.scope !== 'dns-engine' || !document.dns) return undefined;
-  const zone = document.dns.descriptor.zone;
+/** Keep DNS publication and hosting-claim release in the same native-zone critical section. */
+function dnsZoneLockKey(zone: z.infer<typeof dnsPlanDescriptorSchema>['zone']): string {
+  const requiredScope = zone.provider === 'azure' ? [zone.scope.subscriptionId, zone.scope.resourceGroup]
+    : zone.provider === 'gcp' ? [zone.scope.projectId] : [zone.scope.accountId];
+  if (requiredScope.some(value => typeof value !== 'string' || !value.trim())) throw new Error('Incomplete native DNS zone scope.');
   const identity = zone.provider === 'azure'
     ? [zone.provider, zone.zoneId.toLowerCase(), zone.scope.subscriptionId?.toLowerCase(), zone.scope.resourceGroup?.toLowerCase()]
     : zone.provider === 'gcp' ? [zone.provider, zone.zoneId, zone.scope.projectId]
       : [zone.provider, zone.zoneId, zone.scope.accountId];
-  return [`dns-zone:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`];
+  return `dns-zone:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+}
+
+/** Derive locks only from persisted native scope; arbitrary plan-supplied lock keys are ignored. */
+function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
+  if (document.scope === 'dns-engine' && document.dns) return [dnsZoneLockKey(document.dns.descriptor.zone)];
+  if (document.scope !== 'infrastructure-engine') return undefined;
+  const domains = new Set<string>();
+  for (const action of document.actions) {
+    if (action.type === 'noop') continue;
+    const forget = action.metadata?.operation === 'gcpDomainForget';
+    if (!forget && !action.id.startsWith('domain:')) continue;
+    const domain = forget ? action.metadata?.domain : action.id.slice('domain:'.length);
+    if (typeof domain !== 'string' || !domain || action.resource.kind !== 'domain'
+      || action.resource.provider !== 'gcp' || action.resource.name !== domain) throw new Error('Invalid exact domain-claim action.');
+    if (!forget) {
+      const segment = engineSegmentOf(action);
+      if (!segment?.addresses.length || segment.addresses.some(address => !/^google_cloud_run_domain_mapping\.[A-Za-z0-9_]+$/.test(address)))
+        throw new Error('Invalid native domain mapping action.');
+    }
+    domains.add(domain);
+  }
+  if (!domains.size) return undefined;
+  const claims = z.object({ domainClaims: z.record(z.string(), z.object({ zone: dnsPlanDescriptorSchema.shape.zone,
+    connectionScope: z.string().min(1).optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+  return [...new Set([...domains].map(domain => {
+    const claim = claims[domain];
+    if (!claim) throw new Error('The exact domain claim has no saved native DNS zone.');
+    return dnsZoneLockKey(claim.zone);
+  }))].sort();
 }
 
 export class ConvergeExecutor {
@@ -884,6 +914,9 @@ export class ConvergeExecutor {
       return { success: false, error: error instanceof Error ? error.message : String(error), receipts: [] };
     }
 
+    let lockResourceKeys: string[] | undefined;
+    try { lockResourceKeys = dnsZoneResourceLocks(document); }
+    catch { return { success: false, error: 'The saved domain action has no valid exact DNS zone claim. Re-run hv_plan before changing the domain.', receipts: [] }; }
     const reservation = this.runRepo.reserveApply({
       projectId: planRun.projectId,
       environmentId: planRun.environmentId,
@@ -891,7 +924,7 @@ export class ConvergeExecutor {
       environmentName: document.environmentName,
       specRevision: document.specRevision,
       lockEnvironmentIds: document.lockEnvironmentIds,
-      lockResourceKeys: dnsZoneResourceLocks(document),
+      lockResourceKeys,
     });
     if (!reservation.reserved) {
       const error = reservation.reason === 'already_applied'

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
-import { planInfrastructureEngine, verifyGcpDnsSource } from '../infrastructure-engine.js';
+import { applyInfrastructureEngine, planInfrastructureEngine, verifyGcpDnsSource } from '../infrastructure-engine.js';
 import * as dns from '../dns-engine.js';
 import * as absence from '../dns-absence.js';
 import { domainEngineKey } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
@@ -89,6 +89,24 @@ function fixture(options: { owned?: boolean; mapping?: boolean; remove?: boolean
 }
 
 describe('Google hosting and DNS stage composition', () => {
+  it('finishes cancellation explicitly when the mapping never reached the provider', async () => {
+    const f = fixture({ owned: true, mapping: false, remove: true });
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: undefined,
+      engine: { kind: 'opentofu', domains: ['app.example.com'], domainClaims: { 'app.example.com': {
+        zone: { provider: 'aws', zoneId: 'Z123456', zoneName: 'example.com', scope: { accountId: '123456789012' } },
+      } } } });
+    vi.spyOn(absence, 'verifyDnsTrafficAbsent').mockResolvedValue({ ready: true, zoneFingerprint: 'exact-zone', connectionId: 'saved-dns' });
+    f.engine.mockResolvedValue({ ok: true, segment: { id: 'empty', engine: 'opentofu', planDigest: 'empty', configurationDigest: 'empty', engineVersion: '1.13.9', providerVersions: {} },
+      segmentId: 'empty', planFile: '/unused', actions: [], blockers: [], unmanagedDeletes: [] });
+    const result = await planInfrastructureEngine(f.ctx, { ...f, specRevision: 1, environmentName: 'staging' });
+    expect(result).not.toHaveProperty('blocked');
+    if ('blocked' in result) throw Error(result.blocked.join(' '));
+    expect(result.actions).toEqual([expect.objectContaining({ type: 'update', metadata: expect.objectContaining({ operation: 'gcpDomainForget', domain: 'app.example.com' }) })]);
+    const apply = vi.spyOn(OpenTofuEngine.prototype, 'apply');
+    expect(await applyInfrastructureEngine(f.ctx, { project: f.project, spec: f.spec, specRevision: 1, planId: result.planRunId, confirmActions: [] })).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(apply).not.toHaveBeenCalled();
+    expect(f.ctx.repos.environments.findById(f.environment.id)?.platformBindings.engine).toMatchObject({ domains: [], domainClaims: {} });
+  });
   it('blocks traffic DNS for an unowned same-service mapping', async () => {
     const f = fixture({ owned: true, mapping: true }); f.inspect.mockResolvedValue({ ok: true, present: false });
     const result = await planInfrastructureEngine(f.ctx, { ...f, specRevision: 1, environmentName: 'staging' });

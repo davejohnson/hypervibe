@@ -89,6 +89,31 @@ function fixture(provider: 'gcp' | 'cloudflare' = 'gcp') {
 }
 
 describe('DNS shared application authority', () => {
+  it.each(['before-write', 'after-write'] as const)('recovers an interrupted Cloudflare update with the authorized %s singleton', async stage => {
+    const f = fixture('cloudflare'); const first = await f.prepare(); const address = engineSegmentOf(first.actions[0])!.addresses[0];
+    f.engineState(address, cfRecordId); f.effects(() => f.observe(desired.values));
+    expect(Object.values((await f.execute(first)).outcomes)).toEqual(['succeeded']);
+    const changed = { ...desired, values: ['reviewed-next-verification-value'] };
+    f.actionType('update'); const update = await f.prepare([changed]);
+    f.effects(() => f.observe(stage === 'after-write' ? changed.values : desired.values));
+    f.inspectState.mockRejectedValueOnce(Error('Interrupted ownership capture'));
+    expect(Object.values((await f.execute(update)).outcomes)).toEqual(['unknown']);
+    f.actionType(stage === 'after-write' ? 'noop' : 'update');
+    const recovered = await f.prepare([changed]);
+    expect(recovered.blocked).toBeUndefined();
+    expect(recovered.actions[0]?.metadata?.operation).toBe(stage === 'after-write' ? 'dnsOwnershipReconcile' : 'dnsEngine');
+    expect(f.apply).toHaveBeenCalledTimes(2); // Recovery planning is read-only.
+  });
+  it('blocks an interrupted Cloudflare update whose live value matches neither reviewed state', async () => {
+    const f = fixture('cloudflare'); const first = await f.prepare(); const address = engineSegmentOf(first.actions[0])!.addresses[0];
+    f.engineState(address, cfRecordId); f.effects(() => f.observe(desired.values)); await f.execute(first);
+    const changed = { ...desired, values: ['reviewed-next-verification-value'] };
+    f.actionType('update'); const update = await f.prepare([changed]);
+    f.effects(() => f.observe(['externally-changed-verification-value']));
+    f.inspectState.mockRejectedValueOnce(Error('Interrupted ownership capture')); await f.execute(update);
+    f.plan.mockClear(); const recovered = await f.prepare([changed]);
+    expect(recovered.blocked).toBeDefined(); expect(f.plan).not.toHaveBeenCalled();
+  });
   it('blocks fresh planning when a Google zone is recreated with the same API name', async () => {
     const f = fixture(); const first = await f.prepare(); const address = engineSegmentOf(first.actions[0])!.addresses[0];
     f.engineState(address, gcpNativeId); f.effects(() => f.observe(['private-verification-token'])); await f.execute(first);
