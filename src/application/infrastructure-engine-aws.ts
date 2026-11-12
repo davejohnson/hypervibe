@@ -6,6 +6,7 @@ import { DeleteParametersCommand, GetParameterCommand, GetParametersByPathComman
 import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
 import { DeleteTaskDefinitionsCommand, DeregisterTaskDefinitionCommand, ECSClient, ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
 import { CloudWatchLogsClient, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { IAMClient, ListRolesCommand } from '@aws-sdk/client-iam';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
@@ -363,7 +364,7 @@ async function emptyBucket(context: AwsEngineContext, bucket: string): Promise<A
   }
 }
 
-async function removeLeftovers(context: AwsEngineContext, metadata: { parameterPath: string; families: string[]; logGroups: string[] }): Promise<ActionResult> {
+async function removeLeftovers(context: AwsEngineContext, metadata: { parameterPath: string; families: string[]; logGroups: string[]; prefix: string }): Promise<ActionResult> {
   const { region } = context.connection;
   const credentials = context.credentials;
   const ssm = new SSMClient({ region, credentials });
@@ -399,7 +400,17 @@ async function removeLeftovers(context: AwsEngineContext, metadata: { parameterP
       if (!(error instanceof Error && error.name === 'ResourceNotFoundException')) throw error;
     }
   }
-  return { success: true, message: `Deleted ${names.length} setting(s) from Parameter Store, ${revisions} released task revision(s) and the build logs.` };
+  // OpenTofu reported the roles deleted; confirm it, since a leftover role keeps the environment's access alive.
+  const iam = new IAMClient({ region: 'us-east-1', credentials });
+  const remaining: string[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await iam.send(new ListRolesCommand({ PathPrefix: '/hypervibe/app/', Marker: marker }));
+    remaining.push(...(page.Roles ?? []).map((role) => role.RoleName!).filter((name) => name.startsWith(`${metadata.prefix}-`)));
+    marker = page.IsTruncated ? page.Marker : undefined;
+  } while (marker);
+  if (remaining.length) return { success: false, message: `These roles of the environment still exist: ${remaining.join(', ')}. Run the teardown plan again.` };
+  return { success: true, message: `Deleted ${names.length} setting(s) from Parameter Store, ${revisions} released task revision(s) and the build logs, and confirmed the environment's roles are gone.` };
 }
 
 export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -591,7 +602,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
         }
         if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(context, (action.metadata as { bucket: string }).bucket);
         if (metadata.operation === AWS_TEARDOWN_CLEANUP_OPERATION) {
-          const removed = await removeLeftovers(context, action.metadata as { parameterPath: string; families: string[]; logGroups: string[] });
+          const removed = await removeLeftovers(context, { prefix: context.prefix, ...(action.metadata as { parameterPath: string; families: string[]; logGroups: string[] }) });
           if (removed.success) {
             // Nothing of this environment remains on AWS; forget its bindings so a later plan starts fresh.
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;

@@ -84,6 +84,8 @@ export function deployPolicyDocument(accountId: string): Record<string, unknown>
         'iam:GetRole', 'iam:GetRolePolicy', 'iam:ListRolePolicies', 'iam:ListAttachedRolePolicies', 'iam:ListInstanceProfilesForRole', 'iam:DeleteRole',
         'iam:DeleteRolePolicy', 'iam:DetachRolePolicy', 'iam:TagRole', 'iam:UntagRole', 'iam:UpdateAssumeRolePolicy', 'iam:UpdateRole', 'iam:PassRole',
       ] },
+      // Lets teardown confirm an environment's roles are gone (GetRole on a missing role is denied, not "not found").
+      { Sid: 'ListAppRoles', Effect: 'Allow', Action: 'iam:ListRoles', Resource: appRoles },
       { Sid: 'ServiceLinkedRoles', Effect: 'Allow', Action: 'iam:CreateServiceLinkedRole', Resource: '*',
         Condition: { StringLike: { 'iam:AWSServiceName': ['ecs.amazonaws.com', 'rds.amazonaws.com', 'elasticloadbalancing.amazonaws.com', 'application-autoscaling.amazonaws.com', 'ecs.application-autoscaling.amazonaws.com'] } } },
       { Sid: 'ReadIam', Effect: 'Allow', Action: ['iam:GetPolicy', 'iam:GetPolicyVersion', 'iam:ListPolicyVersions', 'iam:GetOpenIDConnectProvider', 'iam:ListOpenIDConnectProviders'], Resource: '*' },

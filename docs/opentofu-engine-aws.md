@@ -5,7 +5,7 @@ same lifecycle as GCP (`hv_spec` → `hv_plan` → approved `hv_apply`), with th
 same local encrypted state, saved plans, approvals and receipts. This page
 records the AWS-specific decisions and why they were made.
 
-## Status (2026-11-10)
+## Status (2026-11-12)
 
 | Piece | State |
 | --- | --- |
@@ -13,9 +13,9 @@ records the AWS-specific decisions and why they were made.
 | One-time setup (deploy role, boundary, GitHub OIDC, local key) | Built; verified live |
 | OpenTofu runs as the deploy role | Built; read-only probe verified live |
 | Registry, runtime role, storage, database, app login | Built; applied live (billforge `aws`) |
-| Image builds and releases (`hv_deploy`) | Built; live verification in progress |
-| Web, worker, cron | Built; passes `tofu validate` |
-| Environment teardown (`hv_plan scope="teardown"`) | Built; live verification in progress |
+| Image builds and releases (`hv_deploy`) | Built; verified live (demo app) |
+| Web (Lambda), on-demand worker and cron (Fargate) | Built; verified live (demo app): database over verified TLS, generated secret, storage with the runtime role, worker woken by requests and by the next-due timer while Aurora was paused, no drift after releases |
+| Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
 | CI releases, data copy | Not built |
 
@@ -113,9 +113,27 @@ plan; every action needs its own confirmation:
 4. The environment's bindings are cleared and it is removed from the spec, so the
    next plan does not recreate it.
 
-The database keeps a final snapshot (`<prefix>-postgres-final`). Hypervibe's
+The database keeps a final snapshot (`<prefix>-postgres-final`) unless the plan
+uses `deleteFinalSnapshot=true`, which adds its deletion as its own confirmed
+action; for an environment already torn down, it plans just that deletion.
+Cleanup confirms the environment's roles are gone (`iam:ListRoles` on
+`/hypervibe/app/`). Hypervibe's
 account access (deploy role, boundary, local key) stays, for the project's other
 environments.
+
+## Waking on-demand workers
+
+Aurora pauses only after ten minutes with no connections, and every pending-work
+count is a connection. So the waker never counts just because the database is
+awake. It counts when the app could have queued work: the worker is running,
+the web service had requests in the last five minutes (Lambda's `Invocations`
+metric), a scheduled job just finished (an ECS event), or the next-due timer
+fired. With nothing pending, it moves a one-time EventBridge Scheduler wake to
+`onDemand.nextWorkAtQuery`'s time. Failures keep one worker running.
+
+A frozen Lambda can hold its idle database connection until AWS reclaims the
+sandbox (about 8 minutes on the demo), so Aurora pauses roughly 20 minutes after
+the app goes quiet. An uptime monitor that calls the app keeps it awake.
 
 ## Provider pin
 
