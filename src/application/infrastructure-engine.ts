@@ -13,6 +13,7 @@ import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/qu
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
+import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
 import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
@@ -136,7 +137,11 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   if (database) {
     if (database.provider !== 'cloudsql') problems.push('The OpenTofu engine manages databases only with provider "cloudsql".');
     for (const field of ['seedCommand', 'resilience', 'credentialAliases', 'freshInitialization'] as const) {
-      if (database[field] !== undefined) problems.push(`database.${field} is not yet supported by the OpenTofu engine.`);
+      if (database[field] !== undefined) {
+        problems.push(field === 'seedCommand'
+          ? 'database.seedCommand is not yet supported by the OpenTofu engine: remove it from the spec and have the app seed an empty database when it starts (for example in its migrations).'
+          : `database.${field} is not yet supported by the OpenTofu engine.`);
+      }
     }
   }
   for (const [name, service] of Object.entries(environment.services)) {
@@ -152,11 +157,6 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     }
     if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
     if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
-  }
-  for (const [key, secret] of Object.entries(spec.secrets)) {
-    if (secret.ownership !== 'hypervibe' && secret.environments.includes(environmentName)) {
-      problems.push(`Secret ${key}: externally supplied secrets are not yet supported by the OpenTofu engine; only Hypervibe-generated secrets are.`);
-    }
   }
   return problems;
 }
@@ -472,6 +472,28 @@ export async function waitForSqlOperation(token: string, gcpProjectId: string, o
 }
 
 /** Creates or updates a Hypervibe-labelled secret and adds one version. The value is never returned. */
+/** A plan stops on missing outside keys with the one command that collects them all. */
+export function missingOutsideKeysMessage(environmentName: string, keys: string[]): string {
+  return `${environmentName} needs ${keys.length === 1 ? 'a key' : `${keys.length} keys`} Hypervibe cannot create: ${keys.join(', ')}. `
+    + `Run hv_secrets action="collect" env="${environmentName}" to add ${keys.length === 1 ? 'it' : 'them all'} on one local page (hv_launch does this itself), then plan again.`;
+}
+
+/** Google Secret Manager as an environment's secret store. */
+export async function gcpSecretStore(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
+  const context = await resolveEngineContext(ctx, project, spec, environmentName);
+  if ('blocked' in context) return context;
+  const labels = { 'managed-by': 'hypervibe', 'hv-environment': context.environment.id.toLowerCase(), 'hv-imported': 'true' };
+  return {
+    name: 'Google Secret Manager',
+    observe: async (key) => {
+      const observed = await observeSecret(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key));
+      if (observed.state === 'unknown') return { unknown: observed.reason };
+      return observed.state === 'present' && observed.value.hasEnabledVersion ? 'present' : 'absent';
+    },
+    write: async (key, value) => (await writeSecretVersion(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key), labels, value))?.message,
+  };
+}
+
 export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
   const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets`;
   const observed = await observeSecret(token, gcpProjectId, secretId);
@@ -771,17 +793,17 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
     cacheReady = observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.labels['hv-cache-instance'] === cacheInstanceName;
     if (cacheReady && observed.state === 'present' && observed.value.latestVersion) secretVersions[ENGINE_CACHE_URL_KEY] = observed.value.latestVersion;
   }
-  // Secrets imported from a migration source must exist; Hypervibe never invents their values.
-  const importedSecrets = engineBinding.importedSecrets ?? [];
+  // Outside keys (declared in the spec or copied by a migration) must have a value; Hypervibe never invents them.
+  const importedSecrets = engineOutsideKeys(spec, environmentName, engineBinding.importedSecrets);
+  const missingKeys: string[] = [];
   for (const key of importedSecrets) {
     const secretId = engineSecretId(environmentName, key);
     const observed = await observeSecret(token, context.gcpProjectId, secretId);
     if (observed.state === 'unknown') return { blocked: [observed.reason] };
-    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) {
-      return { blocked: [`The imported secret ${key} is missing from Secret Manager. Run hv_migrate again to copy it from the source.`] };
-    }
+    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) { missingKeys.push(key); continue; }
     secretVersions[key] = observed.value.latestVersion;
   }
+  if (missingKeys.length) return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)] };
   // S3-compatible bucket access: Hypervibe-owned access keys, published before services are wired.
   const s3Storage = Object.entries(environmentSpec!.storage ?? {}).filter(([, storage]) => storage.access === 's3').map(([name]) => name);
   const s3Ready: string[] = [];
