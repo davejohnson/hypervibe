@@ -43,6 +43,7 @@ import { planInfrastructureEngine } from '../application/infrastructure-engine.j
 import { planHostedDns } from '../application/dns-hosting.js';
 import { planPagesEmailDns } from '../application/dns-integrations.js';
 import { isAwsEngineEnvironment, planAwsTeardown } from '../application/infrastructure-engine-aws.js';
+import { isAzureEngineEnvironment, planAzureTeardown } from '../application/infrastructure-engine-azure.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
@@ -808,13 +809,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const specResult = routingSpec;
         if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
         const environmentName = routingEnvironment;
-        if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName)) {
-          return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS environments only.', { next: ['hv_spec'] });
+        const azureTarget = isAzureEngineEnvironment(specResult.spec, environmentName);
+        if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName) && !azureTarget) {
+          return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS and Azure environments only.', { next: ['hv_spec'] });
         }
         if (scope !== 'teardown') validateInstalledProviders(specResult.spec, environmentName);
         const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
         const planned = scope === 'teardown'
-          ? await planAwsTeardown(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
+          ? await (azureTarget ? planAzureTeardown : planAwsTeardown)(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
           : await planInfrastructureEngine(ctx, plannerParams);
         if ('blocked' in planned) {
           return commandError('VALIDATION', 'The infrastructure plan is blocked.', {

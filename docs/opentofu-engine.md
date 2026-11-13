@@ -134,6 +134,7 @@ segments and receipts. Per cloud: configuration, authentication, resource mappin
 - Secret Manager references stay inside the GCP backend.
 - The Cloud Run CI image split is a GCP decision, not a model every cloud must use.
 - AWS decisions (access, runtimes, database network): [OpenTofu engine on AWS](opentofu-engine-aws.md).
+- Azure decisions (access, shared testing resources, runtimes, costs, teardown): [OpenTofu engine on Azure](opentofu-engine-azure.md).
 
 ## Minimal user interaction (hard requirement)
 

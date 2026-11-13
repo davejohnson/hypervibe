@@ -10,6 +10,7 @@ import { secretManagerRegistry } from '../domain/registry/secretmanager.registry
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { connectAws } from '../application/aws-connect.js';
+import { connectAzure } from '../application/azure-connect.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { connectCloudflareInBrowser } from '../application/local-connect-page.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
@@ -126,6 +127,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('action="connect": the environment this access is for, shown on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
+      azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
+      azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
       workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
       adminAuth: z.literal('default').optional().describe('Required for action="bootstrap" and confirmed action="prepare": use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
@@ -155,6 +158,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       purpose,
       environment,
       awsAccountId,
+      azureSubscriptionId,
+      azureApproved,
       adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
@@ -238,6 +243,31 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
             agentInstruction: { action: 'ask_user', message: 'Ask the user to sign in to AWS in the browser tab that opened, then continue.' }, next: ['hv_connections'] });
         }
         return result.status === 'connected' ? commandSuccess(result, { next: ['hv_launch', 'hv_plan'] }) : commandError('PROVIDER_ERROR', result.message, { next: ['hv_connections'] });
+      }
+      if (requestedAction === 'connect' && provider === 'azure') {
+        const { project: azureProject } = await resolveGuidanceContext().catch(() => ({ project: undefined }));
+        if (!azureProject) return commandError('VALIDATION', 'provider="azure" action="connect" needs the project (run it from the app repository or pass project).', { next: ['hv_connections'] });
+        if (azureApproved && !azureSubscriptionId) return commandError('VALIDATION', 'azureApproved needs the azureSubscriptionId from the preview.', { next: ['hv_connections'] });
+        const specResult = new SpecStore().get(azureProject);
+        const result = await connectAzure({ project: azureProject, ...(specResult ? { spec: specResult.spec } : {}),
+          ...(azureSubscriptionId ? { subscriptionId: azureSubscriptionId } : {}), ...(azureApproved ? { approved: true } : {}) });
+        if (result.status === 'needs_subscription') {
+          return commandSuccess(result, {
+            hint: 'Ask the user which subscription to use (it is billed for the app); list each by name. Then call again with azureSubscriptionId set to their choice.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user which Azure subscription the app should run in and be billed to.' }, next: ['hv_connections'],
+          });
+        }
+        if (result.status === 'needs_approval') {
+          return commandSuccess(result, {
+            hint: 'Show the user the subscription, region and each change in one short list, then ask them to approve. On approval call again with azureSubscriptionId set to this subscriptionId and azureApproved=true.',
+            agentInstruction: { action: 'ask_user', message: `Ask the user to approve setting up Hypervibe in Azure subscription ${result.subscriptionName}.` }, next: ['hv_connections'],
+          });
+        }
+        if (result.status === 'waiting') {
+          return commandSuccess(result, { hint: 'Tell the user an Azure sign-in page is open in their browser (give the link). Call action="connect" again after they sign in.',
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to sign in to Azure in the browser tab that opened, then continue.' }, next: ['hv_connections'] });
+        }
+        return result.status === 'connected' ? commandSuccess(result, { next: ['hv_spec'] }) : commandError('PROVIDER_ERROR', result.message, { next: ['hv_connections'] });
       }
       if (requestedAction === 'connect') {
         if (provider !== 'cloudflare' || !scope?.trim()) {

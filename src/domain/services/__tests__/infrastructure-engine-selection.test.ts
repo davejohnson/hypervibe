@@ -2,15 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { engineEnvironmentProblems, engineSelectionProblem, isEngineManaged } from '../infrastructure-engine-selection.js';
 
-function specFor(provider: 'cloudrun' | 'aws' | 'railway', engine?: 'opentofu') {
+function specFor(provider: 'cloudrun' | 'aws' | 'azure' | 'railway', engine?: 'opentofu') {
   return projectSpecSchema.parse({ version: 1, project: 'engine-selection', environments: {
     staging: { hosting: { provider, ...(engine ? { engine } : {}) }, services: { web: {} } },
   }, secrets: { API_KEY: { ownership: 'delegated', principal: 'app-owner', environments: ['staging'] } } });
 }
 
 describe('engine selection across the GCP cutover', () => {
-  it('keeps explicit AWS OpenTofu while inferring OpenTofu for Cloud Run', () => {
-    for (const spec of [specFor('aws', 'opentofu'), specFor('cloudrun'), specFor('cloudrun', 'opentofu')]) {
+  it('keeps explicit AWS and Azure OpenTofu while inferring OpenTofu for Cloud Run', () => {
+    for (const spec of [specFor('aws', 'opentofu'), specFor('azure', 'opentofu'), specFor('cloudrun'), specFor('cloudrun', 'opentofu')]) {
       const environment = spec.environments.staging;
       expect(isEngineManaged(environment)).toBe(true);
       expect(engineSelectionProblem(environment)).toBeUndefined();

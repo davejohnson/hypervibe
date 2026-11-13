@@ -142,6 +142,10 @@ async function runLaunch(ctx: CommandContext, params: {
   if (!isEngineManaged(environmentSpec)) {
     return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Choose hosting.provider="cloudrun" with hv_spec first.' };
   }
+  // Azure has its own access (hv_connections provider="azure" action="connect"); never fall through to Google Cloud setup.
+  if (environmentSpec.hosting.provider === 'azure') {
+    return { status: 'blocked', message: 'hv_launch does not run Azure environments yet. Connect with hv_connections provider="azure" action="connect", then run hv_plan scope="infrastructure", hv_apply and hv_deploy.' };
+  }
 
   const validation = firstProviderSpecValidationFailure(params.spec, params.environmentName);
   if (validation) return { status: 'blocked', message: validation.message, details: validation.details };
