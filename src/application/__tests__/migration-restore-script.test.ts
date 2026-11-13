@@ -18,6 +18,8 @@ function executeRestore(script: string, restoreExit: number, diagnostic: string)
   const tools: Record<string, string> = {
     psql: `
       case "$*" in
+        *pg_control_system*)
+          if [ "$1" = source ]; then printf '101:736f75726365\\n'; else printf '202:746172676574\\n'; fi ;;
         *information_schema.tables*)
           printf 'manifest:%s\\n' "$1" >> "$TEST_TRACE"
           printf 'public.invoices|1:42\\n' ;;
@@ -45,6 +47,7 @@ function executeRestore(script: string, restoreExit: number, diagnostic: string)
       env: {
         PATH: `${directory}:/usr/bin:/bin`,
         SOURCE_DATABASE_URL: 'source', DATABASE_URL: 'target', DUMP_URL: 'https://fixture.invalid/dump',
+        SOURCE_DATABASE_IDENTITY: '101:736f75726365',
         TEST_DIRECTORY: directory, TEST_TRACE: trace, TEST_RESTORE_EXIT: String(restoreExit), TEST_DIAGNOSTIC: diagnostic,
       },
       timeout: 10_000,

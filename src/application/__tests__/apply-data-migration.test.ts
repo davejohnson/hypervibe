@@ -16,6 +16,8 @@ import type { IStorageAdapter, StorageContext, StorageObjectClient } from '../..
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import * as environmentMaintenanceService from '../../domain/services/environment-maintenance.service.js';
+import '../../adapters/providers/aws/rds.adapter.js';
+import '../../adapters/providers/railway/railway.adapter.js';
 
 vi.mock('../../domain/services/database-access.service.js', async (original) => {
   const actual = await original<typeof import('../../domain/services/database-access.service.js')>();
@@ -95,13 +97,13 @@ describe('applyDataMigrationAction', () => {
     const source = new ComponentRepository().create({
       environmentId: sourceEnvironment.id,
       type: 'postgres',
-      bindings: { provider: 'railway', instanceId: 'source-db' },
+      bindings: { provider: 'railway', instanceId: 'source-db', providerScope: { projectId: 'railway-project', environmentId: 'railway-staging' } },
       externalId: 'source-db',
     });
     const target = new ComponentRepository().create({
       environmentId: targetEnvironment.id,
       type: 'postgres',
-      bindings: { provider: 'rds', instanceId: 'old-production-db', connectionString: 'postgres://old' },
+      bindings: { provider: 'rds', instanceId: 'old-production-db', connectionString: 'postgres://old', providerScope: { accountId: '123456789012', region: 'us-west-2' } },
       externalId: 'old-production-db',
     });
     const spec = projectSpecSchema.parse({
@@ -162,7 +164,7 @@ describe('applyDataMigrationAction', () => {
       provision: vi.fn(async (_type, environment) => ({
         component: {
           id: 'provider-candidate', environmentId: environment.id, type: 'postgres',
-          bindings: { provider: 'rds', instanceId: 'new-production-db', connectionString: 'postgres://new' },
+          bindings: { provider: 'rds', instanceId: 'new-production-db', connectionString: 'postgres://new', providerScope: { accountId: '123456789012', region: 'us-west-2' } },
           externalId: 'new-production-db', createdAt: new Date(), updatedAt: new Date(),
         },
         receipt: { success: true, message: 'provisioned' },
@@ -173,8 +175,15 @@ describe('applyDataMigrationAction', () => {
     } satisfies IDatabaseAdapter;
   }
 
-  it('switches the binding only after verification and retains the old target', async () => {
+  it.each(['staging', 'production'])('switches the binding after a verified copy from %s and retains the old target', async (fromEnvironment) => {
     const fixture = setup();
+    if (fromEnvironment === 'production') {
+      fixture.spec.environments.production.dataMigration!.fromEnvironment = fromEnvironment;
+      Object.assign(fixture.action.metadata!, {
+        sourceEnvironment: fromEnvironment, sourceProvider: 'rds', sourceComponentId: fixture.target.id,
+        sourceExternalId: fixture.target.externalId, sourceMaintenanceFingerprint: maintenanceFingerprint(fromEnvironment),
+      });
+    }
     const targetAdapter = adapter();
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: targetAdapter });
     vi.mocked(acquireManagedDatabaseAccess).mockResolvedValue({ ok: true, lease: lease('postgres://source') });
@@ -193,7 +202,7 @@ describe('applyDataMigrationAction', () => {
     const active = new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'postgres')!;
     expect(active.externalId).toBe('new-production-db');
     expect(active.bindings).toMatchObject({
-      dataMigration: { id: 'initial-launch', fromEnvironment: 'staging', totalRows: '12' },
+      dataMigration: { id: 'initial-launch', fromEnvironment, totalRows: '12' },
       dataMigrationPreviousTarget: { provider: 'rds', externalId: 'old-production-db' },
     });
     expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).toBeNull();
@@ -219,6 +228,125 @@ describe('applyDataMigrationAction', () => {
     expect(active.bindings.dataMigration).toBeUndefined();
     expect(targetAdapter.destroy).toHaveBeenCalledWith(expect.objectContaining({ externalId: 'new-production-db' }));
     expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).toBeNull();
+  });
+
+  it.each(['same', 'unknown', 'query failure', 'URL override'] as const)('preserves an unsafe candidate when actual database identity is %s, including retry', async (identity) => {
+    const fixture = setup();
+    const targetAdapter = adapter();
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: targetAdapter });
+    const sourceLease = lease('postgresql://reader@public.example/app');
+    const targetLease = lease(identity === 'URL override'
+      ? 'postgresql://owner@public.example/app?host=private.example&port=6432'
+      : 'postgresql://owner@private.example/app');
+    vi.mocked(acquireManagedDatabaseAccess).mockResolvedValue({ ok: true, lease: sourceLease });
+    vi.mocked(acquireDatabaseComponentAccess).mockResolvedValue({ ok: true, lease: targetLease });
+    const actual = await vi.importActual<typeof import('../../domain/services/postgres-transfer.service.js')>('../../domain/services/postgres-transfer.service.js');
+    const runTools = vi.fn(async () => 1);
+    vi.mocked(transferPostgresDatabase).mockImplementation((sourceUrl, targetUrl) => actual.transferPostgresDatabase(sourceUrl, targetUrl, {
+      createClient: (url) => ({
+        connect: async () => undefined, end: async () => undefined,
+        query: async (sql) => {
+          if (sql.includes('pg_control_system')) {
+            if (identity === 'query failure') throw new Error('provider diagnostic containing a secret');
+            const targetConnection = new URL(url).hostname === new URL(targetUrl).hostname;
+            return { rows: [{ identity: targetConnection && identity === 'unknown' ? null
+              : targetConnection && identity === 'URL override' ? '7500000000000000002:617070' : '7500000000000000001:617070' }] };
+          }
+          if (sql.includes('pg_export_snapshot')) return { rows: [{ snapshot: '1-1' }] };
+          if (sql.includes('server_version_num')) return { rows: [{ version: '160004' }] };
+          return { rows: [] };
+        },
+      }), runTools,
+    }));
+    const input = { ctx: createCommandContext(), project: fixture.project, spec: fixture.spec,
+      targetEnvironmentName: 'production', action: fixture.action };
+    const result = await applyDataMigrationAction(input);
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(result.error).not.toContain('secret');
+    expect(runTools).not.toHaveBeenCalled();
+    expect(targetAdapter.destroy).not.toHaveBeenCalled();
+    expect(sourceLease.release).toHaveBeenCalled();
+    expect(targetLease.release).toHaveBeenCalled();
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'postgres')?.externalId).toBe('old-production-db');
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).not.toBeNull();
+    targetAdapter.provision.mockClear();
+    expect(await applyDataMigrationAction(input)).toMatchObject({ success: false, status: 'blocked' });
+    expect(targetAdapter.provision).not.toHaveBeenCalled();
+    expect(targetAdapter.destroy).not.toHaveBeenCalled();
+  });
+
+  it.each(['fresh', 'partial', 'retained'] as const)('never deletes a %s candidate whose provider identity aliases the source', async (kind) => {
+    const fixture = setup();
+    const bindings = { provider: 'rds', instanceId: 'source-db', connectionString: 'postgresql://source/app', providerScope: { accountId: '123456789012', region: 'us-west-2' } };
+    new ComponentRepository().update(fixture.source.id, { bindings });
+    fixture.spec.environments.staging.database!.provider = 'rds';
+    fixture.action.metadata!.sourceProvider = 'rds';
+    const targetAdapter = adapter();
+    targetAdapter.provision.mockResolvedValue({
+      component: { ...fixture.source, externalId: 'source-db', environmentId: fixture.targetEnvironment.id, bindings },
+      receipt: { success: kind !== 'partial', message: 'provider receipt' },
+    });
+    if (kind === 'retained') new ComponentRepository().create({
+      environmentId: fixture.targetEnvironment.id, type: 'data-migration:initial-launch:postgres',
+      bindings, externalId: 'source-db',
+    });
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: targetAdapter });
+    vi.mocked(acquireManagedDatabaseAccess).mockResolvedValue({ ok: false, code: 'provider_error', error: 'unavailable', resourceCreated: false, cleanup: 'not_needed' });
+    const result = await applyDataMigrationAction({ ctx: createCommandContext(), project: fixture.project, spec: fixture.spec,
+      targetEnvironmentName: 'production', action: fixture.action });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(targetAdapter.destroy).not.toHaveBeenCalled();
+    expect(acquireManagedDatabaseAccess).not.toHaveBeenCalled();
+    expect(transferPostgresDatabase).not.toHaveBeenCalled();
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'postgres')?.externalId).toBe('old-production-db');
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).not.toBeNull();
+  });
+
+  it('preserves a retained candidate when the source native scope is incomplete', async () => {
+    const fixture = setup();
+    new ComponentRepository().update(fixture.source.id, {
+      bindings: { provider: 'rds', providerScope: { accountId: '123456789012' } },
+    });
+    fixture.spec.environments.staging.database!.provider = 'rds';
+    fixture.action.metadata!.sourceProvider = 'rds';
+    new ComponentRepository().create({
+      environmentId: fixture.targetEnvironment.id, type: 'data-migration:initial-launch:postgres',
+      externalId: 'source-db',
+      bindings: { provider: 'rds', providerScope: { accountId: '123456789012', region: 'us-west-2' } },
+    });
+    const targetAdapter = adapter();
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: targetAdapter });
+    vi.mocked(acquireManagedDatabaseAccess).mockResolvedValue({
+      ok: false, code: 'provider_error', error: 'unavailable', resourceCreated: false, cleanup: 'not_needed',
+    });
+    const result = await applyDataMigrationAction({ ctx: createCommandContext(), project: fixture.project, spec: fixture.spec,
+      targetEnvironmentName: 'production', action: fixture.action });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(targetAdapter.destroy).not.toHaveBeenCalled();
+    expect(targetAdapter.provision).not.toHaveBeenCalled();
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).not.toBeNull();
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.sourceEnvironment.id, 'postgres')?.externalId).toBe('source-db');
+  });
+
+  it.each(['source', 'target'] as const)('preserves the candidate if the active %s binding changes to it during transfer', async (changed) => {
+    const fixture = setup();
+    const targetAdapter = adapter();
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: targetAdapter });
+    vi.mocked(acquireManagedDatabaseAccess).mockResolvedValue({ ok: true, lease: lease('postgres://source') });
+    vi.mocked(acquireDatabaseComponentAccess).mockResolvedValue({ ok: true, lease: lease('postgres://target') });
+    vi.mocked(transferPostgresDatabase).mockImplementation(async () => {
+      const candidate = new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')!;
+      new ComponentRepository().update(changed === 'source' ? fixture.source.id : fixture.target.id, {
+        externalId: candidate.externalId, bindings: candidate.bindings,
+      });
+      return { manifest: { sourceVersion: '160004', extensions: [], tables: [], totalRows: '0', dumpBytes: 1 }, targetVersion: '160004' };
+    });
+    const result = await applyDataMigrationAction({ ctx: createCommandContext(), project: fixture.project, spec: fixture.spec,
+      targetEnvironmentName: 'production', action: fixture.action });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(targetAdapter.destroy).not.toHaveBeenCalled();
+    expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).not.toBeNull();
+    expect(new ComponentRepository().findById(changed === 'source' ? fixture.source.id : fixture.target.id)?.externalId).toBe('new-production-db');
   });
 
   it('passes opaque provider scopes through a cross-provider storage migration', async () => {

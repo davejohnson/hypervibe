@@ -9,6 +9,8 @@ import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { acquireManagedDatabaseAccess } from '../domain/services/database-access.service.js';
+import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
+import { migrationDatabaseBindingConflict } from './migration-database-binding.js';
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
@@ -219,6 +221,11 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   confirmCutover?: boolean;
   sourceDirectory?: string;
 }): Promise<MigrateResult> {
+  // Reject before even proposing or preparing a target. This applies equally
+  // to every provider and to copy, refresh, verification and cutover resumes.
+  if (params.from.trim() === params.to.trim()) {
+    return { status: 'blocked', message: 'The migration source and target must be different environments. Migrating an environment into itself can erase its source data.' };
+  }
   const store = new SpecStore();
   let specResult = store.get(params.project);
   if (!specResult) return { status: 'blocked', message: 'This project has no spec yet.' };
@@ -226,6 +233,11 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   if (!sourceSpec) return { status: 'blocked', message: `The spec has no source environment "${params.from}".` };
   const sourceEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.from);
   if (!sourceEnvironment) return { status: 'blocked', message: `Environment ${params.from} has never been deployed by Hypervibe.` };
+  const bindingConflict = () => migrationDatabaseBindingConflict(ctx, params.project, specResult!.spec,
+    ctx.repos.environments.findById(sourceEnvironment.id) ?? sourceEnvironment,
+    ctx.repos.environments.findByProjectAndName(params.project.id, params.to) ?? undefined);
+  const initialConflict = bindingConflict();
+  if (initialConflict) return { status: 'blocked', message: initialConflict };
 
   // 1. Target: proposed from the source when it does not exist yet.
   if (!specResult.spec.environments[params.to]) {
@@ -353,6 +365,8 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   // 4. Infrastructure for the target, without releasing code yet.
   const built = await launchEnvironment(ctx, { ...launchParams, stopAfter: 'infrastructure' });
   if (built.status !== 'ready') return built;
+  const preparedConflict = bindingConflict();
+  if (preparedConflict) return { status: 'blocked', message: preparedConflict };
   // This phase consumed its exact artifact approval; later rounds need their own review.
   delete launchParams.planId;
   delete launchParams.confirmActions;
@@ -518,12 +532,14 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
     variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: sign('PUT') }, timeoutMs: 30 * 60 * 1000,
   });
   const cleanedUp = railway.adapter.lastPrivateTaskCleanup;
-  const exportResult = parseTransferResult(exported.output) as { ok?: boolean; source?: DatabaseManifest } | undefined;
+  const exportResult = parseTransferResult(exported.output) as { ok?: boolean; source?: DatabaseManifest; sourceIdentity?: unknown } | undefined;
   if (exported.exitCode !== 0 || !exportResult?.ok || !exportResult.source) {
     return { blocked: `The private export inside Railway did not complete (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
   }
+  const sourceIdentity = parsePostgresDatabaseIdentity(exportResult.sourceIdentity);
+  if (!sourceIdentity) return { blocked: 'The private export did not verify the source database identity; the target was not changed.' };
   const restored = await runTransferJob<{ ok: boolean; error?: string; target?: DatabaseManifest; restoreWarnings?: number }>(transfer, {
-    purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: {},
+    purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: { SOURCE_DATABASE_IDENTITY: sourceIdentity },
     sourceSecrets: { DUMP_URL: sign('GET') },
     secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion } },
     cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 3600,
