@@ -164,6 +164,19 @@ Failed copies never replace active bindings. Hypervibe attempts to destroy a
 failed fresh target; if provider cleanup fails, it retains the exact candidate
 identity and blocks another candidate until cleanup succeeds.
 
+Migration rejects identical environments and environments bound to the same
+native database instance. Before replacing data, both PostgreSQL connections
+must report different database identities, regardless of their URLs or login
+roles. An unavailable identity query blocks the copy. Replicas or clones that
+share a cluster identifier and database name also block conservatively.
+
+If a candidate aliases an active database, or its connected identity cannot be
+verified, Hypervibe preserves it and blocks automatic cleanup and retry. Review
+its bindings through the supported workflow; it must not be deleted as a failed
+fresh target. These checks apply to the shared transfer path and the GCP copy
+worker, including private Railway exports. They do not add unavailable provider
+migration destinations.
+
 ## Maintenance provider support
 
 The edge and database controls are portable: Cloudflare uses the connected API

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { observeSecret, secretManagerFetch, writeSecretVersion } from './infrastructure-engine.js';
 
@@ -114,6 +115,46 @@ export function signedObjectUrl(params: { clientEmail: string; privateKey: strin
   return `https://storage.googleapis.com${path}?${query}&X-Goog-Signature=${signature}`;
 }
 
+/** Actual connection identity must be known and distinct before replacing data. */
+const DATABASE_IDENTITY_FUNCTIONS = [
+  'identity() { psql "$1" -X -At -v ON_ERROR_STOP=1 -c "' + POSTGRES_DATABASE_IDENTITY_SQL + '" 2>/dev/null; }',
+  'valid_identity() { case "$1" in ""|*[!0-9a-f:]*) return 1 ;; esac; printf "%s" "$1" | LC_ALL=C grep -Eq "' + POSTGRES_DATABASE_IDENTITY_PATTERN + '"; }',
+  'blocked() { printf \'' + RESULT_MARKER + '{"ok":false,"error":"%s"}\\n\' "$1"; exit 1; }',
+];
+const READ_SOURCE_IDENTITY = [
+  'if ! SOURCE_IDENTITY=$(identity "$SOURCE_DATABASE_URL") || ! valid_identity "$SOURCE_IDENTITY"; then',
+  '  blocked "The source database identity could not be verified; no data was replaced."',
+  'fi',
+];
+const READ_TARGET_IDENTITY = [
+  'if ! TARGET_IDENTITY=$(identity "$DATABASE_URL") || ! valid_identity "$TARGET_IDENTITY"; then',
+  '  blocked "The target database identity could not be verified; no data was replaced."',
+  'fi',
+  'if [ "$SOURCE_IDENTITY" = "$TARGET_IDENTITY" ]; then',
+  '  blocked "The source and target reach the same database; no data was replaced."',
+  'fi',
+];
+/** Recheck on the connection that clears the target; errors roll back all writes. */
+function guardedTargetReset(restorePublicOwner = false): string[] {
+  return [
+    'if ! psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -v expected_identity="$TARGET_IDENTITY" -v source_identity="$SOURCE_IDENTITY" >/dev/null 2>/tmp/identity-guard.log <<\'HV_MIGRATION_IDENTITY\'',
+    'BEGIN;',
+    'SELECT 1 / CASE WHEN (' + POSTGRES_DATABASE_IDENTITY_SQL + ') = :\'expected_identity\' AND (' + POSTGRES_DATABASE_IDENTITY_SQL + ') <> :\'source_identity\' THEN 1 ELSE 0 END;',
+    ...(restorePublicOwner ? [
+      'SELECT pg_catalog.set_config(\'hypervibe.migration_owner\', CURRENT_USER, true);',
+      'SET ROLE NONE;',
+      'DO $hv$ BEGIN EXECUTE pg_catalog.format(\'ALTER SCHEMA public OWNER TO %I\', pg_catalog.current_setting(\'hypervibe.migration_owner\')); EXCEPTION WHEN OTHERS THEN NULL; END $hv$;',
+      'SELECT pg_catalog.format(\'SET ROLE %I\', pg_catalog.current_setting(\'hypervibe.migration_owner\')) \\gexec',
+    ] : []),
+    'DROP OWNED BY CURRENT_USER CASCADE; CREATE SCHEMA IF NOT EXISTS public;',
+    'COMMIT;',
+    'HV_MIGRATION_IDENTITY',
+    'then',
+    '  blocked "The target database could not be safely prepared; its identity must remain verified and different from the source."',
+    'fi',
+  ];
+}
+
 /**
  * Export half of a private-network copy (runs inside the source provider,
  * next to its database): records the source manifest, dumps, and uploads the
@@ -124,11 +165,13 @@ export function databaseExportScript(): string {
     'set -eu',
     'apk add --no-cache curl >/dev/null 2>&1 || true',
     ...MANIFEST_FUNCTIONS,
+    ...DATABASE_IDENTITY_FUNCTIONS,
+    ...READ_SOURCE_IDENTITY,
     'VERSION=$(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")',
     'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
     'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
     'curl -sf -X PUT -H "Content-Type: application/octet-stream" --upload-file /tmp/source.dump "$UPLOAD_URL"',
-    `printf '${RESULT_MARKER}{"ok":true,"source":{"tables":%s,"totalRows":"%s","version":"%s"},"bytes":%s}\\n' "\${SRC%|*}" "\${SRC##*|}" "$VERSION" "$(wc -c < /tmp/source.dump)"`,
+    `printf '${RESULT_MARKER}{"ok":true,"sourceIdentity":"%s","source":{"tables":%s,"totalRows":"%s","version":"%s"},"bytes":%s}\\n' "$SOURCE_IDENTITY" "\${SRC%|*}" "\${SRC##*|}" "$VERSION" "$(wc -c < /tmp/source.dump)"`,
   ].join('\n');
 }
 
@@ -138,11 +181,12 @@ export function databaseRestoreScript(): string {
     'set -eu',
     'apk add --no-cache curl >/dev/null 2>&1 || true',
     ...MANIFEST_FUNCTIONS,
+    ...DATABASE_IDENTITY_FUNCTIONS,
+    'SOURCE_IDENTITY="${SOURCE_DATABASE_IDENTITY:-}"',
+    'if ! valid_identity "$SOURCE_IDENTITY"; then blocked "The exported source database identity is missing or invalid; no data was replaced."; fi',
+    ...READ_TARGET_IDENTITY,
     'curl -sf -o /tmp/source.dump "$DUMP_URL"',
-    // Hand public to the app owner role (as the login itself); harmless when it already is.
-    'OWNER=$(psql "$DATABASE_URL" -At -c "SELECT current_user")',
-    'psql "$DATABASE_URL" -q -c "SET ROLE NONE; ALTER SCHEMA public OWNER TO \\"$OWNER\\";" >/dev/null 2>&1 || true',
-    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE; CREATE SCHEMA IF NOT EXISTS public;"',
+    ...guardedTargetReset(true),
     'set +e',
     'pg_restore --exit-on-error --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
     'RESTORE=$?',
@@ -174,23 +218,23 @@ export function databaseTransferScript(): string {
   return [
     'set -eu',
     ...MANIFEST_FUNCTIONS,
+    ...DATABASE_IDENTITY_FUNCTIONS,
+    ...READ_SOURCE_IDENTITY,
+    ...READ_TARGET_IDENTITY,
     'version() { psql "$1" -At -c "SHOW server_version_num"; }',
     'SRC_VERSION=$(version "$SOURCE_DATABASE_URL")',
     'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
-    // Clear only what the app's owner role created; the restore recreates it owned by that role.
-    'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE; CREATE SCHEMA IF NOT EXISTS public;"',
+    // A failed source dump must not destroy even a distinct target.
+    'if pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump 2>/tmp/dump.log; then :; else',
+    '  DUMP=$?; blocked "The source database could not be read (pg_dump exit $DUMP); no data was replaced."',
+    'fi',
+    ...guardedTargetReset(),
     'set +e',
-    'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
-    'DUMP=$?',
     // Matching table contents cannot prove that schema objects were restored.
     'pg_restore --exit-on-error --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
     'RESTORE=$?',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
-    'if [ "$DUMP" -ne 0 ]; then',
-    `  echo '${RESULT_MARKER}{"ok":false,"error":"The source database could not be read (pg_dump exit '"$DUMP"')."}'`,
-    '  exit 1',
-    'fi',
     'if [ "$RESTORE" -ne 0 ]; then',
     `  echo '${RESULT_MARKER}{"ok":false,"error":"The copy could not be written to the new database (pg_restore exit '"$RESTORE"')."}'`,
     '  exit 1',

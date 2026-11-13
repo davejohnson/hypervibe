@@ -12,6 +12,7 @@ import {
   acquireManagedDatabaseAccess,
 } from '../domain/services/database-access.service.js';
 import { transferPostgresDatabase } from '../domain/services/postgres-transfer.service.js';
+import { PostgresDatabaseIdentityError } from '../domain/services/postgres-database-identity.js';
 import {
   createS3ObjectClient,
   transferObjectStorageClients,
@@ -29,6 +30,7 @@ import type { StorageContext } from '../domain/ports/storage.port.js';
 import type { CommandContext } from './context.js';
 import { observeEnvironmentMaintenance } from '../domain/services/environment-maintenance.service.js';
 import type { IProviderAdapter } from '../domain/ports/provider.port.js';
+import { migrationDatabaseComponentBindingConflict } from './migration-database-binding.js';
 
 interface StorageCandidate {
   migrationId: string;
@@ -163,15 +165,63 @@ function migrationIdentity(params: {
   return { migrationId, sourceEnvironmentName, sourceProvider, targetProvider };
 }
 
+interface ProtectedDatabase {
+  environment: Environment;
+  type: string;
+  component: Component | null;
+}
+
+function protectDatabaseCandidate(params: {
+  ctx: CommandContext;
+  environment: Environment;
+  candidate: Component;
+  protectedDatabases: ProtectedDatabase[];
+}): string | undefined {
+  const candidate = params.ctx.repos.components.findById(params.candidate.id);
+  const preserve = (reason: string): string => {
+    if (candidate) params.ctx.repos.components.update(candidate.id, {
+      bindings: { ...candidate.bindings, dataMigrationIdentityUnverified: true },
+    });
+    return reason;
+  };
+  if (!candidate || candidate.environmentId !== params.candidate.environmentId
+    || candidate.externalId !== params.candidate.externalId
+    || JSON.stringify(candidate.bindings) !== JSON.stringify(params.candidate.bindings)) {
+    return preserve('The migration candidate changed or could not be read safely. It must be preserved for review.');
+  }
+  if (candidate.bindings.dataMigrationIdentityUnverified === true) {
+    return 'The retained migration target has an unverified database identity.';
+  }
+  for (const protectedDatabase of params.protectedDatabases) {
+    const environment = params.ctx.repos.environments.findById(protectedDatabase.environment.id);
+    const current = environment && params.ctx.repos.components.findByEnvironmentAndType(environment.id, protectedDatabase.type);
+    const expected = protectedDatabase.component;
+    if (!environment || environment.projectId !== protectedDatabase.environment.projectId
+      || JSON.stringify(environment.platformBindings) !== JSON.stringify(protectedDatabase.environment.platformBindings)
+      || (expected ? !current || current.id !== expected.id || current.externalId !== expected.externalId
+        || JSON.stringify(current.bindings) !== JSON.stringify(expected.bindings) : Boolean(current))) {
+      return preserve('An active database binding changed or could not be read safely. The migration candidate must be preserved for review.');
+    }
+    if (!current) continue;
+    const conflict = migrationDatabaseComponentBindingConflict({ environment, component: current }, {
+      environment: params.environment, component: candidate,
+    });
+    if (conflict) return preserve(conflict);
+  }
+  return undefined;
+}
+
 async function destroyDatabaseCandidate(params: {
   ctx: CommandContext;
   project: Project;
   environment: Environment;
   candidate: Component;
   provider: string;
+  protectedDatabases: ProtectedDatabase[];
 }): Promise<boolean> {
   const adapterResult = await adapterFactory.getDatabaseAdapter(params.provider, params.project);
   if (!adapterResult.success || !adapterResult.adapter) return false;
+  if (protectDatabaseCandidate(params)) return false;
   const receipt = await adapterResult.adapter.destroy(params.candidate);
   if (!receipt.success) return false;
   params.ctx.repos.components.delete(params.candidate.id);
@@ -256,10 +306,22 @@ async function applyDatabaseMigration(params: {
   if (reviewedTarget && (!reviewedTargetProvider || !reviewedTargetExternalId)) {
     return stale(params.action, 'The current target database lacks a durable rollback identity.');
   }
+  const protectedDatabases = [
+    { environment: sourceEnvironment, type: sourceSpec.database.engine, component: source },
+    { environment: targetEnvironment, type: targetSpec.database.engine, component: reviewedTarget },
+  ];
 
   const candidateType = `data-migration:${identity.migrationId}:${targetSpec.database.engine}`;
   const lingering = params.ctx.repos.components.findByEnvironmentAndType(targetEnvironment.id, candidateType);
   if (lingering) {
+    if (lingering.bindings.dataMigrationIdentityUnverified === true) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: 'The retained migration target has an unverified database identity',
+        error: 'The target may share a live database. Hypervibe preserved it; its identity must be resolved before retrying.',
+      };
+    }
     const lingeringProvider = stringField(asRecord(lingering.bindings), 'provider');
     if (lingeringProvider !== identity.targetProvider) {
       return stale(params.action, 'A retained migration candidate belongs to a different provider.');
@@ -270,6 +332,7 @@ async function applyDatabaseMigration(params: {
       environment: targetEnvironment,
       candidate: lingering,
       provider: identity.targetProvider,
+      protectedDatabases,
     });
     if (!removed) {
       return {
@@ -311,6 +374,7 @@ async function applyDatabaseMigration(params: {
       environment: targetEnvironment,
       candidate: partial,
       provider: identity.targetProvider,
+      protectedDatabases,
     });
     return {
       success: false,
@@ -327,6 +391,15 @@ async function applyDatabaseMigration(params: {
     bindings: provisioned.component.bindings,
     externalId: provisioned.component.externalId ?? undefined,
   });
+  const candidateConflict = protectDatabaseCandidate({ ctx: params.ctx, environment: targetEnvironment, candidate, protectedDatabases });
+  if (candidateConflict) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'The migration target may share a live database',
+      error: `${candidateConflict} The target was preserved; no copy or active binding change was made.`,
+    };
+  }
 
   const cleanupCandidate = async (): Promise<boolean> => destroyDatabaseCandidate({
     ctx: params.ctx,
@@ -334,6 +407,7 @@ async function applyDatabaseMigration(params: {
     environment: targetEnvironment,
     candidate,
     provider: identity.targetProvider,
+    protectedDatabases,
   });
   const sourceAccess = await acquireManagedDatabaseAccess(params.project, sourceEnvironment);
   if (!sourceAccess.ok) {
@@ -367,17 +441,32 @@ async function applyDatabaseMigration(params: {
 
   let transfer: Awaited<ReturnType<typeof transferPostgresDatabase>> | undefined;
   let transferFailed = false;
+  let identityFailure: PostgresDatabaseIdentityError | undefined;
   try {
     transfer = await sourceAccess.lease.withConnection((sourceUrl) =>
       targetAccess.lease.withConnection((targetUrl) => transferPostgresDatabase(sourceUrl, targetUrl))
     );
-  } catch {
+  } catch (error) {
     transferFailed = true;
+    if (error instanceof PostgresDatabaseIdentityError) {
+      identityFailure = error;
+      params.ctx.repos.components.update(candidate.id, {
+        bindings: { ...candidate.bindings, dataMigrationIdentityUnverified: true },
+      });
+    }
   }
   const [sourceCleanup, targetCleanup] = await Promise.all([
     sourceAccess.lease.release(),
     targetAccess.lease.release(),
   ]);
+  if (identityFailure) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Database identities do not establish a separate migration target',
+      error: `${identityFailure.message} The target was preserved and no active database binding changed.${sourceCleanup.status === 'failed' || targetCleanup.status === 'failed' ? ' Temporary database access cleanup remains pending.' : ''}`,
+    };
+  }
   if (transferFailed || !transfer || sourceCleanup.status === 'failed' || targetCleanup.status === 'failed') {
     const removed = await cleanupCandidate();
     return {
@@ -397,10 +486,12 @@ async function applyDatabaseMigration(params: {
       || existing.id !== reviewedTarget.id
       || existing.updatedAt.getTime() !== reviewedTarget.updatedAt.getTime()
       || existing.externalId !== reviewedTarget.externalId
+      || JSON.stringify(existing.bindings) !== JSON.stringify(reviewedTarget.bindings)
     : Boolean(existing);
   const sourceChanged = !currentSource
     || currentSource.updatedAt.getTime() !== source.updatedAt.getTime()
-    || currentSource.externalId !== source.externalId;
+    || currentSource.externalId !== source.externalId
+    || JSON.stringify(currentSource.bindings) !== JSON.stringify(source.bindings);
   if (targetChanged || sourceChanged) {
     const removed = await cleanupCandidate();
     return {
