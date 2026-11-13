@@ -12,11 +12,11 @@ import { requestingAgent } from './requesting-agent.js';
 
 /**
  * Where an OpenTofu-managed environment keeps its runtime settings: Google
- * Secret Manager on GCP, Parameter Store on AWS. Values only ever go in; the
+ * Secret Manager on GCP, Parameter Store on AWS, Key Vault on Azure. Values only ever go in; the
  * store reports presence, never contents.
  */
 export interface EngineSecretStore {
-  /** "Google Secret Manager", "AWS Parameter Store" */
+  /** "Google Secret Manager", "AWS Parameter Store", "Azure Key Vault" */
   name: string;
   observe(key: string): Promise<'present' | 'absent' | { unknown: string }>;
   /** Saves a value; returns a displayable error on failure. */
@@ -24,6 +24,8 @@ export interface EngineSecretStore {
 }
 
 export async function engineSecretStore(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
+  const { isAzureEngineEnvironment, azureSecretStore } = await import('./infrastructure-engine-azure.js');
+  if (isAzureEngineEnvironment(spec, environmentName)) return azureSecretStore(ctx, project, environmentName);
   const { isAwsEngineEnvironment, awsSecretStore } = await import('./infrastructure-engine-aws.js');
   if (isAwsEngineEnvironment(spec, environmentName)) return awsSecretStore(ctx, project, environmentName);
   const { gcpSecretStore } = await import('./infrastructure-engine.js');

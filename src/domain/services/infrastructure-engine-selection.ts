@@ -1,15 +1,15 @@
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 
-/** Cloud Run always uses OpenTofu; AWS keeps its explicit engine selection. */
+/** Cloud Run always uses OpenTofu; AWS and Azure keep their explicit engine selection. */
 export function isEngineManaged(environment: EnvironmentSpec | undefined): boolean {
   return environment?.hosting.provider === 'cloudrun'
-    || (environment?.hosting.provider === 'aws' && environment.hosting.engine === 'opentofu');
+    || ((environment?.hosting.provider === 'aws' || environment?.hosting.provider === 'azure') && environment.hosting.engine === 'opentofu');
 }
 
 /** Reject an explicit engine on providers for which that engine has no implementation. */
 export function engineSelectionProblem(environment: EnvironmentSpec): string | undefined {
   if (environment.hosting.engine !== undefined && !isEngineManaged(environment)) {
-    return `hosting.engine="${environment.hosting.engine}" is not supported with hosting.provider="${environment.hosting.provider}". OpenTofu currently manages Cloud Run and explicitly selected AWS environments.`;
+    return `hosting.engine="${environment.hosting.engine}" is not supported with hosting.provider="${environment.hosting.provider}". OpenTofu currently manages Cloud Run and explicitly selected AWS and Azure environments.`;
   }
   return undefined;
 }
@@ -18,8 +18,8 @@ export function engineSelectionProblem(environment: EnvironmentSpec): string | u
 export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName];
   if (!environment) return [`Spec has no environment "${environmentName}".`];
-  // AWS validates its provider capabilities in the AWS engine planner.
-  if (environment.hosting.provider === 'aws' && isEngineManaged(environment)) return [];
+  // AWS and Azure validate their provider capabilities in their own engine planners.
+  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return [];
   const problems: string[] = [];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   const unsupported: Array<[string, unknown]> = [

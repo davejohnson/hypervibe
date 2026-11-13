@@ -3,3 +3,4 @@ export * from './azure-resource-manager.client.js';
 export * from './azure-postgres.client.js';
 export * from './azure-postgres.adapter.js';
 export * from './azure-blob.adapter.js';
+export * from './azure-engine.adapter.js';

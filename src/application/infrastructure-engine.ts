@@ -3,6 +3,7 @@ import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '..
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { applyAwsInfrastructureEngine, isAwsEngineEnvironment, planAwsInfrastructureEngine } from './infrastructure-engine-aws.js';
+import { applyAzureInfrastructureEngine, isAzureEngineEnvironment, planAzureInfrastructureEngine } from './infrastructure-engine-azure.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
@@ -693,6 +694,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   const environmentSpec = spec.environments[environmentName];
   if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} is not managed by the OpenTofu engine. Use Cloud Run or select hosting.engine="opentofu" for AWS.`] };
   if (isAwsEngineEnvironment(spec, environmentName)) return planAwsInfrastructureEngine(ctx, params);
+  if (isAzureEngineEnvironment(spec, environmentName)) return planAzureInfrastructureEngine(ctx, params);
   const problems = engineEnvironmentProblems(spec, environmentName);
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
@@ -1152,6 +1154,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   // AWS plans carry their target; a teardown's snapshot cleanup runs after the environment left the spec.
+  if ((loaded.document as { engine?: { azure?: unknown } }).engine?.azure) return applyAzureInfrastructureEngine(ctx, params);
   if ((loaded.document as { engine?: { aws?: unknown } }).engine?.aws || isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
@@ -1426,6 +1429,10 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   if (isAwsEngineEnvironment(spec, environmentName)) {
     const { releaseAwsEngineServices } = await import('./infrastructure-engine-aws-release.js');
     return releaseAwsEngineServices(ctx, params);
+  }
+  if (isAzureEngineEnvironment(spec, environmentName)) {
+    const { releaseAzureEngineServices } = await import('./infrastructure-engine-azure-release.js');
+    return releaseAzureEngineServices(ctx, params);
   }
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };

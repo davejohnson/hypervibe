@@ -149,6 +149,12 @@ describe that gap rather than claiming a proven live path.
   and account; do not ask. If AWS shows "400 Bad Request", it is an expired AWS
   session in that browser: tell them to click "Sign out of AWS" on the page and
   sign in again.
+- Azure: `hv_connections provider="azure" action="connect"` opens one Microsoft
+  sign-in (the page names it "Microsoft Azure CLI"; nothing to install) and the
+  person approves the listed changes there. Hypervibe picks the region; ask only
+  which subscription pays when it reports several. Testing environments run with
+  `hv_plan scope="infrastructure"`, `hv_apply` and `hv_deploy` (not `hv_launch`
+  yet); staging and production are not built yet.
 - Decide routine choices (region, sizes, names) and state them; ask only for what
   only the person can do.
 - Follow each result's `agentInstruction`. After blocked, failed, pending, or

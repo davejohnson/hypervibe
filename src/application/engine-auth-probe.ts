@@ -6,6 +6,8 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { AwsEngineCredentialsSchema } from '../adapters/providers/aws/aws-engine.adapter.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
+import { AzureEngineCredentialsSchema } from '../adapters/providers/azure/azure-engine.adapter.js';
+import { azureEngineAuthentication, azureEngineBackend, azureResourceGroupId } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 
 export type EngineAuthProbeResult =
   | { status: 'verified'; identity: string; projectId: string; projectNumber: string }
@@ -85,4 +87,31 @@ export async function probeAwsEngineAuthentication(params: { scope: string | nul
     return { status: 'scope_mismatch', message: 'OpenTofu authenticated, but not as the deploy role in the connection\'s account and region. Nothing was changed.' };
   }
   return { status: 'verified', identity, accountId: parsed.data.accountId, region: parsed.data.region };
+}
+
+/**
+ * Read-only proof that the OpenTofu azurerm provider runs as the project's
+ * Hypervibe deploy identity and sees exactly the connection's resource group.
+ */
+export async function probeAzureEngineAuthentication(params: { scope: string | null; signal?: AbortSignal }): Promise<
+  | { status: 'verified'; identity: string; resourceGroupId: string; location: string }
+  | { status: 'missing_connection' | 'permission_denied' | 'scope_mismatch' | 'engine_unavailable' | 'engine_error'; message: string }> {
+  const connection = new ConnectionRepository().findBestVerifiedMatch('azure', params.scope);
+  if (!connection) return { status: 'missing_connection', message: 'No verified Azure connection exists for this project. Connect Azure with hv_connections provider="azure" action="connect".' };
+  const parsed = AzureEngineCredentialsSchema.safeParse(getSecretStore().decryptObject(connection.credentialsEncrypted));
+  if (!parsed.success) return { status: 'missing_connection', message: 'The Azure connection is not Hypervibe\'s deploy access. Run Azure setup again.' };
+  const binary = await ensureEngineBinary();
+  if (!binary.ok) return { status: 'engine_unavailable', message: binary.error };
+  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), timeoutMs: 5 * 60 * 1000, signal: params.signal });
+  const resourceGroupId = azureResourceGroupId(parsed.data.subscriptionId, parsed.data.resourceGroup);
+  const result = await engine.probeAuthentication({ backend: azureEngineBackend, projectId: resourceGroupId, auth: azureEngineAuthentication(parsed.data) });
+  if (!result.ok) {
+    if (result.stage === 'version') return { status: 'engine_unavailable', message: result.error };
+    return { status: /AuthorizationFailed|\b403\b|AADSTS7000215|invalid_client/i.test(result.error) ? 'permission_denied' : 'engine_error', message: result.error.replaceAll(os.homedir(), '~') };
+  }
+  if (String(result.outputs.client_id) !== parsed.data.clientId || String(result.outputs.identity) !== parsed.data.deployPrincipalId
+    || String(result.outputs.tenant_id) !== parsed.data.tenantId || String(result.outputs.project_id).toLowerCase() !== resourceGroupId.toLowerCase()) {
+    return { status: 'scope_mismatch', message: 'OpenTofu authenticated, but not as the deploy identity or not in the connection\'s resource group. Nothing was changed.' };
+  }
+  return { status: 'verified', identity: String(result.outputs.identity), resourceGroupId, location: String(result.outputs.location ?? '') };
 }
