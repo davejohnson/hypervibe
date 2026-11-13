@@ -122,3 +122,18 @@ describe('Azure apply actions', () => {
     expect(azure.bindings().azure).toBeUndefined();
   });
 });
+
+describe('saved Azure plans', () => {
+  it('pass the saved-plan check, so hv_apply can load them', async () => {
+    const { planRunDocumentSchema } = await import('../../domain/plan/converge.executor.js');
+    const azure = await import('../infrastructure-engine-azure.js');
+    const operations = [azure.AZURE_SECRET_OPERATION, azure.AZURE_DATABASE_LOGIN_OPERATION, azure.AZURE_IMAGE_BUILD_OPERATION,
+      azure.AZURE_STORAGE_EMPTY_OPERATION, azure.AZURE_DATABASE_DROP_OPERATION, azure.AZURE_TEARDOWN_CLEANUP_OPERATION];
+    const document = {
+      kind: 'hv_plan', scope: 'infrastructure-engine', environmentName: 'test', specRevision: 1, observedFingerprint: null, unmanaged: [], warnings: [],
+      engine: { planId: 'p1', azure: { subscriptionId: 's', resourceGroup: 'g', prefix: 'hv-x' } },
+      actions: operations.map((operation) => ({ id: operation, type: 'create', verified: true, resource: { kind: 'service', name: operation, provider: 'azure' }, reason: 'r', metadata: { operation } })),
+    };
+    expect(planRunDocumentSchema.safeParse(document).success).toBe(true);
+  });
+});
