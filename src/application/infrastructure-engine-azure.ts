@@ -266,7 +266,8 @@ const importedOf = (environment: Environment) => (environment.platformBindings a
 
 function engineFor(): Promise<OpenTofuEngine | { blocked: string }> {
   return ensureEngineBinary().then((binary) => binary.ok
-    ? new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() })
+    // Azure deletes can take over 20 minutes (a Container Apps environment drains before its workspace goes).
+    ? new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), timeoutMs: 60 * 60 * 1000 })
     : { blocked: binary.error });
 }
 
