@@ -16,7 +16,7 @@ export interface KnownSecret {
 }
 
 const accepts = (url: string, headers: (value: string) => Record<string, string>) => async (value: string) => {
-  const response = await fetch(url, { headers: headers(value), signal: AbortSignal.timeout(15_000) });
+  const response = await fetch(url, { headers: headers(value), redirect: 'error', signal: AbortSignal.timeout(15_000) });
   await response.body?.cancel();
   return response.ok;
 };
@@ -46,7 +46,7 @@ export const KNOWN_SECRETS: Record<string, KnownSecret> = {
     permissionsHtml: '<em>Sending access</em>, limited to this app\'s sending domain.',
     // Sending-only keys cannot list domains; Resend answers restricted_api_key for a real one.
     check: async (value) => {
-      const response = await fetch('https://api.resend.com/domains', { headers: { Authorization: `Bearer ${value}` }, signal: AbortSignal.timeout(15_000) });
+      const response = await fetch('https://api.resend.com/domains', { headers: { Authorization: `Bearer ${value}` }, redirect: 'error', signal: AbortSignal.timeout(15_000) });
       if (response.ok) { await response.body?.cancel(); return true; }
       const { name } = (await response.json().catch(() => ({}))) as { name?: string };
       return name === 'restricted_api_key';
@@ -60,7 +60,7 @@ export const KNOWN_SECRETS: Record<string, KnownSecret> = {
     // A valid secret with no token returns missing-input-response; a wrong one returns invalid-input-secret.
     check: async (value) => {
       const response = await fetch('https://www.google.com/recaptcha/api/siteverify', {
-        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, redirect: 'error',
         body: new URLSearchParams({ secret: value }).toString(), signal: AbortSignal.timeout(15_000),
       });
       const body = (await response.json().catch(() => ({}))) as { 'error-codes'?: string[] };
@@ -73,7 +73,7 @@ export const KNOWN_SECRETS: Record<string, KnownSecret> = {
     permissionsHtml: '<em>Restricted Access</em>: <em>Mail Send</em> → Full Access, everything else off.',
     // The key lists its own scopes; sending mail is the only one the app needs.
     check: async (value) => {
-      const response = await fetch('https://api.sendgrid.com/v3/scopes', { headers: { Authorization: `Bearer ${value}` }, signal: AbortSignal.timeout(15_000) });
+      const response = await fetch('https://api.sendgrid.com/v3/scopes', { headers: { Authorization: `Bearer ${value}` }, redirect: 'error', signal: AbortSignal.timeout(15_000) });
       if (!response.ok) return false;
       const { scopes = [] } = (await response.json().catch(() => ({}))) as { scopes?: string[] };
       return scopes.includes('mail.send') || 'That key works but cannot send mail. Edit it in SendGrid and set Mail Send to Full Access.';
