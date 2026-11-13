@@ -185,12 +185,26 @@ export async function azureSecretStore(ctx: CommandContext, project: Project, en
   return azureEnvironmentSecretStore(context);
 }
 
+/** An environment's Azure region: its spec region, otherwise the one chosen at setup. */
+export function azureLocationFor(spec: ProjectSpec, environmentName: string, connection: { location: string }): string {
+  return spec.environments[environmentName]?.hosting.region?.trim() || connection.location;
+}
+
+/** The shared server and registry live where the environments sharing them are; they must agree. */
+export function azureSharedLocation(spec: ProjectSpec, environments: string[], connection: { location: string }): string | { blocked: string } {
+  const regions = [...new Set(environments.map((name) => azureLocationFor(spec, name, connection)))];
+  if (regions.length > 1) return { blocked: `Testing environments ${environments.join(', ')} share one database server and registry, so they need one region; they are set to ${regions.join(' and ')}.` };
+  return regions[0] ?? connection.location;
+}
+
 /** The shared server and registry for this environment's group, sized for the environments that remain in the spec. */
 export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngineContext, 'connection' | 'shared' | 'project'>, environments: string[]): AzureSharedInput {
   const database = environments.map((name) => spec.environments[name]?.database).find(Boolean);
+  const location = azureSharedLocation(spec, environments, context.connection);
+  if (typeof location === 'object') throw new Error(location.blocked);
   return {
     kind: 'shared', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
-    location: context.connection.location, prefix: context.shared.prefix, label: context.shared.label,
+    location, prefix: context.shared.prefix, label: context.shared.label,
     deployPrincipalId: context.connection.deployPrincipalId, deployPrincipalName: azureDeployAppName(context.project.name),
     ...(database ? { database: { version: database.version ?? 17 } } : {}),
   };
@@ -216,7 +230,7 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
-    location: context.connection.location, prefix: context.prefix, environmentId: context.environment.id, environmentName,
+    location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer },
     vault: { id: context.vault.id, uri: context.vault.uri },
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((name) => ({ name, container: azureContainerName(name) })),
@@ -324,6 +338,8 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   if ('blocked' in engine) return { blocked: [engine.blocked] };
   // 1. The shared server and registry (a separate state, so other testing environments keep them).
   const sharedPlanId = crypto.randomUUID();
+  const sharedLocation = azureSharedLocation(spec, azureTestingEnvironments(spec), context.connection);
+  if (typeof sharedLocation === 'object') return { blocked: [sharedLocation.blocked] };
   const sharedInput = buildAzureSharedInput(spec, context, azureTestingEnvironments(spec));
   const sharedPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
   if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
@@ -362,7 +378,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildActions), ...changing(loginActions)];
   const actions = [...sharedActions, ...secretActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [
-    `Azure ${context.connection.location}, testing profile: workloads scale to zero; the shared database server is about $16/month for all testing environments.`,
+    `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero; the shared database server is about $16/month for all testing environments.`,
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, shared: { planId: sharedPlanId, state: context.shared.state } });
@@ -436,7 +452,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   if (!cleanup.dependsOn!.length) delete cleanup.dependsOn;
   const actions = [...emptyActions, ...environmentActions, ...dropActions, ...sharedActions, cleanup];
   const warnings = [
-    `Removes Azure environment ${environmentName} (${context.connection.location}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
+    `Removes Azure environment ${environmentName} (${azureLocationFor(spec, environmentName, context.connection)}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
     ...(environmentSpec.database ? ['Azure keeps no final snapshot of a deleted database; export it first if you need the data.'] : []),
     sharedActions.length ? 'No other testing environment uses the shared server and registry, so they are removed too.' : `The shared server and registry stay for ${remaining.join(', ')}.`,
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,

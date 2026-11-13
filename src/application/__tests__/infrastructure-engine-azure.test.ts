@@ -137,3 +137,14 @@ describe('saved Azure plans', () => {
     expect(planRunDocumentSchema.safeParse(document).success).toBe(true);
   });
 });
+
+describe('Azure regions', () => {
+  it('uses the spec region over the setup region, and keeps environments sharing a server in one region', async () => {
+    const { azureLocationFor, azureSharedLocation } = await import('../infrastructure-engine-azure.js');
+    const spec = { environments: { test: { hosting: { provider: 'azure', engine: 'opentofu', region: 'westus2' } }, preview: { hosting: { provider: 'azure', engine: 'opentofu' } } } } as never;
+    expect(azureLocationFor(spec, 'test', { location: 'eastus2' })).toBe('westus2');
+    expect(azureLocationFor(spec, 'preview', { location: 'eastus2' })).toBe('eastus2');
+    expect(azureSharedLocation(spec, ['test'], { location: 'eastus2' })).toBe('westus2');
+    expect(azureSharedLocation(spec, ['test', 'preview'], { location: 'eastus2' })).toMatchObject({ blocked: expect.stringContaining('one region') });
+  });
+});
