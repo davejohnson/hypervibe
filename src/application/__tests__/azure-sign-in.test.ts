@@ -80,3 +80,17 @@ describe('Azure sign-in', () => {
     await expect(result).resolves.toMatchObject({ status: 'signed_in', session: { tenantId: 't1' }, applied: { ok: true } });
   });
 });
+
+describe('personal Microsoft accounts', () => {
+  it('signs in a personal account that is a member of a directory, whose tokens carry no object id', async () => {
+    const { exchangeAzureCode } = await import('../azure-sign-in.js');
+    const jwt = (claims: Record<string, unknown>) => `x.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.y`;
+    const fetchImpl = (async () => new Response(JSON.stringify({
+      access_token: jwt({ tid: 'tenant-1', idp: 'live.com', altsecid: '1:live.com:abc', email: 'person@outlook.com' }),
+      refresh_token: 'r', id_token: jwt({ tid: 'tenant-1', idp: 'live.com', preferred_username: 'person@outlook.com' }), expires_in: 3600,
+    }), { status: 200 })) as typeof fetch;
+    const session = await exchangeAzureCode({ code: 'c', verifier: 'v', redirectUri: 'http://localhost:1/' }, fetchImpl);
+    expect(session).toMatchObject({ tenantId: 'tenant-1', username: 'person@outlook.com' });
+    expect(session.userObjectId).toBeUndefined();
+  });
+});

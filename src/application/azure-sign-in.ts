@@ -23,7 +23,8 @@ export interface AzureSignInSession {
   /** Exchanged for tokens in other tenants and for Microsoft Graph; in memory only. */
   refreshToken: string;
   tenantId: string;
-  userObjectId: string;
+  /** Absent for personal Microsoft accounts in a directory; nothing depends on it. */
+  userObjectId?: string;
   /** For example someone@example.com. */
   username: string;
   expiresAt: string;
@@ -69,11 +70,23 @@ export async function exchangeAzureCode(params: { code: string; verifier: string
     const reason = entraReason(body);
     throw new Error(`Microsoft sign-in did not return tokens (HTTP ${body.status}${reason ? `, ${reason}` : ''}).`);
   }
-  const claims = JSON.parse(Buffer.from(body.id_token.split('.')[1] ?? '', 'base64url').toString('utf8')) as { tid?: string; oid?: string; preferred_username?: string; email?: string };
-  if (!claims.tid || !claims.oid) throw new Error('Microsoft sign-in returned an ID token without a tenant or user.');
+  type Claims = { tid?: string; oid?: string; preferred_username?: string; email?: string; upn?: string; unique_name?: string };
+  const decode = (token: string): Claims => {
+    try { return JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as Claims; } catch { return {}; }
+  };
+  // The Azure Resource Manager access token always names the tenant and user; the ID token may not.
+  const idClaims = decode(body.id_token);
+  const accessClaims = decode(body.access_token);
+  const claims: Claims = { ...accessClaims, ...Object.fromEntries(Object.entries(idClaims).filter(([, value]) => value)) };
+  claims.tid ??= accessClaims.tid;
+  claims.oid ??= accessClaims.oid;
+  // Personal Microsoft accounts in a directory carry no oid; only the tenant is needed.
+  if (!claims.tid) {
+    throw new Error(`Microsoft sign-in returned tokens without a tenant (ID token fields: ${Object.keys(idClaims).sort().join(', ') || 'none'}; access token fields: ${Object.keys(accessClaims).sort().join(', ') || 'none'}).`);
+  }
   return {
-    accessToken: body.access_token, refreshToken: body.refresh_token, tenantId: claims.tid, userObjectId: claims.oid,
-    username: claims.preferred_username ?? claims.email ?? claims.oid, expiresAt: new Date(Date.now() + (body.expires_in ?? 3600) * 1000).toISOString(),
+    accessToken: body.access_token, refreshToken: body.refresh_token, tenantId: claims.tid, ...(claims.oid ? { userObjectId: claims.oid } : {}),
+    username: claims.preferred_username ?? claims.email ?? claims.upn ?? claims.unique_name ?? claims.oid ?? 'your Microsoft account', expiresAt: new Date(Date.now() + (body.expires_in ?? 3600) * 1000).toISOString(),
   };
 }
 
