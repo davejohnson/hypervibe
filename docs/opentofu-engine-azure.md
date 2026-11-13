@@ -12,15 +12,27 @@ mocked HTTP and, for configuration, passing `tofu validate`.
 
 | Piece | State |
 | --- | --- |
-| Sign-in without the Azure CLI | Built; not yet run live |
-| One-time setup (resource group, project Key Vault, deploy identity, roles, GitHub OIDC, client secret) | Built; not yet run live |
-| OpenTofu authenticates as the deploy identity (read-only probe) | Built; not yet run live |
-| Outside keys, `needs_secrets` and `hv_secrets action="collect"` (Key Vault store) | Built; not yet run live |
-| Testing environments: `hv_plan scope="infrastructure"` → `hv_apply` → `hv_deploy` for web, on-demand worker, cron, database, storage and secrets | Built; `tofu validate` passes with `azurerm` 5.11.0; never planned or applied |
-| Shared server and registry for testing environments (one database and login each) | Built; not yet run live |
-| First image built inside the infrastructure apply (no second plan round) | Built; not yet run live |
-| Environment teardown (`hv_plan scope="teardown"`) | Built; not yet run live |
+| Sign-in without the Azure CLI | Built; verified live (a personal Microsoft account in a pay-as-you-go directory) |
+| One-time setup (resource group, project Key Vault, deploy identity, roles, GitHub OIDC, client secret) | Built; verified live |
+| OpenTofu authenticates as the deploy identity | Built; verified live |
+| Outside keys, `needs_secrets` and `hv_secrets action="collect"` (Key Vault store) | Built; generated secrets verified live, outside keys not yet |
+| Testing environments: `hv_plan scope="infrastructure"` → `hv_apply` → `hv_deploy` for web, on-demand worker, cron, database, storage and secrets | Built; verified live on the demo app (westus2): web over HTTPS, database over verified TLS with the environment's own login, a Key Vault secret, Blob storage with the managed identity, the on-demand worker (jobs done 0.3–1.9 s after due), cron on time, two releases with an empty plan after |
+| Shared server and registry for testing environments (one database and login each) | Built; verified live with one environment |
+| First image built inside the infrastructure apply (no second plan round) | Built; verified live |
+| Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
 | Production profile (staging, production), `hv_launch`, `hv_migrate`, CI releases, custom domains | Not built |
+
+
+## Found in the first live run (2026-11-13)
+
+- **Personal Microsoft accounts** in a directory carry no object id in their tokens; sign-in now needs only the tenant.
+- **Saved plans** were refused by `hv_apply` until the Azure operations were on the engine allowlist.
+- **Burstable B1ms was refused in eastus2** for a new pay-as-you-go subscription (`SkuNotAvailable`) although the capability API lists it. The demo moved to westus2, and environments now honor their spec `hosting.region` (the shared server and registry follow the testing environments, which must agree).
+- **ACR Tasks has no BuildKit**, so the generated Dockerfile installs without the optional npm-token mount. A repository Dockerfile that needs BuildKit does not build yet.
+- **Azure assigns a Consumption workload profile** to the environment and to each app and job; it is ignored so plans stay empty.
+- **Dropped connections** (three in one session) left role assignments created but unrecorded; planning now adopts them, as a separately confirmed step.
+- **Slow deletes:** a Container Apps environment drained for over 20 minutes before its Log Analytics workspace went, past the 30-minute engine limit; Azure engine runs now get 60 minutes. Re-planning finished each interrupted teardown.
+- **Build failures** report the run id and the log's last lines; results link the registry's portal page, never the signed log URL.
 
 ## Access
 
