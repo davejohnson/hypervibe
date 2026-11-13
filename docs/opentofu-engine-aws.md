@@ -31,8 +31,11 @@ records the AWS-specific decisions and why they were made.
   ([aws/aws-cli#10186](https://github.com/aws/aws-cli/issues/10186)). The page
   explains this and links to sign out of AWS. A private window also works.
 - **What setup creates** (all free):
-  - `hypervibe-deploy-<project>` (role): what OpenTofu runs as, from this computer
-    and from the repository's GitHub Actions (keyless OIDC).
+  - `hypervibe-deploy` (role, one per account): what OpenTofu runs as for every
+    project, from this computer and from GitHub Actions in each trusted owner's
+    repositories (`repo:<owner>/*`, keyless OIDC). Earlier versions created one
+    role per project; the next setup run moves their saved access to this role
+    and removes them.
   - `hypervibe-deploy` (policy): workloads, database, storage, schedules,
     parameters under `/hypervibe/*`. IAM writes are limited to roles under
     `/hypervibe/app/` that carry the boundary.
@@ -42,6 +45,11 @@ records the AWS-specific decisions and why they were made.
     encrypted on the computer; the engine gets one-hour role credentials.
 - **Trust uses the account principal plus `aws:PrincipalArn`.** A user created
   seconds earlier is rejected as an "invalid principal"; the account never is.
+- **One sign-in per account.** Access is saved per GitHub owner (`<owner>/*`), so
+  a new repository of the same owner needs nothing. A project of another owner
+  (or with no remote) reuses the account's access without signing in when exactly
+  one account is connected and its access is current; otherwise setup signs in.
+  A new owner's GitHub Actions need one setup run to be trusted.
 - **Region** follows the app's other environments, otherwise `us-east-1`.
   Hypervibe states the choice; it does not ask.
 

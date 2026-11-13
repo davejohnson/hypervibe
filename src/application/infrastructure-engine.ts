@@ -120,6 +120,12 @@ function labelValue(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 63);
 }
 
+export interface MigrationCopyEvidence {
+  copiedAt?: string;
+  database?: { tables: number; rows: string; match: boolean; differences: string[]; restoreWarnings: number };
+  storage?: Array<{ name: string; files: number; bytes: number; match: boolean }>;
+}
+
 export interface EngineBinding {
   kind?: 'opentofu';
   database?: { instanceName: string; connectionName?: string };
@@ -147,13 +153,12 @@ export interface EngineBinding {
   secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
   /** Keyless CI release trust granted for this exact repository. */
   ci?: { repository: string; provider: string; releaseIdentity: string };
-  /** Evidence of a verified migration copy; re-runs release without copying again. */
-  migration?: {
+  /** Current copy evidence is cleared before replacement; prior evidence is historical only. */
+  migration?: MigrationCopyEvidence & {
     from: string;
     sourceMajor?: number;
-    copiedAt?: string;
-    database?: { tables: number; rows: string; match: boolean; differences: string[]; restoreWarnings: number };
-    storage?: Array<{ name: string; files: number; bytes: number; match: boolean }>;
+    copyAttempt?: { id: string; startedAt: string; status: 'incomplete' | 'complete' };
+    previousCopy?: MigrationCopyEvidence;
   };
 }
 
@@ -995,8 +1000,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   if ('blocked' in credentialActions) return { blocked: [credentialActions.blocked] };
   const onDemandWorkers = Object.entries(environmentSpec!.services).filter(([, service]) => service.workloadKind === 'worker' && service.onDemand).map(([name]) => name);
   const wakeUser = context.runtimeServiceAccountEmail ? iamDatabaseUser(context.runtimeServiceAccountEmail) : undefined;
-  // A data copy (migration restore) recreates the tables, so a grant older than the copy is gone.
-  const copiedAt = engineBinding.migration?.copiedAt;
+  // Even an incomplete restore may replace tables and invalidate earlier grants.
+  const copiedAt = engineBinding.migration?.copiedAt ?? engineBinding.migration?.copyAttempt?.startedAt;
   const grantStale = engineBinding.workerWakeGrant !== wakeUser
     || Boolean(copiedAt && (!engineBinding.workerWakeGrantAt || engineBinding.workerWakeGrantAt < copiedAt));
   const wakeGrantActions: PlanAction[] = databaseSpec && wakeUser && onDemandWorkers.length && grantStale ? [{

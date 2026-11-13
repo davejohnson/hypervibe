@@ -1,5 +1,5 @@
 import {
-  AttachRolePolicyCommand, CreateAccessKeyCommand, CreateOpenIDConnectProviderCommand, CreatePolicyCommand, CreatePolicyVersionCommand,
+  AttachRolePolicyCommand, CreateAccessKeyCommand, DeleteRoleCommand, DeleteRolePolicyCommand, DetachRolePolicyCommand, ListAttachedRolePoliciesCommand, ListRolePoliciesCommand, ListRolesCommand, CreateOpenIDConnectProviderCommand, CreatePolicyCommand, CreatePolicyVersionCommand,
   CreateRoleCommand, CreateUserCommand, DeletePolicyVersionCommand, GetPolicyCommand, GetPolicyVersionCommand, GetRoleCommand, GetUserCommand, IAMClient,
   ListAccessKeysCommand, ListOpenIDConnectProvidersCommand, ListPolicyVersionsCommand, NoSuchEntityException, PutUserPolicyCommand, UpdateAssumeRolePolicyCommand,
 } from '@aws-sdk/client-iam';
@@ -26,7 +26,22 @@ const BOUNDARY = 'hypervibe-app-boundary';
 const DEPLOY_POLICY = 'hypervibe-deploy';
 const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
 
+/** Earlier versions created one deploy role per project; setup retires them in favor of the account role. */
 export const deployRoleName = (project: string) => `hypervibe-deploy-${project.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40)}`;
+/** One deploy role per account, so a new project needs no new sign-in. */
+export const ACCOUNT_DEPLOY_ROLE = 'hypervibe-deploy';
+
+/** GitHub owners whose repositories' Actions may use the deploy role, read from its current trust. */
+export function trustedGitHubOwners(trust: string | undefined): string[] {
+  if (!trust) return [];
+  try {
+    const document = JSON.parse(decodeURIComponent(trust)) as { Statement?: Array<{ Condition?: { StringLike?: Record<string, string | string[]> } }> };
+    const subjects = (document.Statement ?? []).flatMap((statement) => [statement.Condition?.StringLike?.[`${GITHUB_OIDC_HOST}:sub`] ?? []].flat());
+    return [...new Set(subjects.map((subject) => /^repo:([^/]+)\/\*$/.exec(subject)?.[1]).filter((owner): owner is string => Boolean(owner)))].sort();
+  } catch {
+    return [];
+  }
+}
 
 /** Services the app's own runtime roles may use (the permissions boundary). */
 export function appBoundaryDocument(): Record<string, unknown> {
@@ -97,7 +112,7 @@ export function deployPolicyDocument(accountId: string): Record<string, unknown>
   };
 }
 
-function deployTrustDocument(accountId: string, repository?: string): Record<string, unknown> {
+function deployTrustDocument(accountId: string, owners: string[]): Record<string, unknown> {
   return {
     Version: '2012-10-17',
     Statement: [
@@ -105,9 +120,9 @@ function deployTrustDocument(accountId: string, repository?: string): Record<str
       // principal ("Invalid principal in policy"), while the account always is.
       { Sid: 'ThisComputer', Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${accountId}:root` }, Action: 'sts:AssumeRole',
         Condition: { ArnEquals: { 'aws:PrincipalArn': `arn:aws:iam::${accountId}:user${AWS_PATH}${LOCAL_USER}` } } },
-      ...(repository ? [{ Sid: 'GitHubActions', Effect: 'Allow', Principal: { Federated: `arn:aws:iam::${accountId}:oidc-provider/${GITHUB_OIDC_HOST}` },
+      ...(owners.length ? [{ Sid: 'GitHubActions', Effect: 'Allow', Principal: { Federated: `arn:aws:iam::${accountId}:oidc-provider/${GITHUB_OIDC_HOST}` },
         Action: 'sts:AssumeRoleWithWebIdentity',
-        Condition: { StringEquals: { [`${GITHUB_OIDC_HOST}:aud`]: 'sts.amazonaws.com' }, StringLike: { [`${GITHUB_OIDC_HOST}:sub`]: `repo:${repository}:*` } } }] : []),
+        Condition: { StringEquals: { [`${GITHUB_OIDC_HOST}:aud`]: 'sts.amazonaws.com' }, StringLike: { [`${GITHUB_OIDC_HOST}:sub`]: owners.map((owner) => `repo:${owner}/*`) } } }] : []),
     ],
   };
 }
@@ -119,6 +134,10 @@ export interface AwsSetupPlan {
   signedInAs: string;
   deployRole: string;
   repository?: string;
+  /** GitHub owners whose Actions may deploy; every repository of an owner is covered. */
+  githubOwners: string[];
+  /** Per-project deploy roles from earlier versions, removed once connections use the account role. */
+  retiringRoles: string[];
   changes: AwsSetupChange[];
   /** True when every change is already in place. */
   ready: boolean;
@@ -167,7 +186,7 @@ export async function awsAccessCurrent(credentials: { accessKeyId: string; secre
 export async function planAwsSetup(session: AwsSignInSession, params: { project: string; region: string; repository?: string }): Promise<AwsSetupPlan> {
   const iam = iamClient(session);
   const account = session.accountId;
-  const role = deployRoleName(params.project);
+  const role = ACCOUNT_DEPLOY_ROLE;
   const changes: AwsSetupChange[] = [];
   const boundary = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${BOUNDARY}`, appBoundaryDocument());
   changes.push({ id: 'boundary', state: boundary === undefined ? 'create' : boundary ? 'ok' : 'update', change: `Policy ${BOUNDARY}: the most any role Hypervibe creates for your app can do (no admin or IAM access)` });
@@ -178,12 +197,28 @@ export async function planAwsSetup(session: AwsSignInSession, params: { project:
     const hasGithub = (providers.OpenIDConnectProviderList ?? []).some((entry) => entry.Arn?.endsWith(`oidc-provider/${GITHUB_OIDC_HOST}`));
     changes.push({ id: 'github-oidc', state: hasGithub ? 'ok' : 'create', change: 'GitHub sign-in for AWS, so CI deploys without stored keys' });
   }
-  const hasRole = await exists(() => iam.send(new GetRoleCommand({ RoleName: role })));
-  changes.push({ id: 'deploy-role', state: hasRole ? 'update' : 'create', change: `Role ${role}: what Hypervibe deploys with, from this computer${params.repository ? ` and ${params.repository}'s GitHub Actions` : ''}` });
+  let currentTrust: string | undefined;
+  const hasRole = await exists(async () => { currentTrust = (await iam.send(new GetRoleCommand({ RoleName: role }))).Role?.AssumeRolePolicyDocument; });
+  const trusted = trustedGitHubOwners(currentTrust);
+  const owner = params.repository?.split('/')[0];
+  const githubOwners = [...new Set([...trusted, ...(owner ? [owner] : [])])].sort();
+  const roleCurrent = hasRole && JSON.stringify(JSON.parse(decodeURIComponent(currentTrust ?? '{}'))) === JSON.stringify(deployTrustDocument(account, githubOwners));
+  changes.push({ id: 'deploy-role', state: !hasRole ? 'create' : roleCurrent ? 'ok' : 'update',
+    change: `Role ${role}: what Hypervibe deploys every project in this account with, from this computer${githubOwners.length ? ` and from GitHub Actions in ${githubOwners.map((name) => `${name}/*`).join(', ')}` : ''}` });
+  const retiringRoles: string[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await iam.send(new ListRolesCommand({ PathPrefix: AWS_PATH, Marker: marker }));
+    retiringRoles.push(...(page.Roles ?? []).map((entry) => entry.RoleName!).filter((name) => name.startsWith(`${ACCOUNT_DEPLOY_ROLE}-`)));
+    marker = page.IsTruncated ? page.Marker : undefined;
+  } while (marker);
+  if (retiringRoles.length) {
+    changes.push({ id: 'retire-project-roles', state: 'update', change: `Remove the older per-project roles (${retiringRoles.join(', ')}); ${role} replaces them` });
+  }
   const hasUser = await exists(() => iam.send(new GetUserCommand({ UserName: LOCAL_USER })));
   changes.push({ id: 'local-user', state: hasUser ? 'update' : 'create', change: `User ${LOCAL_USER} with one access key: lets this computer use the deploy role and nothing else; stored encrypted here and rotated by Hypervibe` });
   return {
-    accountId: account, region: params.region, signedInAs: session.identityArn, deployRole: role, ...(params.repository ? { repository: params.repository } : {}),
+    accountId: account, region: params.region, signedInAs: session.identityArn, deployRole: role, ...(params.repository ? { repository: params.repository } : {}), githubOwners, retiringRoles,
     changes, ready: changes.every((change) => change.state === 'ok'),
   };
 }
@@ -205,6 +240,22 @@ async function putPolicy(iam: IAMClient, account: string, name: string, document
   return arn;
 }
 
+/** Removes the per-project roles an approved plan listed, after every connection moved to the account role. */
+export async function retireProjectRoles(session: AwsSignInSession, plan: AwsSetupPlan): Promise<void> {
+  const iam = iamClient(session);
+  for (const role of plan.retiringRoles) {
+    for (const attached of (await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: role }))).AttachedPolicies ?? []) {
+      await iam.send(new DetachRolePolicyCommand({ RoleName: role, PolicyArn: attached.PolicyArn! }));
+    }
+    for (const name of (await iam.send(new ListRolePoliciesCommand({ RoleName: role }))).PolicyNames ?? []) {
+      await iam.send(new DeleteRolePolicyCommand({ RoleName: role, PolicyName: name }));
+    }
+    try { await iam.send(new DeleteRoleCommand({ RoleName: role })); } catch (error) {
+      if (!(error instanceof NoSuchEntityException)) throw error;
+    }
+  }
+}
+
 /**
  * Applies an approved plan. Returns the new local access key only when one
  * was created (the caller stores it encrypted and never prints it); an
@@ -216,7 +267,7 @@ export async function applyAwsSetup(session: AwsSignInSession, plan: AwsSetupPla
   const tags = [{ Key: 'managed-by', Value: 'hypervibe' }];
   await putPolicy(iam, account, BOUNDARY, appBoundaryDocument(), 'Hypervibe: the most any app role may do');
   const deployArn = await putPolicy(iam, account, DEPLOY_POLICY, deployPolicyDocument(account), 'Hypervibe: deploy and run apps');
-  if (plan.repository && plan.changes.some((change) => change.id === 'github-oidc' && change.state === 'create')) {
+  if (plan.changes.some((change) => change.id === 'github-oidc' && change.state === 'create')) {
     // IAM no longer checks the thumbprint for GitHub's issuer; one value is still required.
     await iam.send(new CreateOpenIDConnectProviderCommand({ Url: `https://${GITHUB_OIDC_HOST}`, ClientIDList: ['sts.amazonaws.com'], ThumbprintList: ['6938fd4d98bab03faadb97b34396831e3780aea1'], Tags: tags }));
   }
@@ -224,14 +275,14 @@ export async function applyAwsSetup(session: AwsSignInSession, plan: AwsSetupPla
     await iam.send(new CreateUserCommand({ UserName: LOCAL_USER, Path: AWS_PATH, Tags: tags }));
   }
   await iam.send(new PutUserPolicyCommand({ UserName: LOCAL_USER, PolicyName: 'assume-hypervibe-deploy-roles', PolicyDocument: JSON.stringify({
-    Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Resource: `arn:aws:iam::${account}:role${AWS_PATH}hypervibe-deploy-*` }],
+    Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Resource: [`arn:aws:iam::${account}:role${AWS_PATH}${ACCOUNT_DEPLOY_ROLE}`, `arn:aws:iam::${account}:role${AWS_PATH}${ACCOUNT_DEPLOY_ROLE}-*`] }],
   }) }));
-  const trust = JSON.stringify(deployTrustDocument(account, plan.repository));
+  const trust = JSON.stringify(deployTrustDocument(account, plan.githubOwners));
   if (await exists(() => iam.send(new GetRoleCommand({ RoleName: plan.deployRole })))) {
     await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: plan.deployRole, PolicyDocument: trust }));
   } else {
     await iam.send(new CreateRoleCommand({ RoleName: plan.deployRole, Path: AWS_PATH, AssumeRolePolicyDocument: trust, MaxSessionDuration: 3600, Tags: tags,
-      Description: 'Hypervibe deploys this project with this role' }));
+      Description: 'Hypervibe deploys the apps in this account with this role' }));
   }
   await iam.send(new AttachRolePolicyCommand({ RoleName: plan.deployRole, PolicyArn: deployArn }));
   const roleArn = `arn:aws:iam::${account}:role${AWS_PATH}${plan.deployRole}`;
