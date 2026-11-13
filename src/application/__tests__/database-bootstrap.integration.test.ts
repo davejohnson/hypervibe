@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { CommandRegistry } from '../commands.js';
+import { registerCoreTools } from '../../tools/core.tools.js';
+import * as infrastructureEngine from '../infrastructure-engine.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { SecretStore } from '../../adapters/secrets/secret-store.js';
 import { createCommandContext } from '../context.js';
@@ -132,6 +135,14 @@ describe('fresh schema bootstrap in the normal plan/apply loop', () => {
     const recovery = await new PlanService().plan(project, 'production');
     expect(recovery).toMatchObject({ scope: 'database-bootstrap', blocked: [] });
     if ('error' in recovery) throw new Error(recovery.error);
+    const enginePlan = vi.spyOn(infrastructureEngine, 'planInfrastructureEngine').mockRejectedValue(new Error('New infrastructure must not precede retained task cleanup'));
+    const commands = new CommandRegistry();
+    registerCoreTools(commands, ctx);
+    const publicRecovery = await commands.execute('hv_plan', { project: project.name, env: 'production' });
+    expect(publicRecovery).toMatchObject({ ok: true, data: { scope: 'database-bootstrap' } });
+    const infrastructure = await commands.execute('hv_plan', { project: project.name, env: 'production', scope: 'infrastructure' });
+    expect(infrastructure).toMatchObject({ ok: false, error: { message: expect.stringContaining('observation or cleanup') } });
+    expect(enginePlan).not.toHaveBeenCalled();
     if (databaseProvider === 'railway') {
       const saved = ctx.repos.runs.findById(recovery.planRunId)!.plan! as Record<string, unknown>;
       ctx.repos.runs.updatePlan(recovery.planRunId, { ...saved, actions: [{ ...recovery.actions[0],
@@ -150,6 +161,8 @@ describe('fresh schema bootstrap in the normal plan/apply loop', () => {
     expect(retained.authentication).toMatchObject({ phase: 'complete', deploymentId: 'owned-deployment' });
     expect(retained.authenticationVerifiedAt).toBeUndefined();
     expect(retained.consumedAt).toBeUndefined();
+    expect(await new PlanService().plan(project, 'production')).toMatchObject({ error: expect.stringContaining('managed by the OpenTofu engine') });
+    expect(runJob).toHaveBeenCalledTimes(2);
   });
 
   it('keeps desired-provider validation for new bootstrap execution', async () => {

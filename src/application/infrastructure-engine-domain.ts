@@ -1,266 +1,224 @@
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { CloudRunAdapter } from '../adapters/providers/gcp/cloudrun.adapter.js';
-import { findCloudflareZone, getCloudflareAdapterFromHints } from '../domain/services/cloudflare-ops.service.js';
 import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
-import type { CloudflareAdapter } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { dnsHostnameBelongsToZone, dnsHostnameSchema } from '../domain/spec/dns.schema.js';
+import type { DesiredDnsRecord } from './dns-engine.js';
 
-/**
- * Custom domains for OpenTofu-managed Cloud Run environments.
- *
- * OpenTofu owns the Cloud Run domain mapping. Hypervibe owns everything that
- * needs DNS or Google account state: proving ownership to Google as the
- * deployment identity (TXT record + Site Verification API), writing the
- * traffic records, and waiting for the certificate. Users never visit Search
- * Console or a DNS dashboard.
- */
+/** Google owns verification and mapping; every DNS resource write belongs to the saved engine plan. */
 export const DOMAIN_VERIFY_OPERATION = 'gcpDomainVerify';
 export const DOMAIN_DNS_OPERATION = 'gcpDomainDns';
 export const DOMAIN_READY_OPERATION = 'gcpDomainReady';
 export const DOMAIN_DNS_REMOVE_OPERATION = 'gcpDomainDnsRemove';
-
-const SUBDOMAIN_TARGET = 'ghs.googlehosted.com';
-const APEX_TARGETS: Record<'A' | 'AAAA', string[]> = {
-  A: ['216.239.32.21', '216.239.34.21', '216.239.36.21', '216.239.38.21'],
-  AAAA: ['2001:4860:4802:32::15', '2001:4860:4802:34::15', '2001:4860:4802:36::15', '2001:4860:4802:38::15'],
+export interface DomainContext { adapter: CloudRunAdapter; gcpProjectId: string; region: string; serviceName?: string }
+type Ownership = 'present' | 'absent' | 'api-disabled' | { unknown: string };
+export type DomainMappingObservation = { state: 'absent' } | { state: 'unknown'; reason: string } | {
+  state: 'present'; uid: string; namespace: string; domain: string; serviceName: string;
+  ready: boolean; certificate: string; dnsRecords?: DesiredDnsRecord[]; sourceFingerprint: string;
 };
-
-type Tri = 'present' | 'absent' | { unknown: string };
-
-export interface DomainContext {
-  adapter: CloudRunAdapter;
-  gcpProjectId: string;
-  region: string;
-}
-
-function isApex(domain: string, zoneName: string): boolean {
-  return domain === zoneName;
-}
-
-function normalizeContent(value: string): string {
-  return value.replace(/\.$/, '').toLowerCase();
-}
-
-/** The traffic records Google expects; fixed targets, so DNS can be written before the mapping exists. */
-export function expectedTrafficRecords(domain: string, zoneName: string): Array<{ type: string; content: string }> {
-  return isApex(domain, zoneName)
-    ? [...APEX_TARGETS.A.map((content) => ({ type: 'A', content })), ...APEX_TARGETS.AAAA.map((content) => ({ type: 'AAAA', content }))]
-    : [{ type: 'CNAME', content: SUBDOMAIN_TARGET }];
-}
-
-export async function cloudflareFor(domain: string): Promise<{ adapter: CloudflareAdapter; zoneId: string; zoneName: string } | { error: string }> {
-  // A connection scoped to the zone (example.com) covers its hostnames (app.example.com).
-  const resolved = getCloudflareAdapterFromHints([...new Set([domain, dnsZoneScopeForDomain(domain)])]);
-  if ('error' in resolved) return { error: `Hypervibe needs access to Cloudflare to manage DNS for ${domain}. Connect it with hv_connections provider="cloudflare" action="connect" scope="${domain}" (opens a one-step page in the browser).` };
-  const zone = await findCloudflareZone(resolved.adapter, domain);
-  if (!zone) return { error: `No Cloudflare zone visible to the connection contains ${domain}.` };
-  return { adapter: resolved.adapter, zoneId: zone.id, zoneName: zone.name };
-}
+const normalized = (value: string) => value.toLowerCase().replace(/\.$/, '');
+const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 async function siteVerificationFetch(token: string, path: string, init: RequestInit = {}): Promise<Response> {
   return fetchWithRetry(`https://www.googleapis.com/siteVerification/v1/${path}`, {
-    ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-  });
+    ...init, signal: AbortSignal.timeout(15_000),
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  }, 1);
 }
+const ownedList = z.object({ items: z.array(z.object({ id: z.string().min(1),
+  site: z.object({ type: z.string(), identifier: z.string().min(1) }), owners: z.array(z.string()).min(1),
+})).max(10000) });
 
-async function observeOwnership(context: DomainContext, domain: string): Promise<Tri | 'api-disabled'> {
-  const token = await context.adapter.siteVerificationAccessToken();
-  const response = await siteVerificationFetch(token, `webResource/${encodeURIComponent(`dns://${domain}`)}`);
-  if (response.status === 404) return 'absent';
-  if (response.status === 403) {
-    const text = await response.text();
-    if (/SERVICE_DISABLED|has not been used|is disabled/i.test(text)) return 'api-disabled';
-    // Site Verification answers 403 for resources the caller does not own.
-    return /forbidden|permission/i.test(text) ? 'absent' : { unknown: 'Site Verification returned HTTP 403.' };
-  }
-  if (!response.ok) return { unknown: `Site Verification returned HTTP ${response.status}.` };
-  const body = await response.json() as { owners?: string[] };
-  return (body.owners ?? []).includes(context.adapter.engineDeploymentIdentity()) ? 'present' : 'absent';
-}
-
-async function observeTrafficDns(domain: string): Promise<Tri | { conflict: string }> {
-  const cloudflare = await cloudflareFor(domain);
-  if ('error' in cloudflare) return { unknown: cloudflare.error };
-  let records;
+/** A permission error is unknown. Only a complete successful owned-site list proves nonownership. */
+async function observeOwnership(context: DomainContext, verificationDomain: string): Promise<Ownership> {
   try {
-    records = await cloudflare.adapter.listRecords(cloudflare.zoneId);
-  } catch (error) {
-    return { unknown: `Reading DNS for ${domain} failed: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  const atName = records.filter((record) => normalizeContent(record.name) === domain && ['A', 'AAAA', 'CNAME'].includes(record.type));
-  const expected = expectedTrafficRecords(domain, cloudflare.zoneName);
-  const foreign = atName.find((record) => !expected.some((target) => target.type === record.type && normalizeContent(record.content) === target.content));
-  if (foreign) return { conflict: `${domain} already has a ${foreign.type} record pointing elsewhere. Hypervibe will not overwrite DNS it did not create; remove it or choose another hostname.` };
-  if (atName.some((record) => record.proxied)) return { conflict: `${domain} is proxied by Cloudflare; Google cannot issue its certificate. Turn the proxy off for this record.` };
-  return expected.every((target) => atName.some((record) => record.type === target.type && normalizeContent(record.content) === target.content)) ? 'present' : 'absent';
+    const token = await context.adapter.siteVerificationAccessToken();
+    const response = await siteVerificationFetch(token, 'webResource');
+    if (!response.ok) {
+      if (response.status === 403 && /SERVICE_DISABLED|has not been used|is disabled/i.test(await response.text())) return 'api-disabled';
+      return { unknown: `Google Site Verification ownership is unknown (HTTP ${response.status}).` };
+    }
+    const parsed = ownedList.safeParse(await response.json());
+    if (!parsed.success) return { unknown: 'Google returned an incomplete verified-domain inventory.' };
+    const matches = parsed.data.items.filter(item => item.site.type === 'INET_DOMAIN' && normalized(item.site.identifier) === verificationDomain);
+    if (matches.length > 1) return { unknown: 'Google returned ambiguous ownership identities for the verification domain.' };
+    if (!matches.length) return 'absent';
+    return matches[0]!.owners.includes(context.adapter.engineDeploymentIdentity()) ? 'present'
+      : { unknown: 'The verified domain does not include the exact deployment identity.' };
+  } catch { return { unknown: 'The Google verified-domain inventory could not be read.' }; }
 }
 
-async function domainMapping(context: DomainContext, domain: string): Promise<{ state: 'present'; ready: boolean; certificate: string } | { state: 'absent' } | { state: 'unknown'; reason: string }> {
-  const token = await context.adapter.engineAccessToken();
-  const response = await fetchWithRetry(`https://${context.region}-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/${context.gcpProjectId}/domainmappings/${domain}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (response.status === 404) return { state: 'absent' };
-  if (!response.ok) return { state: 'unknown', reason: `Cloud Run returned HTTP ${response.status} for the ${domain} mapping.` };
-  const body = await response.json() as { status?: { conditions?: Array<{ type?: string; status?: string; reason?: string }> } };
-  const conditions = body.status?.conditions ?? [];
-  const condition = (type: string) => conditions.find((entry) => entry.type === type);
-  return {
-    state: 'present',
-    ready: condition('Ready')?.status === 'True',
-    certificate: condition('CertificateProvisioned')?.status === 'True' ? 'issued' : condition('CertificateProvisioned')?.reason ?? 'pending',
-  };
+const mappingSchema = z.object({
+  metadata: z.object({ name: z.string().min(1), namespace: z.string().min(1), uid: z.string().min(1),
+    generation: z.union([z.number().int(), z.string().regex(/^\d+$/)]).optional() }),
+  spec: z.object({ routeName: z.string().min(1) }),
+  status: z.object({
+    observedGeneration: z.union([z.number().int(), z.string().regex(/^\d+$/)]).optional(),
+    mappedRouteName: z.string().optional(),
+    conditions: z.array(z.object({ type: z.string(), status: z.string(), reason: z.string().optional() })).max(64).optional(),
+    resourceRecords: z.array(z.object({ name: z.string().optional(), type: z.enum(['A', 'AAAA', 'CNAME']), rrdata: z.string().min(1) })).max(64).optional(),
+  }).optional(),
+});
+
+/** Fresh immutable mapping identity and its provider-supplied DNS requirements. */
+export async function observeDomainMapping(context: DomainContext, domain: string): Promise<DomainMappingObservation> {
+  try {
+    const token = await context.adapter.engineAccessToken();
+    const response = await fetchWithRetry(`https://${context.region}-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/${encodeURIComponent(context.gcpProjectId)}/domainmappings/${encodeURIComponent(domain)}`,
+      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) }, 1);
+    if (response.status === 404) return { state: 'absent' };
+    if (!response.ok) return { state: 'unknown', reason: `Cloud Run mapping observation failed (HTTP ${response.status}).` };
+    const parsed = mappingSchema.safeParse(await response.json());
+    if (!parsed.success) return { state: 'unknown', reason: 'Cloud Run returned an incomplete domain mapping identity or DNS requirements.' };
+    const body = parsed.data;
+    if (normalized(body.metadata.name) !== domain || context.serviceName && body.spec.routeName !== context.serviceName
+      || body.status?.mappedRouteName && body.status.mappedRouteName !== body.spec.routeName) {
+      return { state: 'unknown', reason: 'The domain mapping targets a different hostname or native service.' };
+    }
+    const groups = new Map<string, DesiredDnsRecord>();
+    for (const record of body.status?.resourceRecords ?? []) {
+      const base = dnsZoneScopeForDomain(domain);
+      // Google defines name as relative and applicable only to CNAME records.
+      const owner = record.type !== 'CNAME' ? domain : record.name
+        ? normalized(record.name).endsWith(`.${base}`) || normalized(record.name) === base
+          ? normalized(record.name) : `${normalized(record.name)}.${base}`
+        : undefined;
+      if (owner !== domain) return { state: 'unknown', reason: 'Cloud Run returned DNS requirements for a different or incomplete record owner.' };
+      const value = record.type === 'CNAME' ? normalized(record.rrdata) : record.rrdata;
+      const key = `${owner}|${record.type}`;
+      const prior = groups.get(key);
+      if (prior) prior.values = [...new Set([...prior.values, value])].sort();
+      else groups.set(key, { key: `gcp_domain_${record.type.toLowerCase()}`, name: owner, type: record.type, values: [value], ttl: 300, proxied: false });
+    }
+    const dnsRecords = body.status?.resourceRecords ? [...groups.values()].sort((a, b) => a.key.localeCompare(b.key)) : undefined;
+    const conditions = body.status?.conditions ?? [];
+    const certificate = conditions.find(entry => entry.type === 'CertificateProvisioned');
+    const currentGeneration = body.metadata.generation !== undefined && body.status?.observedGeneration !== undefined
+      && String(body.metadata.generation) === String(body.status.observedGeneration);
+    const ready = currentGeneration && conditions.find(entry => entry.type === 'Ready')?.status === 'True'
+      && certificate?.status === 'True';
+    const identity = { uid: body.metadata.uid, namespace: body.metadata.namespace, domain, serviceName: body.spec.routeName, dnsRecords };
+    return { state: 'present', ...identity, ready, certificate: certificate?.status === 'True' ? 'issued' : certificate?.reason ?? 'pending',
+      sourceFingerprint: hash(identity) };
+  } catch { return { state: 'unknown', reason: 'The exact Cloud Run domain mapping could not be observed.' }; }
 }
 
 export interface DomainPlanActions {
-  before: PlanAction[];
-  after: PlanAction[];
-  blocked?: string;
+  before: PlanAction[]; after: PlanAction[]; blocked?: string; dnsRecords?: DesiredDnsRecord[];
+  ownershipPresent?: boolean; mappingPresent?: boolean; verificationDomain?: string; sourceFingerprint?: string;
 }
 
-/** Observes one desired domain and returns the Hypervibe-owned actions around the engine's mapping. */
-export async function planDomain(context: DomainContext, domain: string, healthPath: string): Promise<DomainPlanActions> {
-  const base = { verified: true, metadata: { gcpProjectId: context.gcpProjectId, region: context.region, domain } };
-  const ownership = await observeOwnership(context, domain);
-  if (typeof ownership === 'object') return { before: [], after: [], blocked: ownership.unknown };
-  const dns = await observeTrafficDns(domain);
-  if (typeof dns === 'object') return { before: [], after: [], blocked: 'conflict' in dns ? dns.conflict : dns.unknown };
-  const mapping = await domainMapping(context, domain);
-  if (mapping.state === 'unknown') return { before: [], after: [], blocked: mapping.reason };
-
-  const before: PlanAction[] = [
-    {
-      ...base, id: `domain-verify:${domain}`, type: ownership === 'present' ? 'noop' : 'create',
-      resource: { kind: 'domain', name: `${domain} ownership`, provider: 'gcp' },
-      reason: ownership === 'present'
-        ? `Google already recognizes Hypervibe as the owner of ${domain}.`
-        : `Hypervibe will prove ownership of ${domain} to Google with a DNS TXT record${ownership === 'api-disabled' ? ' (enabling the Site Verification API first)' : ''}.`,
-      metadata: { ...base.metadata, operation: DOMAIN_VERIFY_OPERATION },
-    },
-    {
-      ...base, id: `domain-dns:${domain}`, type: dns === 'present' ? 'noop' : 'create',
-      resource: { kind: 'domain', name: `${domain} DNS`, provider: 'cloudflare' },
-      reason: dns === 'present' ? `DNS for ${domain} already points at Google.` : `Hypervibe will point ${domain} at Google in Cloudflare (DNS only, not proxied).`,
-      metadata: { ...base.metadata, operation: DOMAIN_DNS_OPERATION },
-    },
-  ];
-  const ready = mapping.state === 'present' && mapping.ready;
-  const after: PlanAction[] = [{
-    ...base, id: `domain-ready:${domain}`, type: ready ? 'noop' : 'update',
-    resource: { kind: 'domain', name: `${domain} certificate`, provider: 'gcp' },
-    reason: ready ? `${domain} serves HTTPS.` : `Hypervibe will wait for Google to issue the HTTPS certificate for ${domain} and check that it answers.`,
-    metadata: { ...base.metadata, operation: DOMAIN_READY_OPERATION, healthPath },
-  }];
-  return { before, after };
+function healthUrl(domain: string, path: string): URL | undefined {
+  try {
+    const url = new URL(path, `https://${domain}`);
+    return path.startsWith('/') && !path.startsWith('//') && url.origin === `https://${domain}`
+      && !url.hash && !url.username && !url.password ? url : undefined;
+  } catch { return undefined; }
 }
 
-export function planDomainDnsRemoval(context: DomainContext, domain: string, dependsOn: string[]): PlanAction {
+async function successfulHttps(url: URL): Promise<boolean> {
+  try {
+    const response = await fetchWithRetry(url, { redirect: 'manual', signal: AbortSignal.timeout(20_000) }, 1);
+    await response.body?.cancel();
+    return response.status >= 200 && response.status < 300;
+  } catch { return false; }
+}
+
+/** Google verification, native mapping, engine DNS, and HTTPS remain separate reviewed stages. */
+export async function planDomain(context: DomainContext, requestedDomain: string, healthPath: string, zoneName?: string): Promise<DomainPlanActions> {
+  const parsed = dnsHostnameSchema.safeParse(requestedDomain);
+  const block = (blocked: string): DomainPlanActions => ({ before: [], after: [], blocked });
+  if (!parsed.success) return block('Choose a complete public DNS hostname for the custom domain.');
+  const domain = parsed.data;
+  const url = healthUrl(domain, healthPath);
+  if (!url) return block('The health check must stay on the reviewed HTTPS hostname.');
+  const verificationDomain = dnsZoneScopeForDomain(domain);
+  if (zoneName && !dnsHostnameBelongsToZone(verificationDomain, zoneName)) return block(`Google requires ownership proof at ${verificationDomain}; the selected DNS zone cannot contain that base-domain record.`);
+  const ownership = await observeOwnership(context, verificationDomain);
+  if (typeof ownership === 'object') return block(ownership.unknown);
+  if (ownership === 'api-disabled') return block('The Google Site Verification API is disabled. Review project access preparation before continuing.');
+  const mapping = await observeDomainMapping(context, domain);
+  if (mapping.state === 'unknown') return block(mapping.reason);
+  const dnsRecords: DesiredDnsRecord[] = [];
+  if (ownership === 'absent') {
+    try {
+      const token = await context.adapter.siteVerificationAccessToken();
+      const response = await siteVerificationFetch(token, 'token', { method: 'POST', body: JSON.stringify({
+        site: { type: 'INET_DOMAIN', identifier: verificationDomain }, verificationMethod: 'DNS_TXT',
+      }) });
+      if (!response.ok) return block(`Google did not provide the ownership proof (HTTP ${response.status}).`);
+      const body = await response.json() as { token?: unknown };
+      if (typeof body.token !== 'string' || !body.token.trim() || body.token.length > 8192) return block('Google returned an incomplete ownership proof.');
+      dnsRecords.push({ key: 'gcp_domain_verification', name: verificationDomain, type: 'TXT', values: [body.token], ttl: 300, proxied: false });
+    } catch { return block('Google ownership proof could not be prepared. No DNS action was authorized.'); }
+  } else if (mapping.state === 'present') {
+    if (!mapping.dnsRecords?.length) return block('The Cloud Run mapping has not supplied complete DNS requirements yet. Run hv_plan again after it becomes available.');
+    dnsRecords.push(...mapping.dnsRecords);
+  }
+  const metadata = { gcpProjectId: context.gcpProjectId, region: context.region, domain, verificationDomain,
+    ...(context.serviceName ? { serviceName: context.serviceName } : {}) };
+  const ready = mapping.state === 'present' && mapping.ready && await successfulHttps(url);
   return {
-    id: `domain-dns-remove:${domain}`, type: 'destroy', verified: true,
-    resource: { kind: 'domain', name: `${domain} DNS`, provider: 'cloudflare' },
-    reason: `Hypervibe will remove the DNS records it created for ${domain}.`,
-    requiresConfirm: true,
-    dependsOn,
-    metadata: { operation: DOMAIN_DNS_REMOVE_OPERATION, gcpProjectId: context.gcpProjectId, region: context.region, domain },
+    before: [{ id: `domain-verify:${domain}`, type: ownership === 'present' ? 'noop' : 'create',
+      resource: { kind: 'domain', name: `${domain} ownership`, provider: 'gcp' }, verified: true,
+      reason: ownership === 'present' ? `Google verified the deployment identity for ${verificationDomain}.` : `Ask Google to verify the reviewed DNS proof for ${verificationDomain}.`,
+      metadata: { ...metadata, operation: DOMAIN_VERIFY_OPERATION } }],
+    after: [{ id: `domain-ready:${domain}`, type: ready ? 'noop' : 'update', resource: { kind: 'domain', name: `${domain} certificate`, provider: 'gcp' },
+      verified: true, reason: 'Verify the exact mapping, issued certificate and successful HTTPS response.',
+      metadata: { ...metadata, operation: DOMAIN_READY_OPERATION, healthPath } }],
+    dnsRecords, ownershipPresent: ownership === 'present', mappingPresent: mapping.state === 'present', verificationDomain,
+    sourceFingerprint: mapping.state === 'present' ? mapping.sourceFingerprint : 'absent',
   };
 }
 
-async function enableSiteVerification(context: DomainContext): Promise<boolean> {
-  const token = await context.adapter.engineAccessToken();
-  const response = await fetchWithRetry(`https://serviceusage.googleapis.com/v1/projects/${context.gcpProjectId}/services/siteverification.googleapis.com:enable`, {
-    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}',
-  });
-  if (!response.ok) return false;
-  // Enablement propagates asynchronously; wait until the API answers.
-  for (let attempt = 0; attempt < 20; attempt++) {
-    if (await observeOwnership(context, '__probe__.invalid') !== 'api-disabled') return true;
-    await new Promise((resolve) => setTimeout(resolve, 6000));
-  }
-  return false;
-}
-
+/** Historical plans never gain authority to write DNS without their saved engine artifact. */
 export async function executeDomainAction(context: DomainContext, action: PlanAction): Promise<ActionResult> {
-  const { domain, operation, healthPath } = action.metadata as { domain: string; operation: string; healthPath?: string };
+  const metadata = action.metadata ?? {};
+  const domain = typeof metadata.domain === 'string' ? normalized(metadata.domain) : '';
+  const operation = metadata.operation;
+  if (operation === DOMAIN_DNS_OPERATION || operation === DOMAIN_DNS_REMOVE_OPERATION) return {
+    success: false, status: 'blocked', message: 'This historical DNS action has no saved OpenTofu plan. Run hv_plan to review exact owned DNS resources.',
+  };
+  if (!dnsHostnameSchema.safeParse(domain).success) return { success: false, status: 'blocked', message: 'The domain action has no exact hostname.' };
+  if (metadata.gcpProjectId !== undefined && metadata.gcpProjectId !== context.gcpProjectId
+    || metadata.region !== undefined && metadata.region !== context.region
+    || context.serviceName && metadata.serviceName !== undefined && metadata.serviceName !== context.serviceName) {
+    return { success: false, status: 'blocked', message: 'The reviewed Google project, region or service changed. Run hv_plan again.' };
+  }
   if (operation === DOMAIN_VERIFY_OPERATION) {
-    let ownership = await observeOwnership(context, domain);
-    if (ownership === 'present') return { success: true, message: `Google already recognizes Hypervibe as the owner of ${domain}.` };
-    if (ownership === 'api-disabled') {
-      if (!await enableSiteVerification(context)) return { success: false, status: 'blocked', message: 'The Google Site Verification API could not be enabled for this project.' };
-      ownership = await observeOwnership(context, domain);
-    }
+    const verificationDomain = dnsZoneScopeForDomain(domain);
+    if (metadata.verificationDomain !== undefined && metadata.verificationDomain !== verificationDomain) return { success: false, status: 'blocked', message: 'The reviewed base-domain ownership target changed.' };
+    const ownership = await observeOwnership(context, verificationDomain);
+    if (ownership === 'present') return { success: true, message: `Google verified the deployment identity for ${verificationDomain}.` };
+    if (ownership === 'api-disabled') return { success: false, status: 'blocked', message: 'The Google Site Verification API is disabled. Review project access preparation before continuing.' };
     if (typeof ownership === 'object') return { success: false, status: 'blocked', message: ownership.unknown };
-    const token = await context.adapter.siteVerificationAccessToken();
-    const site = { type: 'INET_DOMAIN', identifier: domain };
-    const tokenResponse = await siteVerificationFetch(token, 'token', { method: 'POST', body: JSON.stringify({ site, verificationMethod: 'DNS_TXT' }) });
-    if (!tokenResponse.ok) return { success: false, message: `Google did not issue a verification token for ${domain} (HTTP ${tokenResponse.status}).` };
-    const verificationToken = (await tokenResponse.json() as { token?: string }).token;
-    if (!verificationToken) return { success: false, message: 'Google returned an empty verification token.' };
-    const cloudflare = await cloudflareFor(domain);
-    if ('error' in cloudflare) return { success: false, status: 'blocked', message: cloudflare.error };
-    const existing = await cloudflare.adapter.listRecords(cloudflare.zoneId, 'TXT');
-    if (!existing.some((record) => normalizeContent(record.name) === domain && record.content.replace(/"/g, '') === verificationToken)) {
-      // Create, never upsert: other TXT records at this name belong to someone else.
-      await cloudflare.adapter.createRecord(cloudflare.zoneId, { name: domain, type: 'TXT', content: verificationToken, ttl: 120 });
-    }
-    // DNS propagation to Google takes a little while; retry the verification.
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const verify = await siteVerificationFetch(token, 'webResource?verificationMethod=DNS_TXT', { method: 'POST', body: JSON.stringify({ site }) });
-      if (verify.ok) return { success: true, message: `Google verified Hypervibe as the owner of ${domain}.` };
-      if (verify.status !== 400) return { success: false, message: `Google rejected verification of ${domain} (HTTP ${verify.status}).` };
-      await new Promise((resolve) => setTimeout(resolve, 15000));
-    }
-    return { success: false, status: 'pending', message: `Google has not seen the verification record for ${domain} yet. Run hv_plan again in a few minutes.` };
+    if (metadata.verificationDomain !== verificationDomain) return { success: false, status: 'blocked', message: 'This historical plan did not review base-domain verification. Run hv_plan again.' };
+    try {
+      const token = await context.adapter.siteVerificationAccessToken();
+      const response = await siteVerificationFetch(token, 'webResource?verificationMethod=DNS_TXT', {
+        method: 'POST', body: JSON.stringify({ site: { type: 'INET_DOMAIN', identifier: verificationDomain } }),
+      });
+      if (response.status === 400) return { success: false, status: 'pending', message: 'Google has not validated the staged DNS proof yet. Run hv_plan again after propagation.' };
+      if (!response.ok) return { success: false, status: 'blocked', message: `Google domain verification failed (HTTP ${response.status}).` };
+      const verified = await observeOwnership(context, verificationDomain);
+      return verified === 'present' ? { success: true, message: `Google verified the deployment identity for ${verificationDomain}.` }
+        : { success: false, status: 'pending', message: 'Google accepted verification but current ownership has not been confirmed. Run hv_plan again.' };
+    } catch { return { success: false, status: 'pending', message: 'Google verification has an uncertain outcome. Re-observe ownership with hv_plan before retrying.' }; }
   }
-
-  if (operation === DOMAIN_DNS_OPERATION) {
-    const dns = await observeTrafficDns(domain);
-    if (dns === 'present') return { success: true, message: `DNS for ${domain} already points at Google.` };
-    if (typeof dns === 'object') return { success: false, status: 'blocked', message: 'conflict' in dns ? dns.conflict : dns.unknown };
-    const cloudflare = await cloudflareFor(domain);
-    if ('error' in cloudflare) return { success: false, status: 'blocked', message: cloudflare.error };
-    const existing = await cloudflare.adapter.listRecords(cloudflare.zoneId);
-    for (const target of expectedTrafficRecords(domain, cloudflare.zoneName)) {
-      const present = existing.some((record) => normalizeContent(record.name) === domain && record.type === target.type && normalizeContent(record.content) === target.content);
-      if (!present) await cloudflare.adapter.createRecord(cloudflare.zoneId, { name: domain, type: target.type, content: target.content, ttl: 300, proxied: false });
-    }
-    return await observeTrafficDns(domain) === 'present'
-      ? { success: true, message: `${domain} now points at Google.` }
-      : { success: false, status: 'pending', message: `DNS for ${domain} was written but could not be confirmed yet.` };
-  }
-
   if (operation === DOMAIN_READY_OPERATION) {
-    const deadline = Date.now() + 12 * 60 * 1000;
-    let last = 'pending';
-    while (Date.now() < deadline) {
-      const mapping = await domainMapping(context, domain);
-      if (mapping.state === 'unknown') return { success: false, status: 'blocked', message: mapping.reason };
-      if (mapping.state === 'absent') return { success: false, status: 'blocked', message: `The ${domain} mapping does not exist.` };
-      last = mapping.certificate;
-      if (mapping.ready) {
-        try {
-          const response = await fetchWithRetry(`https://${domain}${healthPath ?? '/'}`, { redirect: 'manual', signal: AbortSignal.timeout(20_000) });
-          if (response.status < 500) return { success: true, message: `https://${domain} answers (HTTP ${response.status}).`, data: { url: `https://${domain}` } };
-        } catch { /* certificate or edge still settling */ }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20000));
-    }
-    return { success: false, status: 'pending', message: `Google is still issuing the certificate for ${domain} (${last}). This can take up to an hour; run hv_plan again later to check.` };
+    const mapping = await observeDomainMapping({ ...context,
+      ...(typeof metadata.serviceName === 'string' ? { serviceName: metadata.serviceName } : {}) }, domain);
+    if (mapping.state === 'unknown') return { success: false, status: 'blocked', message: mapping.reason };
+    if (mapping.state === 'absent') return { success: false, status: 'blocked', message: 'The exact Cloud Run mapping is absent.' };
+    if (!mapping.ready) return { success: false, status: 'pending', message: 'Cloud Run has not finished reconciling the mapping and certificate. Run hv_plan again later.' };
+    const healthPath = typeof metadata.healthPath === 'string' ? metadata.healthPath : '/';
+    const url = healthUrl(domain, healthPath);
+    if (!url) return { success: false, status: 'blocked', message: 'The health check must stay on the reviewed HTTPS hostname.' };
+    if (await successfulHttps(url)) return { success: true, message: 'The issued custom-domain certificate and HTTPS response are verified.', data: { url: `https://${domain}` } };
+    return { success: false, status: 'pending', message: 'The custom domain did not return a successful HTTPS response. Run hv_plan again after the application is ready.' };
   }
-
-  if (operation === DOMAIN_DNS_REMOVE_OPERATION) {
-    const cloudflare = await cloudflareFor(domain);
-    if ('error' in cloudflare) return { success: false, status: 'blocked', message: cloudflare.error };
-    const expected = expectedTrafficRecords(domain, cloudflare.zoneName);
-    const records = await cloudflare.adapter.listRecords(cloudflare.zoneId);
-    // Only the exact Google targets Hypervibe writes; anything else at the name is left alone.
-    for (const record of records.filter((entry) => normalizeContent(entry.name) === domain
-      && expected.some((target) => target.type === entry.type && normalizeContent(entry.content) === target.content))) {
-      await cloudflare.adapter.deleteRecord(cloudflare.zoneId, record.id);
-    }
-    return await observeTrafficDns(domain) === 'absent'
-      ? { success: true, message: `Removed the DNS records Hypervibe created for ${domain}.` }
-      : { success: false, status: 'pending', message: `DNS removal for ${domain} could not be confirmed yet.` };
-  }
-  return { success: false, status: 'blocked', message: `No domain authority exists for ${action.id}.` };
+  return { success: false, status: 'blocked', message: 'No domain authority exists for this action.' };
 }

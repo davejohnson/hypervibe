@@ -38,6 +38,8 @@ export interface ManagedWorkflowFixture {
     provider: string;
     engine: 'redis';
   };
+  storage?: Record<string, { provider: string; type: 'bucket'; region: string; injectInto: string[] }>;
+  queues?: Record<string, Record<string, never>>;
 }
 
 export interface HostingProviderContract {
@@ -184,6 +186,19 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     domainTrafficProxy: 'supported',
     maintenance: 'managed',
     credentials: railwayCredentials,
+    managedWorkflow: {
+      environmentName: 'production',
+      fixtureDirectory: 'test/provider-conformance/fixture',
+      requiredPaths: ['.hypervibe/spec.json', 'Dockerfile', 'package.json', 'server.mjs'],
+      workflow: 'deploy-railway-production.yml',
+      publicUrlProtocols: ['https:'],
+      serviceName: 'web',
+      service: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true },
+      database: { provider: 'railway', engine: 'postgres' },
+      cache: { provider: 'railway', engine: 'redis' },
+      storage: { files: { provider: 'railway', type: 'bucket', region: 'iad', injectInto: ['web'] } },
+      queues: { jobs: {} },
+    },
   },
   {
     kind: 'hosting',

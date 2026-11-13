@@ -84,6 +84,7 @@ describe('server tool surface', () => {
       const instructions = client.getInstructions()!;
       expect(instructions.length).toBeLessThanOrEqual(limit);
       expect(instructions).toContain('hv_spec');
+      expect(instructions).toContain('GCP always uses OpenTofu');
       expect(instructions).toContain('complete query string');
       expect(instructions).toContain('action="describe"');
       expect(instructions).toContain('hypervibe://guidance');

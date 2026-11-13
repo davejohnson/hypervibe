@@ -8,6 +8,33 @@ relevant to the task. Paths in code spans are relative to the repository root.
 
 Related contracts: [Pinned provider contracts](../../test/provider-contracts/README.md) and [provider conformance](../provider-conformance.md).
 
+## Existing-zone DNS evidence
+
+The shared DNS engine implements scoped A, AAAA, CNAME, TXT, CAA and MX records
+with exact imports and encrypted state for these provider pins:
+
+| Provider | Pin | Ordinary CI evidence | Installed live lifecycle |
+| --- | --- | --- | --- |
+| Cloudflare | 5.19.1 | Actual provider init/validate; individual-record identity and imports | Unverified |
+| Google Cloud DNS | 8.9.0 | Actual provider init/validate; authoritative RRset imports and preserved sibling values | Unverified |
+| Amazon Route 53 | 6.40.0 | Actual provider init/validate; scoped RRset imports without overwrite permission | Unverified |
+| Azure DNS | 4.65.0 | Actual provider init/validate; ARM-scoped RRsets and imports without automatic provider registration | Unverified |
+
+Checksums were obtained with real OpenTofu provider locking for Darwin/Linux,
+AMD64/ARM64. The [backend evidence](../../src/adapters/dns/tofu/README.md) links
+the pinned primary schemas. Read-only observer transport fixtures, shared
+plan/apply boundary regressions, and Pages/email consumer ordering run in normal
+CI. They establish local behavior and provider configuration compatibility, not
+cloud authentication, successful import/apply, propagation, certificates or native
+absence after a live teardown. Installed live profile requirements are described
+in [provider conformance](../provider-conformance.md); no live pass is asserted here.
+
+Only existing explicitly selected zones are supported by the configuration.
+Zone creation, DNSSEC signing, registrar DS/delegation changes and automatic CAA
+security policy mutations are unavailable. Security requirements are observed
+and blocked when unsatisfied or unknown. DNS provider selection does not promote
+the corresponding hosting provider's capability status.
+
 Stable rule IDs preserve the original guidance and are mapped in
 [the migration audit](guidance-migration.json). These files are
 for developing Hypervibe; the distributed user workflow lives in
@@ -32,6 +59,21 @@ coverage as each capability becomes reachable.
 Review affected implementations when a shared boundary changes. For an
 adapter-local fix that preserves the shared contract, reuse verified evidence and
 investigate only the affected assumptions; do not restart a full provider review.
+
+Every implemented infrastructure provider needs a disposable live lifecycle
+profile through the installed Hypervibe workflow: create, verify the fixture app
+and resources, update, verify a noop, tear down, and independently confirm exact
+native resource absence. Capture identities before teardown and after partial
+applies. An empty plan, missing local binding, or successful delete request is
+not deletion evidence. Preserve recovery state and fail the run if cleanup is
+failed or unknown. Reusable test account/project prerequisites are separate from
+the environment resources created by each run.
+
+Keep profile coverage and the lifecycle harness's failure/cleanup checks in
+ordinary acceptance. Live runs require configured dedicated test access and
+exact infrastructure approval; missing access or an unimplemented provider must
+be reported explicitly, never counted as a live pass. Record the tested source
+revision with the complete lifecycle evidence before claiming support.
 
 ## DG-018
 

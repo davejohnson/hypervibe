@@ -410,6 +410,20 @@ describe('hv_connections', () => {
     await t.close();
   });
 
+  it('previews the exact setup plan after billing selection without applying it', async () => {
+    const project = new ProjectRepository().create({ name: 'gcp-selected-billing', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    vi.mocked(runGcpBootstrap).mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-project-plan', actions: [],
+      openBillingAccounts: [{ name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', displayName: 'Test billing' }], requiresConfirmation: true });
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', { provider: 'cloudrun', action: 'bootstrap', project: project.name,
+        gcpProjectId: 'example-project', region: 'europe-west1', adminAuth: 'default', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' });
+      expect(result.ok).toBe(true);
+      expect(result.data.planId).toBe('saved-project-plan');
+      expect(runGcpBootstrap).toHaveBeenCalledWith(expect.objectContaining({ region: 'europe-west1', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', confirm: undefined }));
+    } finally { await t.close(); }
+  });
+
   it('confirms GCP bootstrap only with the exact billing account selected by the user', async () => {
     const project = new ProjectRepository().create({
       name: 'gcp-bootstrap-confirm',
@@ -459,14 +473,6 @@ describe('hv_connections', () => {
         project: 'app',
         gcpProjectId: 'vibe-project',
         adminAuth: 'default',
-        billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
-      },
-      {
-        provider: 'cloudrun',
-        action: 'bootstrap',
-        project: 'app',
-        gcpProjectId: 'vibe-project',
-        adminAuth: 'default',
         confirm: true,
       },
     ];
@@ -483,6 +489,7 @@ describe('hv_connections', () => {
   it('allows staged GCP capabilities only through Cloud Run preparation', async () => {
     const t = await makeClient();
     for (const capability of [
+      { region: 'europe-west1' },
       { gcsAccess: 'inspect' },
       { memorystoreAccess: 'inspect' },
       { queueAccess: 'lifecycle' },

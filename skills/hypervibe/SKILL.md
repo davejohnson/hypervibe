@@ -56,16 +56,15 @@ replace them with remembered permission tables or dashboard procedures.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
 
-An environment with `hosting.engine: "opentofu"` (experimental GCP path; use it
-only when the spec already has it or the user asks) is driven end to end by
-`hv_launch`: it connects GCP, creates or updates the Cloud Run services, Cloud
+Google Cloud uses OpenTofu as its only infrastructure engine. Select
+`hosting.provider: "cloudrun"`; Hypervibe chooses the engine automatically. Do
+not ask the user to choose an engine or offer a legacy GCP path. `hv_launch` connects GCP, creates or updates the Cloud Run services, Cloud
 SQL database, storage buckets and custom domain in reviewed rounds, releases
 the committed local code and verifies it. Ask the user only at its stop points:
-`needs_billing_choice` (show its `plannedSteps`, including any resource access
-listed there; choosing the account approves them), `needs_access` (an existing
-project needs one more permission: explain it, then pass its `accessId` in
-`approveAccess`) and `needs_confirmation` (show the changes and estimated
-monthly cost, then pass exactly `confirmActions`) and `needs_secrets` (keys only
+`needs_billing_choice` (ask which billing account should pay; the choice does
+not approve infrastructure or permissions), `needs_access` (show its saved OpenTofu setup plan and exact permissions,
+then pass its `accessId` in `approveAccess` after approval), `needs_confirmation` (show the changes and estimated
+monthly cost, then pass its exact `planId` and `confirmActions`) and `needs_secrets` (keys only
 an outside service issues, such as API keys: a local page is open with a link to
 each key's page, and one-click use of a value already in `.env.<env>` or the
 shared `.env` (never shown); share the link and call again once they are saved). Declare
@@ -89,12 +88,41 @@ After a verified copy, a re-run releases without copying again; pass
 `verifyOnly=true` to compare the source and the copy (row counts, per-table
 content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
 `hv_deploy` remain available for individual steps; a full-scope `hv_plan` is
-refused. Resources it reports as unsupported stay blocked; do not work around
+refused for app infrastructure. A Pages-only canonical environment with explicit
+DNS selection uses the ordinary repository plan. Resources reported as unsupported stay blocked; do not work around
 them.
 
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
 requires explicit intent to adopt and the exact reviewed mapping.
+
+## Domains and DNS
+
+Select `environment.dns` independently of hosting: Cloudflare, Google Cloud DNS,
+Amazon Route 53 or Azure DNS. Use an existing zone with its exact provider ID,
+name and account/project/subscription scope, plus a verified connection. Infer
+routine choices from existing evidence; never infer ownership from a name match.
+Plan DNS through `hv_plan`, apply its saved stage, and plan again to continue the
+consumer workflow. Hypervibe manages OpenTofu privately; no separate installation
+or direct record-writing workaround is needed.
+
+Use `environment.domain` for a hosted app or email domain. A Pages-only project
+can select DNS in its declared canonical environment without a hosting domain
+or services; existing hosting/data resources must first be reconciled. Pages
+claims the hostname before DNS publication and keeps the claim until DNS removal
+is verified. SendGrid records wait for an observed domain authorization. Existing
+records require explicit exact-ID adoption and preservation of unrelated values.
+
+Defaults are public DNS, required HTTPS, proxy off and no wildcards; preserve
+existing DNSSEC and CAA policy. Required security settings block when evidence
+is missing or unsatisfied. Zone creation, DNSSEC/registrar changes, automatic CAA
+policy edits, private DNS and wildcard workflows are unavailable. Cloudflare
+Email Routing automatic DNS activation and unsupported Cloud Run email remain
+blocked. A pending certificate is not a completed deployment.
+
+All four DNS backends have pinned-provider configuration and local lifecycle
+coverage. Their installed live apply, propagation and teardown remain unverified;
+describe that gap rather than claiming a proven live path.
 
 ## Present the next step accurately
 

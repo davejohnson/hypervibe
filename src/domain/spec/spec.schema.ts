@@ -5,6 +5,9 @@ import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
 import { withDefaultDatabaseProvider } from './database-defaults.js';
+import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
+export { dnsSpecSchema, dnsSecurityPolicySchema } from './dns.schema.js';
+export type { DnsSpec, DnsSecurityPolicy } from './dns.schema.js';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -1614,8 +1617,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
-    /** Opt-in: OpenTofu plans and applies this environment's infrastructure (Cloud Run pilot). */
-    engine: z.literal('opentofu').optional(),
+    /** Compatibility field for saved specs; Cloud Run always uses OpenTofu. */
+    engine: z.literal('opentofu').optional().describe('Optional compatibility field. Cloud Run always uses OpenTofu; other hosting providers cannot select it.'),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
@@ -1632,6 +1635,8 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
   ]).optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  /** DNS authority is independent of hosting; an exact existing zone is required. */
+  dns: dnsSpecSchema.optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
   domainProxy: z.boolean().optional(),
   /** Route this hostname through its owned Cloudflare Worker to a verified service in a separate environment. */
@@ -1681,11 +1686,34 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.dns) {
+    const dns = environment.dns;
+    const hostname = environment.domain?.toLowerCase().replace(/\.$/, '');
+    const wildcard = hostname?.startsWith('*.') === true;
+    if (hostname && !dnsHostnameSchema.safeParse(wildcard ? hostname.slice(2) : hostname).success) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domain'],
+        message: 'DNS management requires a complete custom-domain hostname.' });
+    } else if (hostname && !dnsHostnameBelongsToZone(hostname, dns.zone.name)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dns', 'zone', 'name'],
+        message: 'The custom domain must belong to the selected DNS zone.' });
+    }
+    if (wildcard && dns.policy?.wildcard !== 'allow') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dns', 'policy', 'wildcard'],
+        message: 'A wildcard custom domain requires an explicit wildcard policy.' });
+    }
+    if (environment.domainProxy !== undefined && dns.policy?.proxy !== undefined
+      && environment.domainProxy !== (dns.policy.proxy === 'on')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dns', 'policy', 'proxy'],
+        message: 'domainProxy and dns.policy.proxy must describe the same intent.' });
+    }
+  }
   if (environment.domainTarget || environment.maintenance?.page === 'off') {
+    const unsupportedDnsRouting = environment.dns && (environment.dns.provider !== 'cloudflare'
+      || (environment.dns.policy?.proxy ?? (environment.domainProxy === true ? 'on' : 'off')) !== 'on');
     if (!environment.domainTarget || !environment.domain || environment.domainProxy === false
-      || environment.maintenance?.mode !== 'application' || environment.maintenance.enabled !== true) {
+      || unsupportedDnsRouting || environment.maintenance?.mode !== 'application' || environment.maintenance.enabled !== true) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
-        message: 'Traffic switching requires a domainTarget, a proxied domain, and enabled application maintenance. Keep the original app paused while routing to its replacement.' });
+        message: 'Traffic switching requires a domainTarget, a Cloudflare-proxied domain, and enabled application maintenance. Explicit DNS intent must enable its Cloudflare proxy. Keep the original app paused while routing to its replacement.' });
     }
     if (environment.loadBalancer) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
       message: 'Traffic switching cannot also manage a load balancer for the same hostname.' });
@@ -2238,6 +2266,14 @@ export const projectSpecSchema = z.object({
     ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
     : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    if (environment.dns && !environment.domain) {
+      const canonical = spec.github?.canonicalEnvironment ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository');
+      const pagesDomain = spec.github?.enabled !== false && canonical === environmentName ? spec.github?.pages?.customDomain : undefined;
+      if (!pagesDomain) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'dns'],
+        message: 'Select DNS for an environment domain or the GitHub Pages custom domain in its canonical environment.' });
+      else if (!dnsHostnameBelongsToZone(pagesDomain, environment.dns.zone.name)) ctx.addIssue({ code: z.ZodIssueCode.custom,
+        path: ['environments', environmentName, 'dns', 'zone', 'name'], message: 'The GitHub Pages custom domain must belong to this environment’s selected DNS zone.' });
+    }
     if (environment.domainTarget) {
       const destination = spec.environments[environment.domainTarget.environment];
       const service = destination?.services[environment.domainTarget.service];

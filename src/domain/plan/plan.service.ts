@@ -1,3 +1,4 @@
+import { engineSelectionProblem, isEngineManaged } from '../services/infrastructure-engine-selection.js';
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
 import { planServiceInstances } from '../services/service-instance.service.js';
 import { pendingRepositoryVariableEnvironment, planRepositoryVariables } from '../services/repository-variables.service.js';
@@ -117,6 +118,7 @@ import {
   githubInfrastructureConnectionBlock,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
+  isRepositoryDnsEnvironment,
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
 import {
@@ -1699,8 +1701,25 @@ export class PlanService {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
     const scope = options?.scope ?? 'full';
-    if (specResult.spec.environments[environmentName]?.hosting.engine === 'opentofu') {
-      return { error: `Environment "${environmentName}" is managed by the OpenTofu engine. Plan infrastructure with hv_plan scope="infrastructure" and release code with hv_deploy.` };
+    const selectedEnvironment = specResult.spec.environments[environmentName];
+    if (scope === 'full' && isRepositoryDnsEnvironment(specResult.spec, environmentName)) {
+      const existing = this.envRepo.findByProjectAndName(project.id, environmentName);
+      if (existing && (Object.keys(existing.platformBindings).some(key => !['github', 'dnsEngine'].includes(key))
+        || this.componentRepo.findByEnvironmentId(existing.id).length > 0)) {
+        return { error: 'This environment has existing or unknown bound hosting resources. Preserve and reconcile those resources before using it for repository-only Pages DNS.' };
+      }
+      return this.planRepositoryInfrastructure(project, environmentName, specResult, options);
+    }
+    const selectionProblem = selectedEnvironment && engineSelectionProblem(selectedEnvironment);
+    if (selectionProblem) return { error: selectionProblem };
+    const retainedEnvironment = scope === 'full' ? this.envRepo.findByProjectAndName(project.id, environmentName) : undefined;
+    const retainedExecutionRecovery = Boolean(retainedEnvironment && this.componentRepo.findByEnvironmentId(retainedEnvironment.id)
+      .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+    // Existing credential values and already acknowledged task observation are
+    // separate from infrastructure ownership. Their isolated planners validate
+    // exact targets and cannot admit a service create/update as a side effect.
+    if (isEngineManaged(selectedEnvironment) && scope !== 'credentials' && !retainedExecutionRecovery) {
+      return { error: `Environment "${environmentName}" is managed by the OpenTofu engine. Plan infrastructure with hv_plan and release code with hv_deploy.` };
     }
     if (scope === 'backups') {
       if (options?.serviceFilter !== undefined || options?.envVarOverrides !== undefined || options?.envFile !== undefined

@@ -118,7 +118,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       project: projectField.describe('Hypervibe project name/id for validated context. Required explicitly for action="bootstrap". With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
       repositoryContext: z.boolean().optional().describe('Read-only discovery/describe only: resolve the current client repository without importing its spec or bindings. Do not combine with project. A fresh repository may supply Git-remote context for form labels and owner prefill, but remains unscoped. Ambiguous or unrecorded committed identities remain blocked.'),
       gcpProjectId: z.string().optional().describe('Exact GCP project ID. Bootstrap preview reuses verified repository-scoped access or derives a stable name when omitted; confirmation requires the exact ID returned by that preview. Prepare defaults to the Cloud Run connection projectId.'),
-      billingAccountName: z.string().optional().describe('action="bootstrap" with confirm=true: exact open billing account name returned by the preview, such as billingAccounts/AAAAAA-BBBBBB-CCCCCC.'),
+      region: z.string().trim().min(1).optional().describe('GCP bootstrap/prepare target region for shared build resources; defaults to us-central1. Each region is reviewed and retained independently.'),
+      billingAccountName: z.string().optional().describe('action="bootstrap": exact open billing account name chosen from discovery. Preview again with this account, then confirm the saved infrastructure plan separately.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
@@ -147,6 +148,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       project: projectRef,
       repositoryContext,
       gcpProjectId,
+      region,
       billingAccountName,
       deployServiceAccountEmail,
       gcsAccess,
@@ -201,6 +203,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || credentialsKey !== undefined
           || credentialsMap !== undefined
           || scope !== undefined
+          || region !== undefined
           || gcpProjectId !== undefined
           || billingAccountName !== undefined
           || deployServiceAccountEmail !== undefined
@@ -292,7 +295,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       if (requestedAction === 'describe') {
         const incompatible = suppliedOptionNames({ credentials, credentialsRef, credentialsKey, credentialsMap,
-          gcpProjectId, billingAccountName, deployServiceAccountEmail,
+          gcpProjectId, region, billingAccountName, deployServiceAccountEmail,
           gcsAccess, memorystoreAccess, queueAccess, workerAccess, adminAuth, adminCredentialsJson,
           adminCredentialsJsonRef, adminAccessToken, adminAccessTokenRef, confirm });
         if (incompatible.length) return commandError('VALIDATION', `describe does not accept: ${incompatible.join(', ')}.`);
@@ -309,6 +312,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       const sharedGcpFields = {
         gcpProjectId,
+        region,
         adminAuth,
       };
       const prepareOnlyFields = {
@@ -361,6 +365,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction === 'prepare' && adminAccessToken && adminAccessTokenRef) {
         return commandError('VALIDATION', 'Pass either adminAccessToken or adminAccessTokenRef, not both.');
       }
+      if (requestedAction === 'prepare' && region && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'region is supported only when preparing the shared cloudrun connection.');
+      }
       if (requestedAction === 'prepare' && gcsAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'gcsAccess is supported only when preparing the shared cloudrun connection.');
       }
@@ -409,11 +416,6 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           hint: 'Hypervibe uses your current Google Application Default Credentials in memory for this one-time setup and never stores them.',
         });
       }
-      if (requestedAction === 'bootstrap' && !confirm && billingAccountName !== undefined) {
-        return commandError('VALIDATION', 'billingAccountName is accepted only with confirm=true for action="bootstrap".', {
-          hint: 'Run the preview first. It lists the exact open billing accounts available to your current Google login.',
-        });
-      }
       if (requestedAction === 'bootstrap' && confirm && !billingAccountName?.trim()) {
         return commandError('VALIDATION', 'confirm=true requires the exact billingAccountName returned by the bootstrap preview.', {
           hint: 'Run the same bootstrap call without confirm first, then choose one exact openBillingAccounts[].name value.',
@@ -431,6 +433,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const targetProject = project!;
         const payload = await runGcpBootstrap({
           project: targetProject,
+          ...(region ? { region } : {}),
           gcpProjectId,
           scope,
           billingAccountName,
@@ -449,14 +452,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
                 : undefined)
               .filter((name): name is string => typeof name === 'string')
             : [];
-          const hint = accountNames.length === 0
-            ? 'No open billing accounts are visible to the current Google login. Give that login access to an open GCP billing account, then run this preview again.'
-            : accountNames.length === 1
-              ? `Review the preview, then ask the user to approve billing account ${accountNames[0]}. Re-run with that exact billingAccountName and confirm=true only after approval; linking billing can create costs.`
-              : 'Review the preview and ask the user to choose one exact openBillingAccounts[].name. Re-run with that billingAccountName and confirm=true only after approval; linking billing can create costs.';
-          const agentMessage = accountNames.length === 0
-            ? 'No open GCP billing account is available. Ask the user to grant the current Google login access to an open billing account, then run the preview again. Do not confirm or try alternate infrastructure tools.'
-            : 'Show the GCP setup preview and open billing accounts. Ask the user to approve one exact billing account before confirming. Never choose or confirm a billable account on their behalf.';
+          const hint = billingAccountName
+            ? 'Review the exact saved infrastructure plan and its costs and permissions. After approval, repeat these inputs with confirm=true; do not create a new preview in between.'
+            : accountNames.length === 0
+              ? 'No open billing accounts are visible. Give this Google login access to an open billing account, then repeat discovery.'
+              : `Ask which billing account should pay (${accountNames.join(', ')}), then preview again with that billingAccountName. Infrastructure can create costs; choosing billing does not approve it.`;
+          const agentMessage = billingAccountName
+            ? 'Show the saved setup plan and ask for approval of its exact changes before confirming. Billing selection alone is not approval.'
+            : 'Ask the user to choose a billing account. Never choose it for them; preview its infrastructure separately before confirmation.';
           return commandSuccess(
             { project: { id: targetProject.id, name: targetProject.name }, ...payload },
             {
@@ -484,6 +487,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           : adminAccessToken;
         const payload = await runCloudPrepare({
           project: targetProject,
+          ...(region ? { region } : {}),
           provider,
           gcpProjectId,
           deployServiceAccountEmail,

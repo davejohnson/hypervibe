@@ -1140,6 +1140,14 @@ export function resolvePlanActionAuthority(
   }
   if (
     exactResource(action, 'domain')
+    && action.type === 'update'
+    && action.metadata?.operation === 'domainDnsReady'
+    && action.metadata?.dnsEngineReady === true
+  ) {
+    return authority(action, 'domain.configure');
+  }
+  if (
+    exactResource(action, 'domain')
     && hasType(action, 'create', 'update', 'replace')
     && !action.metadata?.operation
   ) {
@@ -1166,7 +1174,10 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'serviceId')
     && metadataString(action, 'environmentId')
     && metadataString(action, 'providerDomainId')
-    && metadataString(action, 'zoneId')
+    && (metadataString(action, 'zoneId') || action.metadata?.dnsEngineRemoved === true
+      || (action.metadata?.dnsCancellationVerified === true && action.metadata?.dnsCancellationRequired === true
+        && typeof (action.metadata.dnsCancellationProof as Record<string, unknown> | undefined)?.zoneFingerprint === 'string'
+        && typeof (action.metadata.dnsCancellationProof as Record<string, unknown> | undefined)?.connectionId === 'string'))
     && metadataStringArray(action, 'dnsRecordIds')
   ) {
     return authority(action, 'domain.configure');

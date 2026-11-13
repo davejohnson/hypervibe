@@ -229,6 +229,18 @@ export function isBackupProgramPublicationAction(action: PlanAction): boolean {
 }
 
 /** Runtime-validated document stored in runs.plan for type 'plan' runs. */
+const dnsPlanDescriptorSchema = z.object({
+  version: z.literal(1), planId: z.string().min(1),
+  segment: z.object({ id: z.string().min(1), engine: z.literal('opentofu'), planDigest: z.string().min(1),
+    configurationDigest: z.string().min(1), engineVersion: z.string().min(1), providerVersions: z.record(z.string(), z.string()) }).strict(),
+  state: z.object({ provider: z.string().regex(/^dns-(cloudflare|gcp|aws|azure)$/), projectId: z.string().min(1),
+    environmentId: z.string().min(1), partition: z.literal('environment') }).strict(),
+  zone: z.object({ provider: z.enum(['cloudflare', 'gcp', 'aws', 'azure']), zoneId: z.string().min(1), zoneName: z.string().min(1),
+    scope: z.object({ accountId: z.string().optional(), projectId: z.string().optional(), subscriptionId: z.string().optional(), resourceGroup: z.string().optional() }).strict() }).strict(),
+  owner: z.string().min(1), domain: z.string().min(1), connectionId: z.string().min(1), connectionScope: z.string().optional(),
+  zoneFingerprint: z.string().min(1), payloadEncrypted: z.string().min(1),
+}).strict();
+
 export const planRunDocumentSchema = z.object({
   kind: z.literal('hv_plan'),
   /** Omitted by plans created before scoped planning; those remain full plans. */
@@ -253,8 +265,10 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-publication',
     'managed-ci-credentials',
     'infrastructure-engine',
+    'dns-engine',
   ]).optional(),
   environmentName: z.string().min(1),
+  dns: z.object({ descriptor: dnsPlanDescriptorSchema, source: z.record(z.string(), z.unknown()).optional() }).strict().optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
   databaseBootstrapReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
@@ -282,8 +296,31 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'dns-engine') {
+    const descriptor = document.dns?.descriptor;
+    const reconciliation = descriptor && document.actions.length === 1
+      && document.actions[0]?.type === 'update' && document.actions[0]?.verified === true
+      && document.actions[0]?.metadata?.operation === 'dnsOwnershipReconcile'
+      && !engineSegmentOf(document.actions[0]) && document.actions[0]?.resource.kind === 'domain'
+      && document.actions[0]?.resource.name === descriptor.domain
+      && document.actions[0]?.resource.provider === `dns-${descriptor.zone.provider}`;
+    if (!descriptor || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length
+      || descriptor.state.provider !== `dns-${descriptor.zone.provider}`
+      || descriptor.state.partition !== 'environment'
+      || !reconciliation && document.actions.some(action => {
+        if (action.resource.kind !== 'domain' || action.resource.provider !== `dns-${descriptor.zone.provider}`) return true;
+        if (action.type === 'noop') return Boolean(action.metadata?.engineSegment);
+        const member = engineSegmentOf(action);
+        if (!member) return true;
+        const { addresses: _addresses, ...reviewed } = member;
+        return !isDeepStrictEqual(reviewed, descriptor.segment);
+      })) ctx.addIssue({ code: 'custom', message: 'DNS plans contain only the exact saved DNS engine segment and its source identity.' });
+    return;
+  }
+  if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
-    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
+    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
     'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
@@ -616,7 +653,7 @@ export interface ConvergeResult {
   applyRunId?: string;
   error?: string;
   conflict?: {
-    kind: 'already_applied' | 'plan_in_progress' | 'environment_in_progress';
+    kind: 'already_applied' | 'plan_in_progress' | 'environment_in_progress' | 'resource_in_progress';
     runId: string;
   };
   receipts: ActionReceipt[];
@@ -770,6 +807,47 @@ export function orderActions(actions: PlanAction[]): PlanAction[] {
   return ordered;
 }
 
+/** Keep DNS publication and hosting-claim release in the same native-zone critical section. */
+function dnsZoneLockKey(zone: z.infer<typeof dnsPlanDescriptorSchema>['zone']): string {
+  const requiredScope = zone.provider === 'azure' ? [zone.scope.subscriptionId, zone.scope.resourceGroup]
+    : zone.provider === 'gcp' ? [zone.scope.projectId] : [zone.scope.accountId];
+  if (requiredScope.some(value => typeof value !== 'string' || !value.trim())) throw new Error('Incomplete native DNS zone scope.');
+  const identity = zone.provider === 'azure'
+    ? [zone.provider, zone.zoneId.toLowerCase(), zone.scope.subscriptionId?.toLowerCase(), zone.scope.resourceGroup?.toLowerCase()]
+    : zone.provider === 'gcp' ? [zone.provider, zone.zoneId, zone.scope.projectId]
+      : [zone.provider, zone.zoneId, zone.scope.accountId];
+  return `dns-zone:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+}
+
+/** Derive locks only from persisted native scope; arbitrary plan-supplied lock keys are ignored. */
+function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
+  if (document.scope === 'dns-engine' && document.dns) return [dnsZoneLockKey(document.dns.descriptor.zone)];
+  if (document.scope !== 'infrastructure-engine') return undefined;
+  const domains = new Set<string>();
+  for (const action of document.actions) {
+    if (action.type === 'noop') continue;
+    const forget = action.metadata?.operation === 'gcpDomainForget';
+    if (!forget && !action.id.startsWith('domain:')) continue;
+    const domain = forget ? action.metadata?.domain : action.id.slice('domain:'.length);
+    if (typeof domain !== 'string' || !domain || action.resource.kind !== 'domain'
+      || action.resource.provider !== 'gcp' || action.resource.name !== domain) throw new Error('Invalid exact domain-claim action.');
+    if (!forget) {
+      const segment = engineSegmentOf(action);
+      if (!segment?.addresses.length || segment.addresses.some(address => !/^google_cloud_run_domain_mapping\.[A-Za-z0-9_]+$/.test(address)))
+        throw new Error('Invalid native domain mapping action.');
+    }
+    domains.add(domain);
+  }
+  if (!domains.size) return undefined;
+  const claims = z.object({ domainClaims: z.record(z.string(), z.object({ zone: dnsPlanDescriptorSchema.shape.zone,
+    connectionScope: z.string().min(1).optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+  return [...new Set([...domains].map(domain => {
+    const claim = claims[domain];
+    if (!claim) throw new Error('The exact domain claim has no saved native DNS zone.');
+    return dnsZoneLockKey(claim.zone);
+  }))].sort();
+}
+
 export class ConvergeExecutor {
   constructor(private runRepo = new RunRepository()) {}
 
@@ -837,6 +915,9 @@ export class ConvergeExecutor {
       return { success: false, error: error instanceof Error ? error.message : String(error), receipts: [] };
     }
 
+    let lockResourceKeys: string[] | undefined;
+    try { lockResourceKeys = dnsZoneResourceLocks(document); }
+    catch { return { success: false, error: 'The saved domain action has no valid exact DNS zone claim. Re-run hv_plan before changing the domain.', receipts: [] }; }
     const reservation = this.runRepo.reserveApply({
       projectId: planRun.projectId,
       environmentId: planRun.environmentId,
@@ -844,13 +925,16 @@ export class ConvergeExecutor {
       environmentName: document.environmentName,
       specRevision: document.specRevision,
       lockEnvironmentIds: document.lockEnvironmentIds,
+      lockResourceKeys,
     });
     if (!reservation.reserved) {
       const error = reservation.reason === 'already_applied'
         ? `Plan ${params.planRunId} was already applied (run ${reservation.conflictingRunId}). Re-run hv_plan.`
         : reservation.reason === 'plan_in_progress'
           ? `Plan ${params.planRunId} is already being applied (run ${reservation.conflictingRunId}). Wait for that apply to finish and inspect its receipts before retrying.`
-          : `Environment ${document.environmentName} already has a running apply (run ${reservation.conflictingRunId}). Wait for it to finish and inspect its receipts before applying another plan.`;
+          : reservation.reason === 'resource_in_progress'
+            ? `This DNS zone already has a running apply in another environment (run ${reservation.conflictingRunId}). Wait for it to finish, then refresh the DNS plan before applying changes.`
+            : `Environment ${document.environmentName} already has a running apply (run ${reservation.conflictingRunId}). Wait for it to finish and inspect its receipts before applying another plan.`;
       return {
         success: false,
         error,

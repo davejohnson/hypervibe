@@ -1,3 +1,4 @@
+import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import { createCommandRegistry } from './commands.js';
 import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.service.js';
 import pg from 'pg';
@@ -201,6 +202,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   billingAccountName?: string;
   approveAccess?: string[];
   confirmActions?: string[];
+  planId?: string;
   importSecrets?: boolean;
   copyData?: boolean;
   /** Copy the data again even though a verified copy exists (refresh before cutover). */
@@ -229,13 +231,24 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     const proposed = proposeTargetEnvironment(sourceSpec, { region: params.region, domain: params.domain });
     specResult = store.merge(params.project, { environments: { [params.to]: proposed } });
   }
+  let sourcePlanApproval = false;
+  if (params.planId) {
+    const loaded = new ConvergeExecutor().loadPlan(params.planId);
+    if ('error' in loaded) return { status: 'blocked', message: loaded.error };
+    if (loaded.run.projectId !== params.project.id || ![params.from, params.to].includes(loaded.document.environmentName)) {
+      return { status: 'blocked', message: 'The saved migration plan belongs to another project or environment.' };
+    }
+    sourcePlanApproval = loaded.document.environmentName === params.from;
+    if (sourcePlanApproval && !params.cutover) return { status: 'blocked', message: 'A source-environment plan can be confirmed only during the reviewed cutover.' };
+  }
   let spec = specResult.spec;
   if (isAwsEngineEnvironment(spec, params.to)) return migrateToAws(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
     ...(params.approveAccess ? { approveAccess: params.approveAccess } : {}),
-    ...(params.confirmActions ? { confirmActions: params.confirmActions } : {}),
+    ...(!sourcePlanApproval && params.planId ? { planId: params.planId } : {}),
+    ...(!sourcePlanApproval && params.confirmActions ? { confirmActions: params.confirmActions } : {}),
     ...(params.sourceDirectory ? { sourceDirectory: params.sourceDirectory } : {}),
   };
 
@@ -246,7 +259,8 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   if ('blocked' in context) return { status: 'blocked', message: context.blocked };
   const environmentLabel = context.environment.id.toLowerCase();
 
-  // 3. Runtime secrets, copied from the running source after the user sees their names.
+  // 3. Review runtime-secret names. Containers are prepared through the engine before values move.
+  let pendingSecretValues: Record<string, string> | undefined;
   const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const recorded = (environment().platformBindings as { engine?: EngineBinding }).engine;
   if (recorded?.importedSecrets?.some((key) => scopedToEnvironment(key, params.from))) {
@@ -275,14 +289,9 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
           + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
       };
     }
-    const token = await context.adapter.engineAccessToken();
-    for (const key of keys) {
-      const failure = await writeSecretVersion(token, context.gcpProjectId, engineSecretId(params.to, key),
-        { 'managed-by': 'hypervibe', 'hv-environment': environmentLabel, 'hv-imported': 'true' }, values[key]!);
-      if (failure) return { status: 'blocked', message: failure.message };
-    }
+    pendingSecretValues = Object.fromEntries(keys.map((key) => [key, values[key]!]));
     const engine = (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
-    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, kind: 'opentofu', importedSecrets: keys } });
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, kind: 'opentofu', pendingImportedSecrets: keys } });
   }
 
   const migration = () => {
@@ -324,6 +333,24 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   // 4. Infrastructure for the target, without releasing code yet.
   const built = await launchEnvironment(ctx, { ...launchParams, stopAfter: 'infrastructure' });
   if (built.status !== 'ready') return built;
+  // This phase consumed its exact artifact approval; later rounds need their own review.
+  delete launchParams.planId;
+  delete launchParams.confirmActions;
+
+  // Containers now exist under an approved saved engine plan. Values stay outside engine state.
+  if (pendingSecretValues) {
+    const token = await context.adapter.engineAccessToken();
+    for (const [key, value] of Object.entries(pendingSecretValues)) {
+      const failure = await writeSecretVersion(token, context.gcpProjectId, engineSecretId(params.to, key),
+        { 'managed-by': 'hypervibe', 'hv-environment': environmentLabel, 'hv-imported': 'true' }, value);
+      if (failure) return { status: 'blocked', message: failure.message };
+    }
+    const engine = (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, importedSecrets: Object.keys(pendingSecretValues), pendingImportedSecrets: [] } });
+    const wired = await launchEnvironment(ctx, { ...launchParams, stopAfter: 'infrastructure' });
+    if (wired.status !== 'ready') return wired;
+  }
+
 
   // 5. Copy the data inside the target cloud, after the user approves replacing target data.
   const targetSpec = spec.environments[params.to]!;
@@ -470,12 +497,32 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
 }
 
 /** Plans and applies the source environment, accepting only pause and traffic changes. */
-async function applySourceStage(ctx: CommandContext, project: Project, environmentName: string, confirmActions: string[] | undefined, stage: string): Promise<'done' | MigrateResult> {
+async function applySourceStage(ctx: CommandContext, project: Project, environmentName: string, confirmActions: string[] | undefined, stage: string, planId?: string): Promise<'done' | MigrateResult> {
   const registry = createCommandRegistry(ctx);
+  type SourcePlan = { planId: string; blocked?: unknown[]; actions: Array<{ id: string; type: string; reason?: string; requiresConfirm?: boolean; billable?: boolean; dataBearing?: boolean; metadata?: { operation?: string } }> };
+  let reviewed: SourcePlan | undefined;
+  if (planId) {
+    const loaded = new ConvergeExecutor().loadPlan(planId);
+    if ('error' in loaded) return { status: 'blocked', message: loaded.error };
+    if (loaded.document.environmentName === environmentName) {
+      const environment = ctx.repos.environments.findByProjectAndName(project.id, environmentName);
+      if (loaded.run.projectId !== project.id || !environment || loaded.run.environmentId !== environment.id
+        || loaded.document.specRevision !== new SpecStore().get(project)?.revision) {
+        return { status: 'blocked', message: 'The saved source plan no longer matches this project, environment and spec. Review a new cutover plan.' };
+      }
+      reviewed = { planId, actions: loaded.document.actions };
+    }
+  }
+
   for (let round = 0; round < 4; round++) {
-    const planned = await registry.get('hv_plan')!.execute({ project: project.id, env: environmentName });
-    if (!planned.ok) return { status: 'blocked', message: `Planning the ${stage} of ${environmentName} failed: ${planned.error?.message ?? 'unknown error'}` };
-    const plan = planned.data as { planId: string; blocked?: unknown[]; actions: Array<{ id: string; type: string; reason?: string; requiresConfirm?: boolean; billable?: boolean; dataBearing?: boolean; metadata?: { operation?: string } }> };
+    const usingReviewedPlan = reviewed !== undefined;
+    let plan = reviewed;
+    reviewed = undefined;
+    if (!plan) {
+      const planned = await registry.get('hv_plan')!.execute({ project: project.id, env: environmentName });
+      if (!planned.ok) return { status: 'blocked', message: `Planning the ${stage} of ${environmentName} failed: ${planned.error?.message ?? 'unknown error'}` };
+      plan = planned.data as SourcePlan;
+    }
     if (plan.blocked?.length) return { status: 'blocked', message: `The ${stage} of ${environmentName} is blocked: ${JSON.stringify(plan.blocked).slice(0, 500)}` };
     const changes = plan.actions.filter((action) => action.type !== 'noop');
     if (!changes.length) return 'done';
@@ -486,9 +533,9 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
       return { status: 'blocked', message: `${environmentName} has other pending changes (${unrelated.map((action) => action.id).join(', ')}). Apply or undo them first; the cutover changes only the pause and the traffic route.` };
     }
     const required = changes.filter((action) => action.requiresConfirm || action.billable || action.dataBearing).map((action) => action.id);
-    const missing = required.filter((id) => !(confirmActions ?? []).includes(id));
-    if (missing.length) {
-      return { status: 'needs_confirmation', confirmActions: required, changes: changes.map((action) => ({ id: action.id, change: action.reason ?? action.type })), estimatedMonthlyCost: [] };
+    const exactApproval = usingReviewedPlan && JSON.stringify([...(confirmActions ?? [])].sort()) === JSON.stringify([...required].sort());
+    if (required.length && !exactApproval) {
+      return { status: 'needs_confirmation', planId: plan.planId, confirmActions: required, changes: changes.map((action) => ({ id: action.id, change: action.reason ?? action.type })), estimatedMonthlyCost: [] };
     }
     const applied = await registry.get('hv_apply')!.execute({ project: project.id, planId: plan.planId, ...(required.length ? { confirmActions: required } : {}) });
     const result = applied.data as { applied?: boolean; error?: string } | undefined;
@@ -519,7 +566,7 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
     .filter(([, value]) => targetOrigin && value.replace(/\/$/, '') === targetOrigin).map(([key]) => [key, sourceOrigin]));
   const routed = source.domainTarget?.environment === params.to && source.maintenance?.page === 'off';
   if (routed) {
-    const done = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'traffic move');
+    const done = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'traffic move', params.planId);
     if (done !== 'done') return done;
     return { status: 'cut_over', domain, target: params.to, message: `${domain} now forwards to ${params.to}. ${params.from} stays paused with its data and DNS in place; to send visitors back, set its domainTarget away and maintenance.page to "active", then resume.` };
   }
@@ -539,11 +586,13 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
   if (!(source.maintenance?.enabled && source.maintenance.mode === 'application')) {
     store.merge(params.project, { environments: { [params.from]: { maintenance: { enabled: true, mode: 'application', page: 'active' } } } });
   }
-  const paused = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'pause');
+  const paused = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'pause', params.planId);
   if (paused !== 'done') return paused;
   // 2. Point the target at the source domain (released with the copy), copy again and prove it matches.
   if (Object.keys(retarget).length) store.merge(params.project, { environments: { [params.to]: { envVars: retarget } } });
-  const copied = await migrateEnvironment(ctx, { ...params, cutover: false, confirmCutover: false, copyData: true, refreshData: true });
+  const prior = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined;
+  const sourceApprovalConsumed = prior && !('error' in prior) && prior.document.environmentName === params.from;
+  const copied = await migrateEnvironment(ctx, { ...params, ...(sourceApprovalConsumed ? { planId: undefined, confirmActions: undefined } : {}), cutover: false, confirmCutover: false, copyData: true, refreshData: true });
   if (copied.status !== 'migrated') return copied;
   // The copy is proven by its own check: the paused source's checksums against the restored
   // target, taken before the target app can write. A later comparison would race the live target.
@@ -552,7 +601,7 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
   }
   // 3. Send the domain to the target.
   store.merge(params.project, { environments: { [params.from]: { domainTarget: { environment: params.to, service: web }, maintenance: { enabled: true, mode: 'application', page: 'off' } } } });
-  const moved = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'traffic move');
+  const moved = await applySourceStage(ctx, params.project, params.from, undefined, 'traffic move');
   if (moved !== 'done') return moved;
   return {
     status: 'cut_over', domain, target: params.to, ...(copied.database ? { database: copied.database } : {}),

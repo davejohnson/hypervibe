@@ -102,48 +102,6 @@ describe('Cloud Run native cron maintenance transport', () => {
     expect(f.writes()).toHaveLength(0);
   });
 
-  it('pauses future runs, waits for completion, and resumes the saved schedule without cancelling work', async () => {
-    const f = await fixture({ inventory: (_page, read) => ({ executions: [read < 4 ? execution({ runningCount: 1 }) : completed()] }) });
-    const snapshot = await f.observe();
-    expect(snapshot).toMatchObject({ wasRunning: true, cronSchedule: schedule });
-    await expect(f.adapter.suspendMaintenanceWorkload(f.environment, snapshot)).resolves.toMatchObject({ success: true });
-    expect(f.reads()).toBeGreaterThanOrEqual(4);
-    await expect(f.adapter.resumeMaintenanceWorkload(f.environment, snapshot)).resolves.toMatchObject({ success: true });
-    expect(f.writes().map(([url]) => String(url))).toEqual([
-      `https://cloudscheduler.googleapis.com/v1/${schedulerName}:pause`,
-      `https://cloudscheduler.googleapis.com/v1/${schedulerName}:resume`,
-    ]);
-  });
-
-  it('retries a paused schedule using a fresh paginated inventory without cancelling or repausing', async () => {
-    const f = await fixture({ state: 'PAUSED', inventory: (page, read) => page
-      ? { executions: [read < 6 ? execution({ name: `${jobName}/executions/older` }) : completed()] }
-      : { executions: [execution({ name: `${jobName}/executions/newer`, completionTime: '2026-11-04T00:02:00Z' })], nextPageToken: 'older' } });
-    expect(await f.observe()).toMatchObject({ state: 'running' });
-    await expect(f.adapter.suspendMaintenanceWorkload(f.environment, f.snapshot)).resolves.toMatchObject({ success: true });
-    expect(f.reads()).toBeGreaterThanOrEqual(6);
-    expect(f.writes()).toHaveLength(0);
-  });
-
-  it('keeps the trigger paused on drain deadline and allows the same saved snapshot to retry', async () => {
-    let done = false;
-    const f = await fixture({ inventory: () => ({ executions: [done ? completed() : execution({ reconciling: true })] }) });
-    await expect(f.adapter.suspendMaintenanceWorkload(f.environment, f.snapshot)).resolves.toMatchObject({ success: false });
-    expect(f.reads()).toBeLessThanOrEqual(125);
-    expect(await f.observe()).toMatchObject({ state: 'running', providerState: { schedulerState: 'PAUSED' } });
-    done = true;
-    await expect(f.adapter.suspendMaintenanceWorkload(f.environment, f.snapshot)).resolves.toMatchObject({ success: true });
-    expect(f.writes()).toHaveLength(1);
-    expect(String(f.writes()[0]?.[0])).toMatch(/:pause$/);
-  });
-
-  it('recovers a lost pause response by observing the exact paused trigger and completed runs', async () => {
-    const f = await fixture({ pauseLostAcknowledgement: true });
-    await f.adapter.suspendMaintenanceWorkload(f.environment, f.snapshot).catch(() => undefined);
-    await expect(f.adapter.suspendMaintenanceWorkload(f.environment, f.snapshot)).resolves.toMatchObject({ success: true });
-    expect(f.writes()).toHaveLength(1);
-  });
-
   it.each([
     ['omitted repeated/scalar defaults', {}],
     ['empty execution inventory', { executions: [], nextPageToken: '' }],

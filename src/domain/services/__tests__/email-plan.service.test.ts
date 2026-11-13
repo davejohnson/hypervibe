@@ -156,6 +156,13 @@ const domainAuthentication = {
 };
 
 describe('planEmail', () => {
+  it('does not freeze a partial provider authentication response into a smaller DNS intent', async () => {
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: spec(), environment: null, observed: null,
+      integrationState: state({ domainAuthentications: { status: 'known', items: [{ ...domainAuthentication,
+        dns: { dkim2: domainAuthentication.dns.dkim2, mail_cname: domainAuthentication.dns.mail_cname },
+      }] } }) });
+    expect(result.actions.find(action => action.metadata?.operation === EMAIL_OPERATIONS.dnsSync)?.metadata).not.toHaveProperty('desiredRecords');
+  });
   it.each([undefined, { perServiceKeys: { api: ['SENDGRID_API_KEY'] } }])('does not plan empty runtime writes for email setup alone: %j', async (runtime) => {
     const desired = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} }, email: { enabled: true } });
     const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,

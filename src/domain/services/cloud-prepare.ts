@@ -24,6 +24,8 @@ export interface CloudPreparationRecord {
   runtimeServiceAccountAccessRoles?: string[];
   /** Roles the runtime identity holds on itself (granted on that one service account). */
   runtimeSelfRoles?: string[];
+  /** Shared image repositories whose exact region and identity were verified. */
+  artifactRepositoryRegions?: string[];
 }
 
 export const CLOUD_PREPARE_PROFILES: Record<CloudPrepareProvider, CloudPrepareProfile> = {
@@ -41,6 +43,7 @@ export const CLOUD_PREPARE_PROFILES: Record<CloudPrepareProvider, CloudPreparePr
       'secretmanager.googleapis.com',
       'logging.googleapis.com',
       'cloudscheduler.googleapis.com',
+      'siteverification.googleapis.com',
     ],
     requiredRoles: [
       'roles/run.admin',
@@ -92,6 +95,7 @@ export function getCloudPreparation(
     runtimeRequiredRoles: asStringArray(record.runtimeRequiredRoles),
     runtimeServiceAccountAccessRoles: asStringArray(record.runtimeServiceAccountAccessRoles),
     runtimeSelfRoles: asStringArray(record.runtimeSelfRoles),
+    artifactRepositoryRegions: asStringArray(record.artifactRepositoryRegions),
   };
 }
 
@@ -99,6 +103,11 @@ export const CLOUD_RUN_RUNTIME_BASE_ROLES = [
   'roles/cloudsql.client',
   'roles/secretmanager.secretAccessor',
 ] as const;
+
+export function isCloudPreparedForRegion(project: Pick<Project, 'policies'> | null | undefined, region: string): boolean {
+  return Boolean(project && isCloudPrepared(project, 'cloudrun')
+    && getCloudPreparation(project, 'cloudrun')?.artifactRepositoryRegions?.includes(region));
+}
 
 export const CLOUD_RUN_RUNTIME_QUEUE_ROLES = [
   'roles/pubsub.publisher',

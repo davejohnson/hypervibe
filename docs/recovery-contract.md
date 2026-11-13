@@ -48,9 +48,9 @@ repository export/import and resume. Conflicting records block recovery.
 
 Restore-drill compilation uses a provider-owned source resolver over the bound
 environment and database component. The shared compiler verifies ownership and
-the safe identity before passing it to the provider compiler. Cloud SQL alone
-parses its `project:region:instance` connection name. Its emitted drill continues
-to restore a separate instance, run the existing SQL check and perform cleanup.
+the safe identity before passing it to the provider compiler. Cloud SQL restore
+drills are unavailable: the old workflow created and deleted instances outside
+OpenTofu and has been removed. A replacement must use the managed engine.
 
 ## Legacy database scope reconciliation
 
@@ -130,8 +130,8 @@ missing evidence is unknown. The checks are:
 presentation, never mutation authorization. Existing confirmation, exact-resource
 authority, deployment locks and release validators remain authoritative.
 Neither a provider capability flag nor an unchanged migration command verifies
-any of these boundaries. A compiled drill is not an executed drill. The current
-Cloud SQL drill does not establish every check in this complete assessment.
+any of these boundaries. A compiled drill is not an executed drill. Cloud SQL has no supported restore
+drill executor.
 
 A checkpoint receipt can verify `recoveryPoint` while all restore/application
 checks remain unknown. A compatible rollback preview can verify
@@ -149,7 +149,7 @@ hosting providers; adding a provider requires updating that explicit review.
 | Database provider | Native model checked | Current Hypervibe recovery implementation |
 | --- | --- | --- |
 | Railway | [Volume backups](https://docs.railway.com/volumes/backups): native restore replaces the original service's volume within its project/environment. Volume deletion removes its backups. | Named native checkpoint; no isolated native-volume restore adapter. The separate [logical retained-set runtime](postgres-logical-backup-runtime.md) restores copied SQL bytes into a fresh local PostgreSQL instance. |
-| Cloud SQL | [BackupRun API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/backupRuns): IDs are scoped to an instance and native statuses distinguish successful, pending and failed backups. [Recovery](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore): PITR creates another instance. | Backup/PITR policy and scheduled PITR drill; no named checkpoint adapter. |
+| Cloud SQL | [BackupRun API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/backupRuns): IDs are scoped to an instance and native statuses distinguish successful, pending and failed backups. [Recovery](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore): PITR creates another instance. | OpenTofu-managed backup/PITR policy; named checkpoints and restore drills are unavailable. |
 | RDS | [Snapshot restore](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html) creates a new instance. Snapshot identity is not a volume-instance identity; an available instance can still be loading data. | Checkpoint and drill unsupported by Hypervibe. |
 | Azure PostgreSQL | [Backup/restore](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore): PITR creates a server; on-demand backup eligibility depends on tier/storage. [Restore configuration](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/how-to-restore-full-backup) requires its own checks. | Checkpoint and drill unsupported by Hypervibe. |
 
@@ -172,7 +172,7 @@ not accepted as rollback authority.
 The ordinary `npm test` path checks registry completeness, provider capability
 truth, safe source identity across all eight database models, unsupported
 checkpoint planning, and the existing real Railway transport/lifecycle and
-Cloud SQL workflow paths. An RDS-shaped compiler/operation fixture tests the
+Cloud SQL unsupported-capability boundaries. An RDS-shaped compiler/operation fixture tests the
 shared boundary without enabling an RDS adapter. Timestamp/LSN tests establish
 point-in-time representation only. Provider documentation is cited
 evidence; only the existing pinned API fixtures claim schema validation.

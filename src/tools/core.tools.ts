@@ -40,6 +40,8 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
+import { planHostedDns } from '../application/dns-hosting.js';
+import { planPagesEmailDns } from '../application/dns-integrations.js';
 import { isAwsEngineEnvironment, planAwsTeardown } from '../application/infrastructure-engine-aws.js';
 import { isAzureEngineEnvironment, planAzureTeardown } from '../application/infrastructure-engine-azure.js';
 import {
@@ -58,6 +60,7 @@ import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.j
 import {
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
+  isRepositoryDnsEnvironment,
   unresolvedGitHubCheckRuntimeIssues,
 } from '../domain/services/github-infrastructure.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -96,6 +99,7 @@ import { planProviderNativeDeploySources } from '../domain/services/provider-nat
 import { planMaintenance } from '../domain/services/maintenance-plan.service.js';
 import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
 import { eligibleCredentialRequirements } from '../application/credential-plan-handoff.js';
+import { hasDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -764,13 +768,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. A Pages-only canonical environment with explicit DNS and no hosting workloads uses the ordinary repository plan. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"): Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it never releases code (use hv_deploy). backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Cloud Run always plans infrastructure with OpenTofu; infrastructure is an explicit alias. For AWS, infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"). Both include Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; neither releases code (use hv_deploy). teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -780,17 +784,36 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs, deleteFinalSnapshot }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      if (scope === 'infrastructure' || scope === 'teardown') {
+      if (deleteFinalSnapshot !== undefined && scope !== 'teardown') {
+        return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+      }
+      const routingSpec = specStore.get(project);
+      const routingEnvironment = routingSpec ? commandEnvironment(routingSpec.spec, env) : env?.trim() || 'staging';
+      const repositoryDnsOnly = Boolean(routingSpec && isRepositoryDnsEnvironment(routingSpec.spec, routingEnvironment));
+      const cloudRunEnvironment = !repositoryDnsOnly && routingSpec?.spec.environments[routingEnvironment]?.hosting.provider === 'cloudrun';
+      const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, routingEnvironment);
+      const retainedExecution = Boolean(retainedEnvironment && ctx.repos.components.findByEnvironmentId(retainedEnvironment.id)
+        .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+      const retainedExecutionRecovery = retainedExecution && (scope === undefined || scope === 'full');
+      if (cloudRunEnvironment && retainedExecution && scope === 'infrastructure') {
+        return commandError('VALIDATION', 'An acknowledged database task needs observation or cleanup before new infrastructure. Run hv_plan without scope to recover its exact execution.', { next: ['hv_plan'] });
+      }
+      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'credentials') {
+        return commandError('VALIDATION', `scope="${scope}" is not supported for Cloud Run environments. Run hv_plan without scope to review OpenTofu infrastructure.`, { next: ['hv_plan'] });
+      }
+      if (scope === 'infrastructure' || scope === 'teardown' || (cloudRunEnvironment && scope !== 'credentials' && !retainedExecutionRecovery)) {
         const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
-        if (supplied) return commandError('VALIDATION', `scope="${scope}" takes only project and env.`, { next: ['hv_plan'] });
-        const specResult = specStore.get(project);
+        if (supplied) return commandError('VALIDATION', scope === 'teardown'
+          ? 'OpenTofu teardown planning takes only project, env, scope and deleteFinalSnapshot.'
+          : 'OpenTofu infrastructure planning takes only project, env and scope.', { next: ['hv_plan'] });
+        const specResult = routingSpec;
         if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
-        const environmentName = commandEnvironment(specResult.spec, env);
-        if (deleteFinalSnapshot !== undefined && scope !== 'teardown') return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+        const environmentName = routingEnvironment;
         const azureTarget = isAzureEngineEnvironment(specResult.spec, environmentName);
         if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName) && !azureTarget) {
           return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS and Azure environments only.', { next: ['hv_spec'] });
         }
+        if (scope !== 'teardown') validateInstalledProviders(specResult.spec, environmentName);
         const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
         const planned = scope === 'teardown'
           ? await (azureTarget ? planAzureTeardown : planAwsTeardown)(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
@@ -844,12 +867,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
-      if (currentSpec) validateInstalledProviders(currentSpec, scope === 'credentials' ? undefined : plannedEnvironment);
+      if (currentSpec && scope !== 'credentials' && !retainedExecutionRecovery) validateInstalledProviders(currentSpec, plannedEnvironment);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
+      const preparedLocalEnv = currentSpec && !repositoryDnsOnly && !retainedExecutionRecovery && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -871,6 +894,29 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       });
       if ('error' in result) {
         return commandError('VALIDATION', result.error, { next: ['hv_spec'] });
+      }
+      if (currentSpec && result.scope === 'full' && (scope === undefined || scope === 'full')
+        && ![services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined)) {
+        const hosted = await planHostedDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
+          specRevision: result.specRevision, observed: result.observed, actions: result.actions });
+        const dns = hosted ?? await planPagesEmailDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
+          specRevision: result.specRevision, actions: result.actions });
+        if (dns) {
+          if ('blocked' in dns) return commandError('VALIDATION', 'DNS planning is blocked.', {
+            details: { blocked: dns.blocked }, next: ['hv_spec', 'hv_connections'],
+          });
+          const pendingDns = dns.actions.filter(action => action.type !== 'noop');
+          return commandSuccess({ planId: dns.planRunId, scope: 'dns-engine', environment: dns.environmentName,
+            specRevision: dns.specRevision, actions: pendingDns.map(({ metadata: _metadata, ...action }) => action),
+            unchanged: dns.actions.length - pendingDns.length, confirmActions: dns.confirmActions,
+          }, { warnings: dns.warnings, hint: 'Review the DNS changes, then apply this saved plan. Run hv_plan again to continue the application workflow.', next: ['hv_apply'] });
+        }
+        const readyDnsIds = new Set(result.actions.filter(action => action.metadata?.dnsEngineReady === true || action.metadata?.dnsEngineDeferred === true || action.metadata?.dnsCancellationVerified === true).map(action => action.id));
+        if (readyDnsIds.size) {
+          result.blocked = result.blocked.filter(block => !block.actionIds?.length || !block.actionIds.every(id => readyDnsIds.has(id)));
+          const saved = ctx.repos.runs.findById(result.planRunId);
+          if (saved?.plan) ctx.repos.runs.updatePlan(result.planRunId, { ...saved.plan, actions: result.actions });
+        }
       }
       const plannedEnvironmentSpec = specStore.get(project)?.spec.environments[result.environmentName];
 
@@ -1065,9 +1111,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const envName = commandEnvironment(specResult.spec, env);
       const envSpec = specResult.spec.environments[envName];
+      const repositoryDnsOnly = isRepositoryDnsEnvironment(specResult.spec, envName);
       // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
       // status reports what only live observation shows, starting with background workers.
-      if (envSpec && isEngineManaged(envSpec)) {
+      if (envSpec && isEngineManaged(envSpec) && !repositoryDnsOnly) {
         const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
         if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
         const ages = await secretAges(ctx, project, specResult.spec, envName);
@@ -1083,38 +1130,59 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       validateInstalledProviders(specResult.spec, envName);
-      if (!envSpec) {
+      if (!envSpec || repositoryDnsOnly) {
         if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
+          const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+          if (repositoryDnsOnly && retainedEnvironment && (Object.keys(retainedEnvironment.platformBindings)
+            .some(key => !['github', 'dnsEngine'].includes(key))
+            || ctx.repos.components.findByEnvironmentId(retainedEnvironment.id).length > 0)) {
+            return commandError('VALIDATION', 'This environment has existing or unknown bound hosting resources. Reconcile them before using repository-only Pages status.', { next: ['hv_inspect', 'hv_plan'] });
+          }
           const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
           const github = await planGitHubInfrastructure({
             project: projectForStatus,
             spec: specResult.spec,
             environmentName: envName,
           });
+          const legacyDns = repositoryDnsOnly
+            ? github.actions.filter(action => action.metadata?.operation === 'githubPagesDnsSync') : [];
+          const legacyDnsIds = new Set(legacyDns.map(action => action.id));
+          const legacyDnsBlocks = github.blocked.filter(block => block.actionIds?.length
+            && block.actionIds.every(id => legacyDnsIds.has(id)));
+          const legacyDnsMessages = new Set([...legacyDns.map(action => action.reason), ...legacyDnsBlocks.map(block => block.reason)]);
+          const actions = github.actions.filter(action => !legacyDnsIds.has(action.id));
           const blocked = [
             ...planService.projectPreflight(projectForStatus, specResult.spec, envName),
-            ...github.blocked,
+            ...github.blocked.filter(block => !legacyDnsBlocks.includes(block)),
           ];
-          const drift = github.actions.filter((action) => action.type !== 'noop');
+          const drift = actions.filter((action) => action.type !== 'noop');
+          const retainedDns = asRecord(retainedEnvironment?.platformBindings.dnsEngine);
+          const selectedDns = repositoryDnsOnly ? envSpec?.dns : undefined;
           return commandSuccess({
             environment: envName,
             specRevision: specResult.revision,
             specSource: specResult.source ?? { kind: 'local' },
-            verified: github.actions.every((action) => action.verified),
-            inSync: drift.length === 0,
-            summary: summarizeActions(github.actions),
+            verified: !selectedDns && actions.every((action) => action.verified),
+            inSync: !selectedDns && drift.length === 0,
+            summary: summarizeActions(actions),
             drift: drift.map(({ metadata: _metadata, ...action }) => action),
             unmanaged: [],
             blocked,
+            ...(selectedDns ? { dns: { provider: selectedDns.provider, zoneId: selectedDns.zone.id,
+              zoneName: selectedDns.zone.name, status: 'unverified',
+              retainedOwnership: retainedDns?.version === 1,
+              retainedOwners: Array.isArray(retainedDns?.ownedOwners)
+                ? retainedDns.ownedOwners.filter((owner): owner is string => typeof owner === 'string') : [],
+              message: 'Saved DNS ownership is not fresh convergence evidence. Run hv_plan to observe the exact zone and records.' } } : {}),
             ...(blocked.length > 0 ? connectionRecoveryDetails(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) : {}),
           }, {
-            warnings: github.warnings,
+            warnings: github.warnings.filter(warning => !legacyDnsMessages.has(warning)),
             hint: blocked.length > 0
               ? connectionRecoveryHint(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then rerun hv_status or hv_plan.' })
-              : drift.length > 0
+              : selectedDns ? 'Run hv_plan to check selected DNS convergence and continue the repository workflow.' : drift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : 'Repository infrastructure is in sync.',
-            next: blocked.length > 0 ? ['hv_connections'] : drift.length > 0 ? ['hv_plan'] : undefined,
+            next: blocked.length > 0 ? ['hv_connections'] : selectedDns || drift.length > 0 ? ['hv_plan'] : undefined,
           });
         }
         return commandError('NOT_FOUND', `Spec has no environment "${envName}".`, {

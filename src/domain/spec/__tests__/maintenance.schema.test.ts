@@ -47,6 +47,27 @@ describe('environment maintenance spec', () => {
     expect(projectSpecSchema.safeParse(input).success).toBe(false);
   });
 
+  it.each([
+    { provider: 'cloudflare', zone: { id: 'cf-zone', name: 'example.com', accountId: 'cf-account' }, policy: { proxy: 'off' } },
+    { provider: 'cloudflare', zone: { id: 'cf-zone', name: 'example.com', accountId: 'cf-account' } },
+    { provider: 'aws', zone: { id: 'Z123456', name: 'example.com', accountId: '123456789012' }, policy: { proxy: 'on' } },
+  ])('rejects traffic switching through an explicit DNS policy without supported Cloudflare proxying', dns => {
+    const input = project({ enabled: true, mode: 'application', page: 'off' });
+    Object.assign(input.environments.production, { domainTarget: { environment: 'next', service: 'web' }, dns });
+    Object.assign(input.environments, { next: { hosting: { provider: 'cloudrun' }, services: { web: {} } } });
+    expect(projectSpecSchema.safeParse(input).success).toBe(false);
+  });
+
+  it.each([
+    { dns: { provider: 'cloudflare', zone: { id: 'cf-zone', name: 'example.com', accountId: 'cf-account' }, policy: { proxy: 'on' } } },
+    { dns: { provider: 'cloudflare', zone: { id: 'cf-zone', name: 'example.com', accountId: 'cf-account' } }, domainProxy: true },
+  ])('accepts traffic switching with explicit Cloudflare proxy intent', desired => {
+    const input = project({ enabled: true, mode: 'application', page: 'off' });
+    Object.assign(input.environments.production, { domainTarget: { environment: 'next', service: 'web' }, ...desired });
+    Object.assign(input.environments, { next: { hosting: { provider: 'cloudrun' }, services: { web: {} } } });
+    expect(projectSpecSchema.safeParse(input).success).toBe(true);
+  });
+
   it.each(['app.example.com', 'App.Example.Com', 'app.example.com.'])('rejects shared domain ownership for the target spelling %s', domain => {
     const input = project({ enabled: true, mode: 'application', page: 'off' });
     Object.assign(input.environments.production, { domainTarget: { environment: 'next', service: 'web' } });

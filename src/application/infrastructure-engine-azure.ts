@@ -290,7 +290,7 @@ async function localCommit(project: Project): Promise<{ directory: string; commi
 
 export async function planAzureInfrastructureEngine(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; specRevision: number; environmentName: string;
-}): Promise<InfrastructurePlanResult | { blocked: string[] }> {
+}): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName]!;
   const problems = azureEngineProblems(spec, environmentName);
@@ -307,7 +307,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     if (typeof observed === 'object') return { blocked: [observed.unknown] };
     if (observed === 'absent') missing.push(key);
   }
-  if (missing.length) return { blocked: [missingOutsideKeysMessage(environmentName, missing)] };
+  if (missing.length) return { blocked: [missingOutsideKeysMessage(environmentName, missing)], missingOutsideKeys: missing };
   const secretActions: PlanAction[] = [];
   for (const key of keys.generated) {
     const observed = await store.observe(key);

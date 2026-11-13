@@ -1634,13 +1634,15 @@ export function diffEnvironment(input: {
     const dnsRecordIds = (boundDomainDns.records ?? []).map((record) => record.id);
     const customDomainsManaged = input.customDomainManagement === 'managed';
     const observationKnown = observed !== null && serviceObservationKnown;
+    const cancellationPending = boundDomainDns.dnsStagePending === true && Boolean(boundDomainDns.dnsSelection)
+      && !zoneId && Array.isArray(boundDomainDns.records) && boundDomainDns.records.length === 0;
     const bindingComplete = Boolean(
       projectId
       && serviceName
       && serviceId
       && environmentId
       && providerDomainId
-      && zoneId
+      && (zoneId || boundDomainDns.dnsEngineRemoved === true || cancellationPending)
       && Array.isArray(boundDomainDns.records)
     );
     const blockedReason = !customDomainsManaged
@@ -1649,7 +1651,7 @@ export function diffEnvironment(input: {
         ? 'domain_observation_unknown'
         : !bindingComplete
           ? 'domain_detach_binding_incomplete'
-          : undefined;
+          : cancellationPending ? 'domain_dns_cancellation_unverified' : undefined;
     actions.push({
       id,
       type: 'destroy',
@@ -1662,6 +1664,8 @@ export function diffEnvironment(input: {
           ? `Cannot safely detach ${domain} because provider domain observation is unknown`
           : blockedReason === 'domain_detach_binding_incomplete'
             ? `Cannot safely detach ${domain} because its durable provider or DNS identities are incomplete`
+            : blockedReason === 'domain_dns_cancellation_unverified'
+              ? `Confirm traffic DNS is absent before releasing the pending hosting claim for ${domain}`
             : attachedService
               ? `Domain ${domain} is no longer desired and remains attached to ${attachedService.name}`
               : `Domain ${domain} is no longer desired; remove its verified provider attachment and managed DNS records`,
@@ -1673,6 +1677,8 @@ export function diffEnvironment(input: {
         ...(environmentId ? { environmentId } : {}),
         ...(providerDomainId ? { providerDomainId } : {}),
         ...(zoneId ? { zoneId } : {}),
+        ...(boundDomainDns.dnsEngineRemoved === true ? { dnsEngineRemoved: true } : {}),
+        ...(cancellationPending ? { dnsCancellationRequired: true } : {}),
         dnsRecordIds,
         ...(blockedReason ? { blockedReason } : {}),
       },

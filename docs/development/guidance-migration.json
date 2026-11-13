@@ -1266,7 +1266,7 @@
         "reason": "Replace stale src/tools/respond.ts and server ToolContext wiring with the command registry/context/results model. ToolContext remains a compatibility alias, not the active architecture."
       },
       {
-        "heading": "The spec → plan → apply loop",
+        "heading": "The spec \u2192 plan \u2192 apply loop",
         "sourceLine": 129,
         "originalSha256": "282bc116236abb34c1135ec1e054b79470e10779f419e680d4d44d9240608ad0",
         "status": "corrected",
@@ -1556,6 +1556,39 @@
         }
       ],
       "preserved": "OpenTofu ownership, GCP/AWS/Azure focus, existing Railway support, minimal user installs, exact authorization, unknown-state handling, secret boundaries, regression obligations, required CI/reviews, and merge-stop/runtime rules."
+    },
+    {
+      "id": "2026-11-11-gcp-opentofu-only",
+      "date": "2026-11-11",
+      "authority": "Owner request: OpenTofu is the only GCP infrastructure implementation; remove alternatives and complete the cutover.",
+      "changes": [
+        {
+          "area": "GCP engine selection",
+          "destination": "ARCHITECTURE.md",
+          "decision": "Cloud Run always selects managed OpenTofu. Omitted engine flags never select legacy infrastructure. Unsupported capabilities stop explicitly; Railway retains its lifecycle."
+        },
+        {
+          "area": "GCP infrastructure prerequisites",
+          "destination": "docs/development/opentofu-integration.md",
+          "decision": "Project setup, billing attachment, APIs, service accounts, IAM, private build storage, image repositories and CI trust belong to exact saved OpenTofu setup plans in project-shared state. Operational helpers do not create missing prerequisites."
+        },
+        {
+          "area": "Approval and customer guidance",
+          "destination": "skills/hypervibe/SKILL.md",
+          "decision": "Remove experimental/standard engine choices. Billing selection does not authorize infrastructure or resource IAM. Setup confirmation applies the saved preview without replanning."
+        },
+        {
+          "area": "Verification",
+          "destination": "src/adapters/engine/opentofu/__tests__/opentofu.engine.live.test.ts",
+          "decision": "Run pinned engine and generated-provider-configuration tests in ordinary acceptance without cloud mutations. Distinguish these checks from live deployment evidence."
+        },
+        {
+          "area": "Provider lifecycle acceptance",
+          "destination": "docs/development/provider-evidence.md",
+          "decision": "Owner explicitly requires disposable live create/verify/update/noop/teardown/provider-confirmed-absence coverage for every implemented infrastructure provider; failed cleanup preserves recovery evidence and missing test access cannot count as a passing live run."
+        }
+      ],
+      "preserved": "Exact plan authorization, state and data ownership, unknown-state handling, secret boundaries, credential operations, supported operational APIs and existing Railway apps."
     }
   ]
 }
