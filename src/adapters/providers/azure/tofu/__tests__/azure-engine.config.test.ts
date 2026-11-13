@@ -35,6 +35,8 @@ describe('Azure environment configuration', () => {
 
   it('scales the web service to zero and reads its secrets from the project vault by reference', () => {
     expect(resourcesOf(config, 'base.tf.json').azurerm_container_app_environment!.main).not.toHaveProperty('workload_profile');
+    // Azure adds its own Consumption profile; that must not read as drift.
+    expect(resourcesOf(config, 'base.tf.json').azurerm_container_app_environment!.main).toMatchObject({ lifecycle: [{ ignore_changes: ['workload_profile'] }] });
     const web = apps.web as { template: Array<{ min_replicas: number; container: Array<{ env: Array<Record<string, string>> }> }>; secret: unknown[]; registry: unknown[]; depends_on: string[] };
     expect(web.template[0]!.min_replicas).toBe(0);
     expect(web.secret).toContainEqual({ name: 'database-url', key_vault_secret_id: 'https://hv-billforge-abc123.vault.azure.net/secrets/test--database-url', identity: '${azurerm_user_assigned_identity.runtime.id}' });

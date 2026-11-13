@@ -269,7 +269,9 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
           daily_quota_gb: 0.15 } },
         // No workload profiles, private endpoint or maintenance window: those bill $0.10/hour per environment.
         azurerm_container_app_environment: { main: { name: `${input.prefix}-apps`, ...placed,
-          log_analytics_workspace_id: '${azurerm_log_analytics_workspace.logs.id}', logs_destination: 'log-analytics' } },
+          log_analytics_workspace_id: '${azurerm_log_analytics_workspace.logs.id}', logs_destination: 'log-analytics',
+          // Azure adds its own Consumption profile to a new environment; declaring none must not read as drift.
+          lifecycle: [{ ignore_changes: ['workload_profile'] }] } },
         azurerm_user_assigned_identity: { runtime: { name: `${input.prefix}-runtime`, ...placed } },
         azurerm_role_assignment: assignments,
         // New role assignments take a minute or two to apply; the first revision pulls and reads secrets right away.
