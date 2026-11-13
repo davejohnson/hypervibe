@@ -8,6 +8,22 @@ The dated live evidence below describes earlier revisions. It does not establish
 that this cutover has been deployed live. Current verification is recorded in
 the change's pull request.
 
+## Existing-zone DNS engine
+
+DNS records now use the same saved-plan boundary with pinned Cloudflare, Google
+Cloud DNS, Route 53 and Azure DNS backends. `environment.dns` selects the provider
+and exact existing zone independently of hosting. Hypervibe retains read-only
+scope/ownership checks, explicit adoption, consumer ordering and certificate
+readiness; OpenTofu owns record changes and encrypted native state. Domain,
+Pages and email workflows do not invoke the historical direct record writers.
+
+The [DNS setup examples](domain-security-readiness.md#explicit-dns-intent) include
+a Pages-only canonical environment without a hosting domain. Zone creation,
+DNSSEC/registrar changes and automatic CAA security policy mutations remain
+unavailable. All four pinned provider configurations and local boundaries are
+checked in ordinary CI, but their installed live lifecycle is unverified. The
+dated domain evidence below predates this DNS engine and does not validate it.
+
 ## Decision
 
 OpenTofu and the pinned Google provider own GCP infrastructure lifecycle, while Hypervibe keeps the product:

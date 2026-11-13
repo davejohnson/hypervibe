@@ -2,6 +2,9 @@ import { providerContracts } from './provider-matrix.js';
 
 /** Capability coverage is explicit; a profile is not evidence that it has passed live. */
 export const liveFixtureProfiles = [
+  ...(['cloudflare', 'gcp', 'aws', 'azure'] as const).map(provider => ({ id: `dns-${provider}` as const, provider,
+    path: 'dns' as const, runner: 'test/provider-conformance/dns-lifecycle.live.test.ts', capabilities: [`dns:${provider}`],
+    release: 'retained-prepared-app' as const, nativeResources: ['dns-records'] })),
   { id: 'gcp-engine', provider: 'cloudrun', path: 'engine', runner: 'test/provider-conformance/provider-lifecycle.live.test.ts',
     capabilities: ['engine:cloudrun'], release: 'local-commit', nativeResources: ['google_cloud_run_v2_service', 'google_cloud_run_v2_service_iam_member'] },
   { id: 'railway', provider: 'railway', path: 'managed-workflow', runner: 'test/provider-conformance/provider-managed-workflow.live.test.ts',

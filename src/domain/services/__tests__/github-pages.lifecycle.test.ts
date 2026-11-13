@@ -289,7 +289,7 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(dnsDelete).not.toHaveBeenCalled();
   });
 
-  it('adds the recommended www CNAME for an apex domain without replacement confirmation', async () => {
+  it('blocks legacy Pages create actions until DNS has a saved engine plan', async () => {
     const project = new ProjectRepository().create({ name: 'pages-www' });
     const desiredSpec = spec(project.name);
     const connection = new ConnectionRepository().create({
@@ -322,18 +322,12 @@ describe('declarative GitHub Pages lifecycle', () => {
 
     const applied = await applyGitHubPagesDns({ spec: desiredSpec, action: dnsAction });
 
-    expect(applied.success).toBe(true);
+    expect(applied).toMatchObject({ success: false, status: 'blocked' });
     expect(remove).not.toHaveBeenCalled();
-    expect(create).toHaveBeenCalledOnce();
-    expect(create).toHaveBeenCalledWith('zone-1', {
-      name: 'www.hypervibe.dev',
-      type: 'CNAME',
-      content: 'owner.github.io',
-      proxied: false,
-    });
+    expect(create).not.toHaveBeenCalled();
   });
 
-  it('confirmation-gates replacement records and preserves non-address DNS records', async () => {
+  it('blocks legacy Pages replacements even after the old action was reviewed', async () => {
     const project = new ProjectRepository().create({ name: 'pages-dns' });
     const desiredSpec = spec(project.name);
     const connection = new ConnectionRepository().create({
@@ -376,13 +370,13 @@ describe('declarative GitHub Pages lifecycle', () => {
       action: dnsAction,
     });
 
-    expect(applied.success).toBe(true);
-    expect(remove).toHaveBeenCalledOnce();
-    expect(remove).toHaveBeenCalledWith('zone-1', 'old-address');
+    expect(applied).toMatchObject({ success: false, status: 'blocked' });
+    expect(remove).not.toHaveBeenCalled();
+    expect(records.find(record => record.id === 'old-address')).toBeDefined();
     expect(records.find((record) => record.id === 'mail')).toBeDefined();
   });
 
-  it('removes only exact Hypervibe-managed apex and www records during teardown', async () => {
+  it('preserves legacy Pages records until a saved DNS engine teardown is reviewed', async () => {
     const project = new ProjectRepository().create({ name: 'pages-teardown' });
     const enabledSpec = spec(project.name);
     const desiredSpec = projectSpecSchema.parse({
@@ -422,12 +416,12 @@ describe('declarative GitHub Pages lifecycle', () => {
     });
     const applied = await applyGitHubPagesDns({ spec: desiredSpec, action: dnsAction });
 
-    expect(applied.success).toBe(true);
-    expect(remove).toHaveBeenCalledTimes(5);
-    expect(records).toEqual([expect.objectContaining({ id: 'mail', type: 'MX' })]);
+    expect(applied).toMatchObject({ success: false, status: 'blocked' });
+    expect(remove).not.toHaveBeenCalled();
+    expect(records).toHaveLength(6);
   });
 
-  it('orders DNS before Pages configuration so certificate-pending work cannot strand DNS', async () => {
+  it('attaches the GitHub Pages hostname before DNS to prevent an unclaimed-domain takeover', async () => {
     const desiredSpec = spec('pages-ordering');
     const connection = new ConnectionRepository().create({
       provider: 'cloudflare',
@@ -448,8 +442,24 @@ describe('declarative GitHub Pages lifecycle', () => {
     const pagesAction = planned.actions.find((action) => action.id === GITHUB_PAGES_ACTION_ID)!;
 
     expect(dnsAction).toMatchObject({ type: 'update' });
-    expect(dnsAction.dependsOn).toBeUndefined();
-    expect(pagesAction).toMatchObject({ type: 'create', dependsOn: [dnsAction.id] });
+    expect(dnsAction.dependsOn).toEqual([pagesAction.id]);
+    expect(pagesAction).toMatchObject({ type: 'create' });
+    expect(pagesAction.dependsOn).toBeUndefined();
+  });
+
+  it('preserves the Pages claim until a reviewed DNS removal is confirmed', async () => {
+    const desiredSpec = spec('pages-safe-removal'); desiredSpec.github!.pages!.enabled = false;
+    const connection = new ConnectionRepository().create({ provider: 'github', scope: REPOSITORY,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'github-token' }) });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig').mockResolvedValue(pageConfig());
+    const remove = vi.spyOn(GitHubAdapter.prototype, 'deletePagesSite').mockResolvedValue();
+    const result = await applyGitHubPages({ spec: desiredSpec,
+      action: { id: GITHUB_PAGES_ACTION_ID, type: 'destroy', resource: { kind: 'repo', name: REPOSITORY, provider: 'github' },
+        verified: true, reason: 'disable', metadata: { repository: REPOSITORY, enabled: false,
+          observed: { buildType: 'workflow', cname: 'hypervibe.dev', httpsEnforced: false } } } });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it('asks GitHub to enforce HTTPS even when the Pages response omits certificate details', async () => {

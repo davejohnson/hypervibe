@@ -12,13 +12,15 @@ export interface ReserveApplyInput {
   specRevision: number;
   /** Additional environment ids whose durable data this apply reads/writes. */
   lockEnvironmentIds?: string[];
+  /** Exact shared resource identities; unlike environment locks, these span projects. */
+  lockResourceKeys?: string[];
 }
 
 export type ReserveApplyResult =
   | { reserved: true; run: Run }
   | {
     reserved: false;
-    reason: 'already_applied' | 'plan_in_progress' | 'environment_in_progress';
+    reason: 'already_applied' | 'plan_in_progress' | 'environment_in_progress' | 'resource_in_progress';
     conflictingRunId: string;
   };
 
@@ -83,16 +85,23 @@ export class RunRepository {
         input.environmentId,
         ...(input.lockEnvironmentIds ?? []),
       ]);
+      const resourceKeys = (value: unknown): string[] => {
+        if (value === undefined) return [];
+        if (!Array.isArray(value) || value.some(key => typeof key !== 'string' || !key.trim()))
+          throw new Error('Apply resource lock identities are unreadable; existing mutation authority was preserved.');
+        return value as string[];
+      };
+      const requestedResourceKeys = new Set(resourceKeys(input.lockResourceKeys));
       const activeApplies = db.prepare(`
         SELECT *
         FROM runs
         WHERE type = 'apply'
           AND status = 'running'
-          AND project_id = ?
+          AND (project_id = ? OR ? = 1)
         ORDER BY created_at ASC
-      `).all(input.projectId) as Record<string, unknown>[];
+      `).all(input.projectId, requestedResourceKeys.size > 0 ? 1 : 0) as Record<string, unknown>[];
+      let conflictReason: 'plan_in_progress' | 'environment_in_progress' | 'resource_in_progress' = 'environment_in_progress';
       const activeApply = activeApplies.find((candidate) => {
-        if (requestedEnvironmentIds.has(candidate.environment_id as string)) return true;
         const activeDocument = parseJsonColumn(
           runPlanColumnSchema,
           candidate.plan,
@@ -101,19 +110,20 @@ export class RunRepository {
         const locked = Array.isArray(activeDocument.lockEnvironmentIds)
           ? activeDocument.lockEnvironmentIds.filter((value): value is string => typeof value === 'string')
           : [];
-        return locked.some((environmentId) => requestedEnvironmentIds.has(environmentId));
+        const environmentConflict = candidate.project_id === input.projectId
+          && (requestedEnvironmentIds.has(candidate.environment_id as string)
+            || locked.some(environmentId => requestedEnvironmentIds.has(environmentId)));
+        const resourceConflict = requestedResourceKeys.size > 0
+          && resourceKeys(activeDocument.lockResourceKeys).some(key => requestedResourceKeys.has(key));
+        if (!environmentConflict && !resourceConflict) return false;
+        conflictReason = activeDocument.planRunId === input.planRunId ? 'plan_in_progress'
+          : environmentConflict ? 'environment_in_progress' : 'resource_in_progress';
+        return true;
       });
       if (activeApply) {
-        const activeDocument = parseJsonColumn(
-          runPlanColumnSchema,
-          activeApply.plan,
-          `runs.plan (${activeApply.id})`
-        ) as Record<string, unknown>;
         return {
           reserved: false,
-          reason: activeDocument.planRunId === input.planRunId
-            ? 'plan_in_progress'
-            : 'environment_in_progress',
+          reason: conflictReason,
           conflictingRunId: activeApply.id as string,
         };
       }
@@ -142,6 +152,7 @@ export class RunRepository {
           environmentName: input.environmentName,
           specRevision: input.specRevision,
           lockEnvironmentIds: [...requestedEnvironmentIds],
+          ...(requestedResourceKeys.size ? { lockResourceKeys: [...requestedResourceKeys].sort() } : {}),
         }),
         JSON.stringify([]),
         now,

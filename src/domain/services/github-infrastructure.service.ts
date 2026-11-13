@@ -1311,6 +1311,19 @@ export function shouldPlanGitHubInfrastructure(spec: ProjectSpec, environmentNam
   return Boolean(spec.github && spec.github.enabled !== false && githubCanonicalEnvironment(spec) === environmentName);
 }
 
+/** An explicit Pages DNS selection can use the existing repository workflow. */
+export function isRepositoryDnsEnvironment(spec: ProjectSpec, environmentName: string): boolean {
+  const environment = spec.environments[environmentName];
+  if (!environment?.dns || !spec.github?.pages?.customDomain || !shouldPlanGitHubInfrastructure(spec, environmentName)) return false;
+  return !environment.domain && Object.keys(environment.services).length === 0
+    && !environment.email.enabled && Object.keys(environment.envVars).length === 0
+    && !environment.removeEnvVars?.length && !environment.envFile && !environment.deploy && !environment.migrations
+    && !environment.database && !environment.cache && !environment.loadBalancer
+    && Object.keys(environment.storage ?? {}).length === 0 && Object.keys(environment.queues ?? {}).length === 0
+    && !environment.backups && !environment.dataMigration && !environment.maintenance && !environment.payments
+    && !environment.ios && !environment.api && !environment.webhooks && !environment.domainRegistration;
+}
+
 export function shouldPlanGitHubDelegatedSecrets(spec: ProjectSpec, environmentName: string): boolean {
   return githubActionsCanonicalEnvironment(spec) === environmentName;
 }

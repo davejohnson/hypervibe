@@ -15,7 +15,9 @@ export interface FixtureJournal {
   environment: string;
   phase: 'prepared' | 'creating' | 'running' | 'updating' | 'cleaning' | 'cleaned' | 'cleanup-required';
   resources: NativeFixtureResource[];
-  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean };
+  /** Exact pre-existing resources proved retained, never reported as natively absent. */
+  retainedResources?: NativeFixtureResource[];
+  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean };
 }
 
 export interface LifecycleFixtureDriver {
@@ -27,7 +29,7 @@ export interface LifecycleFixtureDriver {
   /** Require exact fixture JSON body, revision, and a provider-ready workload. */
   verifyRunning(revision: 'create' | 'update'): Promise<void>;
   /** Read the exact saved native identity; state/binding disappearance is insufficient. */
-  observe(resource: NativeFixtureResource): Promise<'present' | 'absent' | 'unknown'>;
+  observe(resource: NativeFixtureResource): Promise<'present' | 'absent' | 'unknown' | 'retained'>;
 }
 
 export function resourceKey(resource: NativeFixtureResource): string {
@@ -44,6 +46,10 @@ export function readFixtureJournal(file: string): FixtureJournal {
     throw new Error('The fixture journal is invalid; preserve it for recovery.');
   }
   result.resources.forEach(resourceKey);
+  if (result.retainedResources !== undefined) {
+    if (!Array.isArray(result.retainedResources)) throw new Error('The retained fixture journal is invalid; preserve it for recovery.');
+    result.retainedResources.forEach(resourceKey);
+  }
   return result;
 }
 
@@ -51,7 +57,8 @@ export function saveFixtureJournal(file: string, journal: FixtureJournal): void 
   // Only an explicit projection can cross the evidence/output boundary.
   const safe: FixtureJournal = { version: 1, profile: journal.profile, project: journal.project, environment: journal.environment,
     phase: journal.phase, checks: journal.checks,
-    resources: journal.resources.map(({ provider, type, id, address }) => ({ provider, type, id, address })) };
+    resources: journal.resources.map(({ provider, type, id, address }) => ({ provider, type, id, address })),
+    ...(journal.retainedResources ? { retainedResources: journal.retainedResources.map(({ provider, type, id, address }) => ({ provider, type, id, address })) } : {}) };
   const temporary = `${file}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(safe, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, file);
@@ -63,9 +70,12 @@ export async function runDisposableFixture(params: {
   save(journal: FixtureJournal): void;
   driver: LifecycleFixtureDriver;
   cleanupOnly?: boolean;
+  /** Explicit pre-existing native identities whose original contents must remain after contribution removal. */
+  retainedResources?: Array<Pick<NativeFixtureResource, 'provider' | 'type' | 'id'>>;
   signal?: AbortSignal;
 }): Promise<FixtureJournal> {
   const { journal, driver, save } = params;
+  const retainedIdentities = new Set((params.retainedResources ?? []).map(resource => resourceKey({ ...resource, address: 'retained-baseline' })));
   if (!params.cleanupOnly && journal.phase !== 'prepared') {
     throw new Error('A previous fixture may still exist. Resume with cleanup-only before starting another run.');
   }
@@ -122,14 +132,20 @@ export async function runDisposableFixture(params: {
     journal.phase = 'cleaning';
     persist();
     await driver.converge('absent');
+    const retained: NativeFixtureResource[] = [];
     for (const resource of journal.resources) {
-      if (await driver.observe(resource) !== 'absent') {
+      const observation = await driver.observe(resource);
+      if (retainedIdentities.has(resourceKey(resource))) {
+        if (observation !== 'retained') throw new Error(`Preservation was not confirmed for ${resource.address}.`);
+        retained.push(resource);
+      } else if (observation !== 'absent') {
         throw new Error(`Native absence was not confirmed for ${resource.address} (${resource.id}).`);
       }
     }
     if ((await driver.inventory()).length) throw new Error('The fixture inventory still contains native resources after teardown.');
     await driver.assertNoop();
     journal.checks.absent = true;
+    if (retainedIdentities.size) { journal.retainedResources = retained; journal.checks.retained = retained.length > 0; }
     journal.phase = 'cleaned';
     persist();
   } catch {

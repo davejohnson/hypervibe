@@ -134,6 +134,32 @@ export class OpenTofuEngine {
     });
   }
 
+  /** Project private state without exporting the raw document or its secret values. */
+  async inspectState<T>(params: {
+    backend: InfrastructureEngineBackend; configuration: EngineConfiguration;
+    auth: EngineAuthentication; state: EngineStateIdentity;
+    project: (state: unknown) => T;
+  }): Promise<{ ok: true; present: false } | { ok: true; present: true; value: T } | EngineStepFailure> {
+    const paths = engineStatePaths(params.state, this.options.dataDir ?? getDataDir());
+    // This describes local state availability, never provider resource absence.
+    if (!fs.existsSync(paths.statePath)) return { ok: true, present: false };
+    const prepared = await this.prepare(params);
+    if (!prepared.ok) return prepared;
+    try {
+      const observed = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
+      if (observed.exitCode !== 0) return failure('state inspection', observed);
+      try {
+        const state = JSON.parse(observed.stdout) as { format_version?: unknown };
+        if (!state || typeof state !== 'object' || typeof state.format_version !== 'string') throw new Error();
+        return { ok: true, present: true, value: params.project(state) };
+      } catch {
+        return { ok: false, stage: 'state inspection', error: 'Engine state could not be projected safely. Preserve it and resolve the observation failure before continuing.' };
+      }
+    } finally {
+      fs.rmSync(prepared.directory, { recursive: true, force: true });
+    }
+  }
+
   /** Validates generated configuration without credentials or state. */
   async validate(backend: InfrastructureEngineBackend, configuration: EngineConfiguration): Promise<{ ok: true } | EngineStepFailure> {
     const prepared = await this.prepare({ backend, configuration, auth: { env: {}, redact: [] } });

@@ -158,7 +158,7 @@ export function translateEnginePlan(params: {
       reason: type === 'noop'
         ? 'OpenTofu reports no changes.'
         : `OpenTofu will ${changes.filter((c) => c.action !== 'noop').map((c) => c.action === 'import'
-          ? `take over the existing ${c.address} (created by an interrupted earlier apply)` : `${c.action} ${c.address}`).join(', ')}.`,
+          ? `adopt the explicitly selected existing ${c.address}` : `${c.action} ${c.address}`).join(', ')}.`,
       ...(diff.length ? { diff } : {}),
       ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
       ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace') ? { billable: true } : {}),

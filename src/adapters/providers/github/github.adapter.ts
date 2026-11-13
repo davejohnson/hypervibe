@@ -377,6 +377,7 @@ export class GitHubAdapter {
   async getRepository(owner: string, repo: string): Promise<{
     id?: number;
     full_name?: string;
+    has_pages?: boolean;
     default_branch: string;
     html_url?: string;
     clone_url?: string;
