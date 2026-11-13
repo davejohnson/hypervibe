@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { AZURE_SCOPES, azureRest } from './azure-ops.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { azureEngineAuthentication, azureEngineBackend } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 import {
@@ -289,6 +290,39 @@ const withDependencies = (actions: PlanAction[], dependencies: string[]) => depe
   : actions;
 const changing = (actions: PlanAction[]) => actions.filter((action) => action.type !== 'noop').map((action) => action.id);
 
+/**
+ * Role assignments the plan would create that already exist in Azure for the
+ * environment's runtime identity, with the same scope and role: an earlier
+ * apply created them and lost the reply. Unknown reads block the plan.
+ */
+async function leftoverRoleAssignments(context: AzureEngineContext, input: AzureEngineInput, actions: PlanAction[]): Promise<{ adopt: Record<string, string> } | { unknown: string }> {
+  const creating = actions.flatMap((action) => engineSegmentOf(action)?.addresses ?? []).filter((address) => address.startsWith('azurerm_role_assignment.'));
+  if (!creating.length) return { adopt: {} };
+  const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
+  const tokens = context.tokens;
+  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
+  if (!identity) return { unknown: 'Hypervibe could not read the runtime identity from Azure; try again.' };
+  if (identity.status === 404) return { adopt: {} };
+  const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
+  if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read the runtime identity from Azure (HTTP ${identity.status}).` };
+  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
+  if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the runtime identity's roles in Azure (HTTP ${listed?.status ?? 'none'}).` };
+  const existing = ((listed.body.value ?? []) as Array<{ id?: string; properties?: { scope?: string; roleDefinitionId?: string } }>);
+  const configuration = buildAzureEnvironmentConfiguration(input);
+  const desired = ((configuration.files['base.tf.json'] as { resource?: { azurerm_role_assignment?: Record<string, { scope: string; role_definition_id: string }> } }).resource?.azurerm_role_assignment) ?? {};
+  const storageId = `${group}/providers/Microsoft.Storage/storageAccounts/${azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix })}`;
+  const adopt: Record<string, string> = {};
+  for (const address of creating) {
+    const wanted = desired[address.replace(/^azurerm_role_assignment\./, '')];
+    if (!wanted) continue;
+    const scope = wanted.scope.replace('${azurerm_storage_account.files.id}', storageId).toLowerCase();
+    const role = wanted.role_definition_id.split('/').pop()!.toLowerCase();
+    const match = existing.find((entry) => entry.properties?.scope?.toLowerCase() === scope && entry.properties?.roleDefinitionId?.split('/').pop()?.toLowerCase() === role);
+    if (match?.id) adopt[address] = match.id;
+  }
+  return { adopt };
+}
+
 /** The local commit an infrastructure plan builds when the environment has no image yet. */
 async function localCommit(project: Project): Promise<{ directory: string; commitSha: string } | undefined> {
   const directory = localRepositoryFor(project, new SpecStore().get(project)?.source as { kind?: string; path?: string } | undefined);
@@ -370,11 +404,21 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   }] : [];
 
   // 4. Everything else, in the environment's own state.
-  const input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all, ...(image ? { image } : {}) });
-  const planId = crypto.randomUUID();
-  const planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
+  let input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all, ...(image ? { image } : {}) });
+  let planId = crypto.randomUUID();
+  let planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   if (planned.blockers.length) return { blocked: planned.blockers };
+  // An apply interrupted after Azure created a role assignment leaves it unrecorded; take it over instead of colliding.
+  const leftovers = await leftoverRoleAssignments(context, input, planned.actions);
+  if ('unknown' in leftovers) return { blocked: [leftovers.unknown] };
+  if (Object.keys(leftovers.adopt).length) {
+    input = { ...input, adoptRoleAssignments: leftovers.adopt };
+    planId = crypto.randomUUID();
+    planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
+    if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
+    if (planned.blockers.length) return { blocked: planned.blockers };
+  }
   const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildActions), ...changing(loginActions)];
   const actions = [...sharedActions, ...secretActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [

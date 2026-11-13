@@ -81,6 +81,10 @@ describe('Azure environment configuration', () => {
     expect(env).toContainEqual({ name: 'GREETING', value: 'cost $${HOME} 100%%{x}' });
     expect(() => buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, services: [{ ...fullEnvironmentInput.services![0]!, env: { DATABASE_URL: 'x' } }] })).toThrow(/set by Hypervibe/);
     expect(() => buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, secretKeys: ['API_KEY', 'api_key'] })).toThrow(/same Key Vault name/);
+    // An interrupted apply's role assignments are imported instead of recreated; only desired ones.
+    const adopted = buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, adoptRoleAssignments: { 'azurerm_role_assignment.runtime_pull': '/subscriptions/s/x/roleAssignments/a1' } });
+    expect(adopted.files['imports.tf.json']).toEqual({ import: [{ to: 'azurerm_role_assignment.runtime_pull', id: '/subscriptions/s/x/roleAssignments/a1' }] });
+    expect(() => buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, adoptRoleAssignments: { 'azurerm_role_assignment.someone_else': 'x' } })).toThrow(/Only a desired role assignment/);
   });
 });
 

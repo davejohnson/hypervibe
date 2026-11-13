@@ -54,6 +54,8 @@ export interface AzureEngineInput extends AzurePlacement {
   jobs?: AzureJobInput[];
   /** Runtime secrets every workload reads, by environment variable name; each must exist in Key Vault before apply. */
   secretKeys?: string[];
+  /** Role assignments an interrupted apply created but the engine never recorded: address → Azure id, imported instead of recreated. */
+  adoptRoleAssignments?: Record<string, string>;
 }
 
 interface AzureWorkloadInput {
@@ -260,7 +262,12 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     assignments.runtime_storage = roleAssignment('${azurerm_storage_account.files.id}', ROLE.storageBlobDataContributor, 'Hypervibe: the app reads and writes its files');
     resources['azurerm_role_assignment.runtime_storage'] = runtime;
   }
+  for (const address of Object.keys(input.adoptRoleAssignments ?? {})) {
+    if (!(address.replace(/^azurerm_role_assignment\./, '') in assignments)) throw new Error(`Only a desired role assignment can be adopted (${address}).`);
+  }
   const files: Record<string, unknown> = {
+    ...(Object.keys(input.adoptRoleAssignments ?? {}).length
+      ? { 'imports.tf.json': { import: Object.entries(input.adoptRoleAssignments!).map(([to, id]) => ({ to, id })) } } : {}),
     'provider.tf.json': providerFile(input),
     'base.tf.json': {
       resource: {
