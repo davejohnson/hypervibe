@@ -91,29 +91,32 @@ export function awsConnectionScope(project: Pick<Project, 'name'>, repo?: string
 async function reuseAccountAccess(project: Project, repo?: string): Promise<AwsConnectResult | undefined> {
   const secretStore = getSecretStore();
   const repository = new ConnectionRepository();
-  const accounts = new Map<string, AwsEngineCredentials>();
-  for (const connection of repository.findAllByProvider('aws').filter((entry) => entry.status === 'verified')) {
-    try {
-      const credentials = AwsEngineCredentialsSchema.parse(secretStore.decryptObject(connection.credentialsEncrypted));
-      if (credentials.roleArn.endsWith(`:role/hypervibe/${ACCOUNT_DEPLOY_ROLE}`)) accounts.set(credentials.accountId, credentials);
-    } catch { /* not deploy access */ }
-  }
-  if (accounts.size !== 1) return undefined;
-  const credentials = [...accounts.values()][0]!;
+  const saved = repository.findAllByProvider('aws').filter((entry) => entry.status === 'verified').flatMap((connection) => {
+    try { return [{ connection, credentials: AwsEngineCredentialsSchema.parse(secretStore.decryptObject(connection.credentialsEncrypted)) }]; } catch { return []; }
+  });
+  const accounts = [...new Set(saved.map((entry) => entry.credentials.accountId))];
+  if (accounts.length !== 1) return undefined;
+  const accountId = accounts[0]!;
+  // The local key is account-wide; the account role replaces per-project ones once setup has created it.
+  const base = saved[0]!.credentials;
+  const credentials: AwsEngineCredentials = { ...base, roleArn: `arn:aws:iam::${accountId}:role/hypervibe/${ACCOUNT_DEPLOY_ROLE}` };
   let auth;
   try { auth = await awsEngineAuthentication(credentials); } catch { return undefined; }
-  const access = await awsAccessCurrent({ accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! }, credentials.accountId);
+  const access = await awsAccessCurrent({ accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! }, accountId);
   if (access !== 'current') return undefined;
   const scope = awsConnectionScope(project, repo);
-  const existing = repository.findBestVerifiedMatch('aws', repo ?? project.name);
-  if (!existing || existing.scope !== scope) {
-    const saved = await saveConnection('aws', credentials, scope, { credentialsSource: 'aws-setup' });
-    if (!saved.success) return undefined;
-    const verified = await verifyConnection('aws', scope);
+  // Save this project's access, and move any project still on a per-project role.
+  const targets = [...new Set([scope, ...saved.filter((entry) => entry.credentials.roleArn !== credentials.roleArn).map((entry) => entry.connection.scope ?? '')])];
+  for (const target of targets) {
+    const current = saved.find((entry) => (entry.connection.scope ?? '') === target);
+    if (current?.credentials.roleArn === credentials.roleArn) continue;
+    const written = await saveConnection('aws', { ...credentials, region: current?.credentials.region ?? credentials.region }, target || undefined, { credentialsSource: 'aws-setup' });
+    if (!written.success) return { status: 'failed', message: `Hypervibe could not save AWS access on this computer: ${written.error}` };
+    const verified = await verifyConnection('aws', target || undefined);
     if (verified.kind !== 'verified') return undefined;
   }
-  return { status: 'connected', accountId: credentials.accountId, region: credentials.region, roleArn: credentials.roleArn,
-    message: `Hypervibe already has access to AWS account ${credentials.accountId} (${credentials.region}) and uses it for ${project.name}; no sign-in needed.` };
+  return { status: 'connected', accountId, region: credentials.region, roleArn: credentials.roleArn,
+    message: `Hypervibe already has access to AWS account ${accountId} (${credentials.region}) and uses it for ${project.name}; no sign-in needed.` };
 }
 
 async function finishSetup(project: Project, session: AwsSignInSession, plan: AwsSetupPlan, repo?: string): Promise<AwsConnectResult> {
@@ -127,7 +130,7 @@ async function finishSetup(project: Project, session: AwsSignInSession, plan: Aw
   if (!key) return { status: 'failed', message: 'Hypervibe could not create or find its AWS access key.' };
   const scope = awsConnectionScope(project, repo);
   const saved = await saveConnection('aws', { ...key, roleArn: applied.roleArn, accountId: plan.accountId, region: plan.region }, scope, { credentialsSource: 'aws-setup' });
-  if (!saved.success) return { status: 'failed', message: 'AWS access was created, but Hypervibe could not save it on this computer. Run setup again; it reuses what exists.' };
+  if (!saved.success) return { status: 'failed', message: `AWS access was created, but Hypervibe could not save it on this computer (${saved.error}). Run setup again; it reuses what exists.` };
   const verified = await verifyConnection('aws', scope);
   if (verified.kind !== 'verified') return { status: 'failed', message: 'AWS access was created and saved, but the deploy role could not be used yet. Run setup again in a minute.' };
   // Every other project on this account moves to the account role, then the per-project roles go.

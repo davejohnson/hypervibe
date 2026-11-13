@@ -38,3 +38,13 @@ describe('AWS setup', () => {
     expect(trustedGitHubOwners(undefined)).toEqual([]);
   });
 });
+
+describe('saved AWS access', () => {
+  it('accepts the account deploy role as well as per-project roles from earlier versions', async () => {
+    const { AwsEngineCredentialsSchema } = await import('../../adapters/providers/aws/aws-engine.adapter.js');
+    const base = { accessKeyId: 'AKIAEXAMPLEEXAMPLE12', secretAccessKey: 'x'.repeat(40), accountId: '123456789012', region: 'us-west-2' };
+    expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-deploy' }).success).toBe(true);
+    expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-deploy-billforge' }).success).toBe(true);
+    expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/someone-else' }).success).toBe(false);
+  });
+});
