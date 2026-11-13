@@ -144,11 +144,15 @@ export function databaseRestoreScript(): string {
     'psql "$DATABASE_URL" -q -c "SET ROLE NONE; ALTER SCHEMA public OWNER TO \\"$OWNER\\";" >/dev/null 2>&1 || true',
     'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "DROP OWNED BY CURRENT_USER CASCADE; CREATE SCHEMA IF NOT EXISTS public;"',
     'set +e',
-    'pg_restore --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
+    'pg_restore --exit-on-error --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
+    'RESTORE=$?',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
-    // A few error lines (object names only) explain a failed restore without exposing data.
-    'grep "error:" /tmp/restore.log | head -5 | sed "s/^/HV_RESTORE_ERROR /" || true',
+    // PostgreSQL diagnostics may contain SQL and data; report only the exit code.
+    'if [ "$RESTORE" -ne 0 ]; then',
+    `  echo '${RESULT_MARKER}{"ok":false,"error":"The copy could not be written to the new database (pg_restore exit '"$RESTORE"')."}'`,
+    '  exit 1',
+    'fi',
     'DST=$(manifest "$DATABASE_URL" | json_manifest)',
     `printf '${RESULT_MARKER}{"ok":true,"target":{"tables":%s,"totalRows":"%s","version":"%s"},"restoreWarnings":%s}\\n' "\${DST%|*}" "\${DST##*|}" "$(psql "$DATABASE_URL" -At -c "SHOW server_version_num")" "\${WARNINGS:-0}"`,
   ].join('\n');
@@ -178,9 +182,8 @@ export function databaseTransferScript(): string {
     'set +e',
     'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
     'DUMP=$?',
-    // Without --exit-on-error: harmless ownership/comment errors must not abort the copy;
-    // the manifest comparison below decides whether the data arrived.
-    'pg_restore --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
+    // Matching table contents cannot prove that schema objects were restored.
+    'pg_restore --exit-on-error --no-owner --no-privileges -d "$DATABASE_URL" /tmp/source.dump 2> /tmp/restore.log',
     'RESTORE=$?',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
@@ -188,7 +191,7 @@ export function databaseTransferScript(): string {
     `  echo '${RESULT_MARKER}{"ok":false,"error":"The source database could not be read (pg_dump exit '"$DUMP"')."}'`,
     '  exit 1',
     'fi',
-    'if [ "$RESTORE" -ne 0 ] && [ "${WARNINGS:-0}" -eq 0 ]; then',
+    'if [ "$RESTORE" -ne 0 ]; then',
     `  echo '${RESULT_MARKER}{"ok":false,"error":"The copy could not be written to the new database (pg_restore exit '"$RESTORE"')."}'`,
     '  exit 1',
     'fi',
