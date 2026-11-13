@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { chooseAwsRegion } from '../aws-connect.js';
-import { appBoundaryDocument, deployPolicyDocument } from '../aws-setup.js';
+import { awsConnectionScope, chooseAwsRegion } from '../aws-connect.js';
+import { appBoundaryDocument, deployPolicyDocument, trustedGitHubOwners } from '../aws-setup.js';
 
 type Statement = { Sid: string; Effect: string; Action: string | string[]; Resource: string | string[]; Condition?: Record<string, Record<string, unknown>> };
 
@@ -23,5 +23,28 @@ describe('AWS setup', () => {
     expect(chooseAwsRegion({ environments: { gcp: { hosting: { region: 'us-central1' } } } } as never)).toBe('us-east-1');
     expect(chooseAwsRegion({ environments: { gcp: { hosting: { region: 'europe-west1' } } } } as never)).toBe('eu-west-1');
     expect(chooseAwsRegion(undefined)).toBe('us-east-1');
+  });
+
+  it('shares one deploy role per account: access is saved per GitHub owner, and existing owners stay trusted', () => {
+    expect(awsConnectionScope({ name: 'billforge' }, 'davejohnson/billforge')).toBe('davejohnson/*');
+    expect(awsConnectionScope({ name: 'demo' })).toBe('demo');
+    const trust = encodeURIComponent(JSON.stringify({ Statement: [
+      { Sid: 'ThisComputer' },
+      { Sid: 'GitHubActions', Condition: { StringLike: { 'token.actions.githubusercontent.com:sub': ['repo:davejohnson/*', 'repo:acme/*'] } } },
+    ] }));
+    expect(trustedGitHubOwners(trust)).toEqual(['acme', 'davejohnson']);
+    // A per-repository trust from an earlier version is not an owner-wide one.
+    expect(trustedGitHubOwners(encodeURIComponent(JSON.stringify({ Statement: [{ Condition: { StringLike: { 'token.actions.githubusercontent.com:sub': 'repo:davejohnson/billforge:*' } } }] })))).toEqual([]);
+    expect(trustedGitHubOwners(undefined)).toEqual([]);
+  });
+});
+
+describe('saved AWS access', () => {
+  it('accepts the account deploy role as well as per-project roles from earlier versions', async () => {
+    const { AwsEngineCredentialsSchema } = await import('../../adapters/providers/aws/aws-engine.adapter.js');
+    const base = { accessKeyId: 'AKIAEXAMPLEEXAMPLE12', secretAccessKey: 'x'.repeat(40), accountId: '123456789012', region: 'us-west-2' };
+    expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-deploy' }).success).toBe(true);
+    expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-deploy-billforge' }).success).toBe(true);
+    expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/someone-else' }).success).toBe(false);
   });
 });

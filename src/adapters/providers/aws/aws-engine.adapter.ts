@@ -11,7 +11,8 @@ import { AssumeRoleCommand, GetCallerIdentityCommand, STSClient } from '@aws-sdk
 export const AwsEngineCredentialsSchema = z.object({
   accessKeyId: z.string().trim().min(16),
   secretAccessKey: z.string().min(32),
-  roleArn: z.string().regex(/^arn:aws:iam::\d{12}:role\/hypervibe\/hypervibe-deploy-[a-z0-9-]+$/),
+  // The account role (hypervibe-deploy) or a per-project one from earlier versions.
+  roleArn: z.string().regex(/^arn:aws:iam::\d{12}:role\/hypervibe\/hypervibe-deploy(?:-[a-z0-9-]+)?$/),
   accountId: z.string().regex(/^\d{12}$/),
   region: z.string().regex(/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/),
 }).strict();
