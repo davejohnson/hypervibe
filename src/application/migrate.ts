@@ -2,6 +2,7 @@ import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import { createCommandRegistry } from './commands.js';
 import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.service.js';
 import pg from 'pg';
+import { randomUUID } from 'node:crypto';
 import type { CommandContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -302,15 +303,34 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     const engine = (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
     ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, migration: { ...migration(), from: params.from, ...update } } });
   };
-  const reuseCopy = Boolean(migration()?.copiedAt) && !params.refreshData;
+  const persistCopy = (expected: Environment, next: NonNullable<EngineBinding['migration']>) => {
+    const engine = (expected.platformBindings as { engine?: EngineBinding }).engine ?? {};
+    if (!ctx.repos.environments.replacePlatformBindingsIfUnchanged(expected,
+      { ...expected.platformBindings, engine: { ...engine, migration: next } })) return false;
+    ctx.repos.environments.syncRepoBindingsForId(expected.id);
+    return true;
+  };
+  const copyIsCurrent = (copy: NonNullable<EngineBinding['migration']>) => {
+    const current = migration();
+    return Boolean(copy.copiedAt && current?.copiedAt === copy.copiedAt
+      && current.copyAttempt?.id === copy.copyAttempt?.id
+      && (!current.copyAttempt || current.copyAttempt.status === 'complete'));
+  };
+  const supersededResult = { status: 'blocked' as const, message: 'Another copy attempt changed this migration. This attempt cannot authorize release; review the latest copy state before retrying.' };
+  const incomplete = migration()?.copyAttempt && migration()?.copyAttempt?.status !== 'complete';
+  if (incomplete && (params.cutover || params.verifyOnly || !params.copyData || !params.refreshData)) {
+    return { status: 'blocked', message: `The latest copy into ${params.to} did not complete. Earlier copy evidence is historical and cannot authorize release or cutover. Run hv_migrate with copyData=true and refreshData=true to replace the target data with a fresh verified copy. If a cutover paused ${params.from}, it remains paused.` };
+  }
+  const completedCopy = Boolean(migration()?.copiedAt) && !incomplete;
+  const reuseCopy = completedCopy && !params.refreshData;
 
   if (params.cutover) {
-    if (!migration()?.copiedAt) return { status: 'blocked', message: `Migrate ${params.from} to ${params.to} and check the app there before the cutover.` };
+    if (!completedCopy) return { status: 'blocked', message: `Migrate ${params.from} to ${params.to} and check the app there before the cutover.` };
     return cutoverEnvironment(ctx, params);
   }
 
   if (params.verifyOnly) {
-    if (!migration()?.copiedAt) return { status: 'blocked', message: `Nothing has been copied from ${params.from} to ${params.to} yet; run hv_migrate first.` };
+    if (!completedCopy) return { status: 'blocked', message: `Nothing has been copied from ${params.from} to ${params.to} yet; run hv_migrate first.` };
     return verifyMigratedCopy(ctx, { project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
       instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName, copiedAt: migration()!.copiedAt });
   }
@@ -359,7 +379,9 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   const privateRailwaySource = sourceSpec.database?.provider === 'railway';
   if (reuseCopy) {
     const copy = migration()!;
+    if (!copyIsCurrent(copy)) return supersededResult;
     const released = await launchEnvironment(ctx, launchParams);
+    if (!copyIsCurrent(copy)) return supersededResult;
     if (released.status !== 'live') return released;
     return {
       status: 'migrated', target: params.to, urls: released.urls,
@@ -386,6 +408,17 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       token: () => context.adapter.engineAccessToken(), gcpProjectId: context.gcpProjectId, region: context.region,
       runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, environmentLabel,
     };
+    const expected = environment();
+    const prior = migration();
+    const previousCopy = prior?.copiedAt
+      ? { copiedAt: prior.copiedAt, ...(prior.database ? { database: prior.database } : {}), ...(prior.storage ? { storage: prior.storage } : {}) }
+      : prior?.previousCopy;
+    const copyAttempt = { id: randomUUID(), startedAt: new Date().toISOString(), status: 'incomplete' as const };
+    if (!persistCopy(expected, { ...prior, from: params.from, copyAttempt,
+      copiedAt: undefined, database: undefined, storage: undefined, ...(previousCopy ? { previousCopy } : {}) })) {
+      return { status: 'blocked', message: 'Migration state changed before copying started. Review the latest migration state before retrying.' };
+    }
+    const superseded = () => migration()?.copyAttempt?.id !== copyAttempt.id || migration()?.copyAttempt?.status !== 'incomplete';
     let database: Extract<MigrateResult, { status: 'migrated' }>['database'];
     if (privateRailwaySource) {
       const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer, instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName });
@@ -409,6 +442,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     }
     const storage: Extract<MigrateResult, { status: 'migrated' }>['storage'] = [];
     for (const name of storageNames) {
+      if (superseded()) return supersededResult;
       const binding = parseStorageBindings(sourceEnvironment)[name]!;
       const adapter = await adapterFactory.getStorageAdapter(binding.provider, params.project);
       if (!adapter.success || !adapter.adapter?.getCredentials || !binding.instanceScope) {
@@ -427,10 +461,17 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       if (!match) return { status: 'blocked', message: `The copied files in ${name} do not match the source (${result.differences} difference(s)).`, details: result };
     }
 
-    recordMigration({ copiedAt: new Date().toISOString(), ...(database ? { database } : {}), storage });
+    const current = environment();
+    const currentMigration = (current.platformBindings as { engine?: EngineBinding }).engine?.migration;
+    if (currentMigration?.from !== params.from || currentMigration.copyAttempt?.id !== copyAttempt.id
+      || currentMigration.copyAttempt.status !== 'incomplete') return supersededResult;
+    const completed = { ...currentMigration, copyAttempt: { ...copyAttempt, status: 'complete' as const },
+      copiedAt: new Date().toISOString(), ...(database ? { database } : {}), storage };
+    if (!persistCopy(current, completed) || !copyIsCurrent(completed)) return supersededResult;
 
     // 6. Release the app on the target and verify it.
     const released = await launchEnvironment(ctx, launchParams);
+    if (!copyIsCurrent(completed)) return supersededResult;
     if (released.status !== 'live') return released;
     return {
       status: 'migrated', target: params.to, urls: released.urls,
