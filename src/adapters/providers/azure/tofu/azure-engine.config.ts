@@ -352,7 +352,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
         container: [container(service, probe ? { readiness_probe: [probe], startup_probe: [probe] } : {})],
       }],
       // The release path (CI or hv_deploy) owns the image after creation.
-      lifecycle: [{ ignore_changes: ['template[0].container[0].image'] }],
+      lifecycle: [{ ignore_changes: ['template[0].container[0].image', 'workload_profile_name'] }],
     };
     outputs[`service_${key}_url`] = { value: `https://\${azurerm_container_app.${key}.ingress[0].fqdn}` };
   }
@@ -374,7 +374,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
         } : {}),
         container: [container(worker)],
       }],
-      lifecycle: [{ ignore_changes: ['template[0].container[0].image'] }],
+      lifecycle: [{ ignore_changes: ['template[0].container[0].image', 'workload_profile_name'] }],
     };
   }
   if (Object.keys(apps).length) files['apps.tf.json'] = { resource: { azurerm_container_app: apps }, ...(Object.keys(outputs).length ? { output: outputs } : {}) };
@@ -390,7 +390,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
       replica_timeout_in_seconds: job.timeoutSeconds ?? 1800, replica_retry_limit: 0,
       schedule_trigger_config: [{ cron_expression: azureCron(job.schedule), parallelism: 1, replica_completion_count: 1 }],
       template: [{ container: [container(job)] }],
-      lifecycle: [{ ignore_changes: ['template[0].container[0].image'] }],
+      lifecycle: [{ ignore_changes: ['template[0].container[0].image', 'workload_profile_name'] }],
     };
   }
   if (Object.keys(jobs).length) files['jobs.tf.json'] = { resource: { azurerm_container_app_job: jobs } };

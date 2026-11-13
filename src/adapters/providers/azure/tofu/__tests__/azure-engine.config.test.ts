@@ -55,7 +55,8 @@ describe('Azure environment configuration', () => {
         authentication: [{ secret_name: 'hv-waker-url', trigger_parameter: 'connection' }] }] });
     const job = resourcesOf(config, 'jobs.tf.json').azurerm_container_app_job!.nightly!;
     expect(job).toMatchObject({ schedule_trigger_config: [{ cron_expression: '0 3 * * *', parallelism: 1 }], replica_retry_limit: 0,
-      lifecycle: [{ ignore_changes: ['template[0].container[0].image'] }] });
+      // Releases own the image; Azure assigns the Consumption profile.
+      lifecycle: [{ ignore_changes: ['template[0].container[0].image', 'workload_profile_name'] }] });
     expect(() => azureCron('0 3 * *')).toThrow(/five cron fields/);
   });
 
