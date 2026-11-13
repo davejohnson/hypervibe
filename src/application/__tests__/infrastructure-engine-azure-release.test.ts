@@ -29,7 +29,9 @@ describe('ACR Tasks builds', () => {
       throw new Error(`unexpected ${method} ${url}`);
     });
     const built = await buildWithAcrTasks(azure.tokens, { registryId, loginServer: 'hvappshared123456.azurecr.io', source, pollMs: 1 });
-    expect(built).toEqual({ image: `hvappshared123456.azurecr.io/app@${digest}`, logsUrl: 'https://logs.example/cb1' });
+    // The signed log URL never leaves Hypervibe; results carry a portal link.
+    expect(built).toEqual({ image: `hvappshared123456.azurecr.io/app@${digest}`, logsUrl: `https://portal.azure.com/#resource${registryId}/runs` });
+    expect(JSON.stringify(built)).not.toContain('logs.example');
     const run = JSON.parse(azure.calls.find((call) => call.url.includes('scheduleRun'))!.body!);
     expect(run).toMatchObject({ type: 'DockerBuildRequest', imageNames: [`app:${source.commitSha}`], isPushEnabled: true, sourceLocation: 'source/123/src.tar.gz',
       platform: { os: 'Linux', architecture: 'amd64' } });
@@ -46,7 +48,7 @@ describe('ACR Tasks builds', () => {
     const paused = base(() => json(400, { error: { code: 'TasksOperationsNotAllowed', message: 'paused' } }));
     await expect(buildWithAcrTasks(paused.tokens, { registryId, loginServer: 'r', source })).resolves.toEqual({ error: expect.stringMatching(/free-credit.*pay-as-you-go/) });
     const noDigest = base(() => json(200, { properties: { runId: 'cb2' } }), () => json(200, { properties: { status: 'Succeeded', outputImages: [{ repository: 'app', digest: 'latest' }] } }));
-    await expect(buildWithAcrTasks(noDigest.tokens, { registryId, loginServer: 'r', source, pollMs: 1 })).resolves.toEqual({ error: expect.stringMatching(/refusing to release a mutable tag/) });
+    await expect(buildWithAcrTasks(noDigest.tokens, { registryId, loginServer: 'r', source, pollMs: 1 })).resolves.toMatchObject({ error: expect.stringMatching(/refusing to release a mutable tag/) });
   });
 });
 
@@ -90,5 +92,15 @@ describe('Container Apps releases', () => {
     releaseCalls = 0;
     const unhealthy = release(() => new Response('ok', { status: 200 }), 'Unhealthy');
     await expect(releaseAzureApp(unhealthy.tokens, { id: appId, name: 'web', image: 'img', web: true, waitMs: 1000, fetchTimeoutMs: 1, retryMs: 1 })).resolves.toMatchObject({ status: 'failed', message: expect.stringMatching(/unhealthy/) });
+  });
+});
+
+describe('Azure image builds', () => {
+  it('generates a Dockerfile ACR Tasks can build without BuildKit', async () => {
+    const { azureReleaseDockerfile } = await import('../infrastructure-engine-azure-release.js');
+    const dockerfile = azureReleaseDockerfile({ runtime: { kind: 'node', version: '24', installCommand: 'npm ci' } as never, startCommand: 'npm start' });
+    expect(dockerfile).not.toMatch(/--mount|# syntax/);
+    expect(dockerfile).toContain('RUN npm ci');
+    expect(dockerfile).toContain('FROM node:24-slim');
   });
 });

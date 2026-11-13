@@ -498,7 +498,7 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
     case AZURE_IMAGE_BUILD_OPERATION: {
       const build = deps.buildImage ?? (await import('./infrastructure-engine-azure-release.js')).buildAzureImage;
       const built = await build(context, { directory: String(metadata.directory), commitSha: String(metadata.commitSha) });
-      if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
+      if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error, ...(built.logsUrl ? { data: { buildLogsUrl: built.logsUrl } } : {}) };
       updateBinding(ctx, context, { image: built.image, imageCommit: String(metadata.commitSha) });
       return { success: true, message: `Built ${built.image}.`, data: { imageUri: built.image, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}) } };
     }
