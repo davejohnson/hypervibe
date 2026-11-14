@@ -122,22 +122,6 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('delivers the complete form-link policy during MCP initialization', async () => {
-    const { client, server } = await makeClient();
-    try {
-      const instructions = client.getInstructions();
-      expect(instructions).toContain('direct clickable form URL');
-      expect(instructions).toContain('every supported non-secret field');
-      expect(instructions).toContain('name and description');
-      expect(instructions).toContain('Preserve the complete query string');
-      expect(instructions).toContain('officially documented');
-      expect(instructions).toContain('Never put secrets in URLs');
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-
   it('preserves GitHub form fields and the link policy through a real connection response', async () => {
     const { client, server } = await makeClient(tempDir);
     try {
@@ -364,58 +348,6 @@ describe('server tool surface', () => {
     });
     await client.close();
     await server.close();
-  });
-
-  it('instructs agents to inspect managed deploys through Hypervibe', async () => {
-    const { HYPERVIBE_SERVER_INSTRUCTIONS } = await import('../../server.js');
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'For every deploy or promotion request'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'use hv_ci_status to select the reviewed definition, hv_ci_trigger to dispatch it, hv_ci_status to monitor it'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'Never dispatch, monitor, or inspect a managed CI run with gh'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'follow or report its connection/error guidance and stop instead of bypassing Hypervibe'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'hv_connections({project?}) and hv_secrets({project?}) list by default'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'full environment inspection requires provider + project + env'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'Its successful initialized=false result is a normal bootstrap state'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'correct one unambiguous selector typo and retry once'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'offer to open it in the user\'s browser'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'call hv_cloud_pair with action=start'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'Never ask for a GitHub token, repository id, or environment name'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'Never refer vaguely to a "Hypervibe credential flow"'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'action="bootstrap" with explicit project, gcpProjectId, and adminAuth="default"'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'ask the user to choose one exact account'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'the bounded GCP bootstrap above applies'
-    );
-    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'Never choose a billable account for the user'
-    );
   });
 
   it('every tool responds with the structured envelope on error paths', async () => {

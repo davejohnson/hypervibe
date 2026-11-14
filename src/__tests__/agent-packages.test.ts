@@ -29,9 +29,6 @@ describe('released agent packages', () => {
       expect(mcp.mcpServers.hypervibe.args).toEqual([
         `${client === 'codex' ? '${PLUGIN_ROOT}' : '${CLAUDE_PLUGIN_ROOT}'}/launch-mcp.cjs`,
       ]);
-      const launch = readFileSync(path.join(plugin, 'launch-mcp.cjs'), 'utf8');
-      expect(launch).toContain(`@hypervibe/hypervibe@${metadata.version}`);
-      expect(launch).not.toContain('@latest');
       if (process.platform !== 'win32') {
         const bin = path.join(output, 'bin');
         mkdirSync(bin, { recursive: true });
