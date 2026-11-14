@@ -1,187 +1,165 @@
-# Database password rotation boundary
+# Database password rotation
 
 The `credentials` plan scope dispatches `kind: database-password` to a dedicated
-native lifecycle. It does not send a replacement password through the generic
-application-variable writer as though that changed database authentication. All
-eight registered PostgreSQL providers implement native authentication and issuer
-capabilities, composed with the existing hosting readers/writers in the same
-reviewed two-action lifecycle. The [provider matrix](../test/provider-contracts/database-password-provider-matrix.json)
-records native differences and official sources; normal `npm test` requires every
-registered adapter and positive application plan/apply coverage. Actual runtime
-activation and application operations retain their independent evidence.
+native lifecycle, composed with the existing hosting readers, writers and managed
+rollout. Updating a variable is not SQL password rotation. The
+[provider matrix](../test/provider-contracts/database-password-provider-matrix.json)
+records registered capabilities and official sources; implementation and offline
+tests do not establish live cloud or application compatibility.
 
-The complete optional capability reviews the exact scoped database, role,
-logical database, authoritative issuer names and all existing referenced
-consumers. Existing literal connection URLs use encrypted reviewed templates that
-replace only their passwords. References remain references; unknown endpoints,
-unresolved references and unknown/external consumer coverage block mutation.
-For explicitly observed write-only consumer keys, the declared database binding
-and alias mapping supply the reviewed replacement. Acknowledged synchronization
-does not claim to read their current values; failed reads never grant write authority.
-Provider-generated replacements are recovered through exact-user reads and frozen
-before consumer writes. Configuring this declaration does
-not grant direct provider or SQL access outside Hypervibe.
+## Declaration and review
 
-A declaration uses an existing secret role with `kind: database-password`, a
-private `source` reference or the existing Hypervibe generator, and
-`database: { environment, component, username, database }`. Its `environments` array is empty: the password input is for the
-native database destination, not a raw variable injected into every workload.
-Review uses `hv_plan scope="credentials" credential=<role> intent="rotate"`,
-then exact action IDs through `hv_apply`. `intent="adopt"` verifies and records
-existing values without resetting credentials or synchronizing different values.
-RDS-managed master credentials retain provider-generated
-ownership and recover the exact current replacement after an uncertain response.
-No production
-rotation was performed or authorized by this implementation work.
-
-## Optional deployed application authentication
-
-A supplied-mode rotation may opt into `database.applicationDriver: "node-postgres"`.
-This adds a third read-only action after the existing authentication and issuer
-stages. It remains pending until the normal deployment lifecycle proves exact
-consumer activation and old deployment retirement, then authenticates using each
-running replica's unchanged runtime URLs and its installed `pg` driver. A real
-password challenge and matching session user/database are required; passwordless
-trust, successful deployments and current variables alone cannot finish the action.
-Reapply the same plan after the separate managed rollout. Removing its verification
-action or changing private references invalidates the encrypted review. Existing
-two-action plans, adoption and provider-generated recovery retain their authority.
-
-The current runtime capability is Railway-only and has offline validation. Existing
-`sshIdentityFile` and `sshKnownHostsFile` connection fields must identify an already
-registered private key and independently trusted host file. Hypervibe uses native
-SSH with strict host checking; it does not register keys, accept hosts, invoke the
-Railway CLI or create network access. Missing access or any idle/unknown replica
-blocks this opt-in before SQL mutation. The native SQL route must also already be
-reachable. Idle cron workloads, custom driver connection options and non-Node
-applications have no deployed-driver verifier. Other database providers reject this
-new opt-in while retaining their existing native rotation capabilities; the provider
-matrix separately records this boundary for all eight providers.
+Use an existing secret role with `kind: database-password`, a private `source`
+reference or the existing Hypervibe generator, and
+`database: { environment, component, username, database }`. Its `environments`
+array is empty: this input targets the database, not every workload's environment.
+Use `hv_spec` → `hv_plan scope="credentials" credential=<role> intent="rotate"`
+→ exact action confirmation through `hv_apply`. `intent="adopt"` verifies and
+records existing values without resetting credentials or synchronizing different
+values. The declaration grants no direct SQL or provider access outside Hypervibe.
 
 A delegated supplied-mode role may use positive `rotationGeneration` instead of
 `source`. The private root key and exact project/environment/component/role/generation
 derive one stable replacement for repeated review. Increase the generation after
-acceptance; it is not a provider-generated reset or permission to replay a write.
+acceptance; it does not authorize replaying a write. Provider-generated passwords
+are a separate reviewed input mode: recover the exact user's replacement and
+freeze it before consumer writes. RDS-managed master secrets retain provider ownership.
+
+The plan reviews the exact scoped database, role, logical database, issuer names
+and every existing consumer. Literal URLs use encrypted templates that replace
+only passwords; references remain references. Unknown endpoints, unresolved
+references or unknown/external consumer coverage block mutation. Explicitly
+observed write-only keys use the declared database binding and alias mapping;
+accepted synchronization does not claim current-value equality. Failed reads
+never grant write authority.
 
 ## Authority and recovery
 
-The plan contains two explicit, confirmed, data-bearing database actions:
+The native plan has two explicit, confirmed, data-bearing actions:
 
-1. Change the actual database credential, then establish fresh authentication to
+1. Change the actual database credential and establish fresh authentication to
    the intended role and database using the same frozen replacement.
-2. Synchronize only the reviewed database issuer/reference names, depending on
-   the first action's authentication proof, and verify their readback.
+2. Synchronize only reviewed issuer/reference names after that authentication
+   proof, then verify readback.
 
-Only the existing bound database and reviewed hosting consumer keys may be
-mutated by these actions. Fresh authentication uses the existing configured
-connection or a provider's supported temporary access/connector lease and cleanup
-contract, explicitly described in the review. Railway does not acquire public
-access; an unreachable private database remains unverified and cannot authorize
-credential mutation. No data alteration, schema migration or session termination
-is implied. Hosting adapters retain their declared configuration activation effects;
-the normal rollout lifecycle retains exact
-workload requirements, including declared `databaseEnvAliases`, even when their
-raw reference strings do not change. Every configured consumer must have one
-independently observed provider identity in the exact hosting scope. Strict
-activation requires matching resolved deployment configuration or accepted
-selected-key writes joined to exact native/managed replacement deployments.
-Per-consumer deployment IDs and native configuration versions remain in the
-encrypted recovery record. Old active deployments stay pending, and providers
-that only observe routing or revisions do not establish individual process
-retirement. A successful deployment status alone is insufficient.
+Same-user rotation invalidates the previous password for new connections as soon
+as the database accepts it; existing sessions may remain open. Review that
+disruption before mutation. This is not an overlapping two-credential rotation.
+No data alteration, schema migration or session termination is implied.
 
-Traffic-only retirement evidence keeps credential rollout requirements pending,
-including when native or managed CI receipts identify the exact new deployment.
-The current Cloud Run service and ECS Express
-observers report traffic coverage; they cannot clear this requirement until an
-instance-retirement capability is available. Cloud Run jobs and
-Azure revision/replica observations retain their existing instance evidence.
-Railway retains its scoped active-deployment inventory contract. None of these
-observations independently proves application SQL authentication.
+Only the bound database and reviewed hosting consumer keys may change. Fresh
+authentication uses existing access or the provider's supported temporary access
+lease and cleanup contract, explicitly described in the review. Railway never
+creates public access to proceed; an unreachable private database remains
+unverified. Unknown authentication cannot authorize a first reset.
 
-The source is resolved once and frozen in encrypted plan storage. Private
-configuration expectations and the original deployment baseline are encrypted.
-Database recovery markers are in encrypted component bindings. An attempted
-write is persisted and independently re-read with the exact component identity before crossing its mutation boundary. Null or misleading repository acknowledgements cannot authorize provider mutation. On retry, fresh SQL
-proof and configuration readback reconcile the same replacement. A lost response
-never generates another password or blindly repeats an uncertain write. Each
-consumer's attempted update is encrypted before mutation; readback recovers a
-committed write and retry finishes only consumers not yet attempted. A write-only
-destination with an ambiguous response requires the returned explicit
-`<configuration-action-id>:retry-uncertain` confirmation before resending the same
-replacement; it never resets the database again. Unknown
-authentication cannot authorize a first reset.
-Uncertain native recovery blocks unrelated plans and applies. Malformed recovery
-markers remain blockers. Successful issuer installation releases the mutation
-blocker while retaining pending rollout obligations and explicit unchecked
-application/session evidence.
+The replacement, comparison expectations, original deployment baseline and
+component recovery markers remain encrypted. Persist and independently re-read
+intent with the exact component identity before each provider mutation; a null or
+misleading persistence acknowledgment grants no authority. Retry reconciles the
+same replacement through fresh SQL proof and configuration readback. A lost
+response never generates another password or blindly repeats an uncertain write.
+Each consumer's attempt is durable before mutation; readback recovers a committed
+write. An ambiguous write-only update needs the returned exact
+`<configuration-action-id>:retry-uncertain` confirmation to resend the same
+replacement, without resetting the database again.
 
-Local `hv_destroy` also preserves database/alias recovery, pending generic
-credential updates and strict activation records. Local deletion has no live
-provider evidence proving those records safe to discard; a verified transfer or
-retirement workflow remains required. Legacy generic database-secret plans are
-blocked from replay, preserving their encrypted input and progress for review.
-They cannot bypass the dedicated capability/authority boundary.
+Uncertain native recovery blocks unrelated plans and applies; malformed recovery
+markers remain blockers. Successful issuer installation releases that mutation
+blocker while retaining rollout obligations and unchecked application/session
+evidence. Local `hv_destroy` preserves database/alias recovery, pending generic
+credential updates and strict activation records until verified transfer or
+retirement. Legacy generic database-secret plans cannot replay around this boundary;
+their encrypted inputs and progress remain available for review.
 
-## Independent evidence and limits
+## Provider-specific boundaries
 
-The challenged assumption is that a native reset helper or a matching variable
-value is sufficient to safely finish database rotation. A counterexample is a
-successful SQL password change with a lost acknowledgement while issuer
-configuration and running workloads still use the old value. Another is valid
-references and matching current configuration with a stale deployed consumer.
+| Provider | Authentication and recovery |
+| --- | --- |
+| Railway | Bound project, environment, service, SQL user and database. `ALTER ROLE` changes authentication; additive `POSTGRES_PASSWORD` synchronization uses `skipDeploys: true`. Copied aliases first require the separate [reference repair](database-credential-aliases.md); authored references remain intact. Fresh authentication recovers uncertain SQL, and exact issuer readback recovers metadata. |
+| Cloud SQL | `users.update` sends only the exact user's name and frozen password. Completion must correlate the returned operation with the bound project/instance; it remains separate from fresh SQL authentication. |
+| Amazon RDS | `ModifyDBInstance` changes the bound master password; a separately bound non-master role uses its own SQL session. Unrelated pending modifications block `ApplyImmediately`. Managed masters use `RotateMasterUserPassword` with generated-reset SDK retries disabled and recover through the exact Secrets Manager ARN. |
+| Azure PostgreSQL | Flexible Server `PATCH` changes only `administratorLoginPassword`, using existing ARM operation handling. A separately bound non-admin role uses its own SQL session. Exact subscription/resource group/server, role and database remain required. |
 
-[Railway's rotation guidance](https://blog.railway.com/p/security-disclosure-recommendation-rotate-postgresql-database-credentials)
-separates the PostgreSQL password update, issuer variables, consumer redeploys
-and existing connections. The [official PostgreSQL image documentation](https://github.com/docker-library/docs/blob/master/postgres/README.md)
-limits initialization variables to an empty data directory: changing
-`POSTGRES_PASSWORD` on an initialized container is not SQL password rotation.
-[PostgreSQL ALTER ROLE](https://www.postgresql.org/docs/current/sql-alterrole.html)
-changes authentication at the SQL boundary. A native administrative probe still
-does not validate an application's actual URL, TLS configuration, pooler,
-network path or operation.
+Railway's authored password references require URI-unreserved characters; its
+base64url generator satisfies that constraint. Reject incompatible replacements
+before changing authentication. Railway's SQL path sends a salted SCRAM-SHA-256
+verifier instead of the plaintext replacement, independent of the role's password
+storage default. A verifier may still appear in private server logs and must
+never appear in Hypervibe's public results or persisted output. Other providers'
+SQL fallback parameter logging remains a separate gap. See PostgreSQL's
+[pre-encrypted password handling](https://www.postgresql.org/docs/17/sql-createrole.html)
+and [parameter logging](https://www.postgresql.org/docs/17/runtime-config-logging.html).
 
-The all-provider application regressions first failed at the former blanket
-native-lifecycle rejection, before composition was added. Passing tests now cover
-exact confirmation/dependencies, frozen replacement recovery after lost SQL and
-issuer acknowledgements, unknown authentication, aliases, scope mismatch,
-SQL-only capability rejection, provider-generated value-preserving adoption,
-partial consumer recovery and retained activation requirements. Additional
-regressions were observed failing for wrong hosting provider/project/environment,
-malformed installed recovery, non-durable intent persistence and destructive local record deletion; they pass
-after scope/preservation enforcement. These exercise real planning, apply and
-SQLite encryption, but do not establish any provider's live SQL compatibility.
-Disposable real PostgreSQL authentication and deployed-configuration regressions
-are described in [database authentication](database-authentication.md).
-No customer incident cause, live credential rotation, private routing or
-application operation is proven by these checks.
+## Authentication, deployment and operation evidence
 
-The committed acceptance workflow runs `npm test` and `npm run typecheck` and
-the desired required check is `Hypervibe / acceptance`. Live branch-protection
-enforcement was not verified. Provider permissions, real network access and
-application behavior are verified by the user's reviewed apply, authentication
-and managed rollout evidence; offline contracts do not claim a live rotation.
+Raw references, resolved configuration, selected deployment configuration, fresh
+authentication and application operation are separate evidence. An unchanged
+reference can resolve to a new password while the running deployment remains
+stale. A snapshot describes provider configuration, not every process's environment.
+Changing `POSTGRES_PASSWORD` on an initialized database does not change its SQL
+password; the [official image contract](https://github.com/docker-library/docs/blob/master/postgres/README.md)
+limits initialization variables to an empty data directory.
 
-### Reconciled runtime evidence
+Native probes require a real password challenge and the intended session user and
+database. Trust, peer or certificate-only authentication remains unknown even if
+the session succeeds. PostgreSQL's
+[SQLSTATE table](https://www.postgresql.org/docs/current/errcodes-appendix.html)
+defines `28P01` as invalid password; routing, TLS and timeout failures remain
+unknown. Database names and schemas are distinct; `public` is not a database name.
+The internal probe needs no standalone public command. Separately authorized
+`hv_db_query` diagnostics may establish the selected session's identity; their
+managed connection can require temporary access approval and observed cleanup.
+They do not prove the application's connection configuration or SQL compatibility.
 
-The [native Railway SSH implementation](https://github.com/railwayapp/cli/blob/v5.27.0/src/commands/ssh/native.rs)
-selects exact deployment-instance usernames. Railway's
-[variable reference contract](https://docs.railway.com/variables) separates raw
-references from resolved runtime values. The pinned SDL does not validate opaque
-snapshot contents; tests label those reconstructed responses explicitly. A raw
-snapshot reference therefore stays unknown unless existing trusted runtime access
-covers every exact instance before and after the read. All discovered credential
-alias names travel from encrypted rollout expectations into normal observation;
-values and comparison hashes do not travel in that observation context.
+`hv_plan` and `hv_status` compare declared consumers, including
+`databaseEnvAliases` and replica URL keys, with exact selected deployments without
+adopting resources or writing baselines. Rollout retains the original operation,
+scope, service identity and encrypted expectations. Require matching resolved
+configuration or accepted selected-key writes joined to exact native/managed
+replacement deployments, plus complete active deployment coverage. One consumer's
+receipt cannot discharge another's requirement. Missing snapshots, partial scope
+and insufficient retirement evidence stay unknown or pending; deployment success
+alone cannot finish rotation. Traffic-only coverage currently limits Cloud Run
+services and ECS Express. See [runtime provider evidence](runtime-credential-providers.md#database-consumer-activation-evidence)
+for native activation and retirement boundaries. Application business operations
+still require their own verification.
 
-Reconciliation observed failures for omitted retained alias names, removed optional
-verification authority, changed private references before SQL, and a runtime
-`AuthenticationOk` without a password challenge. Focused checks now exercise those
-boundaries through real SQLite/encryption, serialized GraphQL, and the emitted Node
-program using the real `pg` driver against a synthetic PostgreSQL wire peer.
-The disposable real PostgreSQL suite remains in ordinary `npm test`, but this
-macOS run could not initialize it because the host exhausted shared-memory IDs
-(`shmget`). Host settings and other processes were left unchanged. No live Railway
-SSH, SQL rotation, application business operation or customer incident cause was
-verified. The committed and desired acceptance commands still include these tests;
-live branch-protection enforcement was not inspected.
+## Optional deployed application authentication
+
+Supplied-mode rotation can opt into `database.applicationDriver: "node-postgres"`.
+This adds a third read-only action after native authentication and issuer update.
+Reapply the same plan after normal rollout proves exact consumer activation and
+old deployment retirement. The action uses every running replica's unchanged
+runtime URLs and installed `pg` driver, requiring a password challenge and matching
+session user/database. Removing the action or changing private references
+invalidates the encrypted review. Existing two-action plans, adoption and
+provider-generated recovery keep their existing authority.
+
+This capability is Railway-only and validated offline. `sshIdentityFile` and
+`sshKnownHostsFile` must identify an already registered key and independently
+trusted host file. Native SSH uses strict host checking; it registers no keys,
+accepts no new hosts, invokes no Railway CLI and creates no network access.
+Missing access or idle/unknown replicas block the opt-in before SQL mutation;
+the native SQL route must already be reachable. Idle cron workloads, custom driver
+connection options and non-Node applications have no deployed-driver verifier.
+Other database providers reject this opt-in while retaining native rotation.
+
+The [pinned Railway SSH implementation](https://github.com/railwayapp/cli/blob/v5.27.0/src/commands/ssh/native.rs)
+selects exact deployment-instance usernames. A raw snapshot reference remains
+unknown unless existing trusted runtime access covers every exact instance before
+and after the read. All discovered alias names travel from encrypted expectations
+into observation; values and comparison hashes do not.
+
+## Verification limits
+
+Ordinary `npm test` includes application plan/apply and encrypted-recovery checks,
+real-client provider transport contracts, synthetic PostgreSQL wire tests, and a
+disposable real PostgreSQL suite. The latter requires local PostgreSQL binaries
+and fails rather than silently skipping when unavailable. It distinguishes
+metadata edits from actual password changes and fresh connections from existing
+sessions. Logging and password-challenge checks cover SCRAM and trust behavior.
+Synthetic transport responses and local database tests do not establish cloud
+permissions, live routing, deployed application operation or an incident's cause.
+The acceptance workflow runs this suite and type checking; repository configuration
+alone does not establish live branch-protection enforcement.

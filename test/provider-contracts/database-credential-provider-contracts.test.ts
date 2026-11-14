@@ -33,7 +33,7 @@ function database(adapter: IDatabaseOperations, externalId = 'native-db', userna
 }
 
 // These native HTTP observations are reconstructed from the official contracts
-// listed in docs/database-credential-rotation.md, not captured live success.
+// listed in docs/database-password-rotation.md, not captured live success.
 
 it('RDS changes the master authentication and refuses unrelated pending modifications', async () => {
   const adapter = new RdsAdapter();

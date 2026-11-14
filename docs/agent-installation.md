@@ -100,57 +100,23 @@ configuration contents are not printed, because they may contain credentials.
 
 ## Evidence and limits
 
-The challenged assumption was that registering a server alone distributes
-Hypervibe's workflow, and that one client's registration command applies to
-other clients. A successful Claude-only registration with no installed
-`SKILL.md`, and OpenCode V2's different MCP nesting, are concrete
-counterexamples.
+Installer regressions exercise spawned client fixtures, temporary configuration,
+preserving JSONC/TOML edits, repetition/conflicts, missing clients, output safety,
+skill-only mode, owned upgrades, concurrent-edit rollback and compiled package
+layout. They run in ordinary `npm test`; simulated clients cannot prove native
+client compatibility or model compliance.
 
-Before runtime changes, the subprocess/configuration regressions failed for
-all three default installs: Claude reported success but no skill existed;
-Codex and OpenCode returned unsupported-argument errors. The three skill-only
-regressions also failed. Six managed-upgrade regressions subsequently failed
-before receipt-based upgrade support was added. After implementation all 50
-installer regressions passed (65 with neighboring entrypoint/CLI tests). They
-exercise actual spawned executable fixtures, temporary user
-configuration, preserving JSONC edits, repeat/conflict behavior, missing
-clients, output safety, skill-only behavior, owned upgrades preserving options,
-modified/foreign installation refusal, guarded rollback after a concurrent
-skill edit, and a compiled package layout run
-from an unrelated directory without infrastructure state. These are synthetic
-client fixtures in the ordinary `npm test` gate, not live agent compliance
-claims.
+Recorded native checks cover Claude Code 2.1.296 and Codex CLI 0.164.0 on macOS
+(first/repeated install and an owned upgrade from a simulated prior package),
+and OpenCode V1 1.19.4 (skill discovery and diagnostic MCP connectivity). These
+used isolated temporary configuration. They do not establish compatibility with
+every client version, existing manual installation or later Hypervibe release.
 
-On 2026-10-24, the candidate installer was also run against actual Claude Code
-2.1.296 and Codex CLI 0.164.0 on macOS, with isolated temporary user/config
-homes. First and repeated installs succeeded, retained an unrelated MCP
-entry, preserved configuration bytes on repetition, installed the skill,
-pinned the server version, and did not create Hypervibe state. No server was
-started and no real user configuration was changed. A separate real Codex
-probe inside a trusted temporary project confirmed that `mcp list --json`
-reported the user-level servers rather than that project's MCP entries.
-
-Both real clients also completed an owned upgrade from a temporary candidate
-package labeled `0.0.1` with an older skill to the current candidate. The only
-configuration change was the package argument; an added user environment
-setting and unrelated entries remained intact, the skill updated, repetition
-changed no configuration bytes, and no Hypervibe state was created. This is a
-simulated prior installer release, not a claim about upgrading every previously
-published manual installation.
-
-OpenCode V1 1.19.4 was additionally acquired through `npm exec` in a temporary
-cache, with isolated XDG configuration/data/state and an unrelated working
-directory. Native `debug skill` discovered the full canonical Hypervibe skill;
-`mcp list` connected to a diagnostic MCP endpoint using the installer's V1
-configuration shape. Its initialize identity was `opencode` version `1.19.4`.
-No real user configuration, provider credentials or model requests were used.
-OpenCode V2 compatibility remains checked against documented schemas and
-synthetic subprocess fixtures, rather than a V2 runtime. Native
-Windows/Linux execution, client skill selection, model instruction adherence,
-MCP connectivity and provider lifecycle behavior remain unverified by this
-installer suite. Native Windows MCP launch commands use `cmd /c npx`; this
-launcher shape alone is not Windows compatibility evidence. The npm `latest`
-tag includes these changes only after a package release.
+OpenCode V2 has schema and subprocess-fixture coverage, not a native runtime
+check. Native Windows/Linux execution, universal skill selection and model
+adherence remain unverified. Windows' `cmd /c npx` launch shape alone is not
+compatibility evidence. Installer tests do not establish provider lifecycle
+support. Changes reach npm `latest` only after package release.
 
 Official contracts:
 

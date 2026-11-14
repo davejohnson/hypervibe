@@ -1,15 +1,11 @@
 # Database credential aliases
 
-Reviewed 2026-10-24. This is the provider review and implementation contract for
-repairing references to an existing database credential. It is separate from
-SQL password rotation. Railway is the only provider
-supported to implement initially; this review does not establish live support.
-
-The challenged assumption is that equal resolved values prove that aliases will
-follow their issuer. A copied password and a native reference can resolve to the
-same value today; only the reference follows a later issuer change. Conversely,
-a correct reference to a stale canonical password does not establish SQL access.
-Both raw reference structure and resolved configuration must be examined.
+This reference covers repair of references to an existing database credential,
+separate from [SQL password rotation](database-password-rotation.md). Railway
+implements this isolated capability; offline checks do not establish live support.
+Equal resolved values do not prove that aliases follow their issuer: copied
+passwords can match today without following a later change. Examine both raw
+references and resolved configuration; neither establishes SQL authentication.
 
 ## Shared invariant and authority
 
@@ -73,9 +69,9 @@ permissions, completion and uncertain-write recovery through real transport.
 | Provider | Admission | Native identity and credential boundary | Prerequisites, completion and recovery limits |
 | --- | --- | --- | --- |
 | railway | Supported to implement | Bound project ID, environment ID and database service ID. Same-service `${{POSTGRES_PASSWORD}}` references can replace copied password material in `PGPASSWORD`, `DATABASE_URL`, `DATABASE_PRIVATE_URL` and `DIRECT_URL`. Independently matched user, host, port and database variables can replace copied URL components. [Reference syntax](https://docs.railway.com/variables#referencing-variables-in-the-same-service). | Read raw and resolved variables; patch only these aliases with deployment suppressed; preserve `POSTGRES_PASSWORD` and each resolved URL destination. Fresh raw/resolved readback decides convergence; uncertain responses require observation. See the scoped transport boundary below. |
-| cloudsql | Unsupported | Exact project, instance and user. `users.update` changes a user and returns an Operation. [User update API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/users/update). | That update is an issuer mutation, outside this capability. Review password versus IAM authentication, an authoritative reference source and consumer delivery before admission; native operation completion cannot substitute for alias readback or fresh SQL authentication. |
-| rds | Unsupported | Exact AWS account/region, instance and master login; when RDS manages its password, `MasterUserSecret` identifies a Secrets Manager ARN and status. [RDS-managed credentials](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html). | Review the existing credential mode, secret version, permissions and workload reference mechanism. Secret status and retrieval alone do not prove consumers use the credential. Do not enable managed passwords or rotate the secret as an alias repair; uncertain changes require native recovery. |
-| azure-postgres | Unsupported | Exact subscription/resource group/Flexible Server and administrator login. Reset requires password authentication and a ready server; primary changes propagate asynchronously to replicas. [Administrator password contract](https://learn.microsoft.com/en-us/azure/postgresql/security/security-reset-admin-password). | No alias operation is admitted. Distinguish administrator from application roles and password from Entra authentication. Native reset completion, replica propagation and workload reference readback require separate evidence; never reset the administrator merely to obtain a value for aliases. |
+| cloudsql | Unsupported | Exact project, instance and user. [User update API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1/users/update). | `users.update` mutates the issuer, outside this capability; operation completion cannot substitute for alias readback or fresh authentication. |
+| rds | Unsupported | Exact AWS account/region, instance and master login; managed passwords use a Secrets Manager ARN. [RDS-managed credentials](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html). | Secret status/retrieval does not prove consumer use. Never enable managed passwords or rotate a secret as alias repair. |
+| azure-postgres | Unsupported | Exact subscription/resource group/Flexible Server and administrator login. [Administrator password contract](https://learn.microsoft.com/en-us/azure/postgresql/security/security-reset-admin-password). | Administrator/application roles and password/Entra identities remain distinct. Never reset the administrator to obtain alias values; reset completion does not establish consumer readback. |
 
 ## Railway transport boundary
 
@@ -91,15 +87,6 @@ unresolved or cyclic dependency blocks mutation. URL query options are limited
 to `sslmode`, `application_name` and `connect_timeout`. Whole-URL references,
 foreign-service references and any `DATABASE_PUBLIC_URL` evidence block this
 repair. No absent alias is created.
-
-The regression counterexample was the recorded official template's composed
-`DATABASE_URL`: the earlier parser rejected it as `unsupported_reference`, and
-ignored `DIRECT_URL`. Both new real-client/serialized-transport cases failed
-before the fix. They now cover a mutation-free template read, copied direct URL
-repair, unchanged destinations, dependency drift, issuer updates and lost-write
-readback. Provider rendering in these tests is synthetic; the public template
-configuration is recorded. This does not claim live SQL access or a deployed
-application's current environment.
 
 The [variable API](https://docs.railway.com/integrations/api/manage-variables)
 supports raw reads using `unrendered: true` and resolved reads without that flag.
@@ -126,12 +113,10 @@ the allowlisted patch, unchanged canonical value, no deployment and uncertain
 acknowledgments. Synthetic responses must be identified as synthetic, not as
 captured successful provider behavior.
 
-Configured credential alignment is not fresh SQL authentication. Administrative
-proxy access may use a different credential source from an application's URL.
-Matching literal host/port/database fields also does not prove physical database
-identity. Report configuration convergence, any separately performed login check,
-and application rollout independently. No live repair or SQL authentication is
-claimed by this document or its registry test.
+Matching literal host/port/database fields does not prove physical database
+identity. Administrative proxy access may use a different credential source from
+the application. Report configuration convergence, any separately performed login
+check and application rollout independently.
 
 The read-only comparison includes issuer `PGPASSWORD` and `DIRECT_URL` when
 present and checks each bound application's present `DIRECT_URL`. For that
@@ -139,15 +124,11 @@ application alias, the comparison target is issuer `DIRECT_URL`, otherwise
 `DATABASE_PRIVATE_URL`, otherwise `DATABASE_URL`. It reports the chosen key and
 keeps unusable present values unknown. Absent optional aliases are not errors:
 the recorded native template has neither `DIRECT_URL` nor `DATABASE_PRIVATE_URL`.
-Five serialized-transport counterexamples failed before extending the previous
-URL-only diagnostic; API observation and registered-command regressions now
-cover these aliases and value-free output. These comparisons examine resolved
-configuration only; raw reference verification belongs to the isolated alias
-capability above.
+These comparisons examine resolved configuration only; raw reference verification
+belongs to the isolated alias capability above.
 
-The normal `npm test` gate includes
-`test/provider-contracts/database-credential-aliases-contracts.test.ts`. It checks
-the eight-provider review roster against the real registry, explicit admission
-and official source links, plus the pinned Railway schema's limited transport
-shape. It does not execute a repair or certify live permissions, reference
-resolution, concurrent updates or database access.
+Ordinary `npm test` includes registry admission, pinned schema and real-client
+serialized-transport checks for exact scope, template reads, bounded repair,
+unchanged destinations, dependency drift and uncertain-write readback. Template
+configuration is recorded; provider rendering is synthetic. These checks do not
+certify live permissions, reference resolution, concurrent updates or database access.
