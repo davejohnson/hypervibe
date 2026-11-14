@@ -165,7 +165,7 @@ describe('database seed private-image credential scope', () => {
     { label: 'intentional organization wildcard', global: true, invoice: true, invoiceScope: 'davejohnson/*', remote: `git@github.com:${repository}.git`, expected: invoiceCredentials },
     { label: 'intentional global fallback', global: true, invoice: false, remote: `git@github.com:${repository}.git`, expected: { username: 'global-reader', password: 'synthetic-stale-global-token' } },
     { label: 'unknown repository cannot adopt a scoped credential', global: false, invoice: true, remote: undefined, expected: undefined },
-    { label: 'non-GitHub repository cannot adopt a scoped credential', global: false, invoice: true, remote: `git@gitlab.com:${repository}.git`, expected: undefined },
+    { label: 'non-GitHub repository cannot adopt a scoped credential', global: false, invoice: true, remote: `git@git.example.com:${repository}.git`, expected: undefined },
     { label: 'unknown repository retains intentional global fallback', global: true, invoice: true, remote: undefined, expected: { username: 'global-reader', password: 'synthetic-stale-global-token' } },
     { label: 'failed boot followed by seed reapply', global: true, invoice: true, remote: `git@github.com:${repository}.git`, expected: invoiceCredentials, retry: true },
   ])('$label', async (scenario) => {

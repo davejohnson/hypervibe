@@ -11,6 +11,9 @@ changing customer-facing pages, emails, prompts or errors.
 
 ## Design for the complete journey
 
+- Build toward the [common cloud user journey](docs/development/user-journey.md).
+  It is the acceptance target for GCP, AWS and Azure, not a claim of current
+  support. Provider notes and historical checklists do not define extra scope.
 - Optimize for a working app with the fewest user chores and installed tools.
   Infer routine choices from the repository; ask for missing access, consequential
   decisions and approvals, not an infrastructure design exercise.
@@ -20,9 +23,8 @@ changing customer-facing pages, emails, prompts or errors.
   The current npm path still requires Node.js/npm; distinguish targets from
   implemented and verified installation paths.
 - Focus new cloud work on GCP, AWS and Azure. Preserve Railway for existing apps.
-  The unused GCP prototype may be replaced; do not turn that replacement into a
-  compatibility or import-migration project. This is not permission to discard
-  existing Railway state, user data or working workflows.
+  Keep new infrastructure on the managed engine. Removing obsolete code or
+  documentation does not authorize discarding state, data or working workflows.
 - Prove the smallest complete path from installation and cloud access to a running
   app before expanding providers or features. An engine wrapper or passing unit
   tests alone do not establish a supported deployment. Say what is implemented,
@@ -74,10 +76,14 @@ changing customer-facing pages, emails, prompts or errors.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) defines the infrastructure model. Consult the
 relevant sections and topic rules, not the entire linked document tree. Previously
-read, unchanged guidance need not be loaded again.
+read, unchanged guidance need not be loaded again. The [documentation map](docs/README.md)
+locates current requirements and implementation evidence. Delete superseded
+backlogs and designs after preserving any unique current safeguards in these
+contracts; use Git history for the old material rather than an archive in docs.
 
 | Change | Relevant rules |
 | --- | --- |
+| Cloud journey, feature scope or completion claims | [Common cloud journey](docs/development/user-journey.md) |
 | Onboarding and customer experience | [Product](docs/development/product.md) |
 | Provider APIs or shared capabilities | [Provider evidence](docs/development/provider-evidence.md) |
 | Spec, plan, apply, observation, import or teardown | [Lifecycle](docs/development/lifecycle.md) |
@@ -88,9 +94,8 @@ read, unchanged guidance need not be loaded again.
 
 The installed customer workflow is [skills/hypervibe/SKILL.md](skills/hypervibe/SKILL.md);
 customers do not inherit this file. Keep its instructions honest about current
-capabilities. Document deliberate policy changes in the
-[migration audit](docs/development/guidance-migration.json), a historical record
-rather than a reading checklist.
+capabilities. Update current contracts when policy changes and explain the
+decision in the pull request. Git history preserves earlier policy.
 
 <a id="verification-and-delivery"></a>
 <a id="merge-handoff"></a>

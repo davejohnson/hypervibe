@@ -1,5 +1,17 @@
 # Provider conformance
 
+This guide describes the implemented test harness and its profile coverage.
+The [common cloud journey](development/user-journey.md) defines the broader product
+acceptance target. A profile pass establishes only that profile's declared scope.
+
+Registry and capability-matrix checks describe declared adapter boundaries; they
+do not prove a cloud journey. The former opt-in `test:providers:roadmap` gate was
+removed because it required every historical matrix entry to say `supported`
+using metadata and synthetic credentials alone. Ordinary registry checks and
+live lifecycle profiles remain. Unavailable-feature tests protect today's stop
+points; replace them with behavioral coverage when the feature is implemented,
+rather than treating the rejection as a permanent product requirement.
+
 Provider support requires a disposable live fixture that creates its declared
 resources through Hypervibe, serves the expected application response, updates
 without replacement, converges to a noop, tears down, and independently confirms
@@ -47,9 +59,9 @@ profile. The Cloudflare inventory retains exact account/zone scope and IDs even
 when apply fails or removes local bindings; unresolved creation without a saved
 ID remains a cleanup failure.
 
-The [AWS engine](opentofu-engine-aws.md) has its own implementation and evidence,
-but no complete disposable lifecycle profile in this runner yet. Azure infrastructure
-remains planned and unavailable. Legacy
+The [AWS engine](opentofu-engine-aws.md) and [Azure engine](opentofu-engine-azure.md)
+have implementation notes and recorded live testing-environment evidence, but
+neither has a complete disposable lifecycle profile in this runner yet. Legacy
 GCP adapter lifecycle registrations are also planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
 are unavailable after the engine cutover. Selecting these unavailable profiles

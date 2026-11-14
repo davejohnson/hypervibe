@@ -242,13 +242,13 @@ describe('command presentation', () => {
 
   it('gives every command a command-aware shared success presentation', () => {
     const output = formatCommandResult('hv_inspect', commandSuccess({
-      provider: 'gitlab',
+      provider: 'github',
       resources: [{ id: '1', name: 'web', status: 'success', url: 'https://example.com/web' }],
     }));
 
     expect(output).toContain('✅  HYPERVIBE · INSPECT COMPLETE');
     expect(output).toContain('📦  RESULT');
-    expect(output).toContain('gitlab');
+    expect(output).toContain('github');
     expect(output).toContain('Resources: 1');
     expect(output).toMatch(/RESULT\s+NAME\s+URL\s+ID/);
     expect(output).toMatch(/✅\s+web\s+https:\/\/example\.com\/web\s+1/);
@@ -374,17 +374,17 @@ describe('command presentation', () => {
     const output = formatCommandResult('hv_ci_status', commandSuccess({
       repository: { scope: 'group/project' },
       runs: [{
-        id: 'pipeline-42',
-        name: 'GitLab pipeline',
+        id: '42',
+        name: 'GitHub workflow',
         phase: 'succeeded',
         nativeStatus: 'success',
-        webUrl: 'https://gitlab.example.com/group/project/-/pipelines/42',
+        webUrl: 'https://github.com/group/project/actions/runs/42',
       }],
     }));
 
-    expect(output).toContain('1 run · GitLab pipeline');
+    expect(output).toContain('1 run · GitHub workflow');
     expect(output).toMatch(/OUTCOME\s+URL\s+RUN ID/);
-    expect(output).toMatch(/✅ succeeded\s+https:\/\/gitlab\.example\.com\/group\/project\/-\/pipelines\/42\s+pipeline-42/);
+    expect(output).toMatch(/✅ succeeded\s+https:\/\/github\.com\/group\/project\/actions\/runs\/42\s+42/);
     expect(output).not.toMatch(/^OUTCOME\s+PHASE/m);
   });
 

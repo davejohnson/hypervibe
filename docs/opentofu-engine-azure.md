@@ -1,14 +1,19 @@
-# OpenTofu engine on Azure
+# Azure engine implementation notes
 
 The Azure backend for the [OpenTofu engine](opentofu-engine.md). It follows the
 same lifecycle as GCP and [AWS](opentofu-engine-aws.md) (`hv_spec` → `hv_plan` →
 approved `hv_apply`), with the same local encrypted state, saved plans, approvals
-and receipts. This page records the Azure-specific decisions and why they were made.
+and receipts. This page records Azure implementation decisions and dated evidence.
+Product scope and future priorities belong to the
+[common user journey](development/user-journey.md). This page does not establish a
+complete supported Azure journey.
 
-## Status (2026-11-12)
+## Recorded evidence (2026-11-13)
 
-Nothing below has run against Azure yet. "Built" means implemented, unit-tested with
-mocked HTTP and, for configuration, passing `tofu validate`.
+The first live run described below exercised a testing environment on the demo
+app. "Built" describes implementation; only rows explicitly marked live record a
+live result. Those results do not verify other subscriptions, multiple simultaneous
+testing environments, production profiles or subsequent revisions.
 
 | Piece | State |
 | --- | --- |
@@ -23,6 +28,10 @@ mocked HTTP and, for configuration, passing `tofu validate`.
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
 | Production profile (staging, production), `hv_migrate`, CI releases, custom domains | Not built |
 
+Current planner limits (code reviewed 2026-11-13):
+[`azureEngineProblems`](../src/application/infrastructure-engine-azure.ts) blocks
+all environments whose names match `/prod|stag/i`, as well as Redis, queues and
+custom hosting domains. Testing environments must share a PostgreSQL version.
 
 ## Found in the first live run (2026-11-13)
 
@@ -111,10 +120,11 @@ mocked HTTP and, for configuration, passing `tofu validate`.
 
 ## Runtime choices (testing profile)
 
-Profiles come from the environment name, as on every cloud: names matching
-`/prod|stag/i` use the production shape; everything else is testing. A project's
-testing environments share **one PostgreSQL server and one registry** (decided
-2026-11-12); staging and production will each get their own.
+The current classifier uses the environment name: names matching `/prod|stag/i`
+select the unimplemented production profile and planning blocks them; everything
+else is testing. A project's testing environments share **one PostgreSQL server
+and one registry** (decided 2026-11-12). Separate resources for staging and
+production are a design proposal, not current behavior.
 
 | Piece | Choice | Idle cost (eastus2) |
 | --- | --- | --- |
@@ -275,7 +285,14 @@ stay for the project's other environments.
 - OpenTofu 1.13.9 supports the ephemeral resources and write-only attributes the
   database uses.
 
-## Next
+## Evidence boundaries and implementation gaps
 
-1. The production profile (own server and registry, web always on), `hv_migrate` for
-   Azure, CI releases with the GitHub federated credentials.
+The testing demo's sign-in, setup, plan/apply, deployment and teardown are recorded
+above. That run does not prove the complete
+[common user journey](development/user-journey.md).
+
+The production profile, `hv_migrate`, CI releases and custom
+hosting domains remain unavailable as recorded above. Live evidence is still
+missing here for outside-key collection and more than one testing environment
+sharing resources. BuildKit-dependent repository Dockerfiles also remain blocked.
+These are implementation and evidence gaps, not a separate roadmap.

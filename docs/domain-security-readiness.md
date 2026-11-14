@@ -67,43 +67,12 @@ schema acceptance alone does not establish a supported live deployment.
 
 Every zone requires `id` and `name`. Cloudflare and AWS also require `accountId`;
 Google requires `projectId`; Azure requires `subscriptionId` and `resourceGroup`.
-The zone must already exist and contain the consumer hostname: the environment's
-`domain`, or the project Pages `customDomain` in its canonical environment. DNS
-selection without either consumer is rejected. The connection is
+The zone must already exist and contain the environment's `domain`. DNS
+selection without a domain is rejected. The connection is
 selected and verified independently of hosting. A matching zone name does not
 authorize management, adoption, a DNS provider migration, or nameserver changes.
 
-A repository can select Pages DNS without inventing a hosting domain or app
-service. This complete spec uses the existing repository planning workflow:
-
-```json
-{
-  "version": 1,
-  "project": "pages-site",
-  "github": {
-    "repository": "owner/pages-site",
-    "canonicalEnvironment": "repository",
-    "pages": { "sourcePath": "public", "customDomain": "www.example.com" }
-  },
-  "environments": {
-    "repository": {
-      "hosting": { "provider": "cloudrun" },
-      "dns": {
-        "provider": "gcp",
-        "zone": { "id": "example-zone", "name": "example.com", "projectId": "dns-project" }
-      }
-    }
-  }
-}
-```
-
-Run ordinary `hv_plan` with `env: "repository"`, review and apply each saved stage,
-then plan again. The required hosting field creates no compute resources in this
-repository-only path. App workloads, data resources, existing hosting bindings,
-or unknown resource ownership prevent that routing. Pages claims the exact
-hostname before publishing DNS; teardown removes and verifies its DNS while the
-claim remains, then detaches Pages. A saved removal receipt is required. SendGrid
-records similarly wait for an observed domain authorization. Unsupported email
+SendGrid records wait for an observed domain authorization. Unsupported email
 work in Cloud Run environments remains blocked.
 
 New records default to public DNS, required HTTPS, proxy off, and no wildcards.

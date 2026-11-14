@@ -31,11 +31,6 @@ import {
   GITHUB_DELEGATED_SECRET_OPERATION,
   isGitHubNativeSettingAction,
 } from '../services/github-infrastructure.service.js';
-import {
-  isGitHubPagesAction,
-  isGitHubPagesBindingCleanupAction,
-  isGitHubPagesDnsAction,
-} from '../services/github-pages.service.js';
 import { IOS_OPERATIONS, isIosAction } from '../services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS, isQueueAction } from '../services/queue-plan.service.js';
 import { STORAGE_OPERATIONS, isStorageAction } from '../services/storage-plan.service.js';
@@ -101,9 +96,6 @@ export type PlanMutationCapability =
   | 'github.infrastructure.sync'
   | 'github.delegated-secret.sync'
   | 'github.setting.sync'
-  | 'github.pages.sync'
-  | 'github.pages-binding.cleanup'
-  | 'github.pages-dns.sync'
   | 'appstore.mutate'
   | 'queue.mutate'
   | 'storage.mutate'
@@ -656,39 +648,6 @@ export function resolvePlanActionAuthority(
     )
   ) {
     return authority(action, 'github.setting.sync');
-  }
-  if (
-    isGitHubPagesAction(action)
-    && exactResource(action, 'repo', 'github')
-    && (
-      (metadataBoolean(action, 'enabled') === true && hasType(action, 'create', 'update'))
-      || (metadataBoolean(action, 'enabled') === false && action.type === 'destroy')
-    )
-    && action.resource.name === metadataString(action, 'repository')
-  ) {
-    return authority(action, 'github.pages.sync');
-  }
-  if (
-    isGitHubPagesBindingCleanupAction(action)
-    && exactResource(action, 'repo', 'github')
-    && action.type === 'update'
-    && action.resource.name === metadataString(action, 'repository')
-    && typeof action.metadata?.observedCertificateAttempt === 'object'
-    && action.metadata.observedCertificateAttempt !== null
-  ) {
-    return authority(action, 'github.pages-binding.cleanup');
-  }
-  if (
-    isGitHubPagesDnsAction(action)
-    && exactResource(action, 'domain', 'cloudflare')
-    && (
-      (metadataBoolean(action, 'enabled') === true && action.type === 'update')
-      || (metadataBoolean(action, 'enabled') === false && action.type === 'destroy')
-    )
-    && metadataString(action, 'repository')
-    && Array.isArray(action.metadata?.desiredRecords)
-  ) {
-    return authority(action, 'github.pages-dns.sync');
   }
   if (
     isIosAction(action)

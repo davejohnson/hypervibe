@@ -3,7 +3,7 @@ import { assessRecovery, RECOVERY_CHECKS, type RecoveryCheck, type RecoveryEvide
 
 // Owner requirement: one shared recovery contract. Reconstructed evidence
 // projections, not live restore certification. Independent provider constraints:
-// https://supabase.com/docs/guides/platform/clone-project (copied jobs execute)
+// Copied jobs and outbound effects require their own isolation evidence.
 // https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html
 // (new instance availability does not establish application readiness).
 const verified = Object.fromEntries(RECOVERY_CHECKS.map(check => [check, 'verified'])) as Record<RecoveryCheck, RecoveryEvidenceState>;

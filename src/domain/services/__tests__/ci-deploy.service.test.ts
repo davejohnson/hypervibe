@@ -1054,8 +1054,8 @@ describe('ci-deploy.service', () => {
         target: { ...target, providerImageUris: [imageUri] },
         migration,
       });
-      const firstTag = 'registry.digitalocean.com/acme-reg/davejohnson/billforge:sha-one';
-      const nextTag = 'registry.digitalocean.com/acme-reg/davejohnson/billforge:sha-two';
+      const firstTag = 'registry.example.invalid/acme/app:sha-one';
+      const nextTag = 'registry.example.invalid/acme/app:sha-two';
       expect(hash(nextTag)).toBe(hash(firstTag));
     });
 

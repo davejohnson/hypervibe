@@ -55,61 +55,6 @@ evidence, verification, deployment impact, changed expectations, risks, and
 review checks. Projects can add detail in individual pull requests, while the
 owned template keeps the required review contract consistent.
 
-## Static sites with GitHub Pages
-
-Pages is project-level desired state. A repository that only publishes a
-static site does not need a fake application-hosting environment;
-use the reserved canonical environment `repository`:
-
-```json
-{
-  "version": 1,
-  "project": "example-site",
-  "gitRemoteUrl": "git@github.com:OWNER/REPOSITORY.git",
-  "github": {
-    "repository": "OWNER/REPOSITORY",
-    "canonicalEnvironment": "repository",
-    "pages": {
-      "sourcePath": "apps/website",
-      "branch": "main",
-      "customDomain": "example.com"
-    }
-  },
-  "environments": {}
-}
-```
-
-Hypervibe generates a reviewed workflow using GitHub's supported Pages
-artifact actions. The first apply opens the ordinary GitHub infrastructure
-pull request; it does not enable Pages or change DNS. After a person merges the
-workflow, a new plan can emit two explicit actions: Cloudflare address-record
-reconciliation and GitHub Pages configuration with `build_type: workflow`.
-Replacing existing address records is confirmation-gated. Apex domains use
-GitHub's Pages A records; subdomains use an unproxied CNAME. MX, TXT, and other
-unrelated records are outside this action's authority. Once configuration is
-verified, Hypervibe dispatches the reviewed Pages workflow and returns pending;
-it does not claim publication before the workflow runs.
-
-GitHub may take time to issue the custom-domain certificate. Apply reports a
-pending receipt instead of claiming success; rerun `hv_plan` and `hv_apply`
-later to enforce HTTPS after GitHub reports the certificate ready. Inspect the
-managed workflow through `hv_ci_status`, followed by the live site after the
-run succeeds.
-
-Connect Cloudflare with a zone-scoped API token that has Zone read and DNS edit
-for the intended zone:
-
-```text
-hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
-```
-
-Set `github.pages.enabled` to `false` to tear the site down declaratively. The
-reviewed workflow is removed first. A subsequent plan confirmation-gates Pages
-deletion and removal of only matching GitHub Pages address records. To replace
-or remove an existing custom domain, first disable Pages while retaining that
-current `customDomain`; after the teardown verifies, declare the replacement.
-Hypervibe blocks a one-step domain swap so the old DNS record is not orphaned.
-
 ## A practical starting spec
 
 Automation ids are your own lowercase slugs. `kind` selects a typed behavior;
@@ -253,7 +198,6 @@ For the full `github` feature set, grant the fine-grained token:
 - Issues: read/write
 - Secrets: read/write
 - Workflows: read/write
-- Pages: read/write when `github.pages` is declared
 - Dependabot alerts: read/write when dependency alerts/updates are enabled
 - Code scanning alerts: read/write when code scanning is enabled
 - Secret scanning alerts: read/write when secret scanning is enabled

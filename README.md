@@ -27,20 +27,28 @@ Terraform, cloud CLIs or Docker to deploy an app.
 
 ### Current status
 
-Google Cloud infrastructure uses the managed OpenTofu engine. Cloud Run selects
-it automatically; there is no alternate GCP provisioning path. Hypervibe installs
-its pinned engine and provider plugins, then plans and applies reviewed changes.
-Railway keeps its existing workflow. AWS and Azure engine deployment remain
-unavailable until their complete paths are implemented and verified.
+The [common cloud user journey](docs/development/user-journey.md) is the target
+for Google Cloud, AWS and Azure. The complete journey is not yet established by
+the recorded evidence. Current implementations and verification have different
+limits:
 
-Local and provider-contract checks do not establish a live deployment. See the
-[engine implementation and evidence](docs/opentofu-engine.md) for the current
-boundary and historical live evidence.
+- [Google Cloud](docs/opentofu-engine.md) automatically uses managed OpenTofu.
+  Guided launch and CI release code exist; the dated live evidence predates the
+  current infrastructure cutover and does not prove the complete journey.
+- [AWS](docs/opentofu-engine-aws.md) records live testing-environment deployments
+  and teardown. Guided launch, production-profile databases, CI releases, data
+  copy and custom domains remain gaps.
+- [Azure](docs/opentofu-engine-azure.md) records live testing-environment deployments
+  and teardown. Production, guided launch, CI releases, migration and custom
+  domains remain gaps; repository Dockerfiles requiring BuildKit are unsupported.
+
+Local and provider-contract checks do not establish a live deployment. The linked
+provider notes distinguish implementation from recorded live evidence. Railway
+keeps its existing workflow. Use the [documentation map](docs/README.md) to find
+the current requirements and implementation evidence.
 
 New cloud development focuses on **Google Cloud, AWS and Azure**. **Railway stays
-available for existing apps**; this reset does not require moving those apps.
-The unused GCP prototype can be replaced without building a compatibility or
-import-migration project for it.
+available for existing apps**; the new cloud journey does not require moving them.
 
 The npm installation below currently requires Node.js and npm. A packaged
 installation that removes those prerequisites is a target, not a verified promise.
@@ -114,12 +122,12 @@ current interface and confirmation requirements.
 
 ## Develop Hypervibe
 
-Start with the [product direction](docs/development/product.md),
+Start with the [common cloud journey](docs/development/user-journey.md),
 [development instructions](AGENTS.md) and [architecture](ARCHITECTURE.md).
-Build one complete, verified cloud journey before expanding provider breadth.
-Keep existing Railway applications working while replacing the unused GCP path.
-The [engine integration handoff](docs/development/opentofu-integration.md) records
-the remaining merge work and verification path.
+Build and verify its steps incrementally across the three clouds while preserving
+existing Railway applications. The [GCP integration boundary](docs/development/opentofu-integration.md)
+describes current ownership and routing; provider notes record implementation
+and verification limits.
 
 ```sh
 npm ci

@@ -8,9 +8,7 @@ relevant to the task. Paths in code spans are relative to the repository root.
 
 Related contracts: [Interface Boundary](../../ARCHITECTURE.md#interface-boundary), [Provider Boundary](../../ARCHITECTURE.md#provider-boundary), [Tool And CLI Policy](../../ARCHITECTURE.md#tool-and-cli-policy), and [macOS development](../../apps/macos/README.md).
 
-Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](guidance-migration.json). These files are
-for developing Hypervibe; the distributed user workflow lives in
+These rules are for developing Hypervibe; the distributed user workflow lives in
 [`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-027

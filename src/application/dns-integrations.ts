@@ -1,12 +1,10 @@
 import { createHash } from 'node:crypto';
-import { GitHubAdapter, type GitHubCredentials, type GitHubPagesConfig } from '../adapters/providers/github/github.adapter.js';
 import { SendGridAdapter, type SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { DnsRecordType } from '../domain/ports/dns.port.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { desiredEmailDnsRecords, EMAIL_OPERATIONS } from '../domain/services/email-plan.service.js';
-import { desiredPagesDnsRecords, GITHUB_PAGES_ACTION_ID, GITHUB_PAGES_DNS_OPERATION } from '../domain/services/github-pages.service.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { canonicalJsonSha256 } from '../lib/canonical-json.js';
 import type { CommandContext } from './context.js';
@@ -49,15 +47,10 @@ function engineRecords(records: FrozenRecord[], ttl: number): DesiredDnsRecord[]
   }
   return [...groups.values()];
 }
-function pagesSnapshot(config: GitHubPagesConfig | null): Record<string, unknown> | null {
-  return config ? { buildType: config.build_type ?? null, cname: config.cname ?? null, httpsEnforced: config.https_enforced ?? false } : null;
-}
 function connectionFor(ctx: CommandContext, project: Project, source: Record<string, unknown>) {
-  return source.kind === 'github-pages' && typeof source.repository === 'string'
-    ? ctx.repos.connections.findBestVerifiedMatch('github', source.repository)
-    : source.kind === 'sendgrid-domain' && typeof source.domain === 'string'
-      ? ctx.repos.connections.findBestVerifiedMatchFromHints('sendgrid', [source.domain, ...getProjectScopeHints(project)])
-      : null;
+  return source.kind === 'sendgrid-domain' && typeof source.domain === 'string'
+    ? ctx.repos.connections.findBestVerifiedMatchFromHints('sendgrid', [source.domain, ...getProjectScopeHints(project)])
+    : null;
 }
 
 /** Fresh read before apply; never discovers a new mutation or generates a plan. */
@@ -66,17 +59,6 @@ export async function verifyDnsIntegrationSource(ctx: CommandContext, project: P
   const connection = connectionFor(ctx, project, source);
   if (!connection || source.connectionId !== connection.id) return blocked('The verified DNS consumer connection changed. Run hv_plan again.');
   try {
-    if (source.kind === 'github-pages') {
-      if (typeof source.repository !== 'string' || typeof source.domain !== 'string' || typeof source.enabled !== 'boolean') return blocked('GitHub Pages DNS source is incomplete.');
-      const [owner, repository, extra] = source.repository.split('/');
-      if (!owner || !repository || extra || !recordsEqual(source.records, desiredPagesDnsRecords(source.domain, owner))) return blocked('GitHub Pages DNS targets do not match the reviewed repository.');
-      const adapter = new GitHubAdapter();
-      adapter.connect(ctx.secretStore.decryptObject<GitHubCredentials>(connection.credentialsEncrypted));
-      const current = await adapter.getPagesConfig(owner, repository);
-      if (canonicalJsonSha256(pagesSnapshot(current)) !== canonicalJsonSha256(source.observed)) return blocked('The GitHub Pages attachment changed after planning. Run hv_plan again.');
-      if (!current || dnsName(current.cname ?? '') !== dnsName(source.domain)) return blocked('Keep the exact GitHub Pages hostname attached until its DNS removal is verified.');
-      return { ready: true };
-    }
     if (source.kind === 'sendgrid-domain') {
       if (!environmentSpec.email.enabled || !environmentSpec.domain || dnsName(environmentSpec.domain) !== source.domain || typeof source.authorizationId !== 'string') return blocked('The email DNS consumer changed after planning.');
       const adapter = new SendGridAdapter();
@@ -101,7 +83,7 @@ const defaults: DnsIntegrationDependencies = { prepare: prepareDnsEnginePlan, ve
  * The caller persists actions marked dnsEngineReady/Deferred before returning
  * its normal plan and clears only those actions' obsolete DNS connection blocks.
  */
-export async function planPagesEmailDns(ctx: CommandContext, params: {
+export async function planEmailDns(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; environmentName: string; specRevision: number; actions: PlanAction[];
 }, dependencies: DnsIntegrationDependencies = defaults): Promise<SavedDnsPlan | { blocked: string[] } | null> {
   const environmentSpec = params.spec.environments[params.environmentName];
@@ -110,44 +92,16 @@ export async function planPagesEmailDns(ctx: CommandContext, params: {
   if (!environment) return null;
   for (const action of params.actions) {
     const operation = action.metadata?.operation;
-    const pages = operation === GITHUB_PAGES_DNS_OPERATION;
-    const email = operation === EMAIL_OPERATIONS.dnsSync || operation === EMAIL_OPERATIONS.dnsAdopt;
-    if (!pages && !email) continue;
-    const owner = pages ? 'pages' : 'email';
+    if (operation !== EMAIL_OPERATIONS.dnsSync && operation !== EMAIL_OPERATIONS.dnsAdopt) continue;
+    const owner = 'email';
     if (action.type === 'noop' && !environmentSpec.dns && !hasOwnedDnsRecords(environment, owner)) continue;
     const records = frozenRecords(action.metadata?.desiredRecords);
-    let source: Record<string, unknown>;
-    let removalPlanId: string | undefined;
-    let pagesConsumer: PlanAction | undefined;
-    if (pages) {
-      const consumer = params.actions.find(item => item.id === GITHUB_PAGES_ACTION_ID);
-      if (!consumer?.verified || consumer.metadata?.blockedReason) continue;
-      const enabled = action.metadata?.enabled === true;
-      const observed = consumer.metadata?.observed as Record<string, unknown> | null | undefined;
-      const removal = (environment.platformBindings.github as { pagesDnsRemoved?: { domain?: string; repository?: string; planId?: string } } | undefined)?.pagesDnsRemoved;
-      removalPlanId = removal?.domain === action.resource.name && removal.repository === action.metadata?.repository && typeof removal.planId === 'string'
-        ? removal.planId : undefined;
-      pagesConsumer = consumer;
-      if (!enabled && observed === null && removalPlanId && !hasOwnedDnsRecords(environment, owner)) {
-        action.type = 'noop'; action.verified = true; action.metadata = { ...action.metadata, dnsEngineReady: true };
-        continue;
-      }
-      const attached = observed?.cname === action.resource.name;
-      if (!attached) {
-        if (!enabled) return { blocked: ['The Pages hostname claim is missing or changed. Restore its exact attachment before removing owned DNS.'] };
-        action.metadata = { ...action.metadata, dnsEngineDeferred: true };
-        action.dependsOn = [...new Set([...(action.dependsOn ?? []), consumer.id])];
-        continue;
-      }
-      source = { kind: 'github-pages', repository: action.metadata?.repository, domain: action.resource.name, enabled, observed, records };
-    } else {
-      const consumer = params.actions.find(item => item.id === 'email:sendgrid:authorization');
-      if (!consumer?.verified || consumer.type !== 'noop' || consumer.metadata?.blockedReason || consumer.metadata?.candidateExternalId !== action.metadata?.authorizationId) {
-        action.metadata = { ...action.metadata, dnsEngineDeferred: true };
-        continue;
-      }
-      source = { kind: 'sendgrid-domain', domain: dnsName(action.resource.name), authorizationId: action.metadata?.authorizationId, records };
+    const consumer = params.actions.find(item => item.id === 'email:sendgrid:authorization');
+    if (!consumer?.verified || consumer.type !== 'noop' || consumer.metadata?.blockedReason || consumer.metadata?.candidateExternalId !== action.metadata?.authorizationId) {
+      action.metadata = { ...action.metadata, dnsEngineDeferred: true };
+      continue;
     }
+    const source: Record<string, unknown> = { kind: 'sendgrid-domain', domain: dnsName(action.resource.name), authorizationId: action.metadata?.authorizationId, records };
     if (!records) return { blocked: ['DNS records were not completely observed for this integration. Apply its prerequisite, then run hv_plan again.'] };
     const connection = connectionFor(ctx, params.project, source);
     if (!connection) return { blocked: ['The DNS consumer needs its exact verified provider connection before DNS planning.'] };
@@ -155,17 +109,13 @@ export async function planPagesEmailDns(ctx: CommandContext, params: {
     const verification = await dependencies.verify(ctx, params.project, environmentSpec, source);
     if (!verification.ready) return { blocked: [verification.reason ?? 'The exact DNS consumer could not be verified.'] };
     const prepared = await dependencies.prepare({ ctx, project: params.project, environment, environmentSpec, owner,
-      domain: action.resource.name, records: engineRecords(records, environmentSpec.dns?.ttl ?? 300), ...(pages && source.enabled === false ? { remove: true } : {}) });
+      domain: action.resource.name, records: engineRecords(records, environmentSpec.dns?.ttl ?? 300) });
     if (prepared.blocked?.length) return { blocked: prepared.blocked };
     if (prepared.ready) {
-      if (pages && source.enabled === false) {
-        if (!removalPlanId) return { blocked: ['Pages teardown has no verified DNS removal receipt. Preserve its hostname claim and reconcile exact DNS ownership before detaching it.'] };
-        pagesConsumer!.metadata = { ...pagesConsumer!.metadata, dnsEngineRemoved: true, dnsRemovalPlanId: removalPlanId };
-      }
       const { blockedReason: _blockedReason, ...metadata } = action.metadata ?? {};
       action.metadata = { ...metadata, dnsEngineReady: true };
       action.type = 'noop'; action.verified = true;
-      action.reason = pages && source.enabled === false ? 'The engine confirmed removal of owned Pages DNS values.' : 'The engine verified the frozen DNS records for this integration.';
+      action.reason = 'The engine verified the frozen DNS records for this integration.';
       delete action.requiresConfirm;
       continue;
     }

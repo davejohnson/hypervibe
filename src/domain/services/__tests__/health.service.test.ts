@@ -234,7 +234,7 @@ describe('health.service', () => {
         projectId: project.id,
         name: 'staging',
         platformBindings: {
-          provider: 'vercel',
+          provider: 'fixture-hosting',
           services: { web: { serviceId: 'staging-web' } },
         },
       }),
@@ -269,11 +269,11 @@ describe('health.service', () => {
     ]);
     expect(result.environments).toContainEqual(expect.objectContaining({
       environment: 'staging',
-      provider: 'vercel',
+      provider: 'fixture-hosting',
       state: 'healthy',
     }));
     expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('railway', project);
-    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('vercel', project);
+    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('fixture-hosting', project);
   });
 
   it('checks only services in current desired state when bindings contain a renamed service', async () => {
@@ -364,14 +364,14 @@ describe('health.service', () => {
   it('preserves unknown deployment state when a provider cannot be observed', async () => {
     const project = new ProjectRepository().create({
       name: 'unknown-deployment-health',
-      defaultPlatform: 'vercel',
+      defaultPlatform: 'fixture-hosting',
     });
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'vercel',
-        services: { web: { serviceId: 'vercel-web' } },
+        provider: 'fixture-hosting',
+        services: { web: { serviceId: 'fixture-hosting-web' } },
       },
     });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
@@ -390,7 +390,7 @@ describe('health.service', () => {
       failures: [],
       environments: [{
         environment: 'production',
-        provider: 'vercel',
+        provider: 'fixture-hosting',
         state: 'unknown',
         reason: expect.stringContaining('permission denied'),
       }],
