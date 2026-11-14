@@ -65,24 +65,24 @@ describe('provider conformance matrix', () => {
         'cloud.google.com',
         'docs.aws.amazon.com',
         'learn.microsoft.com',
-        'docs.machines.dev',
       ]),
     });
     const instructions = actions['provider-truth'].kind === 'code-audit'
       ? actions['provider-truth'].instructions
       : '';
     expect(instructions).toContain('providerContracts');
-    expect(instructions).toContain('providerRegistry');
+    expect(instructions).toContain('provider, DevOps and secret-manager registries');
     expect(instructions).toContain('ready-for-live');
     expect(instructions).toContain('live-conformance evidence');
     const shardScopes = actions['provider-truth'].kind === 'code-audit'
       ? actions['provider-truth'].shards.map((shard) => shard.instructions).join('\n')
       : '';
     for (const scope of [
-      'hosting lifecycle',
+      'OpenTofu-managed compute lifecycle',
       'database, cache, storage, queue',
-      'email, messaging, payments',
+      'email, payments',
       'secret-manager',
+      'delegated API-key, webhook, credential-check and AI workflow behavior',
     ]) {
       expect(shardScopes).toContain(scope);
     }
