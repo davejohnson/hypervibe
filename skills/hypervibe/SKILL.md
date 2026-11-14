@@ -148,7 +148,10 @@ describe that gap rather than claiming a proven live path.
   the person approves the listed changes on that page. Hypervibe picks the region
   and account; do not ask. If AWS shows "400 Bad Request", it is an expired AWS
   session in that browser: tell them to click "Sign out of AWS" on the page and
-  sign in again.
+  sign in again. `hv_launch` runs a testing environment end to end: it opens
+  that sign-in when access is missing (or reuses the account's access), stops at
+  `needs_confirmation`, and builds, creates and checks the app in one reviewed
+  plan. Staging, production and releases from GitHub Actions are not built yet.
 - Azure: `hv_connections provider="azure" action="connect"` opens one Microsoft
   sign-in (the page names it "Microsoft Azure CLI"; nothing to install) and the
   person approves the listed changes there. Hypervibe picks the region; ask only

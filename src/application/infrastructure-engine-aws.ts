@@ -511,7 +511,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     id: 'build:image', type: 'create', verified: true, resource: { kind: 'service', name: 'image', provider: 'aws' },
     reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} in CodeBuild (a few cents) so the services start from it.`,
     ...(buildChanging.length ? { dependsOn: buildChanging } : {}),
-    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory },
+    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory, image: firstImage },
   }] : [];
   // 3. Everything else.
   const planId = crypto.randomUUID();
@@ -654,11 +654,12 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
         if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureParameter(ssm, action);
         if (metadata.operation === AWS_IMAGE_BUILD_OPERATION) {
           const { buildAwsCommitImage } = await import('./infrastructure-engine-aws-release.js');
-          const { directory, commitSha } = action.metadata as { directory: string; commitSha: string };
+          const { directory, commitSha, image } = action.metadata as { directory: string; commitSha: string; image: string };
           const built = await buildAwsCommitImage(context, params.spec, environmentName, directory, commitSha);
           if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
+          // Record the reference the reviewed plan creates the services from (the registry's tags are immutable), not the digest, or the next plan replaces them.
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: built.imageUri } });
+          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image } });
           return { success: true, message: `Built ${built.imageUri}.`, data: { imageUri: built.imageUri } };
         }
         if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {
