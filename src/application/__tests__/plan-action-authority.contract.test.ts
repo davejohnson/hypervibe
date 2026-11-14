@@ -6,12 +6,6 @@ import {
   GITHUB_INFRASTRUCTURE_ACTION_ID,
   GITHUB_INFRASTRUCTURE_OPERATION,
 } from '../../domain/services/github-infrastructure.service.js';
-import {
-  GITHUB_PAGES_ACTION_ID,
-  GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
-  GITHUB_PAGES_DNS_OPERATION,
-  GITHUB_PAGES_OPERATION,
-} from '../../domain/services/github-pages.service.js';
 import { IOS_OPERATIONS } from '../../domain/services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS } from '../../domain/services/queue-plan.service.js';
 import { STORAGE_OPERATIONS } from '../../domain/services/storage-plan.service.js';
@@ -201,52 +195,6 @@ const authorized: AuthorizedCase[] = [
       provider: 'github',
       operation: GITHUB_INFRASTRUCTURE_OPERATION,
       metadata: { repository: 'owner/repo' },
-    }),
-  },
-  {
-    label: 'GitHub Pages',
-    capability: 'github.pages.sync',
-    action: action({
-      id: GITHUB_PAGES_ACTION_ID,
-      type: 'create',
-      kind: 'repo',
-      name: 'owner/repo',
-      provider: 'github',
-      operation: GITHUB_PAGES_OPERATION,
-      metadata: { repository: 'owner/repo', enabled: true },
-    }),
-  },
-  {
-    label: 'GitHub Pages DNS',
-    capability: 'github.pages-dns.sync',
-    action: action({
-      id: 'domain:example.com:github-pages-dns',
-      type: 'update',
-      kind: 'domain',
-      name: 'example.com',
-      provider: 'cloudflare',
-      operation: GITHUB_PAGES_DNS_OPERATION,
-      metadata: { repository: 'owner/repo', enabled: true, desiredRecords: [] },
-    }),
-  },
-  {
-    label: 'GitHub Pages local binding cleanup',
-    capability: 'github.pages-binding.cleanup',
-    action: action({
-      id: GITHUB_PAGES_ACTION_ID,
-      type: 'update',
-      kind: 'repo',
-      name: 'owner/repo',
-      provider: 'github',
-      operation: GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
-      metadata: {
-        repository: 'owner/repo',
-        observedCertificateAttempt: {
-          domain: 'example.com',
-          attemptedAt: '2026-08-08T00:00:00.000Z',
-          mode: 'reattach',
-        },
-      },
     }),
   },
   ...[

@@ -176,13 +176,5 @@ export async function applyDnsPlan(ctx: CommandContext, params: {
       ctx.repos.environments.updatePlatformBindings(current.id, { domainDns: { ...binding, dnsEngineRemoved: source.remove === true, dnsStagePending: false } });
     }
   }
-  if (executed && source.kind === 'github-pages' && typeof source.repository === 'string') {
-    const current = ctx.repos.environments.findById(environment.id) ?? environment;
-    const value = (current.platformBindings as Record<string, unknown> | null)?.github;
-    const github = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-    ctx.repos.environments.updatePlatformBindings(current.id, { github: { ...github,
-      pagesDnsRemoved: source.enabled === false ? { domain: descriptor.domain, repository: source.repository, planId: params.planId } : undefined,
-    } });
-  }
   return { kind: 'executed', envName: environmentName, result };
 }

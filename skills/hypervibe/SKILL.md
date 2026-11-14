@@ -95,9 +95,8 @@ content checksums and file hashes) without changing anything. `hv_plan scope="in
 `hv_deploy` remain available for individual steps. GCP's default `hv_plan` routes
 to the engine; AWS and Azure currently require `scope="infrastructure"` and
 `hosting.engine="opentofu"` in the spec. Set those routine implementation choices
-without asking the user to select an engine. A Pages-only canonical environment with explicit
-DNS selection uses the ordinary repository plan. Resources reported as unsupported stay blocked; do not work around
-them.
+without asking the user to select an engine. Resources reported as unsupported stay
+blocked; do not work around them.
 
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
@@ -113,11 +112,8 @@ Plan DNS through `hv_plan`, apply its saved stage, and plan again to continue th
 consumer workflow. Hypervibe manages OpenTofu privately; no separate installation
 or direct record-writing workaround is needed.
 
-Use `environment.domain` for a hosted app or email domain. A Pages-only project
-can select DNS in its declared canonical environment without a hosting domain
-or services; existing hosting/data resources must first be reconciled. Pages
-claims the hostname before DNS publication and keeps the claim until DNS removal
-is verified. SendGrid records wait for an observed domain authorization. Existing
+Use `environment.domain` for a hosted app or email domain; DNS selection needs
+it. SendGrid records wait for an observed domain authorization. Existing
 records require explicit exact-ID adoption and preservation of unrelated values.
 
 Defaults are public DNS, required HTTPS, proxy off and no wildcards; preserve

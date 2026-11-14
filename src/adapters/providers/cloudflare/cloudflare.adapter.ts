@@ -1837,7 +1837,7 @@ catch{return new Response("Temporarily unavailable for maintenance\\n",{status:5
   /**
    * Ensure a set of DNS records exist for a name+type combination.
    * Creates missing records, deletes extra records, leaves matching records unchanged.
-   * Useful for multi-value records like GitHub Pages A records.
+   * Useful for multi-value records such as apex A records.
    */
   async ensureRecords(
     zoneId: string,
