@@ -14,12 +14,6 @@ const adapters = new Map<string, object>([
 
 const workloadKinds = new Map<string, Array<'web' | 'worker' | 'cron'>>([
   ['railway', ['web', 'worker', 'cron']],
-  ['cloudrun', ['web', 'worker', 'cron']],
-  ['ecs', ['web']],
-  ['azure-container-apps', ['web']],
-  ['digitalocean', ['web', 'worker', 'cron']],
-  ['vercel', ['web']],
-  ['fly', ['web', 'worker']],
 ]);
 
 describe('production hosting capability truth', () => {

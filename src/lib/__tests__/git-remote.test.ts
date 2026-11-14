@@ -22,7 +22,7 @@ describe('normalizeGitRemoteIdentity', () => {
     expect(normalizeGitRemoteIdentity('git@github.com:dave/hypervibe.git')).toBe(
       normalizeGitRemoteIdentity('https://github.com/dave/hypervibe.git/')
     );
-    expect(normalizeGitRemoteIdentity('ssh://git@gitlab.com/Acme/App.git')).toBe('gitlab.com/Acme/App');
+    expect(normalizeGitRemoteIdentity('ssh://git@git.example.com/Acme/App.git')).toBe('git.example.com/Acme/App');
   });
 
   it('preserves case-sensitive paths and non-default ports', () => {
@@ -47,7 +47,7 @@ describe('parseRepositoryPathFromRemote', () => {
   it('preserves nested namespaces across hosted git providers', () => {
     expect(
       parseRepositoryPathFromRemote(
-        'git@gitlab.example.com:Acme/Platform/Invoice-Perfect.git'
+        'git@git.example.com:Acme/Platform/Invoice-Perfect.git'
       )
     ).toBe('Acme/Platform/Invoice-Perfect');
     expect(
@@ -76,7 +76,7 @@ describe('parseGitHubRepoFromRemote', () => {
   });
 
   it('returns null for non-GitHub remotes', () => {
-    expect(parseGitHubRepoFromRemote('https://gitlab.com/dave/hypervibe.git')).toBeNull();
+    expect(parseGitHubRepoFromRemote('https://git.example.com/dave/hypervibe.git')).toBeNull();
     expect(parseGitHubRepoFromRemote('git@bitbucket.org:dave/hypervibe.git')).toBeNull();
   });
 
@@ -94,7 +94,7 @@ describe('normalizeGitRemoteForBuild', () => {
   });
 
   it('passes through non-GitHub remotes trimmed', () => {
-    expect(normalizeGitRemoteForBuild(' https://gitlab.com/dave/x.git ')).toBe('https://gitlab.com/dave/x.git');
+    expect(normalizeGitRemoteForBuild(' https://git.example.com/dave/x.git ')).toBe('https://git.example.com/dave/x.git');
   });
 
   it('returns undefined for empty input', () => {

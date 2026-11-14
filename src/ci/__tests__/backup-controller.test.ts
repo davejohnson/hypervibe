@@ -42,7 +42,7 @@ describe('recurring backup failure receipts', () => {
     const contract = join(directory, 'contract.json'), receipt = join(directory, 'receipt.json');
     writeFileSync(contract, JSON.stringify({ environment: 'staging' }));
     const identity = { provider: 's3', externalId: 'archive', instanceScope: { accountId: '123456789012', region: 'us-east-1' } };
-    const target = { version: 1, project: 'test', environment: 'staging', hosting: { provider: 'vercel', providerScope: {} },
+    const target = { version: 1, project: 'test', environment: 'staging', hosting: { provider: 'cloudrun', providerScope: {} },
       runnerImage: `example.invalid/helper@sha256:${'a'.repeat(64)}`, destination: { name: 'archive', identity },
       objects: [], fileReferenceQueries: [], retainSets: 7, maxDataAgeHours: 24, restoreEveryDays: 7 };
     const open = vi.fn(async () => { throw new Error('private-storage-key-echo'); });

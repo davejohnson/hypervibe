@@ -50,7 +50,7 @@ describe('desiredStateToSpec', () => {
           services: ['api'],
           crons: { nightly: { schedule: '0 3 * * *', command: 'npm run nightly' } },
           domain: 'myapp.dev',
-          databaseProvider: 'supabase',
+          databaseProvider: 'cloudsql',
           setupEmail: true,
           serviceConfig: { api: { startCommand: 'npm start', healthCheckPath: '/health', public: true } },
           envVars: { NODE_ENV: 'production' },
@@ -67,7 +67,7 @@ describe('desiredStateToSpec', () => {
     expect(env.hosting.provider).toBe('railway');
     expect(env.services.api).toMatchObject({ workloadKind: 'web', startCommand: 'npm start', public: true });
     expect(env.services.nightly).toMatchObject({ workloadKind: 'cron', cronSchedule: '0 3 * * *', startCommand: 'npm run nightly' });
-    expect(env.database).toEqual({ provider: 'supabase', engine: 'postgres' });
+    expect(env.database).toEqual({ provider: 'cloudsql', engine: 'postgres' });
     expect(env.domain).toBe('myapp.dev');
     expect(env.email.enabled).toBe(true);
     expect(env.deploy).toEqual({ strategy: 'branch', branch: 'main' });

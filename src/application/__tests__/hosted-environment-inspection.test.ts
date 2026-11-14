@@ -320,7 +320,7 @@ describe('hosted desired/current inspection v1', () => {
   it('marks declarations outside supported observation as unsupported, never matching the environment', async () => {
     const request = { ...input(), configurationKeys: ['SENDGRID_API_KEY'] };
     request.source = source({ version: 1, project: 'demo', gitRemoteUrl: 'https://github.com/acme/demo',
-      environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} }, database: { provider: 'supabase' } } } });
+      environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} }, database: { provider: 'cloudsql' } } } });
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     const report = await inspectHostedEnvironmentV1(request, { now });
     expect(report.coverage.status).toBe('unsupported');

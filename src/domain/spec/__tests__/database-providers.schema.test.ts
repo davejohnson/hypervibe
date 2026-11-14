@@ -5,9 +5,8 @@ describe('database provider schema', () => {
   it.each([
     'railway',
     'cloudsql',
-    'supabase',
     'rds',
-    'digitalocean',
+    'azure-postgres',
     'acme-postgres',
   ] as const)('accepts stable provider id %s for Postgres', (provider) => {
     expect(databaseSpecSchema.parse({ provider })).toEqual({ provider, engine: 'postgres' });

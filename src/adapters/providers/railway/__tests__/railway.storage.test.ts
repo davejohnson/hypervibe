@@ -72,7 +72,7 @@ describe('Railway storage buckets', () => {
     const adapter = createRailwayStorageAdapter(railway);
     const standaloneEnvironment = {
       ...environment(),
-      platformBindings: { provider: 'fly', appId: 'fly-app' },
+      platformBindings: { provider: 'unrelated-provider', appId: 'unrelated-app' },
     };
 
     const result = await adapter.resolveObservationContext!(
@@ -88,7 +88,7 @@ describe('Railway storage buckets', () => {
       },
     });
     expect(result.receipt.error).toContain('hv_import');
-    expect(result.receipt.error).toContain('hosted on fly');
+    expect(result.receipt.error).toContain('hosted on unrelated-provider');
     expect(request).not.toHaveBeenCalled();
   });
 

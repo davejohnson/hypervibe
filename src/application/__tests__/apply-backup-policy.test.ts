@@ -76,7 +76,7 @@ describe('reviewed daily backup policy application', () => {
       if (failure === 'wrong target') (action.metadata!.item as { target: { componentId: string } }).target.componentId = 'replacement';
       if (failure === 'unverified') action.verified = false;
       if (failure === 'not billable') action.billable = false;
-      if (failure === 'unsupported provider') action.resource.provider = 'supabase';
+      if (failure === 'unsupported provider') action.resource.provider = 'synthetic-unsupported-provider';
       const result = await f.apply({ action, ...(failure === 'missing confirmation' ? { confirmedActionIds: new Set() } : {}) });
       expect(result).toMatchObject({ success: false, status: 'blocked', data: { applied: 0 } });
       expect(f.configureDaily).not.toHaveBeenCalled();

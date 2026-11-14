@@ -33,6 +33,8 @@ interface DeployEnvSyncPolicy {
   excludedKeys: Set<string>;
 }
 
+// Management credentials stay out of app runtime imports even when Hypervibe
+// has no integration for the service that issued them.
 const PROVIDER_ONLY_EXACT_KEYS = new Set([
   'AWS_ACCESS_KEY_ID',
   'AWS_PROFILE',

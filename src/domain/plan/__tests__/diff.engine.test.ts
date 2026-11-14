@@ -9,6 +9,7 @@ import type { Component } from '../../entities/component.entity.js';
 import { bindingIdentityFingerprint } from '../../services/binding-identity.js';
 import { fingerprintObservedState, isManagedCiBindingRoot } from '../converge.executor.js';
 
+// Synthetic database IDs below exercise planning invariants, not provider API contracts.
 function spec(overrides: Record<string, unknown> = {}): EnvironmentSpec {
   return environmentSpecSchema.parse({
     hosting: { provider: 'railway' },
@@ -191,38 +192,38 @@ describe('diffEnvironment — incomplete database provisioning', () => {
 
   it('blocks another billable create while a provider-assigned database identity remains unresolved', () => {
     const unresolved = localComponent({
-      provider: 'neon',
-      providerScope: { organizationId: 'neon-org' },
+      provider: 'fixture-unresolved-db',
+      providerScope: { organizationId: 'fixture-unresolved-db-org' },
       provisioningIncomplete: true,
       unresolvedMutation: {
         resourceKind: 'database',
         operation: 'create',
         resourceName: 'invoice-perfect-production-postgres',
-        providerScope: { organizationId: 'neon-org' },
+        providerScope: { organizationId: 'fixture-unresolved-db-org' },
       },
     });
     unresolved.externalId = null;
     const result = diffEnvironment({
-      spec: spec({ database: { provider: 'neon' } }),
+      spec: spec({ database: { provider: 'fixture-unresolved-db' } }),
       envName: 'production',
       observed: observed({ databases: [] }),
       local: local({ components: [unresolved] }),
     });
 
-    expect(result.actions.find((action) => action.id === 'database:neon')).toMatchObject({
+    expect(result.actions.find((action) => action.id === 'database:fixture-unresolved-db')).toMatchObject({
       type: 'update',
       verified: false,
       metadata: {
         blockedReason: 'database_unresolved_create_unknown',
         resourceName: 'invoice-perfect-production-postgres',
-        providerScope: { organizationId: 'neon-org' },
+        providerScope: { organizationId: 'fixture-unresolved-db-org' },
       },
     });
     expect(result.actions.some((action) => (
       action.resource.kind === 'database' && action.type === 'create'
     ))).toBe(false);
     expect(result.actions.find((action) => action.id === 'service:web')?.dependsOn)
-      .toContain('database:neon');
+      .toContain('database:fixture-unresolved-db');
     expect(result.warnings).toContainEqual(expect.stringContaining(
       'hv_import mode="retained-database-cleanup"'
     ));
@@ -783,16 +784,16 @@ describe('diffEnvironment — provider switches', () => {
 
   it('emits confirm-gated destroy for the previous database after cutover is recorded', () => {
     const result = diffEnvironment({
-      spec: spec({ database: { provider: 'supabase' } }),
+      spec: spec({ database: { provider: 'fixture-current-db' } }),
       envName: 'production',
       observed: observed({
-        databases: [{ provider: 'supabase', engine: 'postgres', externalId: 'supabase-1', status: 'running' }],
+        databases: [{ provider: 'fixture-current-db', engine: 'postgres', externalId: 'fixture-current-db-1', status: 'running' }],
       }),
       local: local({
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
           bindings: {
-            provider: 'supabase',
+            provider: 'fixture-current-db',
             previousProvider: 'cloudsql',
             previousExternalId: 'cloudsql-legacy-1',
             previousBindings: {
@@ -801,12 +802,12 @@ describe('diffEnvironment — provider switches', () => {
               providerScope: { projectId: 'gcp-project', region: 'us-west1' },
             },
           },
-          externalId: 'supabase-1',
+          externalId: 'fixture-current-db-1',
           createdAt: new Date(), updatedAt: new Date(),
         }],
       }),
     });
-    const create = result.actions.find((a) => a.id === 'database:supabase')!;
+    const create = result.actions.find((a) => a.id === 'database:fixture-current-db')!;
     const destroy = result.actions.find((a) => a.id === 'database:cloudsql:destroy')!;
     expect(create.type).toBe('noop');
     expect(destroy.type).toBe('destroy');
@@ -828,16 +829,16 @@ describe('diffEnvironment — provider switches', () => {
 
   it('blocks retained database cleanup when its provider scope is missing', () => {
     const result = diffEnvironment({
-      spec: spec({ database: { provider: 'supabase' } }),
+      spec: spec({ database: { provider: 'fixture-current-db' } }),
       envName: 'production',
       observed: observed({
-        databases: [{ provider: 'supabase', engine: 'postgres', externalId: 'supabase-1', status: 'running' }],
+        databases: [{ provider: 'fixture-current-db', engine: 'postgres', externalId: 'fixture-current-db-1', status: 'running' }],
       }),
       local: local({
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
           bindings: {
-            provider: 'supabase',
+            provider: 'fixture-current-db',
             previousProvider: 'cloudsql',
             previousExternalId: 'cloudsql-legacy-1',
             previousBindings: {
@@ -845,7 +846,7 @@ describe('diffEnvironment — provider switches', () => {
               instanceId: 'cloudsql-legacy-1',
             },
           },
-          externalId: 'supabase-1',
+          externalId: 'fixture-current-db-1',
           createdAt: new Date(), updatedAt: new Date(),
         }],
       }),
@@ -949,10 +950,10 @@ describe('diffEnvironment — provider switches', () => {
       providerScope: { projectId: 'gcp-project', region: 'us-west1' },
     };
     const currentBindings = {
-      provider: 'supabase',
-      instanceId: 'supabase-current-1',
+      provider: 'fixture-current-db',
+      instanceId: 'fixture-current-db-current-1',
       resourceKind: 'postgres',
-      providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+      providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
       previousProvider: 'cloudsql',
       previousExternalId: 'cloudsql-legacy-1',
       previousBindings,
@@ -962,10 +963,10 @@ describe('diffEnvironment — provider switches', () => {
       envName: 'production',
       observed: observed({
         databases: [{
-          provider: 'supabase',
+          provider: 'fixture-current-db',
           engine: 'postgres',
-          externalId: 'supabase-current-1',
-          providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+          externalId: 'fixture-current-db-current-1',
+          providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
           status: 'running',
         }],
       }),
@@ -973,14 +974,14 @@ describe('diffEnvironment — provider switches', () => {
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
           bindings: currentBindings,
-          externalId: 'supabase-current-1',
+          externalId: 'fixture-current-db-current-1',
           createdAt: new Date(), updatedAt: new Date(),
         }],
       }),
     });
 
     const previousDestroy = result.actions.find((action) => action.id === 'database:cloudsql:destroy')!;
-    const currentDestroy = result.actions.find((action) => action.id === 'database:supabase:destroy')!;
+    const currentDestroy = result.actions.find((action) => action.id === 'database:fixture-current-db:destroy')!;
     expect(previousDestroy).toMatchObject({
       type: 'destroy',
       verified: false,
@@ -994,18 +995,18 @@ describe('diffEnvironment — provider switches', () => {
     });
     expect(currentDestroy.dependsOn).toContain(previousDestroy.id);
     expect(currentDestroy.metadata).toEqual({
-      externalId: 'supabase-current-1',
-      providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+      externalId: 'fixture-current-db-current-1',
+      providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
       bindingsFingerprint: bindingIdentityFingerprint({
-        provider: 'supabase',
-        instanceId: 'supabase-current-1',
+        provider: 'fixture-current-db',
+        instanceId: 'fixture-current-db-current-1',
         resourceKind: 'postgres',
-        providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+        providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
       }),
     });
     expect(confirmGatedActionIds(result.actions)).toEqual([
       'database:cloudsql:destroy',
-      'database:supabase:destroy',
+      'database:fixture-current-db:destroy',
     ]);
   });
 
@@ -2091,13 +2092,13 @@ describe('diffEnvironment — domain and workload', () => {
   it('blocks before DNS mutation when the hosting provider does not manage custom domains', () => {
     const result = diffEnvironment({
       spec: spec({
-        hosting: { provider: 'vercel' },
+        hosting: { provider: 'fixture-unsupported-hosting' },
         database: undefined,
         domain: 'myapp.dev',
       }),
       envName: 'production',
       observed: observed({
-        provider: 'vercel',
+        provider: 'fixture-unsupported-hosting',
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: { 'myapp.dev': { dnsConfigured: true } },
