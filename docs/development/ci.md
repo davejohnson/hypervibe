@@ -8,9 +8,8 @@ relevant to the task. Paths in code spans are relative to the repository root.
 
 Related contracts: [CI And Push Deploys](../../ARCHITECTURE.md#ci-and-push-deploys), [GitHub infrastructure](../github-infrastructure.md), and [API/mobile releases](../api-mobile-releases.md).
 
-Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](guidance-migration.json). These files are
-for developing Hypervibe; the distributed user workflow lives in
+Rule IDs remain stable for references. These files are for developing Hypervibe;
+the distributed user workflow lives in
 [`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-056
@@ -96,3 +95,39 @@ The managed iOS runtime owns build-number selection from a complete paginated Ap
 ## DG-130
 
 Keep generated iOS `run` scripts within GitHub's 21,000-character limit. Embed the managed runtime as step-local data, not a growing shell literal; execute the emitted materializer and enforce the limit in the ordinary workflow regressions.
+
+## Execution authority and rollback
+
+Observe the effective privileged CI configuration, including imports, and the
+scope and precedence of variables that can override release controls. Unknown
+configuration or overrideable commit, applied-spec or renderer gates block secret
+synchronization, dispatch and acceptance of release evidence. Dispatch only the
+bound reviewed definition and provider-observed revision, never replacement
+configuration. Feature-specific executors cannot acquire the application's
+release, promotion or rollback authority.
+
+Managed CI and manual promotion require provider-confirmed disconnection of
+native repository deploy sources. Source reconciliation is an isolated reviewed
+stage; unknown source state cannot authorize other infrastructure changes.
+Default production promotion is explicit and uses the exact verified artifact.
+A required candidate test gate runs before migrations and provider effects.
+
+Rollback freezes the selected artifact, successful producing run, immutable
+source, target identities and current execution state, then re-observes them
+before dispatch. Newer or running work, workflow drift and ambiguous evidence
+block. A dispatch remains pending until completion and application checks.
+Direct-provider receipts and an old spec revision cannot authorize rollback
+without an immutable release capability. [Read-only recovery preparation](../rollback-recovery-preparation.md)
+does not create that authority or certify historical artifacts as executable.
+
+## Mobile release isolation
+
+Keep project build code and signing inputs separate from App Store submission
+credentials. Preparation and release jobs do not execute project checkout code;
+the isolated release job revalidates the IPA, exact server evidence and original
+upload identity before provider effects. Require successful jobs and artifact
+timestamps correlated to the exact run attempt, and recheck immediately before
+Apple mutations. A successful overall run or matching build number cannot prove
+that provenance. Preserve app-scoped concurrency and the current
+[API/mobile contract](../api-mobile-releases.md); optional mobile capabilities do
+not become prerequisites for a server deployment.

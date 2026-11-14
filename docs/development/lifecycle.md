@@ -8,9 +8,8 @@ relevant to the task. Paths in code spans are relative to the repository root.
 
 Related contracts: [State Ownership](../../ARCHITECTURE.md#state-ownership), [Platform Bindings](../../ARCHITECTURE.md#platform-bindings), and [Reconciliation Safety Invariants](../../ARCHITECTURE.md#reconciliation-safety-invariants).
 
-Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](guidance-migration.json). These files are
-for developing Hypervibe; the distributed user workflow lives in
+Rule IDs remain stable for references. These files are for developing Hypervibe;
+the distributed user workflow lives in
 [`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-026
@@ -172,3 +171,79 @@ Classify prerequisite failures separately from missing connections at their sour
 ## DG-131
 
 Distinguish failed execution from work that was never attempted. When confirmation is missing or an earlier action fails or blocks progress, report subsequent unattempted actions as skipped or aborted and name the prerequisite or confirmation that stopped them. Reserve failed for actions actually attempted that failed; preserve confirmation-required, pending, or blocked for the action awaiting that condition. Apply this distinction consistently to receipts, structured results, summaries, and human output.
+
+## Runtime configuration ownership
+
+Ordinary environment configuration is additive and preserve-only. Omission is
+not deletion. Explicit `removeEnvVars` tombstones need exact confirmation and
+must reject collisions with desired values, secret slots and integration-owned
+keys. Renames use two releases: add the replacement and deploy compatible code,
+then retire the old key in a later reviewed change. Do not remove keys while
+service configuration is unconverged; deletion may activate a provider revision.
+
+Deferred code deployment does not prove whether runtime configuration activated.
+Preserve the provider's explicit rollout requirement and exact post-write
+baseline; pending activation keeps status out of sync. An ordinary rollout needs
+a different successful deployment identity. Credential rollouts additionally
+require the selected-key and active-consumer evidence in the
+[credential lifecycle](../credential-lifecycle.md).
+
+## Existing Railway data resources
+
+Preserve Railway's exact environment-scoped instances, database references and
+persistent volumes. A project-level bucket definition does not establish an
+instance in another environment. Reusing that definition may create only the
+confirmed-absent target instance through its reviewed action; do not duplicate
+it or adopt a data instance by name.
+
+Database creation uses the official PostgreSQL template and verifies exact
+service, environment, image, volume and credential-reference evidence. Unknown
+creation outcomes retain recovery identity and block another create. Missing or
+ambiguous persistence must never trigger replacement, restart or an empty-volume
+repair. Explicit fresh initialization remains confined to the eligibility and
+confirmation boundaries in [database provisioning recovery](../database-provision-recovery.md)
+and [initialization/bootstrap](../database-initialization-bootstrap.md).
+
+Keep database issuer references intact and reconcile missing legacy identity
+metadata through the isolated reviewed repair, preserving every recorded field.
+Service filesystem mounts remain retain-only: omission preserves their data and
+bindings, and bound mounts block teardown, replacement or rebinding until a
+supported reviewed transition exists. See [service volumes](../service-volumes.md)
+and the [shared recovery contract](../recovery-contract.md).
+
+## Integration action ownership
+
+Integration management credentials, runtime keys, provider objects and runtime
+projection have separate owners. Generic deploy or service actions cannot set up
+an integration as a side effect, and ordinary env deletion cannot retire its keys.
+Observe exact account, mode, endpoint and consumer identities before action.
+Unmanaged matches are explicit adoption candidates; ambiguous matches block.
+
+Stripe price replacement must move declared consumers to the new price before
+confirmed archival of the old one. Customers, subscriptions and test fixtures
+remain application data. Webhook creation must durably account for its one-time
+signing value and exact endpoint: verify consumer delivery before accepting the
+binding, or verify cleanup of that exact new endpoint and retain uncertain state.
+Webhook deletion verifies absence before removing its owned runtime key and
+binding. Existing endpoints are not recreated because a signing value drifted;
+follow the [same-endpoint rotation contract](../stripe-webhook-credential-rotation.md).
+A seed consuming new integration configuration waits for those actions and the
+verified exact-source application release.
+
+Email separates runtime metadata, sender authorization, DNS, inbound routes,
+delivery events and forwarding into explicit action authorities. Preserve an
+accepted inbound callback when its domain, service and path are unchanged and
+exact attachment evidence remains valid. Unknown attachment or signing evidence
+blocks route changes. Shared forwarding destinations are not implicitly deleted,
+and an account-level delivery-event webhook has only one environment owner.
+External sender verification remains pending until observed complete. Follow
+[sender readiness](../email-sender-readiness.md),
+[delivery-event signing](../sendgrid-webhook-signing.md) and
+[Inbound Parse signing](../sendgrid-inbound-signing.md); their unsupported security
+transitions must not be replaced with deletion and recreation.
+
+Declared generic webhooks are configuration only; they do not authorize vendor
+API calls. Compose callbacks from the exact public-service binding and a
+query-free declared path. Keep secret-bearing supplied URLs out of output.
+[Webhook readiness](../webhook-readiness.md) distinguishes configured HTTPS and
+verification material from application signature verification and event handling.

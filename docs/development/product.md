@@ -6,10 +6,11 @@ Hypervibe takes care of infrastructure definition, authentication, deployment,
 rollback, recovery, observability, secrets and third-party integrations.
 
 This is the product direction, not a claim that every capability works today.
-Read [ARCHITECTURE.md](../../ARCHITECTURE.md) for the technical boundary and
-verify a complete user journey before promising support. These are maintainer
+The [common cloud user journey](user-journey.md) defines the next milestone and
+its acceptance steps for all three clouds. Read [ARCHITECTURE.md](../../ARCHITECTURE.md)
+for the technical boundary and verify that journey before promising its complete
+support. Narrower verified increments must state their scope. These are maintainer
 rules; customers receive the [installed skill](../../skills/hypervibe/SKILL.md).
-Stable rule IDs are recorded in the [migration audit](guidance-migration.json).
 
 ## The experience we are building
 
@@ -29,9 +30,8 @@ and npm. GCP selects the managed engine automatically; do not offer an engine
 choice. Keep installation and live-verification limits explicit.
 
 Focus new cloud work on GCP, AWS and Azure. Preserve Railway for existing apps.
-The unused GCP prototype does not justify a compatibility or import-migration
-project. Removing that prototype does not authorize moving existing apps or
-discarding their state or data.
+New infrastructure uses the managed engine. Removing obsolete implementation or
+documentation does not authorize moving existing apps or discarding state or data.
 
 Choose the smallest complete journey before expanding the feature list: inspect
 one real app, connect its cloud account, plan its needed resources, obtain exact
@@ -177,8 +177,8 @@ with alternate provider writes or one-off scripts.
 ## DG-082
 
 Use `hv_inspect` for read-only provider investigation. Use `hv_import` only for an
-explicit request to adopt existing infrastructure. Do not add an adoption workflow
-merely to preserve the unused GCP prototype.
+explicit request to adopt existing infrastructure. Finding old resources does not
+authorize adoption, replacement or a compatibility project.
 
 ## DG-084
 

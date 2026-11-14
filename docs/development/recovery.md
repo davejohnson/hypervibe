@@ -8,9 +8,8 @@ relevant to the task. Paths in code spans are relative to the repository root.
 
 Related contracts: [Database Resilience](../../ARCHITECTURE.md#database-resilience), [backup defaults](../default-backup-policy.md), and the [shared recovery contract](../recovery-contract.md).
 
-Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](guidance-migration.json). These files are
-for developing Hypervibe; the distributed user workflow lives in
+Rule IDs remain stable for references. These files are for developing Hypervibe;
+the distributed user workflow lives in
 [`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-011
@@ -40,3 +39,21 @@ Admit provider combinations through shared capability metadata, not the independ
 ## DG-110
 
 Define persisted safety evidence with one runtime schema and derive its type from that schema. Producers, completion coordinators and later health/retention readers must validate the same contract; selected-field checks can accept incomplete or contradictory proof. Exercise a real producer through those consumers and reject altered coverage or verification claims before granting readiness or deletion authority.
+
+## Retained data and operational recovery
+
+A checkpoint is a snapshot request, not a tested restore or independent copy.
+Preserve its source, operation identity, acknowledgement and uncertain state
+across export/import and retries. Railway snapshot restore replaces the source
+volume and must never be used as harmless verification. The
+[checkpoint contract](../database-checkpoints.md) and
+[shared recovery contract](../recovery-contract.md) define supported evidence.
+
+Data moves copy into fresh isolated targets and verify them before binding or
+consumer cutover; rollback targets are retained until a separate confirmed
+cleanup. A maintenance pause preserves exact restoration state and blocks
+ordinary changes that could restart the source. Application-only pause does not
+prove a database write fence, drained jobs or authority to copy data. Resuming
+traffic restores workload settings, not writes made elsewhere. Preserve the
+[maintenance and data-move boundaries](../data-migration.md), including explicit
+unsupported capabilities and unknown cleanup outcomes.
