@@ -1,5 +1,11 @@
 # Cross-host persistent filesystem design — original audit
 
+> Historical design scope. “Required” and “approved” below refer to the original
+> filesystem work, not the current three-cloud milestone. Use the
+> [common journey](development/user-journey.md) for priorities and
+> [service filesystem reference](service-volumes.md) for that feature's contract
+> and verification limits. Identity, retention and teardown safeguards still apply.
+
 The initial Railway slice was not completion of the requested cross-host
 feature. This document records the September 16, 2026 pre-implementation audit
 before replacing the Railway-shaped shared contract. No resources were created

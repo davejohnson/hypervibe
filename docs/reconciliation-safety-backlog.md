@@ -1,5 +1,12 @@
 # Reconciliation Safety Backlog
 
+> Historical July 2026 review. Findings and checkbox states describe that review,
+> not current implementation status or an active cloud roadmap. Use the
+> [common journey](development/user-journey.md) for current priorities and
+> [architecture](../ARCHITECTURE.md) for lifecycle boundaries. Preserve the
+> applicable safety lessons; do not recreate handwritten cloud resource writers
+> to complete an old checklist.
+
 This backlog records the July 2026 review prompted by Invoice Perfect's
 Railway import/apply incident. The incident exposed a system-level mismatch:
 planning reasons about individual observed resources, while parts of apply

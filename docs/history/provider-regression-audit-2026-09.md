@@ -2,7 +2,8 @@
 
 > Historical record from September 2026. Fly.io, Vercel, DigitalOcean, GitLab,
 > Neon, Supabase, Twilio and the OpenAI connector named below were removed on
-> 2026-11-03; see the Provider Scope section of ARCHITECTURE.md.
+> 2026-11-03; see the [current provider scope](../../ARCHITECTURE.md#provider-scope).
+> This audit is evidence about its recorded revisions, not the current roadmap.
 
 Initial audit: `7c63032`, Hypervibe `0.1.24`. Hardening integrated onto
 `1e928df` after PRs #189, #191, and #192 merged. Review window: September 2–9
@@ -167,7 +168,7 @@ mutation or release was performed.
 
 After the staging membership fix in #209, API regressions were reproduced
 against checked-in official schemas before changing the adapters. The new
-[offline contract gate](../test/provider-contracts/README.md) replaces the
+[offline contract gate](../../test/provider-contracts/README.md) replaces the
 latest-upstream Railway check without rewriting managed workflow files.
 
 - The official Railway schema rejected seven guessed query/input variants.

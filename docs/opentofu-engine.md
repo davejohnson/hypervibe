@@ -1,12 +1,18 @@
-# OpenTofu infrastructure engine for GCP
+# GCP engine implementation notes
 
 Google Cloud uses OpenTofu as its only infrastructure engine. Cloud Run selects
 it automatically; `hosting.engine` is not a user choice. Default planning routes
 to the engine and unsupported work blocks without a legacy fallback.
 
+This page records engine ownership, implementation decisions and dated evidence.
+Product scope and future priorities belong to the
+[common user journey](development/user-journey.md). It is not a complete support
+claim or a separate roadmap.
+
 The dated live evidence below describes earlier revisions. It does not establish
-that this cutover has been deployed live. Current verification is recorded in
-the change's pull request.
+that the current cutover has been deployed live. Verification for a later change
+belongs in that change's pull request; the historical results remain bounded to
+the runs described here.
 
 ## Existing-zone DNS engine
 
@@ -49,6 +55,9 @@ configuration, authentication, resource identities and deployment behavior.
 
 ## Implementation
 
+The evidence column records the original engine work; it is not a fresh run of
+every listed component on the current revision.
+
 | Piece | File | Evidence |
 | --- | --- | --- |
 | Cloud-neutral engine contract | `src/domain/ports/infrastructure-engine.port.ts` | Type-checked; nothing Google-specific |
@@ -83,7 +92,8 @@ Read-only auth probe through the saved `cloudrun` connection for
 `hypervibe-deploy@hls-property-care.iam.gserviceaccount.com` and read project
 `hls-property-care`. Data sources only; no state written, nothing changed.
 
-Not yet proven: any create/update/delete of a real GCP resource through the engine.
+At this initial probe, real GCP resource mutations were not yet proven. The later
+live journey below records create, update and delete results from the same date.
 
 ## Decisions made while building
 
@@ -110,11 +120,15 @@ infrastructure apply keeps whatever image is running instead of rolling it back.
 Google provider ≥ 5 treats `labels`/`annotations` as non-authoritative, so the
 release annotations CI writes are not reverted.
 
-Needed before enabling: the CI writer (`cloudrun-ci.workflow.ts`, the
-`template.containers` PATCH) must change only the image and release metadata and
-must use the service `etag` on every write, so a concurrent engine apply and CI
-release cannot overwrite each other. If the live journey shows the provider cannot
-hold this split safely, releases move into the engine instead.
+The current engine CI writer is
+[`infrastructure-engine-ci.ts`](../src/application/infrastructure-engine-ci.ts).
+It preserves the read container configuration, changes the image and includes the
+service `etag` in its PATCH; workflow coverage is in
+[`engine-ci-workflow.test.ts`](../src/application/__tests__/engine-ci-workflow.test.ts).
+The release boundary still requires image/release-metadata changes only and an
+`etag` on every write. The November 5–6 live runs below did not exercise CI
+releases, so they do not verify this later implementation or concurrent
+release/apply behavior live.
 
 ## Runtime secrets
 
@@ -136,15 +150,14 @@ segments and receipts. Per cloud: configuration, authentication, resource mappin
 - AWS decisions (access, runtimes, database network): [OpenTofu engine on AWS](opentofu-engine-aws.md).
 - Azure decisions (access, shared testing resources, runtimes, costs, teardown): [OpenTofu engine on Azure](opentofu-engine-azure.md).
 
-## Minimal user interaction (hard requirement)
+## User interaction
 
-Target journey for an existing cloud account: choose the cloud (or accept the
-recommendation) → sign in and approve access → pick a billing account only if it
-can't be determined safely → review the deployment and cost → get a working URL.
-Project creation, API enablement, IAM, deployment identities, storage, secrets,
-deploy and verification belong to Hypervibe. Payment verification and
-organization admin consent may still need a person; Hypervibe links straight to
-that step and resumes afterward.
+The [common user journey](development/user-journey.md) owns the product contract
+for all three clouds. Project creation, API enablement, IAM, deployment identities,
+storage, secrets, deployment and verification belong to Hypervibe. Payment
+verification and organization admin consent may still need a person. The GCP
+implementation notes below do not establish that every step of that contract is
+available or verified.
 
 ## GCP ownership
 
@@ -160,7 +173,7 @@ sign-in, credential values, image builds/releases, logs, health, SQL and object
 transfer operations. Existing Railway infrastructure continues through its
 retained lifecycle.
 
-## How it works for a user
+## Flow exercised by the early GCP implementation
 
 1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun" }`.
 2. `hv_connections action="bootstrap"`: preview, choose a billing account, confirm.
@@ -193,8 +206,9 @@ Fresh repository `davejohnson/hypervibe-engine-pilot`, fresh project
 | Unconfirmed teardown | Refused before any change |
 | Confirmed teardown | Service then secret deleted; URL 404; next plan empty |
 
-Not exercised: CI releases (blocked for engine environments), concurrent
-multi-machine execution, Cloud SQL, domains.
+Not exercised in this November 5 run: CI releases (then blocked for engine
+environments), concurrent multi-machine execution, Cloud SQL or domains. CI is
+now implemented as described above; database and domain evidence follows below.
 
 ## Problems found and fixed along the way
 
@@ -237,16 +251,23 @@ Design notes:
 - Hypervibe never overwrites DNS records it did not create and removes only the exact
   Google targets it wrote.
 
-## Remaining work
+## Evidence boundaries and later implementation
 
-1. **Register Hypervibe's Google OAuth client** ("Desktop app"; owner action) and set
-   `HYPERVIBE_GOOGLE_OAUTH_CLIENT_ID` in the build. Sensitive-scope verification by
-   Google is required before broad public use.
-2. **Database password rotation without downtime**: services reference `latest`, so a
-   rotation needs a new revision; a two-login handover is the safe design.
-3. **CI releases for engine environments** (etag-guarded image writer), scheduled jobs,
-   Memorystore, Pub/Sub, import of existing sites, shared state for multiple machines.
-4. A from-scratch `hv_launch` run (new environment with database, storage and domain).
-5. Teardown leaves Artifact Registry images and the GCP project.
-6. Connection guidance text for missing Cloudflare access is far too long for the
-   intended audience.
+The November 5–6 evidence leaves browser sign-in, a confirmed from-scratch
+`hv_launch` with database, storage and a ready custom domain, and concurrent
+multi-machine execution unverified. The November 6 domain certificate was still
+issuing; storage was planned but not created. Those limits remain part of the
+historical record, not claims about every later revision.
+
+CI releases, scheduled jobs, Memorystore and Pub/Sub are now implemented in
+[`infrastructure-engine-ci.ts`](../src/application/infrastructure-engine-ci.ts) and
+[`gcp-engine.backend.ts`](../src/adapters/providers/gcp/tofu/gcp-engine.backend.ts).
+Their presence in source does not extend the live evidence above. The current DNS
+engine also needs its own installed lifecycle evidence, as noted near the top.
+
+The original follow-ups included Google OAuth client registration, database
+password rotation without downtime, import, shared state across machines, retained
+project/image cleanup and shorter connection guidance. This page does not certify
+their current completion status or set their priority. Use the
+[common user journey](development/user-journey.md) to decide scope, and record new
+implementation and live evidence against the exact affected step.

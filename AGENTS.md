@@ -11,6 +11,9 @@ changing customer-facing pages, emails, prompts or errors.
 
 ## Design for the complete journey
 
+- Build toward the [common cloud user journey](docs/development/user-journey.md).
+  It is the acceptance target for GCP, AWS and Azure, not a claim of current
+  support. Provider notes and historical checklists do not define extra scope.
 - Optimize for a working app with the fewest user chores and installed tools.
   Infer routine choices from the repository; ask for missing access, consequential
   decisions and approvals, not an infrastructure design exercise.
@@ -74,10 +77,12 @@ changing customer-facing pages, emails, prompts or errors.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) defines the infrastructure model. Consult the
 relevant sections and topic rules, not the entire linked document tree. Previously
-read, unchanged guidance need not be loaded again.
+read, unchanged guidance need not be loaded again. The [documentation map](docs/README.md)
+distinguishes current requirements, implementation evidence and historical context.
 
 | Change | Relevant rules |
 | --- | --- |
+| Cloud journey, feature scope or completion claims | [Common cloud journey](docs/development/user-journey.md) |
 | Onboarding and customer experience | [Product](docs/development/product.md) |
 | Provider APIs or shared capabilities | [Provider evidence](docs/development/provider-evidence.md) |
 | Spec, plan, apply, observation, import or teardown | [Lifecycle](docs/development/lifecycle.md) |

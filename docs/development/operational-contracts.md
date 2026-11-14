@@ -2,7 +2,8 @@
 
 > **Status:** This is the retained pre-OpenTofu operational reference for existing
 > Railway apps, third-party integrations and application operations. The root
-> [architecture](../../ARCHITECTURE.md) is authoritative for the rebuild.
+> [architecture](../../ARCHITECTURE.md) defines current technical boundaries and
+> the [common cloud journey](user-journey.md) defines the product milestone.
 > Descriptions here of custom GCP/AWS/Azure CRUD, provider coverage, engine
 > dependencies or a future Railway retirement are superseded. They are historical
 > context, not requirements to preserve that design or claims of current cloud
@@ -677,7 +678,7 @@ Creates, updates, and destroys must be retry-safe:
 Lifecycle changes require contract tests for noop mutation freedom,
 action-scoped mutation authority, observation-error preservation, duplicate
 identity handling, import round trips, confirmation gating, and idempotent
-delete retry. The current audit and repair queue is tracked in
+delete retry. The historical reconciliation review is recorded in
 [`docs/reconciliation-safety-backlog.md`](../../docs/reconciliation-safety-backlog.md).
 
 ## Connections And Secrets

@@ -1,5 +1,9 @@
 # Dependency security evidence, 2026-10-25
 
+> Historical evidence for the dependency graph reviewed on this date. It is not
+> a current vulnerability assessment or permission to skip the release audit.
+> See the [current release rules](../development/workflow.md#dg-117).
+
 This change repairs all findings in the reviewed dependency graph, including the
 Zod and Azure/MSAL findings that remained after the initial compatible updates.
 The development tree reports zero vulnerabilities after a fresh `npm ci`.

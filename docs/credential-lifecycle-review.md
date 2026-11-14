@@ -1,5 +1,10 @@
 # Credential lifecycle review map
 
+> Historical review structure for the credential lifecycle change. The phases
+> below are not a current PR queue or the three-cloud roadmap. Consult
+> [credential lifecycle](credential-lifecycle.md) for the feature contract and
+> the [common journey](development/user-journey.md) for current product priorities.
+
 Review the change in the following three dependency-ordered phases. Each has its
 own behavioral contract and focused acceptance surface. These are review units,
 not three published pull requests. The implementation reuses existing encrypted

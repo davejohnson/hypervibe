@@ -72,6 +72,11 @@ such keys in the spec's `secrets` (ownership not `hypervibe`); never ask for
 their values in chat. `hv_secrets action="collect" env=<env>` opens the same page
 for any missing key, on GCP or AWS. Call `hv_launch` again after `pending`.
 
+This describes implemented GCP commands, not a verified complete journey on every
+cloud. Full launch, migration and recovery need evidence for the actual installed
+release and requested scope. Never infer support from a command name or a successful
+infrastructure step. `hv_launch` is currently GCP-only; do not call it for AWS or Azure.
+
 Keep running costs low by default. A background worker that polls a database
 queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
 `SELECT count(*)` of queued plus in-progress work, read from the app's own
@@ -87,8 +92,10 @@ After a verified copy, a re-run releases without copying again; pass
 `refreshData=true` only after the user approves copying again, and
 `verifyOnly=true` to compare the source and the copy (row counts, per-table
 content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
-`hv_deploy` remain available for individual steps; a full-scope `hv_plan` is
-refused for app infrastructure. A Pages-only canonical environment with explicit
+`hv_deploy` remain available for individual steps. GCP's default `hv_plan` routes
+to the engine; AWS and Azure currently require `scope="infrastructure"` and
+`hosting.engine="opentofu"` in the spec. Set those routine implementation choices
+without asking the user to select an engine. A Pages-only canonical environment with explicit
 DNS selection uses the ordinary repository plan. Resources reported as unsupported stay blocked; do not work around
 them.
 

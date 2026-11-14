@@ -6,8 +6,10 @@ Hypervibe takes care of infrastructure definition, authentication, deployment,
 rollback, recovery, observability, secrets and third-party integrations.
 
 This is the product direction, not a claim that every capability works today.
-Read [ARCHITECTURE.md](../../ARCHITECTURE.md) for the technical boundary and
-verify a complete user journey before promising support. These are maintainer
+The [common cloud user journey](user-journey.md) defines the next milestone and
+its acceptance steps for all three clouds. Read [ARCHITECTURE.md](../../ARCHITECTURE.md)
+for the technical boundary and verify that journey before promising its complete
+support. Narrower verified increments must state their scope. These are maintainer
 rules; customers receive the [installed skill](../../skills/hypervibe/SKILL.md).
 Stable rule IDs are recorded in the [migration audit](guidance-migration.json).
 

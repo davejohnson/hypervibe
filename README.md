@@ -27,15 +27,25 @@ Terraform, cloud CLIs or Docker to deploy an app.
 
 ### Current status
 
-Google Cloud infrastructure uses the managed OpenTofu engine. Cloud Run selects
-it automatically; there is no alternate GCP provisioning path. Hypervibe installs
-its pinned engine and provider plugins, then plans and applies reviewed changes.
-Railway keeps its existing workflow. AWS and Azure engine deployment remain
-unavailable until their complete paths are implemented and verified.
+The [common cloud user journey](docs/development/user-journey.md) is the target
+for Google Cloud, AWS and Azure. The complete journey is not yet established by
+the recorded evidence. Current implementations and verification have different
+limits:
 
-Local and provider-contract checks do not establish a live deployment. See the
-[engine implementation and evidence](docs/opentofu-engine.md) for the current
-boundary and historical live evidence.
+- [Google Cloud](docs/opentofu-engine.md) automatically uses managed OpenTofu.
+  Guided launch and CI release code exist; the dated live evidence predates the
+  current infrastructure cutover and does not prove the complete journey.
+- [AWS](docs/opentofu-engine-aws.md) records live testing-environment deployments
+  and teardown. Guided launch, production-profile databases, CI releases, data
+  copy and custom domains remain gaps.
+- [Azure](docs/opentofu-engine-azure.md) records live testing-environment deployments
+  and teardown. Production, guided launch, CI releases, migration and custom
+  domains remain gaps; repository Dockerfiles requiring BuildKit are unsupported.
+
+Local and provider-contract checks do not establish a live deployment. The linked
+provider notes distinguish implementation from recorded live evidence. Railway
+keeps its existing workflow. Use the [documentation map](docs/README.md) to separate
+current requirements from historical references.
 
 New cloud development focuses on **Google Cloud, AWS and Azure**. **Railway stays
 available for existing apps**; this reset does not require moving those apps.

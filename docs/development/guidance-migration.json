@@ -1589,6 +1589,29 @@
         }
       ],
       "preserved": "Exact plan authorization, state and data ownership, unknown-state handling, secret boundaries, credential operations, supported operational APIs and existing Railway apps."
+    },
+    {
+      "id": "2026-11-13-common-cloud-journey",
+      "date": "2026-11-13",
+      "authority": "Owner request: start with a clearly defined user journey for GCP, AWS and Azure; reconcile old documentation that misdirects the project and review confusing tests.",
+      "changes": [
+        {
+          "area": "Product scope and acceptance",
+          "destination": "docs/development/user-journey.md",
+          "decision": "Use one common journey as the next three-cloud milestone, including installation/access, verified app behavior, updates, production, data copy, diagnosis, rollback, backup/restore and teardown. Deliver explicitly scoped increments; component checks do not establish full support."
+        },
+        {
+          "area": "Documentation authority",
+          "destination": "docs/README.md",
+          "decision": "Separate milestone scope, architecture safeguards, current implementation/evidence and history. Historical backlogs do not create active roadmap obligations; preserve applicable operational safeguards and dated evidence."
+        },
+        {
+          "area": "Test evidence",
+          "destination": "docs/provider-conformance.md",
+          "decision": "Remove the opt-in metadata-only complete support roadmap gate and its script/config. Keep ordinary registry and lifecycle checks, and require replacement behavioral coverage before removing safety tests or source assertions that still guard reachable work."
+        }
+      ],
+      "preserved": "Exact saved-plan approval, present/absent/unknown distinctions, secret custody, recovery and cleanup evidence, required ordinary CI, retained operations, existing Railway applications and user data. No runtime capability, cloud action or live verification is added by this change."
     }
   ]
 }

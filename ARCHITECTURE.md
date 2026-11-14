@@ -14,6 +14,11 @@ This document takes precedence wherever the two disagree.
 
 ## Product Model
 
+The [common cloud user journey](docs/development/user-journey.md) defines the
+GCP/AWS/Azure milestone, build order and observable acceptance. This architecture
+defines its technical and safety boundaries. Backend implementation notes and
+historical evidence do not add requirements to that milestone or prove it complete.
+
 A user describes the app they want to run. Hypervibe inspects the repository,
 chooses sensible infrastructure, connects the authorized account, explains the
 proposal and cost implications, then delivers a verified running app. Deployment,
