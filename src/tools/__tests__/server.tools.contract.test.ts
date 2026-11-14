@@ -212,6 +212,22 @@ describe('server tool surface', () => {
     await server.close();
   });
 
+  it('advertises the mixed secret tool as write-capable without removing read modes', async () => {
+    // MCP annotations describe the whole tool, not a selected input mode:
+    // https://modelcontextprotocol.io/specification/2025-06-18/schema#toolannotations
+    // Inventory and ages only inspect secrets, but collect/rotate change them.
+    const { client, server } = await makeClient();
+    try {
+      const tool = (await client.listTools()).tools.find(({ name }) => name === 'hv_secrets')!;
+      expect(tool.inputSchema.properties?.action).toMatchObject({ enum: ['collect', 'rotate', 'ages'] });
+      expect(tool.inputSchema.properties?.view).toMatchObject({ const: 'inventory' });
+      expect(tool.annotations?.readOnlyHint).toBe(false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('keeps registry, MCP ids, and friendly CLI routes in one-to-one parity', async () => {
     const registry = createCommandRegistry(createCommandContext());
     const definitions = registry.list();
@@ -261,7 +277,7 @@ describe('server tool surface', () => {
     expect(registry.get('hv_secrets')?.description).toContain('{} or {project} lists sources');
     expect(registry.get('hv_secrets')?.description).toContain('Hosting mode requires explicit env');
     expect(registry.get('hv_inspect')?.description).toContain('{provider,project,env}');
-    expect(registry.get('hv_secrets')?.access).toBe('read');
+    expect(registry.get('hv_secrets')?.access).toBe('write');
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
     expect(registry.get('hv_plan')?.inputShape.scope).toBeDefined();
     expect(registry.get('hv_plan')?.description).toContain('scope="retained-cleanup"');
