@@ -397,97 +397,26 @@ Before chat-created plans are rendered in detail, harden the existing `hv_runs g
 
 Do not add a companion projection to `hv_plan`. If composing the existing calls proves too slow or chat-oriented, a single read-only snapshot operation can be considered later. Its implementation must derive data on demand and must not create new state.
 
-## Resource provider changes
+## Refresh and action boundaries
 
-The companion should show both the desired provider and any safe observed/bound identity Hypervibe returns. A resource move is not a dropdown update.
+The companion refreshes on launch, foreground activation and manual request.
+Scheduled refresh and notifications are outside the implemented scope.
 
-Changing a database from one service/provider to another can involve:
+Resource-provider changes remain requests to the existing chat-driven
+spec/plan/apply workflow. The companion never edits infrastructure state or calls
+providers directly. Its production-deploy action is a narrow exception to chat
+handoff: direct deploys call plan-gated `hv_deploy`; managed-CI promotion first
+reads provider-observed definitions with `hv_ci_status`, then calls `hv_ci_trigger`
+with the reviewed definition, source ref and full commit SHA. The app requires
+explicit final confirmation; Hypervibe's protected-environment, stale-plan,
+action-authority, CI-definition and exact-SHA checks remain authoritative.
 
-- a spec change;
-- a new plan;
-- billable resource creation;
-- data migration;
-- connection rewiring;
-- health verification;
-- destructive cleanup.
-
-That belongs in the existing desired-state loop:
-
-```text
-chat intent → hv_spec → hv_plan → review → hv_apply → hv_status
-```
-
-The companion may offer **Change provider…**, but the action should copy or hand off a structured request to chat, for example:
-
-> Move `primary-db` in `staging` from Railway Postgres to Cloud SQL. Preserve data and show me the plan before applying.
-
-The app never edits the database row or calls a provider directly.
-
-## Refresh and scheduling
-
-v0 refreshes on launch, foreground activation, and manual request.
-
-Scheduled status in v1:
-
-- is disclosed during onboarding and can be disabled per project;
-- calls only the existing read-only `hv_status` path;
-- is single-flight per environment;
-- has global concurrency and timeout limits;
-- uses jitter and exponential backoff;
-- pauses in Low Power Mode and below a configurable battery threshold;
-- refreshes stale projects after wake.
-
-Notifications are based on stable app-side fingerprints of sanitized results. Notify only for:
-
-- a new or changed drift set;
-- a new failed/blocked run;
-- completion of a run previously observed as active.
-
-Acknowledgements are UI state, not infrastructure state.
-
-## Plan review
-
-Plans open in a detachable window.
-
-```text
-┌─────────────────────────────────────────────────────┐
-│ invoice-perfect / staging · plan a1b2c3…            │
-│ spec rev 14 · observed 2m ago                       │
-├─────────────────────────────────────────────────────┤
-│ + 2 create   ~ 3 update   – 1 destroy   ⚠ 1 gated  │
-├─────────────────────────────────────────────────────┤
-│ ⚠ DESTRUCTIVE — always expanded                    │
-│  – database:redis · DATA-BEARING                    │
-│                                                     │
-│ Changes (execution order)                           │
-│  1 + storage:documents                   s3         │
-│  2 ~ service:api                         cloudrun   │
-│      healthcheckPath /health → /healthz             │
-│      depends on: storage:documents                  │
-├─────────────────────────────────────────────────────┤
-│ [ Copy apply request ] [ Re-observe ]               │
-└─────────────────────────────────────────────────────┘
-```
-
-Rules:
-
-- color is never the only signal;
-- information cards use an opaque white surface with light semantic content,
-  rather than translucent system-gray fills whose contrast changes with the
-  menu bar material or system appearance;
-- destructive, data-bearing, blocked, confirm-gated, and input-required content is never collapsed;
-- environment-variable diffs show key names only;
-- `billable` means "may incur charges," not an estimated price;
-- receipt counts report completed work only;
-- the app does not reproduce apply precondition logic.
-
-General plan application still uses a copy-to-chat handoff. The production
-deploy window is a narrow exception: direct deploys call plan-gated
-`hv_deploy`, while managed-CI promotion first reads provider-observed
-definitions with `hv_ci_status` and then calls `hv_ci_trigger` with the reviewed
-definition, source ref, and full commit SHA. The app requires its own explicit
-final confirmation, but Hypervibe's protected-environment, stale-plan,
-action-authority, CI-definition, and exact-SHA checks remain final.
+Keep destructive, data-bearing, blocked and confirmation/input-required content
+visible. Show environment-variable key names only; `billable` means possible
+charges, not a price estimate. Receipt counts describe completed work. Color
+cannot be the only signal, and information cards use an opaque white surface
+with light semantic content so contrast does not depend on menu-bar material.
+The app does not reproduce apply precondition logic.
 
 ## Failure model
 
@@ -522,20 +451,10 @@ action-authority, CI-definition, and exact-SHA checks remain final.
 - MCP host configuration edits are scoped, backed up once, atomic, and never
   contain provider credentials.
 
-## Implementation plan
+## Implementation scope
 
-| Phase | Work | MCP impact |
-|---|---|---|
-| **Foundation** | Swift package/app target, project registry, snapshot models/cache, process/MCP session wrapper | None |
-| **v0 — Status** | Menu bar project/environment list, topology, connected apps, manual refresh, stale/error states, recent runs | Uses existing tools unchanged |
-| **v0 — Distribution** | Bundled runtime/server, native launcher/updater, signed DMG, GitHub update checks, Claude/Codex registration | Packages the existing MCP unchanged |
-| **v1 — Ambient** | Scheduling, notifications, acknowledgements, power/network behavior | Uses existing read-only tools |
-| **Plan review** | Detachable review window and copy-to-chat handoff | Narrow `hv_runs get` sanitization/preview only |
-| **Production deploy** | Explicit confirmation; plan-gated direct deploy or reviewed exact-SHA CI dispatch | Existing `hv_deploy`, `hv_ci_status`, and `hv_ci_trigger` |
-| **Later, only if needed** | One derived snapshot operation or native Apply | Separate reviewed decision |
-
-The implemented v0 slice now includes Foundation, Status through manual
-refresh and recent runs, self-contained Distribution/onboarding, provider
+The companion includes manual status refresh and recent runs, self-contained
+distribution/onboarding, provider
 connection management, explicit hosting-variable inventory, and the narrow
 production-deploy action. Scheduling, notifications, general plan review, and
 other lifecycle mutations remain out of scope.
@@ -543,7 +462,7 @@ other lifecycle mutations remain out of scope.
 ## Acceptance criteria
 
 - Removing the companion's Application Support directory loses no infrastructure state.
-- Existing MCP tool names and lifecycle behavior remain unchanged for v0.
+- The companion uses the existing MCP tool names and lifecycle contracts.
 - A clean Mac does not require a separate Node.js or Hypervibe installation.
 - The first packaged launch enables start-at-login once, user opt-out persists,
   and development builds never create a login item.
@@ -564,17 +483,3 @@ other lifecycle mutations remain out of scope.
 - A failed refresh never updates the last-successful freshness time.
 - Provider changes hand off to spec/plan/apply instead of mutating directly.
 - The existing Hypervibe TypeScript tests pass without companion-specific lifecycle fixtures.
-
-## Settled decisions
-
-- Keep the current MCP architecture intact.
-- Bundle that MCP and its Node runtime in the distributable app.
-- Configure supported desktop MCP hosts per project through a native launcher.
-- Connect the coding agent first and let chat determine the user's task.
-- Treat missing provider access as a task boundary, not a user role or an
-  automatic invitation.
-- No direct SQLite reads and no server-owned companion read model.
-- App-owned storage tracks projects and UI state only.
-- Resource topology is derived from Hypervibe's existing spec/status views.
-- Infrastructure changes remain chat-driven through spec/plan/apply.
-- Native Apply remains optional and deferred.
