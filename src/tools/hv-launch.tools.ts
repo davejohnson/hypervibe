@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { localRepositoryFor } from '../application/local-repository.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import type { CommandContext } from '../application/context.js';
-import { launchEnvironment } from '../application/launch.js';
+import { LAUNCH_ACCESS_IDS, launchEnvironment } from '../application/launch.js';
 import { commandError, commandSuccess, wrapCommandHandler } from '../application/results.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { projectField, envField } from './schemas.js';
@@ -10,19 +10,21 @@ import { projectField, envField } from './schemas.js';
 export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_launch',
-    'Take a Cloud Run environment from spec to a working app in one guided command: connect GCP, create or update infrastructure in as many reviewed rounds as needed, release the current code, and verify health and the custom domain. It stops only for decisions a person must make: choosing a billing account (status=needs_billing_choice → ask, then call again with billingAccountName) and approving actions that cost money or delete data (status=needs_confirmation → show the changes and estimated monthly cost, then call again with the returned planId and exactly confirmActions). Call it again after pending results. Never substitute provider CLIs for a stop point.',
+    'Take a Google Cloud (Cloud Run) or Azure testing environment from spec to a working app in one guided command: connect the cloud, create or update infrastructure in as many reviewed rounds as needed, release the current code, and verify health and the custom domain. It stops only for decisions a person must make: choosing a billing account (status=needs_billing_choice → ask, then call again with billingAccountName), choosing an Azure subscription (status=needs_subscription → ask, then call again with azureSubscriptionId) and approving actions that cost money or delete data (status=needs_confirmation → show the changes and estimated monthly cost, then call again with the returned planId and exactly confirmActions). Call it again after pending results. Never substitute provider CLIs for a stop point.',
     {
       project: projectField,
       env: envField,
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
-      approveAccess: z.array(z.enum(['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional()
+      azureSubscriptionId: z.string().uuid().optional()
+        .describe('Exact subscriptionId the user chose after a needs_subscription result, or the one a needs_access "azure-setup" result was shown for.'),
+      approveAccess: z.array(z.enum(LAUNCH_ACCESS_IDS)).optional()
         .describe('accessId values from needs_access results, passed only after the user approved that exact access.'),
       planId: z.string().min(1).optional().describe('Exact saved planId returned by needs_confirmation or pending. Required when supplying infrastructure confirmActions.'),
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, planId, confirmActions, approveAccess }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, azureSubscriptionId, planId, confirmActions, approveAccess }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
@@ -30,7 +32,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       const result = await launchEnvironment(ctx, {
         project, spec: specResult.spec, specRevision: specResult.revision, environmentName,
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
-        ...(billingAccountName ? { billingAccountName } : {}),
+        ...(billingAccountName ? { billingAccountName } : {}), ...(azureSubscriptionId ? { azureSubscriptionId } : {}),
         ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}),
         ...(approveAccess ? { approveAccess } : {}),
       });
@@ -42,12 +44,20 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             agentInstruction: { action: 'ask_user', message: 'Show the billing accounts by display name and ask the user to pick one. Never choose a billing account for them.' },
             next: ['hv_launch'],
           });
+        case 'needs_subscription':
+          return commandSuccess(result, {
+            hint: 'Ask which Azure subscription should run and pay for this app, then call hv_launch again with azureSubscriptionId.',
+            agentInstruction: { action: 'ask_user', message: 'List the subscriptions by name and ask the user to pick one. Never choose a subscription for them.' },
+            next: ['hv_launch'],
+          });
         case 'ready':
           return commandSuccess(result, { next: ['hv_launch'] });
         case 'needs_connection':
           return commandSuccess(result, {
             hint: 'A connect page is open in the user\'s browser. Share the link in case it did not open, then call hv_launch again once they finish.',
-            agentInstruction: { action: 'ask_user', message: 'Ask the user to finish the one-step connect page in their browser (create a token in Cloudflare, paste it, click Connect).' },
+            agentInstruction: { action: 'ask_user', message: result.provider === 'azure'
+              ? 'Ask the user to sign in to Microsoft on the page that opened and approve the setup there.'
+              : 'Ask the user to finish the one-step connect page in their browser (create a token in Cloudflare, paste it, click Connect).' },
             next: ['hv_launch'],
           });
         case 'needs_secrets':
@@ -58,8 +68,10 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
           });
         case 'needs_access':
           return commandSuccess(result, {
-            hint: `Explain the access in plain language. After the user approves, call hv_launch again with approveAccess including "${result.accessId}" (keep any earlier approvals).`,
-            agentInstruction: { action: 'ask_user', message: 'Ask the user to approve this Google Cloud access. Do not approve it for them.' },
+            hint: result.accessId === 'azure-setup'
+              ? `Show the subscription, region and each change in one short list. After the user approves, call hv_launch again with approveAccess including "azure-setup" and azureSubscriptionId ${JSON.stringify(result.grants.subscriptionId)}.`
+              : `Explain the access in plain language. After the user approves, call hv_launch again with approveAccess including "${result.accessId}" (keep any earlier approvals).`,
+            agentInstruction: { action: 'ask_user', message: 'Ask the user to approve this access. Do not approve it for them.' },
             next: ['hv_launch'],
           });
         case 'needs_confirmation':

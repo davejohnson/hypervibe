@@ -20,7 +20,8 @@ mocked HTTP and, for configuration, passing `tofu validate`.
 | Shared server and registry for testing environments (one database and login each) | Built; verified live with one environment |
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
-| Production profile (staging, production), `hv_launch`, `hv_migrate`, CI releases, custom domains | Not built |
+| `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (job done 1.5 s after due) working, empty plan after |
+| Production profile (staging, production), `hv_migrate`, CI releases, custom domains | Not built |
 
 
 ## Found in the first live run (2026-11-13)
@@ -276,7 +277,5 @@ stay for the project's other environments.
 
 ## Next
 
-1. Live: sign in and run setup once; plan, apply and deploy the demo app to a testing
-   environment; tear it down.
-2. The production profile (own server and registry, web always on), `hv_launch` and
-   `hv_migrate` for Azure, CI releases with the GitHub federated credentials.
+1. The production profile (own server and registry, web always on), `hv_migrate` for
+   Azure, CI releases with the GitHub federated credentials.
