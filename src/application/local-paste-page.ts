@@ -225,7 +225,7 @@ export interface PasteField {
   id: string;
   /** Where the value is created, with an optional suggested name to copy. */
   link?: { url: string; label: string; hintHtml: string; copy?: { label: string; value: string } };
-  /** Offer "Generate a random value" for app-internal secrets Hypervibe cannot identify. */
+  /** Offer "Generate a random value" only when the caller has established app ownership. */
   allowGenerate?: boolean;
   /** A note such as "Delete the old key in Anthropic after this". */
   noteHtml?: string;

@@ -31,9 +31,6 @@ export function looksSecret(key: string): boolean {
   return /(SECRET|_KEY$|^KEY$|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|_DSN$|WEBHOOK)/.test(key);
 }
 
-/** App-internal signing secrets: generating new ones is safe but signs everyone out. */
-const SIGNS_OUT = /^(SESSION|JWT|COOKIE|AUTH)_SECRET$|^(SECRET_KEY_BASE|NEXTAUTH_SECRET)$/;
-
 export interface SecretAge {
   key: string;
   kind: SecretKind;
@@ -65,11 +62,13 @@ export async function secretAges(ctx: CommandContext, project: Project, spec: Pr
   if ('blocked' in engine) return { blocked: engine.blocked };
   const token = await engine.adapter.engineAccessToken();
   const everyDays = (environmentSpec as { secretRotation?: { everyDays: number } }).secretRotation?.everyDays ?? DEFAULT_ROTATION_DAYS;
+  const generatedKeys = new Set(engineSecretKeys(spec, environmentName));
   const kinds: Array<[string, SecretKind]> = [
-    ...engineSecretKeys(spec, environmentName).map((key) => [key, 'generated'] as [string, SecretKind]),
+    ...[...generatedKeys].map((key) => [key, 'generated'] as [string, SecretKind]),
     ...(environmentSpec.database ? [[ENGINE_DATABASE_URL_KEY, 'database'] as [string, SecretKind]] : []),
     ...(environmentSpec.cache ? [[ENGINE_CACHE_URL_KEY, 'derived'] as [string, SecretKind]] : []),
-    ...(binding(engine).importedSecrets ?? []).map((key) => [key, looksSecret(key) ? 'third-party' : 'setting'] as [string, SecretKind]),
+    ...(binding(engine).importedSecrets ?? []).filter((key) => !generatedKeys.has(key))
+      .map((key) => [key, looksSecret(key) ? 'third-party' : 'setting'] as [string, SecretKind]),
   ];
   const secrets: SecretAge[] = [];
   for (const [key, kind] of kinds) {
@@ -99,7 +98,7 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   project: Project;
   environmentName: string;
   keys?: string[];
-  /** Replace app-internal secrets (ones no outside service issued) with generated values instead of asking. */
+  /** Compatibility option. Only explicit Hypervibe ownership authorizes generation, which is automatic. */
   generateInternal?: boolean;
   confirmActions?: string[];
   approveAccess?: string[];
@@ -148,18 +147,14 @@ export async function rotateSecrets(ctx: CommandContext, params: {
     rotation = { ...rotation, databaseGeneration: next };
     save(rotation);
   }
-  // 1c. App-internal secrets, when asked: generated without a page (no outside service issued them).
-  if (params.generateInternal) {
-    for (const secret of selected.filter((entry) => entry.kind === 'third-party' && !KNOWN_SECRETS[entry.key] && !replaced(entry))) {
-      const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, secret.key), { ...labels, 'hv-imported': 'true' }, crypto.randomBytes(32).toString('base64url'));
-      if (failure) return { status: 'blocked', message: failure.message };
-      secret.createdAt = new Date().toISOString();
-    }
-  }
-  // 1d. Third-party keys: one local page, each value checked where Hypervibe knows how.
-  const pendingKeys = selected.filter((entry) => entry.kind === 'third-party' && !replaced(entry));
-  const pending = pendingKeys.flatMap((secret) => [secret, ...companionsOf(secret.key)
-    .map((companion) => ages.secrets.find((entry) => entry.key === companion.key)!).filter((entry) => !replaced(entry))]);
+  // 1c. Outside keys are always supplied by their issuer. Catalog coverage and
+  // familiar signing-key names do not establish Hypervibe ownership.
+  // Expand the entire selected group before checking completion: saving the
+  // parent must not hide an unfinished companion on the next call.
+  const pending = selected.filter((entry) => entry.kind === 'third-party')
+    .flatMap((secret) => [secret, ...companionsOf(secret.key)
+      .map((companion) => ages.secrets.find((entry) => entry.key === companion.key)!)])
+    .filter((entry) => !replaced(entry));
   if (pending.length) {
     const environmentSpec = specResult.spec.environments[params.environmentName]!;
     const forwardedFrom = Object.values(specResult.spec.environments)
@@ -173,19 +168,19 @@ export async function rotateSecrets(ctx: CommandContext, params: {
       return known
         ? { id: secret.key, link: { url: known.url, label: `Open ${known.service}'s key page`, hintHtml: keyHintHtml(known), copy: { label: 'Name it', value: `${domain}-${params.environmentName}` } },
             noteHtml: `Delete the old key in ${known.service} once ${params.environmentName} runs on the new one.` }
-        : { id: secret.key, allowGenerate: true, ...(SIGNS_OUT.test(secret.key) ? { noteHtml: 'Generating a new value signs everyone out once it is live.' } : {}) };
+        : { id: secret.key };
     });
     const collected = await serveMultiPastePage({
       key: `rotate:${params.project.id}:${params.environmentName}`, provider: 'secret', scope: params.environmentName,
       ...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}), ...(params.openBrowser ? { openBrowser: params.openBrowser } : {}),
       accept: async (key, value) => {
+        if (typeof value !== 'string') return { ok: false, error: 'Paste the replacement value from the service that issues it.' };
         const known = KNOWN_SECRETS[key];
-        const secretValue = typeof value === 'string' ? value : crypto.randomBytes(32).toString('base64url');
-        const rejected = typeof value === 'string' && known ? await checkKnownSecret(known, value) : undefined;
+        const rejected = known ? await checkKnownSecret(known, value) : undefined;
         if (rejected) return { ok: false, error: rejected };
-        const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, key), { ...labels, 'hv-imported': 'true' }, secretValue);
+        const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, key), { ...labels, 'hv-imported': 'true' }, value);
         if (failure) return { ok: false, error: 'Hypervibe could not save it to Google Secret Manager. Try again.' };
-        return { ok: true, message: typeof value === 'string' ? (known?.check ? `saved, ${known.service} accepted it` : 'saved') : 'generated and saved' };
+        return { ok: true, message: known?.check ? `saved, ${known.service} accepted it` : 'saved' };
       },
       spec: {
         tabTitle: `Rotate ${params.environmentName} keys`, eyebrow: 'Rotate keys',

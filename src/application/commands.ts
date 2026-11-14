@@ -89,6 +89,9 @@ export interface CommandRegistrar {
   ): unknown;
 }
 
+// Access metadata (including MCP readOnlyHint) applies to the entire command.
+// hv_secrets is write-capable because collect/rotate change secrets; inventory
+// and ages remain read-only operations within that mixed command.
 const READ_ONLY_COMMANDS = new Set([
   'hv_status',
   'hv_inspect',
@@ -97,7 +100,6 @@ const READ_ONLY_COMMANDS = new Set([
   'hv_ci_status',
   'hv_appstore_status',
   'hv_runs',
-  'hv_secrets',
 ]);
 
 const ROOT_COMMANDS = new Set([
