@@ -25,8 +25,8 @@ boundaries, plus disposable PostgreSQL authentication and migration programs.
 Configuration, SQL authentication, command exit, cleanup and application operation
 remain separate evidence; these tests do not establish live provider readiness.
 
-The [database credential rotation review](../../docs/database-credential-rotation.md)
-covers all eight registered PostgreSQL providers. Normal `npm test` checks port
+The [database password rotation contract](../../docs/database-password-rotation.md)
+describes the registered PostgreSQL credential operations. Normal `npm test` checks port
 coverage, native REST and AWS Query serialization, PostgreSQL wire authentication,
 generated-password recovery and Railway's pinned issuer/alias behavior. Password
 updates, fresh authentication, runtime activation and application health remain
