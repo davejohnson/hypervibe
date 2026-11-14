@@ -31,7 +31,7 @@ struct HypervibeResponseMapperTests {
                           "workloadKind": "worker"
                         }
                       },
-                      "database": { "provider": "supabase" },
+                      "database": { "provider": "railway" },
                       "storage": {
                         "documents": {
                           "provider": "railway",
@@ -75,7 +75,7 @@ struct HypervibeResponseMapperTests {
         ])
         #expect(
             environment.resources.first { $0.id == "database:primary" }?
-                .desiredProvider == "supabase"
+                .desiredProvider == "railway"
         )
         #expect(
             environment.resources.first { $0.id == "domain:example.com" }?

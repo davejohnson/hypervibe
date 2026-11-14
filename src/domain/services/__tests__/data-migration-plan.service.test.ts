@@ -99,10 +99,10 @@ describe('planDataMigration', () => {
       });
   });
 
-  it('keeps database and storage copy provider-neutral when Vercel hosts both environments', () => {
+  it('keeps database and storage copy provider-neutral with synthetic hosting in both environments', () => {
     const { spec, sourceEnvironment } = fixture();
-    spec.environments.staging.hosting.provider = 'vercel';
-    spec.environments.production.hosting.provider = 'vercel';
+    spec.environments.staging.hosting.provider = 'fixture-hosting';
+    spec.environments.production.hosting.provider = 'fixture-hosting';
     const result = planDataMigration({
       targetEnvironmentName: 'production',
       targetSpec: spec.environments.production,
@@ -116,7 +116,7 @@ describe('planDataMigration', () => {
     });
 
     expect(result.pending).toBe(true);
-    expect(result.providers).toEqual(['cloudflare', 'railway', 'rds', 'vercel']);
+    expect(result.providers).toEqual(['cloudflare', 'fixture-hosting', 'railway', 'rds']);
     expect(result.actions).toHaveLength(2);
     expect(result.actions.every((action) => action.metadata?.blockedReason === undefined))
       .toBe(true);

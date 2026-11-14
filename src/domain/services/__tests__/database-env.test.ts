@@ -58,7 +58,7 @@ describe('database runtime projection registry', () => {
         DB_NAME: 'app',
         PGDATABASE: 'app',
       });
-      expect(env.DATABASE_SSL, provider).toBe(provider === 'supabase' ? 'true' : undefined);
+      expect(env.DATABASE_SSL, provider).toBeUndefined();
     }
   });
 

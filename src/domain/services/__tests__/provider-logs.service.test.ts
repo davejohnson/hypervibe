@@ -51,7 +51,7 @@ describe('provider-logs.service helpers', () => {
     });
 
     it('falls back to project default platform', () => {
-      expect(detectProviderName('vercel', undefined)).toBe('vercel');
+      expect(detectProviderName('cloudrun', undefined)).toBe('cloudrun');
     });
 
     it('reports unconfigured when no provider is available', () => {
@@ -94,13 +94,13 @@ describe('provider-logs.service helpers', () => {
     it('matches deployments provider support contract', () => {
       expect(supportsLogsDeploymentsProvider('railway')).toBe(true);
       expect(supportsLogsDeploymentsProvider('cloudrun')).toBe(true);
-      expect(supportsLogsDeploymentsProvider('vercel')).toBe(false);
+      expect(supportsLogsDeploymentsProvider('fixture-unsupported-hosting')).toBe(false);
     });
 
     it('matches build provider support contract', () => {
       expect(supportsLogsBuildProvider('railway')).toBe(true);
       expect(supportsLogsBuildProvider('cloudrun')).toBe(false);
-      expect(supportsLogsBuildProvider('vercel')).toBe(false);
+      expect(supportsLogsBuildProvider('fixture-unsupported-hosting')).toBe(false);
     });
   });
 

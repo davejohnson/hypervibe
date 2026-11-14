@@ -168,12 +168,6 @@ export const managedWorkflowGitHubCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_GITHUB_API_TOKEN' },
 ];
 
-const neonCredentials: ProviderCredentialField[] = [
-  { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_NEON_API_KEY' },
-  { field: 'organizationId', environmentVariable: 'HYPERVIBE_TEST_NEON_ORGANIZATION_ID', optional: true },
-  { field: 'regionId', environmentVariable: 'HYPERVIBE_TEST_NEON_REGION_ID', optional: true },
-];
-
 export const hostingProviderContracts: HostingProviderContract[] = [
   {
     kind: 'hosting',

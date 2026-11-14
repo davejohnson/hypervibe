@@ -149,7 +149,7 @@ describe('preserving an accepted inbound callback after provider URL refresh', (
       if (invalid === 'missing') observation = null;
       if (invalid === 'partial') observed.partial = true;
       if (invalid === 'unknown services') observed.completeness = { services: 'unknown' };
-      if (invalid === 'provider') observed.provider = 'fly';
+      if (invalid === 'provider') observed.provider = 'fixture-other-hosting';
       if (invalid === 'project') observed.projectId = 'another-project';
       if (invalid === 'missing project binding') delete environment.platformBindings.projectId;
       if (invalid === 'environment') observed.environmentId = 'another-environment';

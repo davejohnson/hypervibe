@@ -292,8 +292,8 @@ describe('hosting service destroy apply identity', () => {
             services: { [target.serviceName]: { serviceId: target.serviceId } },
           }
         : {
-            provider: 'vercel',
-            projectId: 'vercel-project',
+            provider: 'cloudrun',
+            projectId: 'gcp-project',
             services: {},
             previousHosting: {
               provider: target.provider,
@@ -438,7 +438,7 @@ describe('hosting service destroy apply identity', () => {
       services: { orphan: { url: 'https://example.invalid' } },
     }],
     ['service-create recovery marker', {
-      provider: 'vercel',
+      provider: 'cloudrun',
       projectId: 'other-provider-project',
       services: {},
       previousHosting: {

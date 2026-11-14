@@ -155,7 +155,7 @@ describe('planDatabaseResilience', () => {
     });
   });
 
-  it.each(['railway', 'supabase', 'rds'])('blocks declared features for unsupported %s databases', (provider) => {
+  it.each(['railway', 'rds'])('blocks declared features for unsupported %s databases', (provider) => {
     const plan = planDatabaseResilience({ ...fixture({ provider }), capabilities: undefined });
     expect(plan.actions.every((action) => action.type === 'update')).toBe(true);
     expect(plan.actions.every((action) => action.metadata?.blockedReason === 'database_resilience_unsupported')).toBe(true);

@@ -27,28 +27,26 @@ function expectSafe(result: unknown) {
   expect(JSON.stringify(new AuditRepository().findRecent())).not.toContain(supplied);
 }
 
-// Real adapters and serialized HTTP. Official endpoint/authentication contracts:
+// Real GitHub adapter and serialized HTTP. Official endpoint/authentication contract:
 // https://docs.github.com/en/rest/users/users#get-the-authenticated-user
-// https://docs.doppler.com/reference/api
 // Error echoes are deliberately synthetic negative observations: neither a token
 // pattern nor provider-authentication success may authorize publishing its value.
-it.each(['github'] as const)('scrubs a %s error response at the shared output and audit boundary', async provider => {
-  const connection = save(provider, provider === 'github' ? { apiToken: supplied } : { token: supplied });
+it('scrubs a GitHub error response at the shared output and audit boundary', async () => {
+  const connection = save('github', { apiToken: supplied });
   const request = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    expect(String(input)).toBe(provider === 'github' ? 'https://api.github.com/user' : 'https://api.doppler.com/v3/configs/config/secrets');
+    expect(String(input)).toBe('https://api.github.com/user');
     expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${supplied}`);
     return Response.json({ message: `Rejected credential ${supplied}` }, { status: 401 });
   });
-  const result = await verifyConnection(provider);
+  const result = await verifyConnection('github');
   expect(result.kind).toBe('failed'); expect(request).toHaveBeenCalledOnce();
   expectSafe(result);
   expect(new ConnectionRepository().findById(connection.id)?.status).toBe('failed');
-  if (provider === 'github') expect(new AuditRepository().findByResource('connection', connection.id)[0]?.details.reason).toContain('[redacted]');
+  expect(new AuditRepository().findByResource('connection', connection.id)[0]?.details.reason).toContain('[redacted]');
 });
 
-// https://developer.hashicorp.com/vault/api-docs/auth/approle#login-with-approle
-// AppRole authenticates inside connect(), so this exercises the outer caught-
-// error branch rather than the adapter's returned failed verification result.
+// A synthetic factory failure exercises the outer caught-error boundary,
+// independently of the adapter's returned failed verification result.
 it('scrubs caught provider construction errors using nested encrypted credential inputs', async () => {
   const connection = save('github', { apiToken: 'separate-private-input', nested: [{ value: supplied }] });
   vi.spyOn(providerRegistry.get('github')!, 'factory').mockRejectedValue(new Error(`Provider startup echoed ${supplied}`));

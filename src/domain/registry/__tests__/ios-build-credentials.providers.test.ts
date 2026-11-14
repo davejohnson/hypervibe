@@ -10,9 +10,8 @@ import { devOpsProviderRegistry } from '../devops.registry.js';
 
 // Native environment-scoped variables do not imply a managed iOS release path.
 // GitHub: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idenvironment
-// GitLab: https://docs.gitlab.com/ci/environments/#limit-the-environment-scope-of-a-cicd-variable
-// Transport fixtures reconstruct only the documented repository identity reads;
-// this tests Hypervibe's unsupported boundary, not live GitLab iOS compatibility.
+// This matrix requires a reviewed decision for each registered CI provider;
+// it does not certify a live iOS release.
 const reviewedCiProviders = {
   'github-actions': 'Implemented; serialized transport and shared lifecycle tests cover the exact environment read.',
 };

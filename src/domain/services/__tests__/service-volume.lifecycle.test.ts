@@ -200,7 +200,7 @@ describe('retained volume lifecycle: real SQLite and schema-executed Railway HTT
     expect(action.dependsOn).toEqual(['volume:web']);
   });
 
-  it.each([['railway', 'worker'], ['railway', 'cron'], ['digitalocean', 'web'], ['vercel', 'web']])('rejects unsupported %s/%s before provisioning', (provider, workloadKind) => {
+  it.each([['railway', 'worker'], ['railway', 'cron'], ['fixture-unsupported-hosting', 'web']])('rejects unsupported %s/%s before provisioning', (provider, workloadKind) => {
     const parsed = projectSpecSchema.parse({ version: 1, project: 'volumes', environments: { staging: { hosting: { provider }, services: { web: { volume: { mountPath: '/data' }, workloadKind, startCommand: 'run', cronSchedule: '* * * * *' } } } } });
     expect(validateProjectSpecProviders(parsed).some((i) => i.field === 'services.volume' || i.field === 'hosting.provider')).toBe(true);
   });

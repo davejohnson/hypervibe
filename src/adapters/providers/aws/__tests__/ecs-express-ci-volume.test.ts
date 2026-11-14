@@ -81,7 +81,7 @@ function fixture(_kind: 'github', options: { denyTask?: boolean; missingMain?: b
     '@aws-sdk/client-ecs': { ...ecsSdk, ECSClient: class extends ecsSdk.ECSClient { constructor(config: any = {}) { super({ ...clientOptions, ...config }); } } },
     '@aws-sdk/client-ecr': { ...ecrSdk, ECRClient: class extends ecrSdk.ECRClient { constructor() { super(clientOptions); } } },
   };
-  const files = new Map([['.hypervibe-deploy-sha', releaseSha], ['.hypervibe-image-uri', 'gitlab.example.test/app:' + releaseSha]]);
+  const files = new Map<string, string>();
   const requireFixture = (module: string) => {
     if (module === 'node:fs') return { readFileSync: (file: string) => files.get(file), writeFileSync: (file: string, body: string) => files.set(file, body) };
     if (module === 'node:child_process') return { execFileSync: vi.fn() };
@@ -90,7 +90,6 @@ function fixture(_kind: 'github', options: { denyTask?: boolean; missingMain?: b
   };
   const env = {
     AWS_ACCESS_KEY_ID: 'test', AWS_SECRET_ACCESS_KEY: 'test', AWS_ECS_CLUSTER_ARN: cluster, AWS_ECS_EXPRESS_SERVICE_ARNS_JSON: JSON.stringify([serviceArn]), IMAGE_URI: releaseImage, DEPLOY_SHA: releaseSha,
-    CI_REGISTRY: 'gitlab.example.test', CI_REGISTRY_USER: 'ci', CI_REGISTRY_PASSWORD: 'synthetic', CI_PROJECT_PATH: 'owner/app', HYPERVIBE_REPOSITORY: 'owner/app', HYPERVIBE_ENVIRONMENT: 'staging', HYPERVIBE_PROGRAM_FINGERPRINT: 'fingerprint',
   };
   const script = extractGitHubScript('jobs:\n  deploy:\n    steps:\n' + buildEcsExpressGitHubActionsSteps({ environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerProjectId: cluster, providerServiceIds: [serviceArn] }).steps, 'Release exact digest to bound ECS Express services');
   const run = () => new AsyncFunction('require', 'process', 'fetch', 'Buffer', 'setTimeout', 'core', script)(requireFixture, { env }, async () => ({ ok: true }), Buffer, () => { throw new Error('Unexpected polling delay'); }, { setOutput: (name: string, value: string) => files.set(name, value) });
@@ -148,7 +147,7 @@ describe.each(['github'] as const)('%s ECS task-definition release', (kind) => {
   it.each([false, true])('does not report release success when the deployed task role changed (inline=%s)', async inline => {
     const f = fixture(kind, { inline, changedDeployedRole: true });
     await expect(f.run()).rejects.toThrow();
-    expect(f.files.has('.hypervibe-release.json')).toBe(false);
+    expect(f.files.has('credential_deployments')).toBe(false);
     expect(f.requests.filter(r => r.operation === 'UpdateExpressGatewayService')).toHaveLength(1);
   });
 });
