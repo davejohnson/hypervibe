@@ -663,7 +663,7 @@ private struct AddConnectionView: View {
                     .clickTargetCursor()
                 }
                 TextField(
-                    "env:NAME, dotenv:/path/.env#KEY, file:/path, or 1password://…",
+                    "env:NAME, dotenv:/path/.env#KEY, or file:/path",
                     text: $credentialsReference
                 )
                 .textFieldStyle(.roundedBorder)

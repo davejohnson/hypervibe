@@ -98,21 +98,34 @@ For an automated move, the target environment declares one reviewed, one-use
 should replace its data. Both environments need data maintenance; application
 maintenance is insufficient and blocks automated copying.
 
+This example uses the retained Railway workflow for both environments and
+declares every resource selected for copying. It is not an example of migration
+to an OpenTofu-managed cloud environment. Those destinations have separate
+capability and verification requirements; see the [common cloud journey](development/user-journey.md).
+
 ```json
 {
+  "version": 1,
+  "project": "portable-move",
   "environments": {
     "staging": {
       "hosting": { "provider": "railway" },
       "domain": "staging.example.com",
       "services": { "web": {}, "worker": { "workloadKind": "worker" } },
       "database": { "provider": "railway", "engine": "postgres" },
+      "storage": {
+        "documents": { "provider": "railway", "type": "bucket", "region": "sjc", "injectInto": ["web"] }
+      },
       "maintenance": { "enabled": true }
     },
     "production": {
-      "hosting": { "provider": "cloudrun" },
+      "hosting": { "provider": "railway" },
       "domain": "example.com",
       "services": { "web": {}, "worker": { "workloadKind": "worker" } },
-      "database": { "provider": "rds", "engine": "postgres" },
+      "database": { "provider": "railway", "engine": "postgres" },
+      "storage": {
+        "documents": { "provider": "railway", "type": "bucket", "region": "iad", "injectInto": ["web"] }
+      },
       "maintenance": { "enabled": true },
       "dataMigration": {
         "id": "initial-production-launch",
