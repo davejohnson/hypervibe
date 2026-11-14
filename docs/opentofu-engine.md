@@ -67,7 +67,6 @@ every listed component on the current revision.
 | Plan/apply of the exact reviewed artifact (plan digest, config digest, engine + provider versions, full-approval check) | `src/adapters/engine/opentofu/engine.ts` | Live tests |
 | Executor **engine segment**: one saved plan runs once; each action gets its own receipt; members report real outcomes even after an earlier failure; external prerequisites must complete first | `src/domain/plan/converge.executor.ts` | `engine-segment.executor.test.ts` |
 | GCP backend: Cloud Run v2 service + public invoker, Secret Manager *references*, digest-pinned images, narrow image ownership, pinned Google provider 8.9.0 | `src/adapters/providers/gcp/tofu/gcp-engine.backend.ts` | Validated by the real provider |
-| Read-only authentication check through a saved Hypervibe connection | `src/application/engine-auth-probe.ts` | Verified against a real project (below) |
 
 Pinned: OpenTofu **1.13.9**, `hashicorp/google` **8.9.0**, with archive checksums
 (darwin/linux × arm64/amd64) and lock hashes recorded in source. `tofu init` runs

@@ -626,51 +626,6 @@ const githubCollaborationSpecSchema = z.object({
   }).strict()).default([]),
 }).strict().prefault({});
 
-const githubPagesSourcePathSchema = z.string().min(1).superRefine((value, ctx) => {
-  if (
-    value.trim() !== value
-    || value.startsWith('/')
-    || value.startsWith('\\')
-    || value.split(/[\\/]/).some((segment) => !segment || segment === '.' || segment === '..')
-    || /[\r\n\0]/.test(value)
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'pages.sourcePath must be a normalized repository-relative directory without empty, current, or parent segments',
-    });
-  }
-});
-
-const githubPagesDomainSchema = z.string().min(1).max(253).superRefine((value, ctx) => {
-  const normalized = value.trim().toLowerCase().replace(/\.$/, '');
-  const labels = normalized.split('.');
-  if (
-    value !== normalized
-    || labels.length < 2
-    || labels.some((label) => (
-      label.length === 0
-      || label.length > 63
-      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
-    ))
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'pages.customDomain must be a lowercase hostname without a scheme, path, port, or trailing dot',
-    });
-  }
-});
-
-export const githubPagesSpecSchema = z.object({
-  enabled: z.boolean().default(true),
-  /** Repository directory uploaded as the static Pages artifact. */
-  sourcePath: githubPagesSourcePathSchema,
-  /** Branch whose pushes publish the site. */
-  branch: z.string().min(1).default('main'),
-  /** Optional custom hostname. DNS is managed through Cloudflare as a separate plan action. */
-  customDomain: githubPagesDomainSchema.optional(),
-  dnsProvider: z.literal('cloudflare').default('cloudflare'),
-}).strict();
-
 export const githubSpecSchema = z.object({
   enabled: z.boolean().default(true),
   /** GitHub repository owner/name. Defaults to the project gitRemoteUrl. */
@@ -678,8 +633,6 @@ export const githubSpecSchema = z.object({
   /** Environment whose hv_plan owns project-level GitHub infrastructure. */
   canonicalEnvironment: z.string().min(1).optional(),
   collaboration: githubCollaborationSpecSchema,
-  /** Static GitHub Pages publishing as project-level desired state. */
-  pages: githubPagesSpecSchema.optional(),
   actions: z.record(automationIdSchema, githubAutomationSpecSchema).default({}),
   /** Existing workflow names that autofix may consume but Hypervibe does not own. */
   externalWorkflows: z.record(automationIdSchema, z.object({
@@ -2267,12 +2220,8 @@ export const projectSpecSchema = z.object({
     : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
     if (environment.dns && !environment.domain) {
-      const canonical = spec.github?.canonicalEnvironment ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository');
-      const pagesDomain = spec.github?.enabled !== false && canonical === environmentName ? spec.github?.pages?.customDomain : undefined;
-      if (!pagesDomain) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'dns'],
-        message: 'Select DNS for an environment domain or the GitHub Pages custom domain in its canonical environment.' });
-      else if (!dnsHostnameBelongsToZone(pagesDomain, environment.dns.zone.name)) ctx.addIssue({ code: z.ZodIssueCode.custom,
-        path: ['environments', environmentName, 'dns', 'zone', 'name'], message: 'The GitHub Pages custom domain must belong to this environment’s selected DNS zone.' });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'dns'],
+        message: 'Select DNS only for an environment that has a domain.' });
     }
     if (environment.domainTarget) {
       const destination = spec.environments[environment.domainTarget.environment];
@@ -2738,7 +2687,6 @@ export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
 export type GitHubEnvironmentTaskAutomationSpec = z.infer<typeof githubEnvironmentTaskAutomationSpecSchema>;
 export type GitHubEnvironmentTaskInputSpec = z.infer<typeof githubEnvironmentTaskInputSchema>;
-export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
