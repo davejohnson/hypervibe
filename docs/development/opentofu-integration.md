@@ -1,4 +1,8 @@
-# OpenTofu integration boundary
+# GCP OpenTofu integration boundary
+
+This is the GCP implementation boundary. The [common cloud user journey](user-journey.md)
+defines the shared product target and acceptance for GCP, AWS and Azure; this
+reference does not claim that its GCP routing is implemented on the other clouds.
 
 GCP has one infrastructure path. `hosting.provider: "cloudrun"` selects the
 managed OpenTofu engine automatically. An explicit `hosting.engine: "opentofu"`

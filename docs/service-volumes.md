@@ -1,7 +1,9 @@
 # Retained service filesystems
 
-> Cross-host implementation in PR #218. Offline tests do not
-> certify live mounts or durability. See the [provider audit](service-volumes-design.md).
+This reference covers existing service-filesystem operations. Offline tests do
+not certify live mounts or durability, and registration alone does not establish
+hosting support. New cloud scope is defined by the
+[common journey](development/user-journey.md).
 
 Declare one persistent filesystem mount on a web service:
 

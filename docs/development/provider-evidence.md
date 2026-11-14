@@ -35,9 +35,7 @@ security policy mutations are unavailable. Security requirements are observed
 and blocked when unsatisfied or unknown. DNS provider selection does not promote
 the corresponding hosting provider's capability status.
 
-Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](guidance-migration.json). These files are
-for developing Hypervibe; the distributed user workflow lives in
+These rules are for developing Hypervibe; the distributed user workflow lives in
 [`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-017

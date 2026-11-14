@@ -1,11 +1,16 @@
-# OpenTofu engine on AWS
+# AWS engine implementation notes
 
 The AWS backend for the [OpenTofu engine](opentofu-engine.md). It follows the
 same lifecycle as GCP (`hv_spec` → `hv_plan` → approved `hv_apply`), with the
 same local encrypted state, saved plans, approvals and receipts. This page
-records the AWS-specific decisions and why they were made.
+records AWS implementation decisions and dated evidence. Product scope and future
+priorities belong to the [common user journey](development/user-journey.md). This
+page does not establish a complete supported AWS journey.
 
-## Status (2026-11-12)
+## Recorded evidence (2026-11-12)
+
+The live results below describe the named apps and runs at that date. They do not
+verify other profiles, workloads or subsequent revisions.
 
 | Piece | State |
 | --- | --- |
@@ -17,7 +22,15 @@ records the AWS-specific decisions and why they were made.
 | Web (Lambda), on-demand worker and cron (Fargate) | Built; verified live (demo app): database over verified TLS, generated secret, storage with the runtime role, worker woken by requests and by the next-due timer while Aurora was paused, no drift after releases |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
+| Production-profile database (RDS `db.t4g.micro`) | Not built; planning blocks it |
 | CI releases, data copy | Not built |
+
+Current planner limits (code reviewed 2026-11-13):
+[`awsEngineProblems`](../src/application/infrastructure-engine-aws.ts) blocks a
+database in an environment whose name matches `/prod|stag/i`, as well as Redis,
+queues and custom hosting domains. The production database design below is not
+implemented. These guards and the recorded testing runs do not prove production
+readiness for an environment without a database either.
 
 ## Access
 
@@ -55,29 +68,34 @@ records the AWS-specific decisions and why they were made.
 
 ## Runtime choices
 
-- **Web: Lambda by default, Fargate when needed.** Lambda (Web Adapter in a
-  container image, or Lambda Web Functions for Node where available) scales to
-  zero. Fargate is chosen for WebSockets, long requests, steady traffic or
-  cold-start-sensitive apps; it needs a load balancer (about $16+/mo).
+Cost figures below are estimates recorded during the November 2026 design work,
+not current quotes.
+
+- **Web: Lambda in the current engine path.** The container image uses Lambda
+  Web Adapter and scales to zero. The earlier design considered Fargate for
+  WebSockets, long requests, steady traffic or cold-start-sensitive apps; this
+  engine path does not implement that selection.
 - **No App Runner.** It closed to new customers on 2026-04-30.
 - **No Elastic Beanstalk for workers.** It runs always-on EC2 instances.
 - **Worker: on demand.** A Fargate service at zero tasks, woken by an
   EventBridge Scheduler check, like the GCP worker pool and Workflows waker.
-- **Cron:** EventBridge Scheduler running Lambda or a Fargate task.
-- **Two profiles, chosen from the environment name (decided 2026-11-10).**
-  `production` and `staging` (names containing `prod` or `stag`) share one
-  production profile, so staging tests exactly what production runs: an always-on
-  RDS `db.t4g.micro` Postgres (about $12/mo), with no pausing. Every other
-  environment (`test`, `preview`, `pr-*`, `dev`, pilots) gets the testing
-  profile: Aurora Serverless v2 at 0 ACU, which pauses when idle so only storage
-  is billed, and wakes in about 15 s. Aurora kept awake (minimum 0.5 ACU, about
-  $44/mo) is not a default. The same split applies on every cloud.
+- **Cron:** EventBridge Scheduler running a Fargate task.
+- **Database profiles (design recorded 2026-11-10).** Names matching
+  `/prod|stag/i` select the production profile, but its proposed always-on RDS
+  `db.t4g.micro` Postgres (estimated about $12/mo at the time) is not built and
+  planning blocks it. Other names (`test`, `preview`, `pr-*`, `dev`, pilots) use
+  the implemented testing profile: Aurora Serverless v2 at 0 ACU, which pauses
+  when idle so only storage is billed. The recorded wake time was about 15 s.
+  Aurora kept awake (minimum 0.5 ACU, estimated about $44/mo at the time) was
+  rejected as the default. This is an AWS implementation decision, not a
+  cross-cloud support guarantee.
 - **Database network: public endpoint, TLS required (decided 2026-11-10).**
   Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
   $32/mo and would be more than the rest of a staging environment. The database
   accepts only TLS and a generated 32-character password, similar to Cloud SQL's
-  public IP. Private networking (NAT gateway, or a NAT instance at about $3/mo
-  that Hypervibe would have to patch) stays an option for production.
+  public IP. Private networking (NAT gateway, or a NAT instance that Hypervibe
+  would have to patch) was considered for production; it is not an implemented
+  option in this engine path.
 - **Secrets: SSM Parameter Store `SecureString`**, which is free. Secrets Manager
   costs $0.40 per secret per month.
 - **Lambda secrets are read at start, not stored in Lambda.** Lambda has no

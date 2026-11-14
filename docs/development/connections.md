@@ -8,9 +8,8 @@ relevant to the task. Paths in code spans are relative to the repository root.
 
 Related contracts: [Connections And Secrets](../../ARCHITECTURE.md#connections-and-secrets), [Runtime Secrets](../../ARCHITECTURE.md#runtime-secrets), and [storage runtime identity](../storage-runtime-identity.md).
 
-Stable rule IDs preserve the original guidance and are mapped in
-[the migration audit](guidance-migration.json). These files are
-for developing Hypervibe; the distributed user workflow lives in
+Rule IDs remain stable for references. These files are for developing Hypervibe;
+the distributed user workflow lives in
 [`skills/hypervibe`](../../skills/hypervibe/SKILL.md).
 
 ## DG-030
@@ -107,3 +106,49 @@ The current npm installation still requires Node.js/npm; keep unproven packaged
 installation claims explicit.
 
 The DG-034 operator-managed Railway private SSH exception is not a runtime dependency or automatic fallback. Private-only database automation remains unsupported without a verified connection; it must not create a public TCP proxy to proceed. Preserve exact-identity cleanup of access recorded by earlier operations.
+
+## Managed runtime secrets
+
+Generated application secrets keep a stable value for their accepted generator
+and generation, with project, environment and key separation. Freeze the value
+in the encrypted plan and send it only to declared consumers; never scaffold it
+into dotenv files. A changed root key must block and require recovery of the
+original key, not silently rotate accepted values. Replacements require exact
+confirmation, and acceptance is durable only after the required consumer checks.
+
+An immutable secret cannot be replaced by confirmation alone. Its first write
+requires the target and every declared conflicting key to be confirmed absent;
+a partial write may be repaired only with the same accepted value. Changed
+policy, conflicting values or unknown observations block. Retirement of a legacy
+encryption key requires an explicit rewrap workflow, not ordinary env deletion.
+
+Delegated secrets remain separate from ordinary env values and provider
+connections. Resolve explicit private references into the reviewed encrypted
+plan; preserve accepted values and report drift until new input is supplied.
+Missing required input blocks apply before provider effects. Store acceptance
+hashes and provenance locally, never in repository exports; a fresh installation
+cannot treat a repository hash as authority to accept or replace a secret.
+Declarative `principal` attribution does not grant provider roles or establish an
+authenticated ACL. Repository review and actual provider authorization remain
+separate boundaries.
+
+Keep inventory read-only and distinguish value acceptance, deployment activation,
+old-instance retirement, credential authentication and application operation.
+The [credential lifecycle](../credential-lifecycle.md) and
+[scoped secret updates](../scoped-secret-updates.md) define the existing review,
+retry and rollout contracts. [Owner requests](../cloud-credential-requests.md)
+and [one-time import](../cloud-secret-import.md) have separate invitation, import
+and apply authority.
+
+## Local credential sources
+
+Project context selects the command's repository; it does not widen a connection's
+durable scope. Keep control-plane inputs out of runtime dotenv projection and
+preserve the [reserved runtime namespace](../reserved-runtime-env.md).
+
+The existing Stripe Projects credential source is read-only. It may inspect the
+active environment's redacted metadata and select declared keys from an existing,
+owner-only regular file inside the linked repository. Ambiguous configurations,
+symlinks, wrong environments and unknown output block. It must not pull, refresh,
+switch environments, mutate services or rotate credentials; the operator performs
+those actions explicitly and then renews the verified Hypervibe connection.

@@ -135,8 +135,7 @@ never-approve policy prevented the tool call. This is one successful model run,
 not a guarantee that every model/client will always preserve a URL. Claude and
 OpenCode model-response adherence have not been established by these checks.
 
-Development instructions remain separate: the shortened root `AGENTS.md` links
-to mandatory topic guidance, `CLAUDE.md` imports it, and the
-[migration audit](development/guidance-migration.json) maps all 129 baseline rules
-to preserved text and records later policy additions separately. Consumer installers
+Development instructions remain separate: root `AGENTS.md` links to current
+topic guidance and `CLAUDE.md` imports it. Policy changes update those contracts;
+their pull requests and Git history record prior decisions. Consumer installers
 never copy or rewrite those files in a user's application repository.
