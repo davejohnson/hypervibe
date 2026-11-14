@@ -147,24 +147,14 @@ private struct ProviderVisual {
             self.init("SendGrid", background: Color(red: 0.08, green: 0.55, blue: 0.88), foreground: .white, mark: .sendGrid)
         case "stripe":
             self.init("Stripe", background: Color(red: 0.39, green: 0.36, blue: 1), foreground: .white, mark: .letters("S"))
-        case "supabase":
-            self.init("Supabase", background: Color(red: 0.12, green: 0.68, blue: 0.43), foreground: .white, mark: .symbol("bolt.fill"))
         case "cloudrun", "cloudsql", "gcp-pubsub":
             self.init("Google Cloud", background: Color(red: 0.26, green: 0.52, blue: 0.96), foreground: .white, mark: .symbol("cloud.fill"))
         case "database", "postgres":
             self.init("PostgreSQL", background: Color(red: 0.20, green: 0.41, blue: 0.58), foreground: .white, mark: .symbol("cylinder.fill"))
         case "appstoreconnect", "app-store-connect":
             self.init("App Store Connect", background: .blue, foreground: .white, mark: .symbol("apple.logo"))
-        case "1password":
-            self.init("1Password", background: Color(red: 0.10, green: 0.49, blue: 0.93), foreground: .white, mark: .letters("1"))
-        case "bitwarden":
-            self.init("Bitwarden", background: Color(red: 0.10, green: 0.45, blue: 0.82), foreground: .white, mark: .symbol("shield.fill"))
         case "aws-secrets":
             self.init("AWS Secrets Manager", background: Color(red: 0.14, green: 0.17, blue: 0.21), foreground: .orange, mark: .symbol("key.fill"))
-        case "doppler":
-            self.init("Doppler", background: .yellow, foreground: .black, mark: .symbol("waveform.path"))
-        case "vault":
-            self.init("Vault", background: .yellow, foreground: .black, mark: .symbol("lock.fill"))
         case "recaptcha":
             self.init("reCAPTCHA", background: .blue, foreground: .white, mark: .symbol("arrow.triangle.2.circlepath"))
         case "tunnel":

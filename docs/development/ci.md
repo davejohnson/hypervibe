@@ -6,7 +6,7 @@ These are normative maintainer rules, complementary to `ARCHITECTURE.md`,
 which remains the infrastructure model's source of truth. Load only the sections
 relevant to the task. Paths in code spans are relative to the repository root.
 
-Related contracts: [CI And Push Deploys](../../ARCHITECTURE.md#ci-and-push-deploys), [GitHub infrastructure](../github-infrastructure.md), [GitLab integration](../gitlab-integration.md), and [API/mobile releases](../api-mobile-releases.md).
+Related contracts: [CI And Push Deploys](../../ARCHITECTURE.md#ci-and-push-deploys), [GitHub infrastructure](../github-infrastructure.md), and [API/mobile releases](../api-mobile-releases.md).
 
 Stable rule IDs preserve the original guidance and are mapped in
 [the migration audit](guidance-migration.json). These files are
