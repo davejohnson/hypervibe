@@ -75,7 +75,8 @@ for any missing key, on GCP or AWS. Call `hv_launch` again after `pending`.
 This describes implemented GCP commands, not a verified complete journey on every
 cloud. Full launch, migration and recovery need evidence for the actual installed
 release and requested scope. Never infer support from a command name or a successful
-infrastructure step. `hv_launch` is currently GCP-only; do not call it for AWS or Azure.
+infrastructure step. `hv_launch` supports GCP and Azure testing environments;
+follow the Azure-specific stop points below. AWS launch remains unavailable.
 
 Keep running costs low by default. A background worker that polls a database
 queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
