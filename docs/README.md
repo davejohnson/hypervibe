@@ -39,42 +39,19 @@ topic rules. They do not require adding every described feature to all clouds.
 Descriptions of old adapters are not evidence those adapters remain reachable.
 Unverified instructions must not be used to bypass an unsupported managed path.
 
-## Historical context
-
-The [retained operational contracts](development/operational-contracts.md) contain
-pre-OpenTofu detail for Railway and retained operations. Their opening status
-notice identifies superseded design. Preserve applicable identity, secret,
-approval and recovery safeguards; do not rebuild old cloud resource writers from
-this reference.
-
-Historical references include:
-
-- [Guidance migration audit](development/guidance-migration.json): preserved rules
-  and explicit policy decisions; the original text is not a competing rule set.
-- [September provider audit](history/provider-regression-audit-2026-09.md) and
-  [October dependency audit](history/dependency-security-2026-10.md): dated evidence,
-  including providers or dependency versions that have since changed.
-- [Reconciliation review](reconciliation-safety-backlog.md),
-  [filesystem design](service-volumes-design.md) and
-  [credential review map](credential-lifecycle-review.md): prior findings and scope,
-  with applicable safety constraints retained.
-
-These are not active task lists. Historical evidence remains useful when its exact
-scope is relevant; its age alone neither proves a current failure nor establishes
-current support. Implementation references such as [agent guidance delivery](agent-guidance.md)
-and [macOS companion design](macos-companion-design.md) remain relevant to those
-components; their names alone are not grounds to archive them.
-
 ## Keeping direction clear
 
 - Change product scope in the common journey, and technical boundaries in
   architecture. Link to them rather than duplicating a roadmap in provider notes.
 - Label new documents as requirements, current usage, implementation notes,
-  evidence or history. Evidence needs a revision, scope, observed outcome and gaps.
+  or evidence. Evidence needs a revision, scope, observed outcome and gaps.
 - Keep current usage aligned with reachable behavior and the installed release.
   Distinguish implementation from offline checks and live verification.
-- Correct a conflicting statement at its source. When preserving history, give
-  it a visible status and a link to the current authority. Preserve inbound links
-  when moving documents and retain applicable safety constraints.
+- Delete superseded designs, old backlogs and one-off audit records. Preserve
+  unique current safeguards in the relevant contract and update inbound links.
+  Git history holds past material; do not keep a second roadmap in an archive.
+- Record policy decisions in the changed contract and its pull request. Dated
+  evidence needed to explain current capability limits belongs in the relevant
+  implementation note, with its scope explicit.
 - Read only what the task touches. No change requires loading this whole folder
-  or completing every historical checklist.
+  or reviving a checklist from an old revision.

@@ -7,10 +7,11 @@ must preserve. GCP selects the managed OpenTofu engine automatically. No legacy
 GCP infrastructure writer or opt-in engine choice is supported. Implementation
 and local checks alone do not establish a verified live cloud journey.
 
-Detailed contracts for existing Railway apps, integrations and operations are in
-[retained operational contracts](docs/development/operational-contracts.md). That
-reference preserves useful safeguards, not the former cloud lifecycle design.
-This document takes precedence wherever the two disagree.
+Existing Railway apps, integrations and operations follow the same safety
+boundaries. Focused rules cover [lifecycle](docs/development/lifecycle.md),
+[connections](docs/development/connections.md), [CI](docs/development/ci.md) and
+[recovery](docs/development/recovery.md); they do not prescribe a second cloud
+infrastructure engine.
 
 ## Product Model
 
@@ -45,9 +46,9 @@ New cloud development targets GCP, AWS and Azure. Prove one complete cloud journ
 before extending it; neither a registry entry nor a mocked test makes a provider
 supported. Record implemented capabilities, verified paths and remaining gaps.
 
-Preserve Railway for existing applications. The unused GCP prototype may be
-replaced without a compatibility or import-migration project. That exception does
-not authorize deleting Railway state, moving an app or discarding user data.
+Preserve Railway for existing applications, including established state, bindings,
+data and working workflows. A change to the cloud engine does not authorize moving
+an existing application or discarding its data.
 
 Retain useful authentication, cloud bootstrap, image build, registry, log,
 deployment inspection and data-operation clients. Replace custom cloud resource
@@ -217,8 +218,8 @@ Write acknowledgement, value acceptance, activation and app health are distinct.
 
 Do not expose secret-bearing engine output as a convenience API. Derive only the
 needed runtime bindings privately and preserve provenance without secret values
-or low-entropy hashes. See the retained
-[runtime-secret contracts](docs/development/operational-contracts.md#runtime-secrets).
+or low-entropy hashes. See the
+[runtime-secret rules](docs/development/connections.md#managed-runtime-secrets).
 
 ## Recovery Of Hypervibe State
 
@@ -242,6 +243,12 @@ Record runtime versions, build inputs, app commands and necessary environment
 configuration in reviewed desired state. Infer sensible defaults from the repo;
 preserve explicit user choices. Build reproducibly without requiring local Docker
 or cloud tools. Do not promote a runtime or build change without fresh evidence.
+
+A repository Dockerfile remains authoritative; do not replace it with a generated
+build to bypass unsupported requirements. Generated builds must reject missing
+or conflicting runtime and build commands. Scheduled jobs use their declared
+command, never a substituted web or worker command. Isolated Hypervibe helpers
+must not inherit application runtime settings.
 
 ## CI And Push Deploys
 
@@ -290,8 +297,7 @@ A successful backup request is not a recoverable backup. Verify artifact integri
 source identity and usable restore evidence. Restore into isolated destinations
 when supported, verify the restored data and app, and require explicit approval
 before repointing consumers or overwriting live data. Unknown restore or cleanup
-results stop dependent actions. See [recovery rules](docs/development/recovery.md)
-and [retained details](docs/development/operational-contracts.md#database-resilience).
+results stop dependent actions. See [recovery rules](docs/development/recovery.md).
 
 ## Database Tasks And Seed Data
 
@@ -309,11 +315,9 @@ Keep management credentials separate from runtime keys; prove the exact account,
 endpoint and required permissions before mutation. Engine adoption is not a reason
 to rewrite useful integration clients.
 
-Detailed contracts remain under [Stripe](docs/development/operational-contracts.md#stripe-desired-state),
-[email](docs/development/operational-contracts.md#email-desired-state),
-[webhooks](docs/development/operational-contracts.md#declared-webhooks) and
-[mobile releases](docs/development/operational-contracts.md#ios-release-desired-state).
-Their presence is not a claim that every optional integration belongs in onboarding.
+See the [integration rules](docs/development/lifecycle.md#integration-action-ownership)
+and [mobile release contract](docs/api-mobile-releases.md). Optional integrations
+do not become onboarding prerequisites merely because they are available.
 
 ## Interface Boundary
 
@@ -338,8 +342,8 @@ start/restart the user's client. See [installation](docs/agent-installation.md).
   clients plus existing Railway behavior; avoid a parallel cloud CRUD framework.
 - `src/adapters/db/repositories/`: protected local persistence and validated reads.
 
-The engine implementation is pending integration. Do not treat the previous
-module layout or a proposed module name as proof that the new path is wired.
+The code layout alone does not prove a complete cloud journey. Verify the managed
+engine through the installed interfaces and the intended running application.
 
 ## New Provider Checklist
 

@@ -140,7 +140,7 @@ provider names and test age alone do not establish that coverage is useless.
 Keep regression coverage in ordinary CI and live evidence in the supported
 [conformance workflow](../provider-conformance.md), with exact approval for live
 work. Review changed behavior and invalidate only evidence its dependencies affect.
-Changes to milestone scope belong here, with their decision recorded in the
-[guidance migration audit](guidance-migration.json). Backend notes and historical
-“next steps” cannot create a competing roadmap. Use the [documentation map](../README.md)
+Changes to milestone scope belong here, with their decision explained in the
+pull request. Delete superseded backlogs and design notes; Git history preserves
+the prior decisions. Backend notes cannot create a competing roadmap. Use the [documentation map](../README.md)
 to find the relevant contract rather than loading the entire docs directory.
