@@ -20,7 +20,7 @@ mocked HTTP and, for configuration, passing `tofu validate`.
 | Shared server and registry for testing environments (one database and login each) | Built; verified live with one environment |
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
-| `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (job done 1.5 s after due) working, empty plan after |
+| `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
 | Production profile (staging, production), `hv_migrate`, CI releases, custom domains | Not built |
 
 
