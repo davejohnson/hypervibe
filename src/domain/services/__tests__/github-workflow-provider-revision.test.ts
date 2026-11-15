@@ -44,7 +44,7 @@ describe('provider-scoped managed workflow migrations', () => {
   it('requires reviewed credential evidence producer migrations for every hosting provider', () => {
     // Shared revision 7 adds operation-bound activation evidence to every native
     // deploy producer. Each existing revision 6 workflow must be reviewed again.
-    const changed = ['azure-container-apps', 'ecs', 'railway'];
+    const changed = ['railway'];
     expect(providerRegistry.all().filter(provider => provider.metadata.orchestration?.ci).map(provider => provider.metadata.name).sort()).toEqual(changed.sort());
     for (const provider of changed) {
       expect(githubActionsWorkflowInputHash({ provider, target, migration }), provider)

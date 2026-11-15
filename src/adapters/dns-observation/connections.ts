@@ -27,7 +27,7 @@ export const azureDnsCredentialsSchema = z.object({
 }).refine(value => value.authMode === 'default' || (!!value.tenantId && !!value.clientId && !!value.clientSecret), 'The Azure DNS engine needs a saved service principal connection.');
 
 export const DNS_CONNECTION_PROVIDERS: Record<DnsProvider, readonly string[]> = {
-  cloudflare: ['cloudflare'], gcp: ['gcp-dns', 'cloudrun', 'gcs'], aws: ['route53', 's3', 'ecs'], azure: ['azure-dns', 'azureblob', 'azure-container-apps'],
+  cloudflare: ['cloudflare'], gcp: ['gcp-dns', 'cloudrun', 'gcs'], aws: ['route53', 's3'], azure: ['azure-dns', 'azureblob'],
 };
 
 export interface DnsAuthenticationDependencies {

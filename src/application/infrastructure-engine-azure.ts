@@ -55,7 +55,7 @@ export function azureProfileFor(environmentName: string): AzureProfile {
 
 export function isAzureEngineEnvironment(spec: ProjectSpec, environmentName: string): boolean {
   const environment = spec.environments[environmentName];
-  return environment?.hosting.engine === 'opentofu' && environment.hosting.provider === 'azure';
+  return environment?.hosting.provider === 'azure';
 }
 
 export interface AzureEngineBinding {

@@ -56,7 +56,7 @@ describe('DNS private saved connection resolution', () => {
     expect(googleToken).toHaveBeenCalledTimes(1);
   });
   it('blocks ambiguous alias connections rather than borrowing a global credential silently', async () => {
-    save('ecs', null, { accessKeyId: 'key1', secretAccessKey: 'secret1' });
+    save('route53', null, { accessKeyId: 'key1', secretAccessKey: 'secret1' });
     save('s3', null, { accessKeyId: 'key2', secretAccessKey: 'secret2' });
     const result = await resolveDnsConnection({ context, zone: { provider: 'aws', zoneId: 'Z123', zoneName: 'example.com', scope: { accountId: '123456789012' } } });
     expect(result).toHaveProperty('blocked');
@@ -92,7 +92,6 @@ describe('DNS private saved connection resolution', () => {
   });
   it('registers DNS capabilities without promoting AWS or Azure hosting maturity', () => {
     for (const provider of ['cloudflare', 'gcp-dns', 'route53', 'azure-dns']) expect(providerRegistry.getMetadata(provider)?.lifecycle?.dns?.engine).toBe('opentofu');
-    for (const provider of ['ecs', 'azure-container-apps']) expect(providerRegistry.getMetadata(provider)?.maturity?.lifecycle?.hosting?.status).toBe('planned');
     for (const provider of ['gcp-dns', 'route53', 'azure-dns']) expect(providerRegistry.getMetadata(provider)?.lifecycle?.hosting).toBeUndefined();
   });
 });

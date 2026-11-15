@@ -6,7 +6,6 @@ import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
-import '../../../adapters/providers/aws/ecs-express.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';

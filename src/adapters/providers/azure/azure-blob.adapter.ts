@@ -586,7 +586,6 @@ providerRegistry.register({
         ['AZURE_CLIENT_SECRET', 'HYPERVIBE_AZURE_CLIENT_SECRET'],
       ],
     },
-    connectionAliases: ['azure-container-apps'],
     maturity: {
       lifecycle: {
         storage: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },

@@ -116,7 +116,7 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
     }
   }
   const target: Record<string, unknown> = {
-    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1', engine: 'opentofu' },
+    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1' },
     services: Object.fromEntries(Object.entries(source.services).map(([name, service]) => [name, {
       workloadKind: service.workloadKind,
       ...(service.startCommand ? { startCommand: service.startCommand } : {}),
@@ -134,7 +134,10 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
       // Apps written for S3-style buckets (Railway, AWS) keep working unchanged.
       ...(['railway', 's3'].includes(storage.provider) ? { access: 's3' } : {}),
     }])) } : {}),
-    ...(source.migrations?.mode === 'releaseCommand' ? { migrations: source.migrations } : {}),
+    // The engine runs schema migrations as a release step. A source that ran them through the
+    // migration tool keeps its command in that form, so the move does not drop them.
+    ...(source.migrations?.mode === 'releaseCommand' ? { migrations: source.migrations }
+      : source.migrations?.mode === 'tool' && source.migrations.command ? { migrations: { mode: 'releaseCommand', command: source.migrations.command } } : {}),
     ...(options.domain ? { domain: options.domain } : {}),
   };
   return target as EnvironmentSpec;

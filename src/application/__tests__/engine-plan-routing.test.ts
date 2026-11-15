@@ -30,7 +30,7 @@ function fixture(provider: 'aws' | 'cloudrun' | 'railway') {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'engine-plan-routing', defaultPlatform: provider });
   const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
-    staging: { hosting: { provider, ...(provider === 'aws' ? { engine: 'opentofu' } : {}) }, services: { web: {} } },
+    staging: { hosting: { provider }, services: { web: {} } },
   } });
   new ProjectSpecRepository().insert(project.id, 1, spec);
   const commands = new CommandRegistry();
@@ -103,6 +103,23 @@ describe('engine hv_plan command boundaries', () => {
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).toContain(`${field} is not yet`);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  // Contract: the engine is not a setting (ARCHITECTURE.md, Provider Scope). An AWS
+  // or Azure environment with no engine flag is accepted and plans through OpenTofu.
+  it.each(['aws', 'azure'] as const)('accepts %s hosting with no engine flag and routes default planning to the engine', async (provider) => {
+    const f = fixture('aws');
+    const spec = { version: 1, project: f.project.name, environments: { cloud: { hosting: { provider }, services: { web: {} } } } };
+    const saved = await f.commands.execute('hv_spec', { project: f.project.name, spec }) as { ok: boolean; error?: { message?: string } };
+    expect(saved.error?.message ?? '').not.toContain('Unknown hosting provider');
+    expect(saved.ok).toBe(true);
+    for (const scope of [undefined, 'full', 'infrastructure'] as const) {
+      f.infrastructure.mockClear();
+      const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'cloud', ...(scope ? { scope } : {}) });
+      expect(result).toMatchObject({ ok: false, error: { details: { blocked: ['INFRASTRUCTURE_REACHED'] } } });
+      expect(f.infrastructure).toHaveBeenCalledOnce();
+    }
+    expect(f.scoped).not.toHaveBeenCalled();
   });
 
   it('does not apply Cloud Run-only scope guards to AWS', async () => {

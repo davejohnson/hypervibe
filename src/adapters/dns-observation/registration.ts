@@ -29,7 +29,7 @@ providerRegistry.register({
 
 providerRegistry.register({
   metadata: { name: 'route53', displayName: 'Amazon Route 53', category: 'dns', credentialsSchema: route53CredentialsSchema,
-    credentials: { supportsNativeCliAuth: true }, connectionAliases: ['s3', 'ecs'], lifecycle: { dns }, maturity },
+    credentials: { supportsNativeCliAuth: true }, connectionAliases: ['s3'], lifecycle: { dns }, maturity },
   factory: credentials => ({ async verify() {
     try {
       const saved = route53CredentialsSchema.parse(credentials);
@@ -43,7 +43,7 @@ providerRegistry.register({
 
 providerRegistry.register({
   metadata: { name: 'azure-dns', displayName: 'Azure DNS', category: 'dns', credentialsSchema: azureDnsCredentialsSchema,
-    connectionAliases: ['azureblob', 'azure-container-apps'], lifecycle: { dns }, maturity },
+    connectionAliases: ['azureblob'], lifecycle: { dns }, maturity },
   factory: credentials => ({ async verify() {
     try {
       const saved = azureDnsCredentialsSchema.parse(credentials);

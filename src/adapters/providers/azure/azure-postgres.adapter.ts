@@ -555,7 +555,6 @@ providerRegistry.register({
         ['AZURE_CLIENT_SECRET', 'HYPERVIBE_AZURE_CLIENT_SECRET'],
       ],
     },
-    connectionAliases: ['azure-container-apps'],
     maturity: {
       lifecycle: {
         database: {

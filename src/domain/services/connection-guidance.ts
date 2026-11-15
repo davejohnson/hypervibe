@@ -282,7 +282,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="azure-postgres" credentialsRef="file:/absolute/path/azure-postgres.json"',
     notes: [
-      'The JSON file contains only tenantId, subscriptionId, clientId, and clientSecret. Reuse the verified azure-container-apps connection when possible; resource-group identity, location, and server shape are lifecycle state, never credentials.',
+      'The JSON file contains only tenantId, subscriptionId, clientId, and clientSecret. Resource-group identity, location, and server shape are lifecycle state, never credentials.',
       'Hypervibe places PostgreSQL in the exact resource group owned by the same Azure Container Apps environment. This lifecycle intentionally rejects non-Azure hosting until a different network contract is implemented.',
       'Hypervibe creates one Flexible Server, one logical app database, and a firewall rule whose start/end are 0.0.0.0. Microsoft defines that rule as access from Azure services; it includes other customers’ Azure resources, so strong generated database credentials remain essential.',
       'The generated administrator credential and connection URL are encrypted in local component state and never returned in plans, receipts, logs, or repo bindings.',
@@ -315,45 +315,10 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="azureblob"',
     notes: [
-      'If the project already has a verified azure-container-apps connection, Hypervibe reuses it; no separate Blob Storage connection or account key is required.',
       'For local use, authenticate through the Azure default credential chain (for example az login), then add the connection without credentials. Hypervibe discovers a sole enabled subscription; when several are accessible, select one with credentials={"authMode":"default","subscriptionId":"<id>"}.',
       'For unattended automation, a standalone connection JSON may contain tenantId, subscriptionId, clientId, and clientSecret. Storage location comes from the spec, and Hypervibe deterministically reuses or creates the environment resource group.',
       'Hypervibe creates a dedicated storage account per declared bucket, disables public blob access, requires HTTPS/TLS 1.2, and creates one private container. The boundary keeps each generated account key scoped to one Hypervibe storage resource.',
       'The account key and generated connection string are runtime secrets. They never enter specs, bindings, plans, receipts, or logs.',
-    ],
-  },
-  'azure-container-apps': {
-    provider: 'azure-container-apps',
-    displayName: 'Azure Container Apps',
-    tokenType: 'Microsoft Entra service principal using tenantId, subscriptionId, application clientId, and a clientSecret',
-    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-    setupUrls: [
-      {
-        label: 'Create or review the Microsoft Entra application',
-        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-      },
-      {
-        label: 'Official service-principal and client-secret setup guide',
-        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
-      },
-      {
-        label: 'Azure built-in role definitions',
-        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles',
-      },
-    ],
-    permissions: [
-      'At subscription scope, assign Contributor (role ID b24988ac-6180-42a0-ab88-20f7382dd24c) so Hypervibe can register Microsoft.App and Microsoft.ContainerRegistry and create/delete its tagged resource groups, Basic ACR registries, managed environments, Container Apps, and managed certificates.',
-      'At the same subscription scope, assign Role Based Access Control Administrator (role ID f58310d9-a9f6-439a-9e8d-f62e7b41a168) so the reviewed project/service actions can grant AcrPush to the connected service principal and AcrPull to each Container App managed identity. Contributor alone cannot create role assignments.',
-      'Hypervibe creates the registry in Legacy Registry Permissions mode, assigns AcrPush (8311e382-0749-4cb8-b61a-304f252e45ec) to the service principal, and assigns AcrPull (7f951dda-4ed3-4680-a7ca-43fe172d538d) to each app identity; users do not pre-create any of these resources.',
-      'Custom domains require Microsoft.App managed-certificate and Container App update permissions included by Contributor. DNS must point directly to Azure while the free certificate is issued and renewed, so Cloudflare proxying remains disabled.',
-    ],
-    credentialExample: 'hv_connections provider="azure-container-apps" credentialsRef="file:/absolute/path/azure-container-apps.json"',
-    notes: [
-      'The JSON needs only tenantId, subscriptionId, clientId, and clientSecret. Do not include location, a resource group, registry, registry server, managed-environment ID, or Container App ID—those are Hypervibe desired state.',
-      'Hypervibe uses canadacentral when environments.<name>.hosting.region is omitted. An agent may declare another Azure location in the spec when latency, residency, or existing infrastructure requires it.',
-      'Copy the client secret VALUE when it is created; Azure shows it only once. Do not use the secret ID.',
-      'Microsoft does not publish a documented pre-filled credential-template URL for this flow. The links above intentionally open the official app-registration and role documentation without guessed dashboard parameters.',
-      'Client secrets expire. Store the JSON outside the repository, rotate it before expiry, and reconnect from a file, dotenv mapping, or secret-manager reference.',
     ],
   },
   cloudflare: {
@@ -467,42 +432,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: ['Use a database user with the least privileges required for the intended hv_db query or migration operation.'],
     credentialExample: 'hv_connections provider="database" credentialsRef="dotenv:/absolute/path/.env#DATABASE_URL"',
   },
-  ecs: {
-    provider: 'ecs',
-    displayName: 'AWS ECS Express Mode',
-    tokenType: 'AWS IAM access key pair containing accessKeyId and secretAccessKey',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    setupUrls: [
-      {
-        label: 'Create or review an IAM user access key',
-        url: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-      },
-      {
-        label: 'Official ECS Express Mode IAM-role setup',
-        url: 'https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-getting-started.html',
-      },
-      {
-        label: 'Official ECS Express Mode infrastructure model',
-        url: 'https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-work.html',
-      },
-    ],
-    permissions: [
-      'For identity and observation: sts:GetCallerIdentity; ecs:ListClusters, ecs:DescribeClusters, ecs:ListServices, ecs:DescribeServices, ecs:DescribeExpressGatewayService; ecr:DescribeRepositories, ecr:ListTagsForResource; iam:GetRole, iam:ListAttachedRolePolicies; ec2:DescribeVpcs, ec2:DescribeSubnets, ec2:DescribeSecurityGroups; acm:ListCertificates, acm:DescribeCertificate, acm:ListTagsForCertificate; and elasticloadbalancing:DescribeLoadBalancers, DescribeTargetGroups, DescribeListeners, DescribeListenerCertificates, and DescribeRules.',
-      'For the reviewed project action: ec2:CreateDefaultVpc when the selected region lacks one, plus ec2:CreateSecurityGroup, ec2:DeleteSecurityGroup, and ec2:CreateTags for the deterministic Hypervibe workload group; ecr:CreateRepository, ecr:DeleteRepository, ecr:TagResource; iam:CreateRole, iam:DeleteRole, iam:TagRole, iam:AttachRolePolicy, iam:DetachRolePolicy, and iam:PassRole limited to Hypervibe hv-* roles; and ecs:CreateCluster, ecs:DeleteCluster, ecs:TagResource.',
-      'Allow the project action to attach only AmazonECSTaskExecutionRolePolicy and AmazonECSInfrastructureRoleforExpressGatewayServices. The latter is AWS\'s managed infrastructure policy for Express Mode.',
-      'For service lifecycle and CI release: ecs:CreateExpressGatewayService, ecs:UpdateExpressGatewayService, ecs:DeleteExpressGatewayService, ecs:DescribeExpressGatewayService; ecr:GetAuthorizationToken plus ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, ecr:BatchGetImage, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, and ecr:PutImage on hypervibe/* repositories; and iam:PassRole for the two exact project roles.',
-      'For declared custom domains: acm:RequestCertificate, acm:AddTagsToCertificate, acm:DescribeCertificate, acm:ListCertificates, acm:ListTagsForCertificate, acm:DeleteCertificate, elasticloadbalancing:DescribeLoadBalancers, DescribeTargetGroups, DescribeListeners, DescribeListenerCertificates, DescribeRules, AddListenerCertificates, RemoveListenerCertificates, and ModifyRule on Express-managed load balancers.',
-      'If the account has never used ECS, allow iam:CreateServiceLinkedRole only for ECS service-linked roles, or have an administrator create the ECS service-linked role first.',
-    ],
-    credentialExample: 'hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
-    notes: [
-      'The JSON needs only accessKeyId and secretAccessKey. Do not include region, cluster, repository, VPC, subnet, security-group, IAM-role, load-balancer, listener, or certificate IDs—Hypervibe creates and binds those through plan/apply. The same verified ecs connection is reused by ElastiCache.',
-      'Hypervibe uses us-west-2 when environments.<name>.hosting.region is omitted. An agent may declare another AWS region in the spec when latency, residency, or existing infrastructure requires it.',
-      'AWS does not publish a documented pre-filled access-key creation template. The official IAM page cannot safely preselect a user or permissions, so Hypervibe does not invent dashboard query parameters.',
-      'ECS Express Mode creates the Fargate service, public HTTPS endpoint, load balancer, security groups, autoscaling, monitoring, and networking components. Hypervibe owns the smaller prerequisite project boundary and exact-digest CI release.',
-      'AWS shows a new secret access key only once. Store it outside the repository and rotate it regularly.',
-    ],
-  },
   aws: {
     provider: 'aws',
     displayName: 'Amazon Web Services',
@@ -613,7 +542,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'For operation-scoped hv_db_query access: ec2:AuthorizeSecurityGroupIngress and ec2:RevokeSecurityGroupIngress on the database security group.',
       'For lifecycle management through hv_plan/hv_apply: rds:CreateDBInstance, rds:DeleteDBInstance, rds:AddTagsToResource, ec2:CreateSecurityGroup, ec2:DeleteSecurityGroup, and ec2:CreateTags.',
     ],
-    credentialExample: 'reuse the verified ECS identity automatically with hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws.json"; a separate compatible identity may use hv_connections provider="rds" credentialsRef="file:/absolute/path/rds.json"',
+    credentialExample: 'hv_connections provider="rds" credentialsRef="file:/absolute/path/rds.json"',
     notes: [
       'RDS desired state is accepted only for ECS-hosted environments. Hypervibe derives region and the exact default-VPC workload network from the persisted ECS binding; it never creates or guesses that hosting network from a database action.',
       'A standalone RDS JSON includes accessKeyId and secretAccessKey, with sessionToken for temporary STS credentials. Legacy region/vpcId/dbSubnetGroupName values must match the bound ECS account, region, and default VPC.',

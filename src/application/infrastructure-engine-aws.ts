@@ -82,7 +82,7 @@ export interface AwsEngineContext {
 
 export function isAwsEngineEnvironment(spec: ProjectSpec, environmentName: string): boolean {
   const environment = spec.environments[environmentName];
-  return environment?.hosting.engine === 'opentofu' && environment.hosting.provider === 'aws';
+  return environment?.hosting.provider === 'aws';
 }
 
 export function awsBinding(environment: Environment): AwsEngineBinding {

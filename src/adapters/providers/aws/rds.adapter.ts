@@ -813,7 +813,6 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: RdsCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    connectionAliases: ['ecs'],
     maturity: {
       lifecycle: {
         database: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
