@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { AzureTokens } from '../azure-ops.js';
-import { azurePlatformError, buildWithAcrTasks, releaseAzureApp, templateWithImage } from '../infrastructure-engine-azure-release.js';
+import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
+import { azurePlatformError, buildWithAcrTasks, releaseAzureApp, templateWithImage } from '../../adapters/providers/azure/azure-release.client.js';
 
 const json = (status: number, body: unknown = {}) => new Response(JSON.stringify(body), { status });
 function fake(route: (method: string, url: string, body?: string) => Response) {
@@ -85,6 +85,18 @@ describe('Container Apps releases', () => {
     expect(JSON.parse(patch.body!).properties.template.containers[0].image).toBe('img@sha256:1');
   });
 
+  it('only checks an app that already runs the image, since Azure makes no new revision for it', async () => {
+    const running = fake((_method, url) => {
+      if (url.startsWith('https://hv-app-test-web.example.azurecontainerapps.io/')) return new Response('ok', { status: 200 });
+      if (url.includes('/revisions/')) return json(200, { properties: { healthState: 'Healthy' } });
+      return json(200, { properties: { provisioningState: 'Succeeded', latestRevisionName: 'rev-1',
+        template: { containers: [{ name: 'app', image: 'img@sha256:1' }] }, configuration: { ingress: { fqdn: 'hv-app-test-web.example.azurecontainerapps.io' } } } });
+    });
+    const result = await releaseAzureApp(running.tokens, { id: appId, name: 'web', image: 'img@sha256:1', web: true, waitMs: 1, fetchTimeoutMs: 1, retryMs: 1 });
+    expect(result).toMatchObject({ status: 'released', health: { status: 200 } });
+    expect(running.calls.some((call) => call.method === 'PATCH')).toBe(false);
+  });
+
   it('fails a release whose app never answers, or that Azure reports unhealthy', async () => {
     releaseCalls = 0;
     const down = release(() => new Response('upstream connect error', { status: 503 }));
@@ -97,7 +109,7 @@ describe('Container Apps releases', () => {
 
 describe('Azure image builds', () => {
   it('generates a Dockerfile ACR Tasks can build without BuildKit', async () => {
-    const { azureReleaseDockerfile } = await import('../infrastructure-engine-azure-release.js');
+    const { azureReleaseDockerfile } = await import('../../adapters/providers/azure/azure-release.client.js');
     const dockerfile = azureReleaseDockerfile({ runtime: { kind: 'node', version: '24', installCommand: 'npm ci' } as never, startCommand: 'npm start' });
     expect(dockerfile).not.toMatch(/--mount|# syntax/);
     expect(dockerfile).toContain('RUN npm ci');

@@ -1,7 +1,10 @@
 import crypto from 'crypto';
 import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
-import { fetchWithRetry } from '../utils/fetch-retry.js';
-import { observeSecret, secretManagerFetch, writeSecretVersion } from './infrastructure-engine.js';
+import { deleteSecret } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { cloudRunJobRequest, readCloudRunOperation } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
+import { listLogEntries } from '../adapters/providers/gcp/gcp-data.client.js';
+export { signedObjectUrl } from '../adapters/providers/gcp/gcp-data.client.js';
+import { observeSecret, writeSecretVersion } from './infrastructure-engine.js';
 
 /**
  * Data transfer that runs inside the target cloud, next to the target data.
@@ -88,31 +91,6 @@ export function storageCheckScript(): string {
     'T=$(rclone size --json "dst:$TARGET_BUCKET")',
     `printf '${RESULT_MARKER}{"ok":true,"source":%s,"target":%s,"differences":%s}\\n' "$S" "$T" "\${DIFFS:-0}"`,
   ].join('\n');
-}
-
-/**
- * V4 signed URL for one Cloud Storage object, signed locally with the
- * deployment identity's key. It grants exactly one method on one object and
- * expires; it carries no reusable credential.
- */
-export function signedObjectUrl(params: { clientEmail: string; privateKey: string; bucket: string; object: string; method: 'PUT' | 'GET'; expiresSeconds: number; now?: Date }): string {
-  const now = params.now ?? new Date();
-  const datetime = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  const date = datetime.slice(0, 8);
-  const scope = `${date}/auto/storage/goog4_request`;
-  const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-  const path = `/${params.bucket}/${params.object.split('/').map(encode).join('/')}`;
-  const query = Object.entries({
-    'X-Goog-Algorithm': 'GOOG4-RSA-SHA256',
-    'X-Goog-Credential': `${params.clientEmail}/${scope}`,
-    'X-Goog-Date': datetime,
-    'X-Goog-Expires': String(params.expiresSeconds),
-    'X-Goog-SignedHeaders': 'host',
-  }).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
-  const canonical = [params.method, path, query, 'host:storage.googleapis.com', '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
-  const toSign = ['GOOG4-RSA-SHA256', datetime, scope, crypto.createHash('sha256').update(canonical).digest('hex')].join('\n');
-  const signature = crypto.createSign('RSA-SHA256').update(toSign).sign(params.privateKey, 'hex');
-  return `https://storage.googleapis.com${path}?${query}&X-Goog-Signature=${signature}`;
 }
 
 /** Actual connection identity must be known and distinct before replacing data. */
@@ -260,10 +238,6 @@ export function storageTransferScript(): string {
   ].join('\n');
 }
 
-async function google(context: TransferContext, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${await context.token()}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
-}
-
 interface TransferJob {
   purpose: 'database' | 'storage';
   image: string;
@@ -280,7 +254,6 @@ interface TransferJob {
 /** Runs one transfer job to completion and returns its parsed result line. */
 export async function runTransferJob<T extends { ok: boolean; error?: string }>(context: TransferContext, job: TransferJob): Promise<T> {
   const id = `hv-migrate-${job.purpose}-${crypto.randomBytes(3).toString('hex')}`;
-  const base = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/jobs`;
   const temporarySecrets: string[] = [];
   try {
     const secretEnv: Array<Record<string, unknown>> = [];
@@ -303,7 +276,7 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
       resources: { limits: { cpu: '2', memory: '4Gi' } },
       ...(job.cloudSqlConnectionName ? { volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }] } : {}),
     };
-    const created = await google(context, `${base}?jobId=${id}`, {
+    const created = await cloudRunJobRequest(await context.token(), context, `?jobId=${id}`, {
       method: 'POST',
       body: JSON.stringify({
         labels: { 'managed-by': 'hypervibe', 'hv-temporary': 'true' },
@@ -318,7 +291,7 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
     });
     if (!created.ok) throw new Error(`Creating the ${job.purpose} copy job failed (HTTP ${created.status}).`);
     await waitOperation(context, await created.json() as { name?: string; done?: boolean });
-    const started = await google(context, `${base}/${id}:run`, { method: 'POST', body: '{}' });
+    const started = await cloudRunJobRequest(await context.token(), context, `/${id}:run`, { method: 'POST', body: '{}' });
     if (!started.ok) throw new Error(`Starting the ${job.purpose} copy failed (HTTP ${started.status}).`);
     const operation = await waitOperation(context, await started.json() as { name?: string; done?: boolean }, job.timeoutSeconds + 300);
     const executionName = (operation.response as { name?: string } | undefined)?.name ?? (operation.metadata as { name?: string } | undefined)?.name;
@@ -326,9 +299,9 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
     if (result) return result as T;
     return { ok: false, error: `The ${job.purpose} copy finished without a result. Check hv_logs for job ${id}.` } as T;
   } finally {
-    await google(context, `${base}/${id}`, { method: 'DELETE' }).catch(() => undefined);
+    await cloudRunJobRequest(await context.token(), context, `/${id}`, { method: 'DELETE' }).catch(() => undefined);
     for (const secretId of temporarySecrets) {
-      await secretManagerFetch(await context.token(), `https://secretmanager.googleapis.com/v1/projects/${context.gcpProjectId}/secrets/${secretId}`, { method: 'DELETE' }).catch(() => undefined);
+      await deleteSecret(await context.token(), context.gcpProjectId, secretId).catch(() => undefined);
     }
   }
 }
@@ -338,7 +311,7 @@ async function waitOperation(context: TransferContext, operation: { name?: strin
   let current = operation;
   while (!current.done && current.name && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5000));
-    const polled = await google(context, `https://run.googleapis.com/v2/${current.name}`);
+    const polled = await readCloudRunOperation(await context.token(), current.name);
     if (polled.ok) current = await polled.json() as typeof current;
   }
   if (!current.done) throw new Error('A copy job did not finish in time.');
@@ -355,20 +328,14 @@ async function readResultLine(context: TransferContext, jobName: string, executi
     `textPayload:"${RESULT_MARKER.trim()}"`,
   ].join(' AND ');
   for (let attempt = 0; attempt < 12; attempt++) {
-    const response = await google(context, 'https://logging.googleapis.com/v2/entries:list', {
-      method: 'POST',
-      body: JSON.stringify({ resourceNames: [`projects/${context.gcpProjectId}`], filter, orderBy: 'timestamp desc', pageSize: 5 }),
-    });
+    const response = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter, orderBy: 'timestamp desc', pageSize: 5 });
     if (response.ok) {
       const entries = (await response.json() as { entries?: Array<{ textPayload?: string }> }).entries ?? [];
       const line = entries.map((entry) => entry.textPayload ?? '').find((text) => text.includes(RESULT_MARKER));
       if (line) {
         let parsed: Record<string, unknown>;
         try { parsed = JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
-        const errors = await google(context, 'https://logging.googleapis.com/v2/entries:list', {
-          method: 'POST',
-          body: JSON.stringify({ resourceNames: [`projects/${context.gcpProjectId}`], filter: filter.replace(`textPayload:"${RESULT_MARKER.trim()}"`, 'textPayload:"HV_RESTORE_ERROR"'), pageSize: 5 }),
-        }).then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ textPayload?: string }> }> : { entries: [] }).catch(() => ({ entries: [] }));
+        const errors = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter: filter.replace(`textPayload:"${RESULT_MARKER.trim()}"`, 'textPayload:"HV_RESTORE_ERROR"'), pageSize: 5 }).then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ textPayload?: string }> }> : { entries: [] }).catch(() => ({ entries: [] }));
         const sample = (errors.entries ?? []).map((entry) => (entry.textPayload ?? '').replace('HV_RESTORE_ERROR ', '').replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 200));
         return sample.length ? { ...parsed, restoreErrors: sample } : parsed;
       }

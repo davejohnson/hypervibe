@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildAzureEnvironmentConfiguration } from '../../adapters/providers/azure/tofu/azure-engine.config.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
-import { AzureTokens } from '../azure-ops.js';
+import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
 import {
   AZURE_DATABASE_LOGIN_OPERATION, AZURE_IMAGE_BUILD_OPERATION, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureEngineLayout, azureEngineProblems,
   azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext,

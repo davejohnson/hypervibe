@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, taggedResources, type SqlRunner } from '../azure-ops.js';
+import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, taggedResources, type SqlRunner } from '../azure-ops.client.js';
 
 const access = { tenantId: 't', clientId: 'c', clientSecret: 'client-secret-value' };
 const json = (status: number, body: unknown = {}) => new Response(status === 204 ? null : JSON.stringify(body), { status });

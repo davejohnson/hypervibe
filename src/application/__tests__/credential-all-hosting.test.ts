@@ -1,15 +1,11 @@
-import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { ECSClient } from '@aws-sdk/client-ecs';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { railwayHttpFixture, projectId as railwayProject, stagingId } from '../../adapters/providers/railway/__tests__/railway-http.fixture.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
-import { EcsExpressAdapter } from '../../adapters/providers/aws/ecs-express.adapter.js';
-import { AzureContainerAppsAdapter } from '../../adapters/providers/azure/azure-container-apps.adapter.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { PlanService, type PlanOptions } from '../../domain/plan/plan.service.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
@@ -30,7 +26,7 @@ let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), 'hv-credential-all-hosting-')); SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(dir, 'test.db')).migrate(); });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(dir, { recursive: true, force: true }); });
 
-async function providerWire(provider: string, environment: Environment) {
+async function providerWire(provider: string, _environment: Environment) {
   const values: Record<string, string> = { API_KEY: 'accepted-old', ALIAS_KEY: 'accepted-old', KEEP: '${UNCHANGED.REFERENCE}' };
   const writes: string[] = [];
   let serial = 0;
@@ -56,37 +52,8 @@ async function providerWire(provider: string, environment: Environment) {
       if (init?.method === 'PATCH') { const body = JSON.parse(String(init.body)); record(Object.fromEntries(body.template.containers[0].env.map((entry: any) => [entry.name, entry.value]))); return Response.json({ name: 'projects/gcp-project/locations/us-west1/operations/update', done: true, response: current() }); }
       return Response.json(current());
     };
-  } else if (provider === 'ecs') {
-    const region = 'us-west-2'; const account = '123456789012'; const cluster = `arn:aws:ecs:${region}:${account}:cluster/bound`; const arn = `arn:aws:ecs:${region}:${account}:service/bound/web`;
-    adapter = new EcsExpressAdapter(); await adapter.connect({ accessKeyId: 'AKIAEXAMPLE12345678', secretAccessKey: 'synthetic-secret-that-is-long-enough-for-schema', region });
-    const client = new ECSClient({ region, credentials: { accessKeyId: 'synthetic', secretAccessKey: 'synthetic' }, requestHandler: { handle: async (request: { body?: unknown; headers: Record<string, string> }) => {
-      const operation = request.headers['x-amz-target'].split('.').at(-1); const input = JSON.parse(String(request.body));
-      if (operation === 'UpdateExpressGatewayService') record(Object.fromEntries(input.primaryContainer.environment.map((entry: any) => [entry.name, entry.value])));
-      else expect(operation).toBe('DescribeExpressGatewayService');
-      return { response: { statusCode: 200, headers: { 'content-type': 'application/x-amz-json-1.1' }, body: Readable.from([JSON.stringify({ service: { cluster, serviceArn: arn, tags: [{ key: 'managed-by', value: 'hypervibe' }, { key: 'hypervibe-environment-id', value: environment.id }], status: { statusCode: 'ACTIVE' }, currentDeployment: `${arn}/revision/${serial}`, activeConfigurations: [{ serviceRevisionArn: `${arn}/revision/${serial}`, primaryContainer: { image: 'registry/web:retained', containerPort: 8080, environment: envEntries() }, taskRoleArn: `arn:aws:iam::${account}:role/runtime`, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'example.invalid' }] }] } })]) } };
-    } } });
-    Object.assign(adapter, { clients: { ecs: client }, accountId: account });
-    binding = { provider, projectId: cluster, environmentId: cluster, services: { web: { serviceId: arn } } };
-    transport = async () => { throw new Error('Unexpected non-SDK request'); };
   } else {
-    const subscription = '22222222-2222-4222-8222-222222222222'; const group = `/subscriptions/${subscription}/resourceGroups/bound`; const managed = `${group}/providers/Microsoft.App/managedEnvironments/bound-env`; const id = `${group}/providers/Microsoft.App/containerApps/bound-web`;
-    adapter = new AzureContainerAppsAdapter(); await adapter.connect({ tenantId: '11111111-1111-4111-8111-111111111111', subscriptionId: subscription, clientId: '33333333-3333-4333-8333-333333333333', clientSecret: 'synthetic', location: 'canadacentral' });
-    let app: any = { id, name: 'bound-web', location: 'canadacentral', tags: { 'managed-by': 'hypervibe', 'hypervibe-environment-id': environment.id }, identity: { type: 'SystemAssigned', principalId: 'runtime' }, properties: { managedEnvironmentId: managed, provisioningState: 'Succeeded', latestReadyRevisionName: 'old', latestRevisionName: 'old', template: { containers: [{ name: 'main', image: 'registry/web:retained', env: envEntries() }] }, configuration: { secrets: [] } } };
-    binding = { provider, projectId: group, environmentId: managed, services: { web: { serviceId: id } } };
-    transport = async (input, init) => {
-      const url = new URL(String(input));
-      if (url.hostname === 'login.microsoftonline.com') return Response.json({ access_token: 'synthetic-token', expires_in: 3600 });
-      if (url.pathname.endsWith('/listSecrets')) return Response.json({ value: app.properties.configuration.secrets });
-      expect(url.pathname).toBe(id);
-      if (init?.method === 'PATCH') {
-        const patch = JSON.parse(String(init.body)); app.properties.configuration.secrets = patch.properties.configuration.secrets;
-        if (patch.properties.template) app.properties.template.containers = patch.properties.template.containers;
-        const secrets = new Map(app.properties.configuration.secrets.map((entry: any) => [entry.name, entry.value]));
-        record(Object.fromEntries(app.properties.template.containers[0].env.map((entry: any) => [entry.name, entry.secretRef ? secrets.get(entry.secretRef) : entry.value])));
-        app.properties.latestRevisionName = `new-${serial}`; app.properties.latestReadyRevisionName = `new-${serial}`;
-      }
-      return Response.json(app);
-    };
+    throw new Error(`No credential fixture for ${provider}`);
   }
   vi.stubGlobal('fetch', vi.fn(transport));
   vi.spyOn(adapter, 'observe').mockImplementation(async (): Promise<ObservedState> => ({ provider, observedAt: new Date().toISOString(), projectExists: true, projectId: binding.projectId, environmentId: binding.environmentId,
@@ -95,7 +62,7 @@ async function providerWire(provider: string, environment: Environment) {
   return { adapter, binding, values: () => values, writes: () => writes };
 }
 
-it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])('%s composes a scoped two-alias rotation with pending activation and a stable retry', async provider => {
+it.each(['railway', 'cloudrun'])('%s composes a scoped two-alias rotation with pending activation and a stable retry', async provider => {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: `credential-${provider}`, defaultPlatform: provider });
   const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging', platformBindings: {} });

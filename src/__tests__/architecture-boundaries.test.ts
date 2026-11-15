@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +46,7 @@ function importsOf(filename: string): Import[] {
 
 const CLOUD_SDK = /^(@aws-sdk\/|@azure\/|@google-cloud\/|google-auth-library$)/;
 const PER_CLOUD_APPLICATION = /^src\/application\/(infrastructure-engine-(aws|azure)(-release)?|(aws|azure)-[a-z-]+|migration-transfer-gcp|gcp-[a-z-]+)$/;
+const CLOUD_API_HOST = /https:\/\/[^\s'"`]*?(management\.azure\.com|graph\.microsoft\.com|login\.microsoftonline\.com|vault\.azure\.net|googleapis\.com|amazonaws\.com|signin\.aws\.amazon\.com)/g;
 const ENGINE_BRANCH = /\b(isAwsEngineEnvironment|isAzureEngineEnvironment)\s*\(/g;
 
 interface Rule { name: string; why: string; violates: (entry: Import) => boolean }
@@ -92,6 +94,15 @@ function observe(): Record<string, string[]> {
     if (count > 0) branches.push(`${file} x${count}`);
   }
   result['engine-name-branch'] = branches.sort();
+  // Cloud APIs reached with fetch are invisible to the SDK rule; track their hosts too.
+  const apiCalls = new Set<string>();
+  for (const filename of files) {
+    const file = path.relative(root, filename).split(path.sep).join('/');
+    if (file.startsWith('src/adapters/')) continue;
+    const code = readFileSync(filename, 'utf8').split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
+    for (const match of code.matchAll(CLOUD_API_HOST)) apiCalls.add(`${file} -> ${match[1]}`);
+  }
+  result['cloud-api-outside-adapters'] = [...apiCalls].sort();
   // The same exported function defined in several files is a copied helper.
   const definitions = new Map<string, string[]>();
   for (const filename of files) {
@@ -115,6 +126,7 @@ describe('architecture boundaries', () => {
   const why: Record<string, string> = {
     ...Object.fromEntries(rules.map((rule) => [rule.name, rule.why])),
     'engine-name-branch': 'Generic code must route by engine capability, not by isAwsEngineEnvironment/isAzureEngineEnvironment. Add the behavior to the engine instead of a new branch.',
+    'cloud-api-outside-adapters': 'This file calls a cloud API host directly. Put the call in that cloud\'s adapter under src/adapters/providers and call the adapter.',
     'duplicated-exported-function': 'An exported function with this name already exists in another file. Reuse or move the existing one instead of copying it.',
   };
 
@@ -126,5 +138,28 @@ describe('architecture boundaries', () => {
   it.each(Object.keys(observed))('%s baseline lists only current violations', (rule) => {
     const fixed = (baseline[rule] ?? []).filter((entry) => !observed[rule]!.includes(entry));
     expect(fixed, 'These are fixed. Remove them from architecture-boundaries.baseline.json (see the header of this test)').toEqual([]);
+  });
+
+  // Copied code across files is how the three clouds drift apart. The threshold in
+  // .jscpd.json is a ceiling on duplicated lines: lower it as duplication is removed,
+  // never raise it. `npm run check:duplication` lists the clones.
+  it('keeps copied code under the .jscpd.json ceiling', () => {
+    const run = () => execFileSync(process.execPath, [path.join(root, 'node_modules', 'jscpd', 'bin', 'jscpd')], { cwd: root, encoding: 'utf8', stdio: 'pipe' });
+    expect(run, 'Duplicated code exceeds the ceiling. Run `npm run check:duplication` and reuse the existing code').not.toThrow();
+  }, 120_000);
+
+  // Hypercloud (the hosted view of Hypervibe) imports `@hypervibe/hypervibe/hosted`
+  // and, in its tests, these built modules by path. Moving or renaming one breaks
+  // it on its next upgrade, so a move must be coordinated with that repository.
+  it.each([
+    ['src/hosted.ts', 'inspectCommittedProjectSpecV1'],
+    ['src/application/cloud-request-client.ts', 'createCloudRequestClient'],
+    ['src/application/cloud-pairing.ts', 'createHypervibeCloudPairingClient'],
+    ['src/application/cloud-connections.ts', 'createCloudConnections'],
+    ['src/application/cloud-secret-import.ts', 'createCloudSecretImport'],
+    ['src/utils/env-parser.ts', 'parseEnvContent'],
+  ])('keeps %s exporting %s for Hypercloud', (file, name) => {
+    const source = readFileSync(path.join(root, file), 'utf8');
+    expect(new RegExp(`export (async )?(function|const|class) ${name}\\b|^\\s*${name},?$|\\b${name}\\b[^;]*\\} from`, 'm').test(source), `${file} must export ${name}`).toBe(true);
   });
 });

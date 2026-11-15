@@ -297,7 +297,6 @@ describe('connection guidance', () => {
         'rds:DescribeDBInstances',
         'ec2:AuthorizeSecurityGroupIngress',
         'ec2:RevokeSecurityGroupIngress',
-        'provider="ecs"',
         'exact default-VPC workload network',
         'credentialsRef="file:/absolute/path/rds.json"',
       ],
@@ -368,8 +367,6 @@ describe('credentialFieldsFromSchema', () => {
   it('keeps hosting geography out of connection forms', () => {
     const expected = {
       cloudrun: ['projectId', 'credentials'],
-      ecs: ['accessKeyId', 'secretAccessKey'],
-      'azure-container-apps': ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
       s3: ['authMode', 'accessKeyId', 'secretAccessKey'],
       gcs: ['authMode', 'credentials'],
       azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
@@ -384,9 +381,9 @@ describe('credentialFieldsFromSchema', () => {
   });
 
   it('lets storage adapters reuse the matching primary cloud connection', () => {
-    expect(providerRegistry.connectionProviders('s3')).toEqual(['s3', 'ecs']);
+    expect(providerRegistry.connectionProviders('s3')).toEqual(['s3']);
     expect(providerRegistry.connectionProviders('gcs')).toEqual(['gcs', 'cloudrun']);
-    expect(providerRegistry.connectionProviders('azureblob')).toEqual(['azureblob', 'azure-container-apps']);
+    expect(providerRegistry.connectionProviders('azureblob')).toEqual(['azureblob']);
   });
 
   it('describes required, optional, secret, multiline, and choice fields', () => {

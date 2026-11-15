@@ -4,9 +4,9 @@ This is the GCP implementation boundary. The [common cloud user journey](user-jo
 defines the shared product target and acceptance for GCP, AWS and Azure; this
 reference does not claim that its GCP routing is implemented on the other clouds.
 
-GCP has one infrastructure path. `hosting.provider: "cloudrun"` selects the
-managed OpenTofu engine automatically. An explicit `hosting.engine: "opentofu"`
-remains readable, but is not an opt-in switch. Unsupported capabilities stop with
+Cloud hosting has one infrastructure path. `hosting.provider` values `cloudrun`,
+`aws` and `azure` always use the managed OpenTofu engine; Railway never does.
+There is no engine setting: an older spec's `hosting.engine` is dropped on read. Unsupported capabilities stop with
 an explicit blocker; they never select the removed handwritten lifecycle.
 
 ## Ownership

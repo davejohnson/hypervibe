@@ -17,3 +17,16 @@ export function withDefaultDatabaseProvider(environment: unknown): unknown {
   if (matches.length !== 1) return environment;
   return { ...environment, database: { ...database, provider: matches[0][0] } };
 }
+
+/**
+ * Older specs carried `hosting.engine: "opentofu"`. The engine is no longer a
+ * choice (cloud hosting always uses it), so the field is dropped on read and
+ * never written back.
+ */
+export function withoutEngineFlag(environment: unknown): unknown {
+  if (!environment || typeof environment !== 'object' || Array.isArray(environment)) return environment;
+  const { hosting } = environment as { hosting?: unknown };
+  if (!hosting || typeof hosting !== 'object' || Array.isArray(hosting) || !('engine' in hosting)) return environment;
+  const { engine: _engine, ...rest } = hosting as Record<string, unknown>;
+  return { ...environment, hosting: rest };
+}

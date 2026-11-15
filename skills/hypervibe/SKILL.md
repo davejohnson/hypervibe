@@ -75,7 +75,8 @@ for any missing key, on GCP or AWS. Call `hv_launch` again after `pending`.
 This describes implemented GCP commands, not a verified complete journey on every
 cloud. Full launch, migration and recovery need evidence for the actual installed
 release and requested scope. Never infer support from a command name or a successful
-infrastructure step. `hv_launch` is currently GCP-only; do not call it for AWS or Azure.
+infrastructure step. `hv_launch` supports GCP, AWS testing environments and Azure
+testing environments; follow the cloud-specific stop points below.
 
 Keep running costs low by default. A background worker that polls a database
 queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
@@ -92,11 +93,10 @@ After a verified copy, a re-run releases without copying again; pass
 `refreshData=true` only after the user approves copying again, and
 `verifyOnly=true` to compare the source and the copy (row counts, per-table
 content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
-`hv_deploy` remain available for individual steps. GCP's default `hv_plan` routes
-to the engine; AWS and Azure currently require `scope="infrastructure"` and
-`hosting.engine="opentofu"` in the spec. Set those routine implementation choices
-without asking the user to select an engine. Resources reported as unsupported stay
-blocked; do not work around them.
+`hv_deploy` remain available for individual steps. Google Cloud, AWS and Azure
+always use the managed OpenTofu engine, and `hv_plan` routes to it by default;
+there is no engine setting, so never add one to a spec or ask the user about it.
+Resources reported as unsupported stay blocked; do not work around them.
 
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
@@ -151,13 +151,18 @@ describe that gap rather than claiming a proven live path.
   the person approves the listed changes on that page. Hypervibe picks the region
   and account; do not ask. If AWS shows "400 Bad Request", it is an expired AWS
   session in that browser: tell them to click "Sign out of AWS" on the page and
-  sign in again.
+  sign in again. `hv_launch` runs a testing environment end to end: it opens
+  that sign-in when access is missing (or reuses the account's access), stops at
+  `needs_confirmation`, and builds, creates and checks the app in one reviewed
+  plan. Staging, production and releases from GitHub Actions are not built yet.
 - Azure: `hv_connections provider="azure" action="connect"` opens one Microsoft
   sign-in (the page names it "Microsoft Azure CLI"; nothing to install) and the
   person approves the listed changes there. Hypervibe picks the region; ask only
-  which subscription pays when it reports several. Testing environments run with
-  `hv_plan scope="infrastructure"`, `hv_apply` and `hv_deploy` (not `hv_launch`
-  yet); staging and production are not built yet.
+  which subscription pays when it reports several. `hv_launch` runs a testing
+  environment end to end: it opens that sign-in when access is missing, stops at
+  `needs_subscription` (ask which subscription pays, then pass `azureSubscriptionId`)
+  and `needs_confirmation`, and builds, creates and checks the app in one reviewed
+  plan. Staging, production and releases from GitHub Actions are not built yet.
 - Decide routine choices (region, sizes, names) and state them; ask only for what
   only the person can do.
 - Follow each result's `agentInstruction`. After blocked, failed, pending, or
