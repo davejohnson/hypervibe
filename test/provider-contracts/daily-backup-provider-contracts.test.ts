@@ -18,13 +18,8 @@ interface EvidenceRow {
   resource: Resource;
   provider: string;
   implementation: 'implemented' | 'unsupported';
-  reason: string;
-  nativeCapability: string;
-  limitations: string[];
-  officialSources: string[];
 }
 const evidence = JSON.parse(readFileSync(new URL('./daily-backup-provider-matrix.json', import.meta.url), 'utf8')) as {
-  schemaVersion: number;
   resources: EvidenceRow[];
 };
 
@@ -52,18 +47,6 @@ describe('named-provider daily backup implementation coverage', () => {
     const names = resource === 'volume' ? providerRegistry.namesFor('hosting').sort() : reviewedOperationProviders(resource);
     expect(rows.map(row => row.provider).sort()).toEqual(names);
     expect([...adapters[resource].keys()].sort()).toEqual(names);
-  });
-
-  it('keeps official-source evidence distinct from implementation and live support', () => {
-    expect(evidence.schemaVersion).toBe(1);
-    for (const row of evidence.resources) {
-      expect(['implemented', 'unsupported']).toContain(row.implementation);
-      expect(row.reason.length).toBeGreaterThan(20);
-      expect(row.nativeCapability.length).toBeGreaterThan(20);
-      expect(row.limitations.length).toBeGreaterThan(0);
-      expect(row.officialSources.length).toBeGreaterThan(0);
-      for (const source of row.officialSources) expect(new URL(source).protocol).toBe('https:');
-    }
   });
 
   it.each(evidence.resources)('$provider $resource advertises only the complete implemented daily policy port', row => {

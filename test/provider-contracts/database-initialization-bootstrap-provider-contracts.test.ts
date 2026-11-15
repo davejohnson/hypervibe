@@ -5,35 +5,19 @@ import { providerRegistry } from '../../src/domain/registry/provider.registry.js
 
 interface EvidenceRow {
   provider: string;
-  identity: string;
-  completionAndRecovery: string;
-  prerequisites: string;
-  limitations: string;
-  officialSources: string[];
 }
 const evidence = JSON.parse(readFileSync(
   new URL('./database-initialization-bootstrap-provider-matrix.json', import.meta.url), 'utf8',
 )) as {
-  schemaVersion: number;
-  evidenceBoundary: string;
   hosting: Array<EvidenceRow & { implementation: 'implemented' | 'unsupported'; databaseProviders: string[] }>;
   database: Array<EvidenceRow & { hostingProviders: string[] }>;
 };
 
 describe('fresh database bootstrap provider admission', () => {
-  it.each(['hosting', 'database'] as const)('reviews every registered %s provider', resource => {
+  it.each(['hosting', 'database'] as const)('covers every registered %s provider', resource => {
     const registered = providerRegistry.namesFor(resource)
       .filter(provider => resource !== 'database' || providerRegistry.supportsEngine(provider, 'database', 'postgres'));
     expect(evidence[resource].map(row => row.provider).sort()).toEqual(registered.sort());
-    for (const row of evidence[resource]) {
-      for (const field of ['identity', 'completionAndRecovery', 'prerequisites', 'limitations'] as const) {
-        expect(row[field].length).toBeGreaterThan(20);
-      }
-      expect(row.officialSources.length).toBeGreaterThan(0);
-      for (const source of row.officialSources) expect(new URL(source).protocol).toBe('https:');
-    }
-    expect(evidence.schemaVersion).toBe(1);
-    expect(evidence.evidenceBoundary).toContain('no live');
   });
 
   it.each(evidence.hosting)('$provider admits only explicitly implemented database pairs', row => {

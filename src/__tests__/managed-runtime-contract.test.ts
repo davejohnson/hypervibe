@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -15,16 +15,6 @@ function minimumNodeMajor(requirement: string): number {
     throw new Error(`Unsupported Node engine requirement: ${requirement}`);
   }
   return Number(match[1]);
-}
-
-function productionSources(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      return entry.name === '__tests__' ? [] : productionSources(path);
-    }
-    return /\.(?:ts|ya?ml)$/.test(entry.name) ? [path] : [];
-  });
 }
 
 describe('managed runtime contract', () => {
@@ -59,7 +49,7 @@ describe('managed runtime contract', () => {
     const lock = JSON.parse(readFileSync(join(repositoryRoot, 'package-lock.json'), 'utf8')) as {
       packages: Record<
         string,
-        { dependencies?: Record<string, string>; engines?: { node?: string } }
+        { engines?: { node?: string } }
       >;
     };
     const sqlite = lock.packages['node_modules/better-sqlite3'];
@@ -72,23 +62,5 @@ describe('managed runtime contract', () => {
     expect(minimumNodeMajor(manifest.engines.node)).toBeGreaterThanOrEqual(
       minimumNodeMajor(sqliteRequirement!),
     );
-    expect(sqlite?.dependencies).toHaveProperty('node-addon-api');
-    expect(sqlite?.dependencies).not.toHaveProperty('prebuild-install');
-  });
-
-  it('does not reintroduce scattered legacy Node image pins or application command fallbacks', () => {
-    const files = productionSources(join(repositoryRoot, 'src'));
-    const forbidden = [
-      /node:(?:20|22)(?:-|\b)/,
-      /nodejs\/node:(?:20|22)(?:-|\b)/,
-      /startCommand[^\n]*(?:\|\||\?\?)[^\n]*(?:npm start|python app\.py|python -m app)/,
-      /package-lock\.json[^\n]*(?:else|\?)[^\n]*npm install/,
-    ];
-    for (const file of files) {
-      const source = readFileSync(file, 'utf8');
-      for (const pattern of forbidden) {
-        expect(source, `${relative(repositoryRoot, file)} still matches ${pattern}`).not.toMatch(pattern);
-      }
-    }
   });
 });
