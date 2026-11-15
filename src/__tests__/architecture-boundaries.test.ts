@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -127,4 +128,12 @@ describe('architecture boundaries', () => {
     const fixed = (baseline[rule] ?? []).filter((entry) => !observed[rule]!.includes(entry));
     expect(fixed, 'These are fixed. Remove them from architecture-boundaries.baseline.json (see the header of this test)').toEqual([]);
   });
+
+  // Copied code across files is how the three clouds drift apart. The threshold in
+  // .jscpd.json is a ceiling on duplicated lines: lower it as duplication is removed,
+  // never raise it. `npm run check:duplication` lists the clones.
+  it('keeps copied code under the .jscpd.json ceiling', () => {
+    const run = () => execFileSync(process.execPath, [path.join(root, 'node_modules', 'jscpd', 'bin', 'jscpd')], { cwd: root, encoding: 'utf8', stdio: 'pipe' });
+    expect(run, 'Duplicated code exceeds the ceiling. Run `npm run check:duplication` and reuse the existing code').not.toThrow();
+  }, 120_000);
 });

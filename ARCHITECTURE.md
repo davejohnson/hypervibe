@@ -359,6 +359,8 @@ which may only shrink:
 - Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`
   branches. It selects a `CloudEngine` from `src/application/cloud-engines.ts`;
   new per-cloud behavior is a method on that interface.
+- Copied code stays under the ceiling in `.jscpd.json` (`npm run check:duplication`
+  lists the clones). Lower the ceiling as duplication is removed; never raise it.
 - An exported function is not defined in two files. Shared engine helpers live in
   `src/application/engine-shared.ts`.
 
