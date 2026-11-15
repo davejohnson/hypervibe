@@ -44,12 +44,28 @@ export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   return problems;
 }
 
+/** Settings only the Google Cloud engine builds so far; the other clouds refuse them instead of dropping them. */
+function googleOnlyProblems(environment: EnvironmentSpec): string[] {
+  const cloud = environment.hosting.provider === 'aws' ? 'AWS' : 'Azure';
+  const problems: string[] = [];
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (service.alwaysOn) problems.push(`Service ${name}: alwaysOn is not yet supported on ${cloud}.`);
+  }
+  for (const [name, storage] of Object.entries(environment.storage ?? {})) {
+    if (storage.versioning) problems.push(`Storage ${name}: versioning is not yet supported on ${cloud}.`);
+    if (storage.browserUploads) problems.push(`Storage ${name}: browserUploads is not yet supported on ${cloud}.`);
+  }
+  return problems;
+}
+
 /** Unsupported desired state must block planning instead of falling back to another engine. */
 export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName];
   if (!environment) return [`Spec has no environment "${environmentName}".`];
   // AWS and Azure add their own provider capabilities in their engine planners.
-  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return commonEngineProblems(environment);
+  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) {
+    return [...commonEngineProblems(environment), ...googleOnlyProblems(environment)];
+  }
   const problems: string[] = [];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   problems.push(...commonEngineProblems(environment));

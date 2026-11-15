@@ -39,6 +39,8 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
 | Production-shaped environments | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
+| File versioning (30 days), browser uploads straight to storage | yes | blocked (#664) | blocked (#664) |
+| Always-on web service (`alwaysOn`) | yes | blocked (#625) | blocked (#625) |
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |
 | Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |

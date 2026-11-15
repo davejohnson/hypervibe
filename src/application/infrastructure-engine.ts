@@ -287,6 +287,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
+        ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
+        ...(workload !== 'job' && service.startCommand ? { startCommand: service.startCommand } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -887,6 +889,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
       ...(storage.access === 's3' ? { s3: { wired: s3Ready.includes(name) } } : {}),
+      ...(storage.versioning ? { versioning: true } : {}),
+      ...(storage.browserUploads ? { browserUploads: true } : {}),
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
