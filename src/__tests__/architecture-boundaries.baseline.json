@@ -207,9 +207,7 @@
   ],
   "interface-imports-provider": [
     "src/tools/connections.tools.ts -> src/application/aws-connect",
-    "src/tools/connections.tools.ts -> src/application/azure-connect",
-    "src/tools/core.tools.ts -> src/application/infrastructure-engine-aws",
-    "src/tools/core.tools.ts -> src/application/infrastructure-engine-azure"
+    "src/tools/connections.tools.ts -> src/application/azure-connect"
   ],
   "railway-dependency": [
     "src/application/hosted/providers.ts -> src/adapters/providers/railway/railway.adapter",
@@ -221,10 +219,7 @@
     "src/domain/services/import.service.ts -> src/adapters/providers/railway/railway.adapter"
   ],
   "engine-name-branch": [
-    "src/application/engine-secrets.ts x2",
-    "src/application/infrastructure-engine.ts x5",
-    "src/application/migrate.ts x1",
-    "src/tools/core.tools.ts x2"
+    "src/application/migrate.ts x1"
   ],
   "duplicated-exported-function": [
     "azureResourceGroupId: src/adapters/providers/azure/azure-environment-scope.ts, src/adapters/providers/azure/tofu/azure-engine.backend.ts"

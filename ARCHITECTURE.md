@@ -357,7 +357,8 @@ which may only shrink:
 - Tools and interfaces do not import provider adapters or per-cloud modules.
 - Nothing new depends on the Railway adapter.
 - Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`
-  branches; the behavior belongs in the engine.
+  branches. It selects a `CloudEngine` from `src/application/cloud-engines.ts`;
+  new per-cloud behavior is a method on that interface.
 - An exported function is not defined in two files. Shared engine helpers live in
   `src/application/engine-shared.ts`.
 
