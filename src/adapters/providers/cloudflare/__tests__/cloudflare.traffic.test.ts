@@ -14,7 +14,7 @@ describe('Cloudflare retained maintenance route traffic handoff', () => {
     const hostname = 'app.example.com';
     const adapter = new CloudflareAdapter();
     adapter.connect({ apiToken: 'synthetic-token', accountId: 'account-1' });
-    vi.spyOn(adapter, 'resolveLoadBalancerScope').mockResolvedValue({ accountId: 'account-1', zoneId: 'zone-1' });
+    vi.spyOn(adapter, 'resolveZoneScope').mockResolvedValue({ accountId: 'account-1', zoneId: 'zone-1' });
     const binding = {
       hostname, accountId: 'account-1', zoneId: 'zone-1', routeId: 'route-1',
       scriptName: `hv-maintenance-${createHash('sha256').update(hostname).digest('hex').slice(0, 20)}`,

@@ -6,7 +6,7 @@ import { assertFixtureHttpResponse, readFixtureJournal, runDisposableFixture, sa
 import { liveFixtureCoverage, liveFixtureProfiles, selectLiveFixtureProfile } from './live-fixture-profiles.js';
 import { observeGcpFixtureResource, plannedGcpServiceIdentities, projectGcpFixtureState, projectRailwayFixtureInventory, readRailwayFixtureInventory, RAILWAY_FIXTURE_INVENTORY_QUERY, gcpFixtureConfigurationScope, assertGcpFixtureContinuationScope, assertGcpFixtureInventoryScope } from './fixture-native-inventory.js';
 import { buildSchema, parse, validate } from 'graphql';
-import { assertFixtureActionScope, assertFixtureContinuation, assertFixtureLifecycleConsent, assertFixtureTarget, fixturePreview, verifiedGcpFixtureCredentials } from './fixture-authorization.js';
+import { assertFixtureContinuation, assertFixtureLifecycleConsent, assertFixtureTarget, fixturePreview, verifiedGcpFixtureCredentials } from './fixture-authorization.js';
 import { hostingProviderContracts } from './provider-matrix.js';
 
 const resource: NativeFixtureResource = { provider: 'gcp', type: 'google_cloud_run_v2_service', address: 'google_cloud_run_v2_service.web', id: 'projects/test-project/locations/us-central1/services/web' };
@@ -128,12 +128,6 @@ describe('dedicated fixture authorization', () => {
     expect(profile.capabilities).toContain('storage:railway'); expect(Object.values(fixture.storage ?? {}).every((item) => item.provider === 'railway')).toBe(true);
     expect(profile.capabilities).toContain('queue:railway'); expect(Object.keys(fixture.queues ?? {})).toEqual(['jobs']);
     expect(fixture.workflow).toBe('deploy-railway-production.yml');
-  });
-  it('blocks incidental origin/platform mutations from the Cloudflare-only fixture', () => {
-    expect(() => assertFixtureActionScope([{ type: 'create', resource: { kind: 'load-balancer' } }, { type: 'noop', resource: { kind: 'service' } }], ['load-balancer'])).not.toThrow();
-    for (const kind of ['service', 'project', 'environment', 'storage', undefined]) {
-      expect(() => assertFixtureActionScope([{ type: 'destroy', resource: { kind } }], ['load-balancer'])).toThrow(/retained test-platform/);
-    }
   });
   it('uses only an exact verified repository connection matching the native project and runtime identity', () => {
     const expected = { repository: 'owner/fixture', nativeProjectId: 'fixture-project', runtimeServiceAccountEmail: 'runtime@fixture-project.iam.gserviceaccount.com' };

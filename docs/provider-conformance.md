@@ -35,7 +35,6 @@ provider status or assert that a live run has passed.
 | --- | --- | --- |
 | `gcp-engine` | One public Cloud Run web service and its public-invoker IAM member | Committed local fixture archive through the installed Hypervibe release path; exact JSON body and `create`/`update` revision; encrypted engine-state identity projection and exact Cloud Run GET after teardown |
 | `railway` | Web service, PostgreSQL, Redis, object bucket, associated volumes, PostgreSQL-backed queue wiring | Prepared repository and managed GitHub workflow, exact commit and release artifact; exact JSON revision and SQL probe; complete native project service/volume/bucket inventory before teardown and after deletion |
-| `cloudflare-load-balancer` | Health monitor, origin pool and hostname load balancer | Two prepared dedicated Railway origins are retained platform prerequisites; exact fixture body through the load balancer; in-place health-monitor update; registered exact-ID reads confirm all three resources absent |
 
 The GCP profile is deliberately **web-only**. It does not prove Cloud SQL,
 Memorystore, storage, queues, secret containers, scheduled jobs, or their complete
@@ -50,14 +49,6 @@ provider queue resource. The fixture checks that database and every native
 service, volume and bucket in its dedicated initially empty Railway project.
 It does not claim every Railway workload kind, custom-domain, data-transfer or
 backup feature has passed live.
-
-The Cloudflare profile refuses any mutation outside its load-balancer resources.
-Its dedicated origins must already be serving the fixture with revision `live`
-through the supported managed release workflow. Origin services are not created
-or deleted by this profile. Their lifecycle is covered separately by Railway's
-profile. The Cloudflare inventory retains exact account/zone scope and IDs even
-when apply fails or removes local bindings; unresolved creation without a saved
-ID remains a cleanup failure.
 
 The [AWS engine](opentofu-engine-aws.md) and [Azure engine](opentofu-engine-azure.md)
 have implementation notes and recorded live testing-environment evidence, but
@@ -74,7 +65,6 @@ Build and select exactly one profile:
 ```sh
 HYPERVIBE_LIVE_PROFILE=gcp-engine npm run test:providers:fixtures
 HYPERVIBE_LIVE_PROFILE=railway npm run test:providers:fixtures
-HYPERVIBE_LIVE_PROFILE=cloudflare-load-balancer npm run test:providers:fixtures
 ```
 
 Selection is explicit. Missing credentials, repository access, marker, or platform

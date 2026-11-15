@@ -127,7 +127,6 @@ function declaredResources(spec: EnvironmentSpec, environment: string, hasRuntim
   for (const name of Object.keys(spec.queues ?? {})) unsupported('queue', name);
   if (spec.domain) unsupported('domain', 'domain');
   if (spec.domainRegistration) unsupported('domain-registration', 'domain-registration', spec.domainRegistration.provider);
-  if (spec.loadBalancer) unsupported('load-balancer', 'load-balancer', spec.loadBalancer.provider);
   if (spec.email.enabled) unsupported('email', 'email', 'unverified');
   if (spec.payments?.stripe) unsupported('payment', 'payment', 'stripe');
   if (spec.maintenance) unsupported('maintenance', 'maintenance');

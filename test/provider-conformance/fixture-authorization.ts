@@ -70,9 +70,3 @@ export function assertFixtureContinuation(preview: FixturePreview, target: Pick<
     throw new Error('Live continuation requires approval of this fixture’s exact saved preview plan ID. Preview the fixture first.');
   }
 }
-
-export function assertFixtureActionScope(actions: Array<Record<string, any>>, allowedKinds: readonly string[]): void {
-  if (actions.some((action) => action.type !== 'noop' && !allowedKinds.includes(action.resource?.kind))) {
-    throw new Error('The fixture plan would mutate retained test-platform infrastructure or an undeclared resource. Prepare those dependencies separately through Hypervibe.');
-  }
-}

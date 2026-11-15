@@ -7,7 +7,6 @@ import type { IHostingAdapter } from '../ports/hosting.port.js';
 import { supportsDatabaseLifecycle, supportsDatabaseOperations, type IDatabaseAdapter, type IDatabaseOperations } from '../ports/database.port.js';
 import { supportsCacheLifecycle, type ICacheAdapter } from '../ports/cache.port.js';
 import { supportsStorageLifecycle, supportsStorageOperations, type IStorageAdapter, type IStorageOperations } from '../ports/storage.port.js';
-import { supportsLoadBalancer, type ILoadBalancerAdapter } from '../ports/load-balancer.port.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 
@@ -135,21 +134,6 @@ export class AdapterFactory {
     return this.requireLifecyclePort(result, supportsStorageLifecycle, providerName, 'storage');
   }
 
-  async getLoadBalancerAdapter(
-    providerName: string,
-    project?: Project,
-    scopeHints?: string[]
-  ): Promise<AdapterResult<ILoadBalancerAdapter>> {
-    const maturityBlock = this.lifecycleMutationBlock<ILoadBalancerAdapter>(providerName, 'load-balancer');
-    if (maturityBlock) return maturityBlock;
-    const result = await this.getAdapter<ILoadBalancerAdapter>(
-      providerName,
-      undefined,
-      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
-    );
-    return this.requireLifecyclePort(result, supportsLoadBalancer, providerName, 'load-balancer');
-  }
-
   /**
    * Get any provider adapter by name.
    * Generic method that works with any registered provider.
@@ -198,7 +182,7 @@ export class AdapterFactory {
 
   private lifecycleMutationBlock<T>(
     providerName: string,
-    capability: 'hosting' | 'database' | 'cache' | 'storage' | 'load-balancer'
+    capability: 'hosting' | 'database' | 'cache' | 'storage'
   ): AdapterResult<T> | undefined {
     if (!providerRegistry.supports(providerName, capability)) {
       return {
@@ -218,7 +202,7 @@ export class AdapterFactory {
     result: AdapterResult<T>,
     supports: (value: unknown) => value is T,
     providerName: string,
-    capability: 'database' | 'cache' | 'storage' | 'load-balancer'
+    capability: 'database' | 'cache' | 'storage'
   ): AdapterResult<T> {
     if (!result.success || !result.adapter) return result;
     if (supports(result.adapter)) return result;

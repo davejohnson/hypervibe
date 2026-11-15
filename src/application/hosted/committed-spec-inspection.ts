@@ -428,9 +428,6 @@ function environmentProviders(environment: EnvironmentSpec): DeclaredProviderCap
   if (environment.cache) {
     providers.push({ capability: 'cache', provider: environment.cache.provider });
   }
-  if (environment.loadBalancer) {
-    providers.push({ capability: 'load-balancer', provider: environment.loadBalancer.provider });
-  }
   if (environment.domainRegistration) {
     providers.push({ capability: 'domain-registration', provider: environment.domainRegistration.provider });
   }
@@ -452,7 +449,6 @@ function environmentFeatures(environment: EnvironmentSpec): string[] {
   if (environment.cache) features.add('cache');
   if (environment.domain) features.add('custom-domain');
   if (environment.domainRegistration) features.add('domain-registration');
-  if (environment.loadBalancer) features.add('load-balancer');
   if (environment.email.enabled) features.add('email');
   if (Object.keys(environment.webhooks ?? {}).length > 0) features.add('webhooks');
   if (Object.keys(environment.queues ?? {}).length > 0) features.add('queue');
