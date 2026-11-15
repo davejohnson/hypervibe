@@ -8,8 +8,9 @@ import { Connector, GoogleAuth, IpAddressTypes } from '@google-cloud/cloud-sql-c
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
+import { sqlAdmin, waitForSqlOperation } from '../adapters/providers/gcp/gcp-data.client.js';
 import {
-  observeSecret, recordSecretVersionMetadata, sqlAdmin, waitForSqlOperation, writeSecretVersion,
+  observeSecret, recordSecretVersionMetadata, writeSecretVersion,
 } from './infrastructure-engine.js';
 
 /**
