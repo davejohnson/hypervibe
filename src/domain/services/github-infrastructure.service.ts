@@ -38,11 +38,6 @@ import {
   delegatedGitHubSecretsForEnvironment,
   type DelegatedSecretInputRequirement,
 } from './delegated-secret.service.js';
-import {
-  compileGitHubPagesWorkflow,
-  GITHUB_PAGES_WORKFLOW_PATH,
-  planGitHubPages,
-} from './github-pages.service.js';
 
 export const GITHUB_INFRASTRUCTURE_OPERATION = 'githubInfrastructurePullRequest';
 export const GITHUB_INFRASTRUCTURE_BRANCH = 'hypervibe/github-infrastructure';
@@ -1230,18 +1225,6 @@ export function compileManagedGitHubFiles(
       automationReview(id, automation)
     ));
   }
-  if (github.pages?.enabled) {
-    files.push(managedFile(
-      GITHUB_PAGES_WORKFLOW_PATH,
-      compileGitHubPagesWorkflow(github.pages),
-      {
-        title: 'GitHub Pages deployment',
-        summary: `Publishes ${github.pages.sourcePath} to GitHub Pages from ${github.pages.branch}.`,
-        details: ['Uploads a static artifact and deploys it through GitHub’s supported Pages Actions workflow.'],
-        mergeEffect: 'The workflow can publish only after this pull request is reviewed and merged.',
-      }
-    ));
-  }
   const dependabot = dependabotContent(github);
   if (dependabot) {
     files.push(managedFile(
@@ -1309,19 +1292,6 @@ export function githubCanonicalEnvironment(spec: ProjectSpec): string | undefine
 
 export function shouldPlanGitHubInfrastructure(spec: ProjectSpec, environmentName: string): boolean {
   return Boolean(spec.github && spec.github.enabled !== false && githubCanonicalEnvironment(spec) === environmentName);
-}
-
-/** An explicit Pages DNS selection can use the existing repository workflow. */
-export function isRepositoryDnsEnvironment(spec: ProjectSpec, environmentName: string): boolean {
-  const environment = spec.environments[environmentName];
-  if (!environment?.dns || !spec.github?.pages?.customDomain || !shouldPlanGitHubInfrastructure(spec, environmentName)) return false;
-  return !environment.domain && Object.keys(environment.services).length === 0
-    && !environment.email.enabled && Object.keys(environment.envVars).length === 0
-    && !environment.removeEnvVars?.length && !environment.envFile && !environment.deploy && !environment.migrations
-    && !environment.database && !environment.cache && !environment.loadBalancer
-    && Object.keys(environment.storage ?? {}).length === 0 && Object.keys(environment.queues ?? {}).length === 0
-    && !environment.backups && !environment.dataMigration && !environment.maintenance && !environment.payments
-    && !environment.ios && !environment.api && !environment.webhooks && !environment.domainRegistration;
 }
 
 export function shouldPlanGitHubDelegatedSecrets(spec: ProjectSpec, environmentName: string): boolean {
@@ -1995,18 +1965,6 @@ export async function planGitHubInfrastructure(params: {
       : action
   )));
   warnings.push(...delegatedSecrets.warnings);
-
-  if (drift.length === 0) {
-    const pages = await planGitHubPages({
-      spec: params.spec,
-      repository,
-      adapter: adapterResult.adapter,
-      environment,
-    });
-    actions.push(...pages.actions);
-    warnings.push(...pages.warnings);
-    blocked.push(...pages.blocked);
-  }
 
   // AI-backed automations read OPENAI_API_KEY like any other user-supplied
   // API key: a delegated project secret delivered to GitHub Actions.

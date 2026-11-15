@@ -6,12 +6,6 @@ import {
   GITHUB_INFRASTRUCTURE_ACTION_ID,
   GITHUB_INFRASTRUCTURE_OPERATION,
 } from '../../domain/services/github-infrastructure.service.js';
-import {
-  GITHUB_PAGES_ACTION_ID,
-  GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
-  GITHUB_PAGES_DNS_OPERATION,
-  GITHUB_PAGES_OPERATION,
-} from '../../domain/services/github-pages.service.js';
 import { IOS_OPERATIONS } from '../../domain/services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS } from '../../domain/services/queue-plan.service.js';
 import { STORAGE_OPERATIONS } from '../../domain/services/storage-plan.service.js';
@@ -31,7 +25,6 @@ import {
   GITHUB_ACTIONS_ROLLBACK_OPERATION,
 } from '../../domain/services/ci-rollback.contract.js';
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
-import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
 import { MAINTENANCE_OPERATIONS } from '../../domain/services/maintenance-plan.service.js';
 import { DOMAIN_DETACH_OPERATION } from '../../domain/services/domain-attach-policy.js';
 import {
@@ -203,52 +196,6 @@ const authorized: AuthorizedCase[] = [
       metadata: { repository: 'owner/repo' },
     }),
   },
-  {
-    label: 'GitHub Pages',
-    capability: 'github.pages.sync',
-    action: action({
-      id: GITHUB_PAGES_ACTION_ID,
-      type: 'create',
-      kind: 'repo',
-      name: 'owner/repo',
-      provider: 'github',
-      operation: GITHUB_PAGES_OPERATION,
-      metadata: { repository: 'owner/repo', enabled: true },
-    }),
-  },
-  {
-    label: 'GitHub Pages DNS',
-    capability: 'github.pages-dns.sync',
-    action: action({
-      id: 'domain:example.com:github-pages-dns',
-      type: 'update',
-      kind: 'domain',
-      name: 'example.com',
-      provider: 'cloudflare',
-      operation: GITHUB_PAGES_DNS_OPERATION,
-      metadata: { repository: 'owner/repo', enabled: true, desiredRecords: [] },
-    }),
-  },
-  {
-    label: 'GitHub Pages local binding cleanup',
-    capability: 'github.pages-binding.cleanup',
-    action: action({
-      id: GITHUB_PAGES_ACTION_ID,
-      type: 'update',
-      kind: 'repo',
-      name: 'owner/repo',
-      provider: 'github',
-      operation: GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
-      metadata: {
-        repository: 'owner/repo',
-        observedCertificateAttempt: {
-          domain: 'example.com',
-          attemptedAt: '2026-08-08T00:00:00.000Z',
-          mode: 'reattach',
-        },
-      },
-    }),
-  },
   ...[
     ['githubSecuritySettings', 'repo:github-security-settings'],
     ['githubCodeScanning', 'repo:github-code-scanning'],
@@ -398,62 +345,6 @@ const authorized: AuthorizedCase[] = [
       },
     }),
   })),
-  ...Object.values(LOAD_BALANCER_OPERATIONS).map((operation): AuthorizedCase => {
-    const monitor = operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
-      || operation === LOAD_BALANCER_OPERATIONS.monitorDestroy;
-    const pool = operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-      || operation === LOAD_BALANCER_OPERATIONS.poolDestroy;
-    const destroy = operation === LOAD_BALANCER_OPERATIONS.destroy
-      || operation === LOAD_BALANCER_OPERATIONS.poolDestroy
-      || operation === LOAD_BALANCER_OPERATIONS.monitorDestroy;
-    const id = operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
-      ? 'load-balancer:monitor'
-      : operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-        ? 'load-balancer:pool'
-        : operation === LOAD_BALANCER_OPERATIONS.ensure
-          ? 'load-balancer:app.example.com'
-          : operation === LOAD_BALANCER_OPERATIONS.destroy
-            ? 'load-balancer:app.example.com:destroy'
-            : operation === LOAD_BALANCER_OPERATIONS.poolDestroy
-              ? 'load-balancer:pool:destroy'
-              : 'load-balancer:monitor:destroy';
-    return {
-      label: operation,
-      capability: monitor
-        ? 'load-balancer.monitor.mutate'
-        : pool
-          ? 'load-balancer.pool.mutate'
-          : 'load-balancer.mutate',
-      action: action({
-        id,
-        type: destroy ? 'destroy' : 'create',
-        kind: 'load-balancer',
-        name: 'app.example.com',
-        provider: 'cloudflare',
-        operation,
-        billable: operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-          || operation === LOAD_BALANCER_OPERATIONS.ensure,
-        metadata: {
-          hostname: 'app.example.com',
-          accountId: 'account-1',
-          zoneId: 'zone-1',
-          configHash: 'config-hash',
-          ...(!destroy && monitor ? { externalName: 'monitor-name' } : {}),
-          ...(!destroy && pool ? {
-            externalName: 'pool-name',
-            services: ['web-a', 'web-b'],
-            origins: [
-              { name: 'web-a', address: 'a.example', hostHeader: 'a.example', enabled: true },
-              { name: 'web-b', address: 'b.example', hostHeader: 'b.example', enabled: true },
-            ],
-            originsHash: 'a'.repeat(64),
-          } : {}),
-          ...(!destroy && !monitor && !pool ? { services: ['web-a', 'web-b'] } : {}),
-          ...(destroy ? { externalId: 'external-1' } : {}),
-        },
-      }),
-    };
-  }),
   {
     label: 'delegated secret sync',
     capability: 'hosting.delegated-secret.sync',
@@ -960,7 +851,6 @@ describe('plan action mutation-authority contract', () => {
   it.each([
     ['queue metadata name', authorized.find((entry) => entry.label === QUEUE_OPERATIONS.ensure)!.action, { queueName: 'other' }],
     ['storage metadata name', authorized.find((entry) => entry.label === STORAGE_OPERATIONS.ensure)!.action, { storageName: 'other' }],
-    ['load-balancer hostname', authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action, { hostname: 'other.example.com' }],
     ['GitHub repository', authorized.find((entry) => entry.label === 'GitHub infrastructure')!.action, { repository: 'other/repo' }],
     ['Stripe service', authorized.find((entry) => entry.label === 'Stripe hosting env sync')!.action, { service: 'worker' }],
     ['iOS bundle id', authorized.find((entry) => entry.label === IOS_OPERATIONS.bundleIdRegister)!.action, { bundleId: 'com.other.app' }],
@@ -978,11 +868,6 @@ describe('plan action mutation-authority contract', () => {
       expect(resolvePlanActionAuthority({ ...candidate, type: invalidType })).toBeNull();
     }
   );
-
-  it('rejects a load-balancer operation under a different action id', () => {
-    const candidate = authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action;
-    expect(resolvePlanActionAuthority({ ...candidate, id: 'load-balancer:other.example.com' })).toBeNull();
-  });
 
   it.each([
     { generator: undefined },
@@ -1251,14 +1136,6 @@ describe('plan action mutation-authority contract', () => {
     const candidate = authorized.find((entry) => entry.label === MAINTENANCE_OPERATIONS.edgeEnable)!.action;
     expect(resolvePlanActionAuthority({ ...candidate, billable: undefined })).toBeNull();
     expect(resolvePlanActionAuthority({ ...candidate, requiresConfirm: undefined })).toBeNull();
-  });
-
-  it.each([
-    LOAD_BALANCER_OPERATIONS.poolEnsure,
-    LOAD_BALANCER_OPERATIONS.ensure,
-  ])('rejects billable load-balancer mutation with a stripped billing flag for %s', (label) => {
-    const candidate = authorized.find((entry) => entry.label === label)!.action;
-    expect(resolvePlanActionAuthority({ ...candidate, billable: undefined })).toBeNull();
   });
 
   it('rejects private GitHub code scanning when billing confirmation is stripped', () => {

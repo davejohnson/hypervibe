@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import '../../../application/providers.js';
-import { CloudflareAdapter } from '../cloudflare/cloudflare.adapter.js';
 import { CloudRunAdapter } from '../gcp/cloudrun.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
-import { supportsLoadBalancer } from '../../../domain/ports/load-balancer.port.js';
 import { supportsManagedQueues } from '../../../domain/ports/queue.port.js';
 import { supportsStorageLifecycle, supportsStorageOperations } from '../../../domain/ports/storage.port.js';
 import { supportsCacheLifecycle } from '../../../domain/ports/cache.port.js';
@@ -21,13 +19,6 @@ describe('production infrastructure capability truth', () => {
     expect(providerRegistry.getMetadata('railway')?.lifecycle?.queue).toEqual({ backend: 'postgres', resources: 'application-managed' });
     expect(supportsManagedQueues(new RailwayAdapter())).toBe(false);
     expect(supportsManagedQueues(new CloudRunAdapter())).toBe(false);
-  });
-
-  it('advertises load balancing only when the provider implements the full port', () => {
-    expect(providerRegistry.namesFor('load-balancer')).toEqual(['cloudflare']);
-    expect(providerRegistry.namesForMutation('load-balancer')).toEqual(['cloudflare']);
-    expect(supportsLoadBalancer(new CloudflareAdapter())).toBe(true);
-    expect(providerRegistry.getMetadata('cloudflare')?.lifecycle?.loadBalancer).toEqual({ topology: 'monitor-pool-balancer', minimumOrigins: 2 });
   });
 
   it('keeps cloud object operations separate from resource lifecycle admission', () => {

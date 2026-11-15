@@ -9,8 +9,6 @@ export const liveFixtureProfiles = [
     capabilities: ['engine:cloudrun'], release: 'local-commit', nativeResources: ['google_cloud_run_v2_service', 'google_cloud_run_v2_service_iam_member'] },
   { id: 'railway', provider: 'railway', path: 'managed-workflow', runner: 'test/provider-conformance/provider-managed-workflow.live.test.ts',
     capabilities: ['hosting:railway', 'database:railway', 'cache:railway', 'storage:railway', 'queue:railway'], release: 'managed-ci', nativeResources: ['services', 'volumes', 'buckets'] },
-  { id: 'cloudflare-load-balancer', provider: 'cloudflare', path: 'infrastructure', runner: 'test/provider-conformance/provider-infrastructure.live.test.ts',
-    capabilities: ['load-balancer:cloudflare'], release: 'managed-origins', nativeResources: ['load-balancer', 'pool', 'monitor'] },
 ] as const;
 
 export function liveFixtureCoverage(): Array<{ capability: string; status: string; profile?: string }> {

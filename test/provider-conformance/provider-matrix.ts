@@ -117,18 +117,6 @@ export interface QueueProviderContract {
   implementationNote?: string;
 }
 
-export interface LoadBalancerProviderContract {
-  kind: 'load-balancer';
-  provider: string;
-  vendor: string;
-  service: string;
-  status: ProviderImplementationStatus;
-  credentials: ProviderCredentialField[];
-  topology: 'monitor-pool-balancer';
-  minimumOrigins: number;
-  implementationNote?: string;
-}
-
 const gcpCredentials: ProviderCredentialField[] = [
   { field: 'projectId', environmentVariable: 'HYPERVIBE_TEST_GCP_PROJECT_ID' },
   { field: 'credentials', environmentVariable: 'HYPERVIBE_TEST_GCP_SERVICE_ACCOUNT_JSON' },
@@ -352,25 +340,10 @@ export const queueProviderContracts: QueueProviderContract[] = [
   },
 ];
 
-export const loadBalancerProviderContracts: LoadBalancerProviderContract[] = [
-  {
-    kind: 'load-balancer',
-    provider: 'cloudflare',
-    vendor: 'Cloudflare',
-    service: 'Cloudflare Load Balancing',
-    status: 'ready-for-live',
-    credentials: cloudflareCredentials,
-    topology: 'monitor-pool-balancer',
-    minimumOrigins: 2,
-    implementationNote: 'Separate monitor, pool, and hostname load-balancer actions, scoped observation, dependency-ordered reconciliation, and confirmed reverse teardown are implemented; promotion requires the review-gated live profile.',
-  },
-];
-
 export const providerContracts = [
   ...hostingProviderContracts,
   ...databaseProviderContracts,
   ...cacheProviderContracts,
   ...storageProviderContracts,
   ...queueProviderContracts,
-  ...loadBalancerProviderContracts,
 ];

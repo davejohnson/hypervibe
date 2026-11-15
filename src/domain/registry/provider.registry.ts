@@ -15,8 +15,7 @@ export type ProviderLifecycleCapability =
   | 'cache'
   | 'storage'
   | 'queue'
-  | 'dns'
-  | 'load-balancer';
+  | 'dns';
 export type ProviderImplementationStatus = 'supported' | 'ready-for-live' | 'planned';
 
 export interface ProviderLiveEvidence {
@@ -269,11 +268,6 @@ export interface ProviderMetadata {
       /** Whether the provider owns external queue resources or only wiring. */
       resources: 'managed' | 'application-managed';
     };
-    /** Provider-managed edge load-balancer topology exposed by its adapter. */
-    loadBalancer?: {
-      topology: 'monitor-pool-balancer';
-      minimumOrigins: number;
-    };
     /**
      * Complete daily policy observation/configuration ports implemented by the adapter.
      * Omitted flags mean unimplemented Hypervibe capability, not missing native backups.
@@ -503,9 +497,6 @@ export class ProviderRegistry {
     }
     if (provider.metadata.lifecycle?.queue) {
       capabilities.push('queue');
-    }
-    if (provider.metadata.lifecycle?.loadBalancer) {
-      capabilities.push('load-balancer');
     }
     return capabilities;
   }
@@ -827,10 +818,10 @@ export class ProviderRegistry {
       return provider.metadata.category === 'storage'
         || typeof provider.derivedAdapters?.storage === 'function';
     }
-    if (capability === 'queue') {
-      return provider.metadata.lifecycle?.queue !== undefined;
+    if (capability === 'dns') {
+      return provider.metadata.lifecycle?.dns !== undefined;
     }
-    return provider.metadata.lifecycle?.loadBalancer !== undefined;
+    return provider.metadata.lifecycle?.queue !== undefined;
   }
 
   namesFor(capability: ProviderLifecycleCapability): string[] {

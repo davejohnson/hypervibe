@@ -32,22 +32,10 @@ describe('DNS desired state at the environment boundary', () => {
     expect(environmentSpecSchema.safeParse({ ...environment, dns }).success).toBe(false);
   });
 
-  it('allows a DNS fragment without borrowing a hosting hostname and validates the consumer at project level', () => {
+  it('allows a DNS fragment alone but requires a domain at project level', () => {
     const selected = { hosting: { provider: 'cloudrun' }, dns: cloudflare };
     expect(environmentSpecSchema.safeParse(selected).success).toBe(true);
-    expect(projectSpecSchema.safeParse({ version: 1, project: 'pages', environments: { repository: selected } }).success).toBe(false);
-    expect(projectSpecSchema.safeParse({ version: 1, project: 'pages', github: {
-      repository: 'owner/pages', canonicalEnvironment: 'repository', pages: { sourcePath: 'public', customDomain: 'example.com' },
-    }, environments: { repository: selected } }).success).toBe(true);
-  });
-
-  it('rejects a Pages consumer outside the selected DNS zone or canonical environment', () => {
-    const selected = { hosting: { provider: 'cloudrun' }, dns: cloudflare };
-    const source = { version: 1, project: 'pages', github: { repository: 'owner/pages', canonicalEnvironment: 'repository',
-      pages: { sourcePath: 'public', customDomain: 'other.example.net' } }, environments: { repository: selected } };
-    expect(projectSpecSchema.safeParse(source).success).toBe(false);
-    expect(projectSpecSchema.safeParse({ ...source, github: { ...source.github, canonicalEnvironment: 'different',
-      pages: { ...source.github.pages, customDomain: 'example.com' } } }).success).toBe(false);
+    expect(projectSpecSchema.safeParse({ version: 1, project: 'dns-only', environments: { repository: selected } }).success).toBe(false);
   });
 
   it('rejects contradictory legacy and explicit proxy intent', () => {

@@ -50,7 +50,7 @@ function storageSpec(provider: string) {
   });
 }
 
-function infrastructureSpec(params: { hosting: string; loadBalancer?: string; queues?: boolean }) {
+function infrastructureSpec(params: { hosting: string; queues?: boolean }) {
   return projectSpecSchema.parse({
     version: 1,
     project: 'provider-infrastructure-contract',
@@ -65,15 +65,6 @@ function infrastructureSpec(params: { hosting: string; loadBalancer?: string; qu
           ? { database: { provider: 'railway' } }
           : {}),
         ...(params.queues ? { queues: { jobs: {} } } : {}),
-        ...(params.loadBalancer
-          ? {
-              domain: 'api.example.com',
-              loadBalancer: {
-                provider: params.loadBalancer,
-                services: ['api', 'fallback'],
-              },
-            }
-          : {}),
       },
     },
   });
@@ -263,20 +254,6 @@ describe('validateProjectSpecProviders', () => {
     expect(validateProjectSpecProviders(managedPubSub)).toEqual([]);
   });
 
-  it('validates provider-managed load-balancer lifecycle independently of hosting', () => {
-    expect(validateProjectSpecProviders(infrastructureSpec({
-      hosting: 'railway',
-      loadBalancer: 'cloudflare',
-    }))).toEqual([]);
-    expect(validateProjectSpecProviders(infrastructureSpec({
-      hosting: 'railway',
-      loadBalancer: 'missing-edge',
-    }))).toContainEqual(expect.objectContaining({
-      field: 'loadBalancer.provider',
-      provider: 'missing-edge',
-      capability: 'load-balancer',
-    }));
-  });
 
 
 });
