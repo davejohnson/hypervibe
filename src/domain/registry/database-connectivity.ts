@@ -6,6 +6,6 @@
 export const nativeDatabaseConnectivity = {
   railway: { compatibleHostingProviders: ['railway'] },
   cloudsql: { compatibleHostingProviders: ['cloudrun'] },
-  rds: { compatibleHostingProviders: ['ecs'] },
-  'azure-postgres': { compatibleHostingProviders: ['azure-container-apps'] },
+  rds: { compatibleHostingProviders: ['aws'] },
+  'azure-postgres': { compatibleHostingProviders: ['azure'] },
 };

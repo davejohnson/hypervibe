@@ -111,8 +111,6 @@ describe('provider conformance matrix', () => {
     )).toEqual({
       railway: ['web', 'worker', 'cron'],
       cloudrun: [],
-      ecs: [],
-      'azure-container-apps': [],
     });
   });
 
@@ -229,13 +227,13 @@ describe('provider conformance matrix', () => {
     expect(rds).toMatchObject({
       status: 'planned',
       engine: 'postgres',
-      fixtureHostingProvider: 'ecs',
+      fixtureHostingProvider: 'aws',
     });
     expect(rds?.credentials.map((credential) => credential.field)).toEqual([
       'accessKeyId',
       'secretAccessKey',
     ]);
-    expect(providerRegistry.connectionProviders('rds')).toEqual(['rds', 'ecs']);
+    expect(providerRegistry.connectionProviders('rds')).toEqual(['rds']);
     expect(providerRegistry.getMetadata('rds')?.lifecycle?.databaseConnectivity)
       .toBeUndefined();
   });
@@ -266,8 +264,6 @@ describe('provider conformance matrix', () => {
     expect(providerRegistry.supports('render', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
-    expect(providerRegistry.supports('ecs', 'hosting')).toBe(false);
-    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(false);
     expect(providerRegistry.supports('fly', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(false);
   });
@@ -372,6 +368,8 @@ describe('provider conformance matrix', () => {
   it('names a hosting fixture for every live datastore contract', () => {
     const hostingIds = new Set(hostingProviderContracts.map((entry) => entry.provider));
     for (const entry of [...databaseProviderContracts, ...cacheProviderContracts]) {
+      // Planned datastores are built by the OpenTofu engines, whose hosting is not in this legacy matrix.
+      if (entry.status === 'planned') continue;
       expect(hostingIds.has(entry.fixtureHostingProvider)).toBe(true);
     }
   });
