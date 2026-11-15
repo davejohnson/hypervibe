@@ -79,6 +79,32 @@ describe('engine hv_plan command boundaries', () => {
     expect(f.scoped).not.toHaveBeenCalled();
   });
 
+  // Contract: unsupported desired state fails explicitly before any effect
+  // (ARCHITECTURE.md, Provider Boundary). The real engine planner runs; only the
+  // network is forbidden, so a missing admission check would surface as a
+  // connection blocker instead of naming the field.
+  it.each([
+    ['backups', { backups: { mode: 'daily' } }],
+    ['email', { email: { enabled: true } }],
+    ['webhooks', { webhooks: { twilio: { vendor: 'twilio', service: 'web', path: '/webhooks/twilio' } } }],
+    ['deploy.promoteFrom', { deploy: { strategy: 'branch', trigger: 'ci', autoDeploy: false, promoteFrom: 'source' } }],
+    ['database.seedCommand', { database: { engine: 'postgres', provider: 'rds', seedCommand: 'npm run seed' } }],
+  ] as const)('blocks AWS infrastructure planning that declares unsupported %s', async (field, extra) => {
+    const f = fixture('aws');
+    f.infrastructure.mockRestore();
+    // The unsupported field is set on the parsed spec: admission, not schema shape, is under test.
+    const spec = projectSpecSchema.parse({ version: 1, project: f.project.name, environments: {
+      testing: { hosting: { provider: 'aws', engine: 'opentofu' }, services: { web: {} } },
+      source: { hosting: { provider: 'aws', engine: 'opentofu' }, services: { web: {} }, deploy: { strategy: 'branch', trigger: 'ci' } },
+    } });
+    Object.assign(spec.environments.testing!, extra);
+    new ProjectSpecRepository().insert(f.project.id, 2, spec);
+    const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'testing', scope: 'infrastructure' });
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).toContain(`${field} is not yet`);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('does not apply Cloud Run-only scope guards to AWS', async () => {
     const f = fixture('aws');
     const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'backups' });
