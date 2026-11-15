@@ -364,6 +364,17 @@ which may only shrink:
 - An exported function is not defined in two files. Shared engine helpers live in
   `src/application/engine-shared.ts`.
 
+### Hosted consumer
+
+Hypercloud, the hosted view that runs continuous health and CI checks, consumes
+this package. It imports `@hypervibe/hypervibe/hosted` in production and a few
+built modules by path in its tests (`dist/application/cloud-request-client.js`,
+`cloud-pairing.js`, `cloud-connections.js`, `cloud-secret-import.js` and
+`dist/utils/env-parser.js`). The boundary test pins those paths and exports.
+Anything Hypercloud needs at runtime belongs in `src/hosted.ts`: keep it free of
+side effects and of local state, and coordinate a breaking change with that
+repository.
+
 ## New Provider Checklist
 
 Prove one integrated path first: clean installation, authorized connection,

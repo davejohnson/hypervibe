@@ -147,4 +147,19 @@ describe('architecture boundaries', () => {
     const run = () => execFileSync(process.execPath, [path.join(root, 'node_modules', 'jscpd', 'bin', 'jscpd')], { cwd: root, encoding: 'utf8', stdio: 'pipe' });
     expect(run, 'Duplicated code exceeds the ceiling. Run `npm run check:duplication` and reuse the existing code').not.toThrow();
   }, 120_000);
+
+  // Hypercloud (the hosted view of Hypervibe) imports `@hypervibe/hypervibe/hosted`
+  // and, in its tests, these built modules by path. Moving or renaming one breaks
+  // it on its next upgrade, so a move must be coordinated with that repository.
+  it.each([
+    ['src/hosted.ts', 'inspectCommittedProjectSpecV1'],
+    ['src/application/cloud-request-client.ts', 'createCloudRequestClient'],
+    ['src/application/cloud-pairing.ts', 'createHypervibeCloudPairingClient'],
+    ['src/application/cloud-connections.ts', 'createCloudConnections'],
+    ['src/application/cloud-secret-import.ts', 'createCloudSecretImport'],
+    ['src/utils/env-parser.ts', 'parseEnvContent'],
+  ])('keeps %s exporting %s for Hypercloud', (file, name) => {
+    const source = readFileSync(path.join(root, file), 'utf8');
+    expect(new RegExp(`export (async )?(function|const|class) ${name}\\b|^\\s*${name},?$|\\b${name}\\b[^;]*\\} from`, 'm').test(source), `${file} must export ${name}`).toBe(true);
+  });
 });
