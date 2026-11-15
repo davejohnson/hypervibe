@@ -28,8 +28,8 @@ volumes exist only on Railway and are not offered on the cloud engines.
 ## Capabilities by destination
 
 `yes` means the planner admits it. `blocked` means the planner refuses it with an
-explicit message. `unchecked` means the engine planner neither builds nor refuses
-it, which is a defect tracked in #633.
+explicit message. Capabilities no engine builds yet are refused by one shared list,
+`commonEngineProblems`, so a new engine cannot silently drop them.
 
 | Capability | GCP | AWS | Azure |
 | --- | --- | --- | --- |
@@ -42,20 +42,20 @@ it, which is a defect tracked in #633.
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |
 | Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
-| Buying a domain | blocked (#627) | unchecked | unchecked |
+| Buying a domain | blocked (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
 | Migrations as a release step | yes (`releaseCommand` mode) | blocked at release | blocked at release |
-| Daily backups, restore drills | blocked (#253) | unchecked | unchecked |
-| Promotion and promotion tests | blocked (#252) | unchecked | unchecked |
-| Email, webhooks, iOS releases | blocked (#626) | unchecked | unchecked |
-| Database resilience, seed command, credential aliases | blocked | unchecked | unchecked |
+| Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
+| Promotion and promotion tests | blocked (#252) | blocked (#252) | blocked (#252) |
+| Email, webhooks, iOS releases | blocked (#626) | blocked (#626) | blocked (#626) |
+| Database resilience, seed command, credential aliases | blocked | blocked | blocked |
 | Spend alerts | not built (#629) | not built (#629) | not built (#629) |
 
 ## Rules for changing this page
 
 - A capability moves to `yes` only with its admission check, a boundary
   regression and, for a support claim to users, recorded live evidence.
-- Unsupported desired state must be refused before any effect. `unchecked` is
-  never an acceptable resting state for a new capability.
+- Unsupported desired state must be refused before any effect. A capability that
+  is neither built nor refused is a defect.
 - Build a capability once behind a cloud-neutral interface; each destination
   implements it or is listed here as `blocked`.
