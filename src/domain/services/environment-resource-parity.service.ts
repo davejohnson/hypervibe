@@ -24,9 +24,6 @@ function resources(environment: EnvironmentSpec): Map<string, unknown> {
   }
   for (const [name, queue] of Object.entries(environment.queues ?? {})) result.set(`queue:${name}`, queue);
   if (environment.domain) result.set('custom-domain', true);
-  if (environment.loadBalancer) result.set('load-balancer', {
-    provider: environment.loadBalancer.provider, services: [...environment.loadBalancer.services].sort(),
-  });
   if (environment.email.enabled) {
     result.set('email', true);
     for (const kind of ['inbound', 'deliveryEvents', 'forwarding'] as const) {

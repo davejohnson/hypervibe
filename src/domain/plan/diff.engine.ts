@@ -1491,7 +1491,7 @@ export function diffEnvironment(input: {
 
   // ---- domain ---------------------------------------------------------------
   const boundDomainDns = local.bindings?.domainDns;
-  if (spec.domain && !spec.loadBalancer) {
+  if (spec.domain) {
     const id = `domain:${spec.domain}`;
     const attachedServices = observed
       ? observed.services.filter((service) => service.customDomains.includes(spec.domain!))
@@ -1617,7 +1617,7 @@ export function diffEnvironment(input: {
           : {}),
       },
     });
-  } else if (!spec.domain && !spec.loadBalancer && boundDomainDns?.name) {
+  } else if (!spec.domain && boundDomainDns?.name) {
     const domain = boundDomainDns.name;
     const id = `domain:${domain}`;
     const attachedService = observed && serviceObservationKnown

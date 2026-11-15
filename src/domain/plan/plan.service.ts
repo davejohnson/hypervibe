@@ -134,10 +134,6 @@ import {
   isProviderNativeDeploySourceAction,
   planProviderNativeDeploySources,
 } from '../services/provider-native-deploy-source.service.js';
-import {
-  LOAD_BALANCER_OPERATIONS,
-  planLoadBalancer,
-} from '../services/load-balancer-plan.service.js';
 import { planDataMigration } from '../services/data-migration-plan.service.js';
 import { planMaintenance } from '../services/maintenance-plan.service.js';
 import {
@@ -891,7 +887,6 @@ export class PlanService {
     if (environmentSpec.database) required.push({ provider: environmentSpec.database.provider });
     if (environmentSpec.cache) required.push({ provider: environmentSpec.cache.provider });
     for (const storage of Object.values(environmentSpec.storage ?? {})) required.push({ provider: storage.provider });
-    if (environmentSpec.loadBalancer) required.push({ provider: environmentSpec.loadBalancer.provider });
     if (environmentSpec.domain) {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
@@ -2554,65 +2549,6 @@ export class PlanService {
       if (firstServiceIndex === -1) actions.push(...followupActions);
       else actions.splice(firstServiceIndex, 0, ...followupActions);
     }
-    const loadBalancer = serviceFilter
-      ? { actions: [], warnings: [], unmanaged: [] }
-      : await planLoadBalancer({
-        project: projectForPlan,
-        environmentName,
-        environmentSpec,
-        environment,
-        observed,
-        serviceActions: actions.filter((action) => action.resource.kind === 'service'),
-      });
-    actions.push(...loadBalancer.actions);
-    if (domainRegistration.action) {
-      const publicLoadBalancer = actions.find((action) =>
-        action.metadata?.operation === LOAD_BALANCER_OPERATIONS.ensure
-      );
-      if (publicLoadBalancer && publicLoadBalancer.type !== 'noop') {
-        publicLoadBalancer.dependsOn = Array.from(new Set([
-          ...(publicLoadBalancer.dependsOn ?? []),
-          domainRegistration.action.id,
-        ]));
-      }
-    }
-    if (!environmentSpec.loadBalancer) {
-      const publicDestroy = actions.find((action) =>
-        action.metadata?.operation === LOAD_BALANCER_OPERATIONS.destroy
-      );
-      const domainAction = environmentSpec.domain
-        ? actions.find((action) => action.id === `domain:${environmentSpec.domain}`)
-        : undefined;
-      if (publicDestroy && domainAction && domainAction.type !== 'noop') {
-        domainAction.dependsOn = Array.from(new Set([
-          ...(domainAction.dependsOn ?? []),
-          publicDestroy.id,
-        ]));
-      }
-    }
-    const providerEnvironmentAction = actions.find((action) =>
-      action.id === environmentActionId
-      && action.metadata?.operation === HOSTING_ENVIRONMENT_ENSURE_OPERATION
-      && action.type !== 'noop'
-    );
-    if (providerEnvironmentAction) {
-      for (const action of actions) {
-        if (
-          action.id === providerEnvironmentAction.id
-          || action.type === 'noop'
-          || action.type === 'destroy'
-          || action.resource.provider !== environmentSpec.hosting.provider
-          || action.resource.kind === 'project'
-          || action.resource.kind === 'environment'
-        ) {
-          continue;
-        }
-        action.dependsOn = Array.from(new Set([
-          ...(action.dependsOn ?? []),
-          providerEnvironmentAction.id,
-        ]));
-      }
-    }
     for (const managedSecretAction of delegatedSecrets.actions) {
       if (managedSecretAction.type === 'noop') continue;
       const serviceNames = Array.isArray(managedSecretAction.metadata?.services)
@@ -2705,7 +2641,7 @@ export class PlanService {
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
         && action.metadata?.operation !== DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
-        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email']
+        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
       : [];
@@ -3337,8 +3273,8 @@ export class PlanService {
         : {}),
       ...(Object.keys(integrationFingerprints).length > 0 ? { integrationFingerprints } : {}),
       actions,
-      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...filterWarnings],
+      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...filterWarnings],
       ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
       ...(planOverrides ? { overrides: planOverrides } : {}),
     };
