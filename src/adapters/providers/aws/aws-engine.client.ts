@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { CloudWatchLogsClient, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { DeleteTaskDefinitionsCommand, DeregisterTaskDefinitionCommand, ECSClient, ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
 import { IAMClient, ListRolesCommand } from '@aws-sdk/client-iam';
-import { DeleteDBClusterSnapshotCommand, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand, RDSClient } from '@aws-sdk/client-rds';
+import { DeleteDBClusterSnapshotCommand, DescribeDBClusterSnapshotsCommand, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand, RDSClient } from '@aws-sdk/client-rds';
 import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
 import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
@@ -43,6 +43,20 @@ export async function tlsRequiredByDefault(access: AwsAccess, major: string): Pr
     marker = page.EngineDefaults?.Marker;
   } while (marker);
   return undefined;
+}
+
+/** Whether a manual cluster snapshot with this name exists; AWS reuses no names, so a teardown's final snapshot needs it free. */
+export async function clusterSnapshotState(access: AwsAccess, identifier: string): Promise<{ state: 'present'; createdAt?: string } | { state: 'absent' } | { state: 'unknown'; error: string }> {
+  const rds = new RDSClient({ region: access.region, credentials: access.credentials });
+  try {
+    const found = await rds.send(new DescribeDBClusterSnapshotsCommand({ DBClusterSnapshotIdentifier: identifier }));
+    const snapshot = found.DBClusterSnapshots?.find((entry) => entry.DBClusterSnapshotIdentifier === identifier);
+    if (!snapshot) return { state: 'unknown', error: `AWS returned no snapshot ${identifier} and no not-found error.` };
+    return { state: 'present', ...(snapshot.SnapshotCreateTime ? { createdAt: snapshot.SnapshotCreateTime.toISOString() } : {}) };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'DBClusterSnapshotNotFoundFault') return { state: 'absent' };
+    return { state: 'unknown', error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function deleteFinalSnapshot(access: AwsAccess, identifier: string): Promise<ActionResult> {
