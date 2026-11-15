@@ -88,8 +88,10 @@ export interface GcpCloudRunServiceInput {
   pendingWorkQuery?: string;
   minInstances?: number;
   maxInstances?: number;
-  command?: string[];
-  args?: string[];
+  /** web: keep one instance running with CPU available between requests. */
+  alwaysOn?: boolean;
+  /** web/worker: shell command that starts the service, replacing the image's own. */
+  startCommand?: string;
   /** Non-secret runtime configuration only. */
   env?: Record<string, string>;
   /** Runtime secrets wired by reference through Secret Manager. */
@@ -177,7 +179,14 @@ export interface GcpStorageInput {
    * Hypervibe-owned secret referenced by services; only non-secret settings live here.
    */
   s3?: { wired: boolean };
+  /** Keep replaced and deleted objects for 30 days. */
+  versioning?: boolean;
+  /** Allow browsers to send files straight to the bucket with a one-time upload address. */
+  browserUploads?: boolean;
 }
+
+/** How long a replaced or deleted object stays recoverable in a versioned bucket. */
+export const STORAGE_VERSION_RETENTION_DAYS = 30;
 
 /** Variables S3-SDK apps read, pointed at Cloud Storage's S3-compatible endpoint. */
 export const S3_COMPATIBLE_SECRET_KEYS = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const;
@@ -313,12 +322,12 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
   }
   const container: Record<string, unknown> = {
     image: service.initialImage,
-    ...(service.command ? { command: service.command } : {}),
-    ...(service.args ? { args: service.args } : {}),
+    ...(service.startCommand?.trim() ? { command: ['/bin/sh'], args: ['-lc', service.startCommand.trim()] } : {}),
     ...(isWorker ? {} : { ports: [{ container_port: service.port ?? 8080 }] }),
     resources: [{
       limits: { cpu: service.cpu ?? '1', memory: service.memory ?? '512Mi' },
-      cpu_idle: !isWorker,
+      // CPU is released between requests unless the service must keep working in the background.
+      cpu_idle: !isWorker && !service.alwaysOn,
     }],
     ...(env.length ? { env } : {}),
     ...(wired ? { volume_mounts: [{ name: 'cloudsql', mount_path: '/cloudsql' }] } : {}),
@@ -337,7 +346,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
     template: [{
       service_account: service.runtimeServiceAccountEmail,
       scaling: [{
-        min_instance_count: service.minInstances ?? (isWorker ? 1 : 0),
+        min_instance_count: service.minInstances ?? (isWorker || service.alwaysOn ? 1 : 0),
         ...(service.maxInstances !== undefined ? { max_instance_count: service.maxInstances } : {}),
       }],
       containers: [container],
@@ -651,6 +660,17 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       public_access_prevention: 'enforced',
       // Never delete objects implicitly: a non-empty bucket blocks deletion until the user empties it.
       force_destroy: false,
+      ...(bucket.versioning ? {
+        versioning: [{ enabled: true }],
+        lifecycle_rule: [{ action: [{ type: 'Delete' }], condition: [{ days_since_noncurrent_time: STORAGE_VERSION_RETENTION_DAYS, with_state: 'ARCHIVED' }] }],
+      } : {}),
+      // Any origin may attempt an upload, but the bucket is private: a request succeeds only with
+      // the one-time upload address (or signature) the app issued. CORS here is not access control.
+      ...(bucket.browserUploads ? { cors: [{
+        origin: ['*'], method: ['GET', 'HEAD', 'PUT', 'POST'],
+        response_header: ['Content-Type', 'Content-Range', 'Range', 'ETag', 'Location', 'x-goog-resumable'],
+        max_age_seconds: 3600,
+      }] } : {}),
       labels: { 'managed-by': 'hypervibe', 'hv-storage': bucket.name, ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
     };
     bucketIam[`${key}_runtime`] = {
