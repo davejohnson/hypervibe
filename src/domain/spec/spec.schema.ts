@@ -82,6 +82,13 @@ export const serviceSpecSchema = z.object({
   /** Memory per instance, for example "512Mi" or "1Gi". */
   memory: z.string().regex(/^[1-9]\d*(Mi|Gi)$/, 'Use a memory size such as "512Mi" or "1Gi".').optional(),
   /**
+   * Web services: keep one instance running with its CPU available between
+   * requests, for apps that work in the background of the web process or must
+   * never start cold. Costs a full instance around the clock. Background
+   * workers are already always on unless onDemand is set.
+   */
+  alwaysOn: z.boolean().optional(),
+  /**
    * Run a background worker only while it has work: it scales to zero when
    * idle and starts within about a minute of new work. pendingWorkQuery is one
    * read-only SELECT against the app database that returns a single count of
@@ -111,6 +118,13 @@ export const serviceSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'cron services require cronSchedule',
       path: ['cronSchedule'],
+    });
+  }
+  if (service.alwaysOn && service.workloadKind !== 'web') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'alwaysOn applies only to web services; background workers are always on unless onDemand is set',
+      path: ['alwaysOn'],
     });
   }
   if (service.onDemand && service.workloadKind !== 'worker') {
@@ -262,6 +276,16 @@ export const databaseSpecSchema = z.object({
   passwordGeneration: z.number().int().positive().optional(),
   /** OpenTofu-managed databases: PostgreSQL major version (default 16). Never lower than a migration source. */
   version: z.number().int().min(13).max(18).optional(),
+  /**
+   * Dedicated capacity: small (1 vCPU), medium (2) or large (4). Omitted, production
+   * and staging get small and other environments the cheapest shared instance.
+   */
+  size: z.enum(['small', 'medium', 'large']).optional(),
+  /**
+   * Refuse to delete the database until this is turned off in its own reviewed
+   * change. On by default for production and staging.
+   */
+  deletionProtection: z.boolean().optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
@@ -1143,6 +1167,14 @@ export const storageSpecSchema = z.object({
   purpose: z.literal('backup').optional(),
   /** "s3": also give services S3-compatible variables (AWS_*), for apps written against S3 APIs. */
   access: z.enum(['native', 's3']).optional(),
+  /** Keep replaced and deleted files recoverable for 30 days. */
+  versioning: z.boolean().optional(),
+  /**
+   * Let browsers send files straight to the bucket with a one-time upload address
+   * the app hands out, instead of through the app (which caps request size).
+   * The bucket stays private: every request still needs that address.
+   */
+  browserUploads: z.boolean().optional(),
 }).strict().superRefine((storage, ctx) => {
   if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
     path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });

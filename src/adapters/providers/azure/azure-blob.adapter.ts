@@ -588,7 +588,7 @@ providerRegistry.register({
     },
     maturity: {
       lifecycle: {
-        storage: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
+        storage: { status: 'planned', reason: 'The OpenTofu engine manages this resource lifecycle; this adapter provides connections and existing-resource operations only.' },
       },
     },
   },

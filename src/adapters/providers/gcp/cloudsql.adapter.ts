@@ -998,7 +998,7 @@ providerRegistry.register({
       lifecycle: {
         database: {
           status: 'planned',
-          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+          reason: 'The OpenTofu engine manages infrastructure. Authentication and operational tools remain available.',
         },
       },
     },

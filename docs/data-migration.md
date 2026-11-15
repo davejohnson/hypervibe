@@ -204,7 +204,6 @@ Workload suspension is currently:
 | Railway | Removes the exact active deployment, preserves replicas/sleep/cron settings, and redeploys it on exit. This does not prove application jobs or uploads finished gracefully. |
 | GCP Cloud Run | Sets manual service scaling to zero, pauses scheduler jobs, waits for current native job executions to finish, and restores the exact prior scaling/schedule state. |
 | Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
-| AWS ECS Express | Unsupported; plans fail closed. |
 
 This matrix is deliberate. A provider is not marked supported until Hypervibe
 can stop background work and direct origins, retain exact restoration state,

@@ -81,28 +81,9 @@ ownership evidence, not manual removal of the marker and blind retry.
 | Host | Filesystem path and initial constraints |
 | --- | --- |
 | Railway | Native volume; web only, known single-instance configuration. Capacity follows account defaults. |
-| Azure Container Apps | Dedicated Standard_LRS StorageV2 account, classic SMB share with 5 GiB quota, environment registration and app attachment; web only. |
-| ECS Express | Encrypted regional EFS, access point, dedicated network permissions and task-definition attachment; web only; metered storage/throughput/transfer. |
-| Cloud Run | Dedicated VPC/subnet and BASIC_HDD Filestore, **1024 GiB minimum provisioned capacity**, then NFS attachment; web/worker. |
 
-Cloud Run's selected `<region>-a` zone must be independently observed as UP in
-the configured region before Filestore creation. Conflicting existing VPC/cache
-placement blocks rather than silently moving the workload. Cache removal must
-not remove networking still used by the filesystem. NFS on Cloud Run has no
-locking support; application UID/share permissions require separate validation.
-The provisioned-capacity cost is not equivalent to a small local disk. See
-[NFS mounts](https://docs.cloud.google.com/run/docs/configuring/services/nfs-volume-mounts)
-and [Filestore tiers](https://docs.cloud.google.com/filestore/docs/service-tiers).
-
-Azure account keys stay inside the provider boundary when registering the share;
-they are never binding fields. ECS retains the workload identity and uses a
-custom task definition rather than mixing it with Express `primaryContainer`
-inputs. Non-idempotent task registration uses one SDK attempt; an ambiguous
-response retains recovery intent. EFS denies insecure/wrong-access-point/root
-access but does not claim exclusivity against every other same-account IAM
-grant. A prepared task revision blocks attachment if the runtime changed in
-the meantime. Azure refreshes the app template before attachment, but does not
-claim atomic optimistic concurrency. Neither provider substitutes a bucket.
+Filesystem volumes exist only on Railway. The cloud engines do not offer them;
+see the [support matrix](development/support-matrix.md).
 
 Railway documents one volume per service, no replicas, and redeployment downtime
 for volume-backed services. Default capacity depends on the account plan; this

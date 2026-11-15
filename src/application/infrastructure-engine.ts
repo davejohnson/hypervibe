@@ -1,5 +1,6 @@
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
@@ -287,6 +288,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
+        ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
+        ...(workload !== 'job' && service.startCommand ? { startCommand: service.startCommand } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -700,6 +703,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ?? lastAttemptedDatabaseInstance(context.environment.id)
     ?? `hv-${environmentName}-db-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const databaseSecretId = engineSecretId(environmentName, ENGINE_DATABASE_URL_KEY);
+  const databaseShape = databaseSpec ? gcpDatabaseShape(environmentName, databaseSpec) : undefined;
+  if (!databaseSpec && engineBinding.database) {
+    const name = engineBinding.database.instanceName;
+    const blocker = await databaseRemovalBlocker(name, () => sqlAdmin(token, context.gcpProjectId, `instances/${name}`));
+    if (blocker) return { blocked: [blocker] };
+  }
   let databaseCredential: DatabaseCredentialObservation = { ready: false, generation: 0 };
   if (databaseSpec) {
     const observed = await observeDatabaseCredential(token, context.gcpProjectId, databaseSecretId, instanceName, labels['hv-environment']);
@@ -866,7 +875,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
-    ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady,
+    ...(databaseSpec && databaseShape ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady,
+      tier: databaseShape.tier, deletionProtection: databaseShape.deletionProtection,
+      retainedBackups: databaseShape.retainedBackups, transactionLogDays: databaseShape.transactionLogDays,
       ...(databaseSpec.version ? { majorVersion: databaseSpec.version } : {}) } } : {}),
     ...(!databaseSpec && engineBinding.database ? { retiredDatabase: true } : {}),
     ...(cacheSpec ? { cache: {
@@ -887,6 +898,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
       ...(storage.access === 's3' ? { s3: { wired: s3Ready.includes(name) } } : {}),
+      ...(storage.versioning ? { versioning: true } : {}),
+      ...(storage.browserUploads ? { browserUploads: true } : {}),
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
@@ -996,6 +1009,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
+    ...(databaseShape && databaseAction && databaseAction.type !== 'noop' ? [databaseShape.summary] : []),
     ...(cacheSpec && !cacheReady && anyService
       ? ['Services are connected to Redis in the next infrastructure plan, once Hypervibe has published its URL.'] : []),
     ...(databaseSpec && !databaseCredentialReady && anyService

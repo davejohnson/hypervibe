@@ -1,4 +1,4 @@
-import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
+import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
@@ -42,12 +42,8 @@ export const AWS_SNAPSHOT_DELETE_OPERATION = 'awsSnapshotDelete';
 export const AWS_IMAGE_BUILD_OPERATION = 'awsImageBuild';
 export const AWS_DATABASE_DROP_OPERATION = 'awsDatabaseDrop';
 
-export type AwsProfile = 'production' | 'testing';
-
-/** production and staging share one shape; everything else is a cheap testing environment. */
-export function awsProfileFor(environmentName: string): AwsProfile {
-  return /prod|stag/i.test(environmentName) ? 'production' : 'testing';
-}
+export type AwsProfile = EnvironmentProfile;
+export const awsProfileFor = environmentProfile;
 
 export interface AwsEngineBinding {
   kind?: 'opentofu';
