@@ -85,6 +85,22 @@ describe.skipIf(process.platform === 'win32')('SecretStore local key security', 
   });
 });
 
+describe('SecretStore stored ciphertext compatibility', () => {
+  it('decrypts sodium-native 4 ciphertext and rejects a modified ciphertext', () => {
+    process.env.HYPERVIBE_SECRET_KEY = '42'.repeat(32);
+    // Generated with sodium-native 4.3.3, this synthetic key and a 24-byte
+    // 0x24 nonce. Persisted values must survive the native-library upgrade.
+    const encrypted = 'JCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkLx8LZfou4JQceoU9hfNQsCGMo0Wlt8p002B+4YfQyZHWKASlwzQQbImqjUw=';
+    const store = getSecretStore();
+
+    expect(store.decrypt(encrypted)).toBe('saved before sodium-native 5');
+
+    const modified = Buffer.from(encrypted, 'base64');
+    modified[modified.length - 1] ^= 1;
+    expect(() => store.decrypt(modified.toString('base64'))).toThrow(/authentication failed/);
+  });
+});
+
 describe('SecretStore deterministic secret derivation', () => {
   it('matches the pinned version-one derivation vector', () => {
     process.env.HYPERVIBE_SECRET_KEY = '00'.repeat(32);
