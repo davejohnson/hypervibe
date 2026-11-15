@@ -1,9 +1,6 @@
 import crypto from 'crypto';
-import http from 'http';
-import type { AddressInfo } from 'net';
-import { contextRows, type ConnectContext } from './local-connect-page.js';
-import { escapeHtml, openInBrowser, pageShell } from './local-paste-page.js';
-import { requestingAgent, servingMcpClient } from './requesting-agent.js';
+import { browserSignIn, type BrowserSignInResult, type BrowserSignInReview, type BrowserSignInState } from './browser-sign-in.js';
+import type { ConnectContext } from './local-connect-page.js';
 
 /**
  * Hypervibe's own Azure browser sign-in (no Azure CLI): the OAuth 2.0
@@ -30,13 +27,9 @@ export interface AzureSignInSession {
   expiresAt: string;
 }
 
-export type AzureSignInResult =
-  | { status: 'signed_in'; session: AzureSignInSession; /** Set when the person approved the review on the page. */ applied?: { ok: boolean; message: string } }
-  | { status: 'waiting'; url: string; message: string }
-  | { status: 'failed'; message: string };
+export type AzureSignInResult = BrowserSignInResult<AzureSignInSession>;
 
 type Fetch = typeof fetch;
-const base64url = (value: Buffer) => value.toString('base64url');
 
 export function azureAuthorizeUrl(params: { redirectUri: string; state: string; challenge: string }): string {
   return `${AUTHORITY}/organizations/oauth2/v2.0/authorize?${new URLSearchParams({
@@ -109,21 +102,14 @@ export async function azureTokenFor(session: AzureSignInSession, params: { tenan
 }
 
 /** What the person approves on the page right after signing in, so setup needs one sign-in and one click. */
-export interface AzureSignInReview {
-  titleHtml: string;
-  leadHtml: string;
-  items: string[];
-  approveLabel: string;
-  apply: () => Promise<{ ok: boolean; message: string }>;
-}
+export type AzureSignInReview = BrowserSignInReview;
 
-let current: AzureSignInSession | undefined;
-let pending: { url: string; result: Promise<AzureSignInResult> } | undefined;
+const held: BrowserSignInState<AzureSignInSession> = {};
 
 /** Forgets the in-memory sign-in (tests, or after setup finished). */
 export function resetAzureSignIn(): void {
-  current = undefined;
-  pending = undefined;
+  held.current = undefined;
+  held.pending = undefined;
 }
 
 /**
@@ -138,102 +124,22 @@ export async function signInToAzure(params: {
   review?: (session: AzureSignInSession) => Promise<AzureSignInReview | undefined>;
   fetchImpl?: Fetch;
 }): Promise<AzureSignInResult> {
-  if (current && Date.parse(current.expiresAt) - Date.now() > 5 * 60_000) return { status: 'signed_in', session: current };
-  if (!pending) {
-    const nonce = crypto.randomBytes(24).toString('base64url');
-    const state = crypto.randomBytes(24).toString('base64url');
-    const verifier = base64url(crypto.randomBytes(48));
-    const challenge = base64url(crypto.createHash('sha256').update(verifier).digest());
-    const context: ConnectContext = { agent: requestingAgent(), ...params.context };
-    let settle!: (result: AzureSignInResult) => void;
-    const result = new Promise<AzureSignInResult>((done) => { settle = done; });
-    let finished: AzureSignInResult | undefined;
-    let review: AzureSignInReview | undefined;
-    let applying = false;
-    const close = (outcome: AzureSignInResult) => { settle(outcome); setTimeout(() => { server.close(); pending = undefined; }, 2000).unref(); };
-    const server = http.createServer(async (request, response) => {
-      const port = (server.address() as AddressInfo).port;
-      // Entra registers the Azure CLI's redirect as http://localhost (any port), so the callback arrives on that host.
-      const origins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
-      const url = new URL(request.url ?? '/', `http://127.0.0.1:${port}`);
-      const approving = request.method === 'POST' && url.pathname === `/approve/${nonce}`;
-      if (!origins.includes(`http://${request.headers.host ?? ''}`) || (request.method !== 'GET' && !approving)) { response.writeHead(request.method === 'GET' ? 421 : 405).end(); return; }
-      const redirectUri = `http://localhost:${port}`;
-      const scriptNonce = crypto.randomBytes(16).toString('base64');
-      const page = (status: number, body: string) => response.writeHead(status, {
-        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; base-uri 'none'; form-action 'self'`, 'Referrer-Policy': 'no-referrer',
-      }).end(pageShell({ tabTitle: 'Sign in to Azure', body, agent: context.agent, storedWhere: 'Used once to set up Hypervibe\'s own limited access, kept in memory only and never saved', checkedAgainst: 'Microsoft', scriptNonce }));
-      const authorize = azureAuthorizeUrl({ redirectUri, state, challenge });
-      if (url.pathname === `/start/${nonce}`) { response.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' }).end(); return; }
-      if (url.pathname === `/connect/${nonce}`) {
-        page(200, finished?.status === 'signed_in'
-          ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>Signed in to Azure</h1><p class="muted">You can close this tab; ${escapeHtml(context.agent)} continues from here.</p></section>`
-          : `<p class="eyebrow">Connect Azure</p><h1>Sign in to your Azure account</h1>
-<p class="lead">${escapeHtml(context.agent)} needs one sign-in to ${escapeHtml(context.purpose ?? 'set up Hypervibe on your Azure subscription')}. Hypervibe then creates its own limited access and does not use this sign-in again.</p>
-<dl class="context">${contextRows(context).map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>
-<p><a class="button" href="/start/${nonce}">Sign in with Microsoft ↗</a></p>
-<p class="muted small">Opens Microsoft's own sign-in page (login.microsoftonline.com). Use the account that owns the subscription your app should run in. Microsoft names the app "Microsoft Azure CLI"; Hypervibe uses that sign-in so you have nothing to install.</p>`);
-        return;
-      }
-      if (approving) {
-        const sameOrigin = origins.includes(request.headers.origin ?? '')
-          || ((request.headers.origin === undefined || request.headers.origin === 'null') && request.headers['sec-fetch-site'] === 'same-origin');
-        let raw = '';
-        for await (const chunk of request) { raw += String(chunk); if (raw.length > 4096) break; }
-        if (!sameOrigin || new URLSearchParams(raw).get('nonce') !== nonce || !review || !current || applying) { response.writeHead(403).end(); return; }
-        applying = true;
-        const applied = await review.apply().catch((error: unknown) => ({ ok: false, message: error instanceof Error ? error.message : 'Setup failed.' }));
-        page(applied.ok ? 200 : 502, applied.ok
-          ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>Done</h1><p>${escapeHtml(applied.message)}</p><p class="muted">You can close this tab; ${escapeHtml(context.agent)} continues from here.</p></section>`
-          : `<h1>Setup did not finish</h1><p>${escapeHtml(applied.message)}</p><p class="muted">${escapeHtml(context.agent)} has the details and can run it again; what was created is reused.</p>`);
-        close({ status: 'signed_in', session: current, applied });
-        return;
-      }
-      if (url.pathname === '/' && !finished && (url.searchParams.has('code') || url.searchParams.has('error'))) {
-        const entraError = url.searchParams.get('error');
-        if (entraError || url.searchParams.get('state') !== state || !url.searchParams.get('code')) {
-          const reason = entraError
-            ? `Microsoft said: ${entraError}${url.searchParams.get('error_description') ? ` (${url.searchParams.get('error_description')!.split(/\r?\n/)[0]})` : ''}`
-            : url.searchParams.get('state') !== state ? 'This sign-in came from an older Hypervibe page.' : 'Microsoft did not send a sign-in code.';
-          process.stderr.write(`azure sign-in callback rejected: ${entraError ?? (url.searchParams.get('state') !== state ? 'state mismatch' : 'no code')}\n`);
-          page(400, `<h1>Azure sign-in did not finish</h1><p>${escapeHtml(reason)}</p><p><a class="button" href="/start/${nonce}">Try again</a></p>`);
-          return;
-        }
-        try {
-          current = await exchangeAzureCode({ code: url.searchParams.get('code')!, verifier, redirectUri }, params.fetchImpl);
-          finished = { status: 'signed_in', session: current };
-          review = params.review ? await params.review(current).catch((error: unknown) => {
-            process.stderr.write(`azure setup preview failed: ${error instanceof Error ? error.message : String(error)}\n`);
-            return undefined;
-          }) : undefined;
-          if (review) {
-            page(200, `<p class="eyebrow">Signed in to Azure · ${escapeHtml(current.username)}</p><h1>${review.titleHtml}</h1><p class="lead">${review.leadHtml}</p>
-<ol class="review">${review.items.map((item) => `<li>${item}</li>`).join('')}</ol>
-<form method="post" action="/approve/${nonce}"><input type="hidden" name="nonce" value="${nonce}"><button type="submit" data-busy="Setting up… this takes about a minute">${escapeHtml(review.approveLabel)}</button></form>
-<p class="muted small">Not right? Close this tab; nothing is changed until you approve.</p>`);
-            return;
-          }
-          page(200, `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>Signed in to Azure</h1><p>${escapeHtml(current.username)}</p><p class="muted">You can close this tab; ${escapeHtml(context.agent)} continues from here.</p></section>`);
-        } catch (error) {
-          // The code is single-use; leave the page open so the person can sign in again.
-          const message = error instanceof Error ? error.message : 'Azure sign-in failed.';
-          process.stderr.write(`azure sign-in token exchange failed: ${message}\n`);
-          page(502, `<h1>Azure sign-in did not finish</h1><p>${escapeHtml(message)}</p><p><a class="button" href="/start/${nonce}">Try again</a></p>`);
-          return;
-        }
-        close(finished);
-        return;
-      }
-      response.writeHead(404).end();
-    });
-    await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
-    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/connect/${nonce}`;
-    // Unapproved after sign-in: report the session so the agent can ask in chat instead.
-    setTimeout(() => { if (!finished || (review && !applying)) { server.close(); pending = undefined; settle(finished ?? { status: 'failed', message: 'The Azure sign-in page expired.' }); } }, 30 * 60 * 1000).unref();
-    pending = { url, result };
-    (params.openBrowser ?? openInBrowser)(url);
-  }
-  const waited = await Promise.race([pending.result, new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 30 * 60 * 1000)).unref())]);
-  return waited ?? { status: 'waiting', url: pending.url, message: `An Azure sign-in page is open in your browser (${pending.url}). Sign in there, then ${requestingAgent()} continues.` };
+  return browserSignIn<AzureSignInSession>({
+    cloud: 'Azure', identityProvider: 'Microsoft', logName: 'azure', reuseMarginMs: 5 * 60_000,
+    newState: () => crypto.randomBytes(24).toString('base64url'),
+    // Entra registers the Azure CLI's redirect as http://localhost (any port), so the callback arrives on that host.
+    origins: (port) => [`http://127.0.0.1:${port}`, `http://localhost:${port}`],
+    redirectUri: (port) => `http://localhost:${port}`,
+    authorizeUrl: azureAuthorizeUrl,
+    isCallback: (url) => url.pathname === '/' && (url.searchParams.has('code') || url.searchParams.has('error')),
+    exchange: (exchange) => exchangeAzureCode(exchange, params.fetchImpl),
+    defaultPurpose: 'set up Hypervibe on your Azure subscription',
+    signInLink: 'start', retryLink: 'start',
+    connectNotesHtml: '<p class="muted small">Opens Microsoft\'s own sign-in page (login.microsoftonline.com). Use the account that owns the subscription your app should run in. Microsoft names the app "Microsoft Azure CLI"; Hypervibe uses that sign-in so you have nothing to install.</p>',
+    errorDescription: (description) => description.split(/\r?\n/)[0]!,
+    sessionLabel: (session) => session.username,
+    sessionSummary: (session) => session.username,
+    logReviewFailure: true,
+  }, held, { ...(params.context ? { context: params.context } : {}), ...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
+    ...(params.openBrowser ? { openBrowser: params.openBrowser } : {}), ...(params.review ? { review: params.review } : {}) });
 }
