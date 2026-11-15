@@ -1,10 +1,4 @@
-import { execFile } from 'child_process';
-import crypto from 'crypto';
-import { promisify } from 'util';
-import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import type { Project } from '../domain/entities/project.entity.js';
-import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -12,9 +6,9 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { ARM, AZURE_SCOPES, azureError, azureRest, type AzureTokens } from './azure-ops.js';
 import type { CommandContext } from './context.js';
 import { AZURE_IMAGE_REPOSITORY, azureBinding, azureResourceName, resolveAzureEngineContext, type AzureEngineContext } from './infrastructure-engine-azure.js';
-import { ENGINE_PLAN_SCOPE, ENGINE_RELEASE_OPERATION, releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
+import { packageLocalCommit, runLocalCommitRelease, selectReleaseWorkloads, type LocalCommitSource } from './engine-release.js';
+import { releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
 
-const execFileAsync = promisify(execFile);
 const AZURE_DOCKERFILE = '.hypervibe-azure.Dockerfile';
 const TASKS_API = 'api-version=2019-06-01-preview';
 const APPS_API = 'api-version=2024-03-01';
@@ -30,23 +24,11 @@ export function azureReleaseDockerfile(params: { repositoryDockerfile?: string; 
     .replace(/^RUN --mount=type=secret,id=npm_token,required=false if \[ -f \/run\/secrets\/npm_token \]; then [^;]+; fi; (.+)$/m, 'RUN $1');
 }
 
-interface Source { commitSha: string; archive: Buffer; uncommittedChangesExcluded: boolean }
+type Source = LocalCommitSource;
 
 /** The exact commit as a tar.gz (ACR Tasks' source format), with the Dockerfile Hypervibe builds. */
-export async function azureLocalSource(directory: string, dockerfileFor: (repositoryDockerfile?: string) => string, commitSha?: string): Promise<Source | { blocked: string }> {
-  try {
-    const git = async (args: string[]) => String((await execFileAsync('git', ['-C', directory, ...args])).stdout);
-    const sha = commitSha ?? (await git(['rev-parse', 'HEAD'])).trim();
-    if (!/^[0-9a-f]{40}$/.test(sha)) return { blocked: 'The local repository has no commit to release.' };
-    let repositoryDockerfile: string | undefined;
-    try { repositoryDockerfile = await git(['show', `${sha}:Dockerfile`]); } catch { /* no repository Dockerfile */ }
-    const archive = (await execFileAsync('git', ['-C', directory, 'archive', '--format=tar.gz', `--add-virtual-file=${AZURE_DOCKERFILE}:${dockerfileFor(repositoryDockerfile)}`, sha],
-      { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 })).stdout as Buffer;
-    const dirty = (await git(['status', '--porcelain', '--untracked-files=no'])).trim().length > 0;
-    return { commitSha: sha, archive, uncommittedChangesExcluded: dirty };
-  } catch (error) {
-    return { blocked: `Hypervibe could not package this repository: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}` };
-  }
+export function azureLocalSource(directory: string, dockerfileFor: (repositoryDockerfile?: string) => string, commitSha?: string): Promise<Source | { blocked: string }> {
+  return packageLocalCommit(directory, { format: 'tar.gz', dockerfileName: AZURE_DOCKERFILE, dockerfileFor, ...(commitSha ? { commitSha } : {}) });
 }
 
 /**
@@ -198,11 +180,9 @@ export async function releaseAzureEngineServices(ctx: CommandContext, params: {
   if (!params.sourceDirectory) return { blocked: 'Azure releases build from this project\'s local git repository; run Hypervibe from the repository.' };
   const context = await resolveAzureEngineContext(ctx, params.project, params.environmentName);
   if ('blocked' in context) return context;
-  const selected = params.services?.length ? params.services : Object.keys(environmentSpec.services);
-  const unknownNames = selected.filter((name) => !environmentSpec.services[name]);
-  if (unknownNames.length) return { blocked: `${unknownNames.join(', ')} is not a service in this environment.` };
-  const web = selected.find((name) => (environmentSpec.services[name]!.workloadKind ?? 'web') === 'web');
-  const startCommand = environmentSpec.services[web ?? selected[0]!]?.startCommand;
+  const workloads = selectReleaseWorkloads(environmentSpec, params.services);
+  if ('blocked' in workloads) return workloads;
+  const { selected, startCommand } = workloads;
   const source = await azureLocalSource(params.sourceDirectory, (repositoryDockerfile) => azureReleaseDockerfile({
     ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(params.spec.runtime ? { runtime: params.spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
   }));
@@ -216,68 +196,16 @@ export async function releaseAzureEngineServices(ctx: CommandContext, params: {
     if (probe.status === 404) firstImage = true;
     else if (probe.status !== 200) return { blocked: `Hypervibe could not read ${selected[0]} on Azure (${azureError(probe)}); try again.` };
   }
-  const provider = 'azure';
-  const actions: PlanAction[] = [
-    { id: 'build:image', type: 'update', verified: true, resource: { kind: 'service', name: 'image', provider },
-      reason: `Build commit ${source.commitSha.slice(0, 12)} with ACR Tasks.`, metadata: { operation: ENGINE_RELEASE_OPERATION, workloadKind: 'build' } },
-    ...(firstImage ? [] : selected.map((name): PlanAction => ({
-      id: `release:${name}`, type: 'update', verified: true, dependsOn: ['build:image'], resource: { kind: 'service', name, provider },
-      reason: `Release commit ${source.commitSha.slice(0, 12)} to ${name}; only the running image changes.`,
-      metadata: { operation: ENGINE_RELEASE_OPERATION, resource: idOf(name), workloadKind: environmentSpec.services[name]!.workloadKind ?? 'web' },
-    }))),
-  ];
-  const runRepo = new RunRepository();
-  const planRun = runRepo.create({ projectId: params.project.id, environmentId: context.environment.id, type: 'plan', plan: {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName: params.environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings: [], engine: { planId: `release-${crypto.randomUUID()}`, release: true },
-  } as unknown as Record<string, unknown> });
-  runRepo.updateStatus(planRun.id, 'succeeded');
-
-  const results: EngineReleaseResult[] = [];
-  let image: string | undefined;
-  const execution = await new ConvergeExecutor().execute({
-    planRunId: planRun.id, currentSpecRevision: params.specRevision,
-    handler: async (action) => {
-      try {
-        if (action.id === 'build:image') {
-          const built = await buildWithAcrTasks(context.tokens, { registryId: context.shared.registryId, loginServer: context.shared.registryLoginServer, source });
-          if ('error' in built) {
-            results.push({ service: 'image', status: built.unknown ? 'unknown' : 'failed', message: built.error, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}) });
-            return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
-          }
-          image = built.image;
-          // Recorded before any workload switches, so the engine creates new workloads from this image.
-          const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-          ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBinding(current), kind: 'opentofu', image, imageCommit: source.commitSha } });
-          if (firstImage) {
-            results.push({ service: 'image', status: 'released', imageUri: image, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}),
-              message: 'Built the first image. Run hv_plan scope="infrastructure" and hv_apply to create the workloads from it.' });
-          }
-          return { success: true, message: `Built ${image}.`, data: { imageUri: image } };
-        }
-        const name = action.resource.name;
-        const kind = String(action.metadata?.workloadKind);
-        const id = String(action.metadata?.resource);
-        const result = kind === 'cron'
-          ? await releaseAzureJob(context.tokens, { id, name, image: image! })
-          : await releaseAzureApp(context.tokens, { id, name, image: image!, web: kind === 'web', ...(environmentSpec.services[name]!.healthCheckPath ? { healthCheckPath: environmentSpec.services[name]!.healthCheckPath } : {}) });
-        results.push(result);
-        const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}) };
-        if (result.status === 'released') return { success: true, message: result.message, data };
-        return { success: false, ...(result.status === 'unknown' ? { status: 'pending' as const } : {}), message: result.message, error: result.message, data };
-      } catch (error) {
-        const message = `Azure rejected the release step: ${error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error)}`;
-        results.push({ service: action.resource.name, status: 'unknown', message });
-        return { success: false, status: 'pending', message, error: message };
-      }
+  return runLocalCommitRelease(params, source, selected, {
+    cloudName: 'Azure', provider: 'azure', environmentId: context.environment.id, buildPhrase: 'with ACR Tasks', firstImage, createdNoun: 'workloads',
+    resourceOf: idOf,
+    build: (packaged) => buildWithAcrTasks(context.tokens, { registryId: context.shared.registryId, loginServer: context.shared.registryLoginServer, source: packaged }),
+    recordImage: (image, packaged) => {
+      const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+      ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBinding(current), kind: 'opentofu', image, imageCommit: packaged.commitSha } });
     },
+    releaseWorkload: ({ name, kind, resource, image }) => kind === 'cron'
+      ? releaseAzureJob(context.tokens, { id: resource, name, image })
+      : releaseAzureApp(context.tokens, { id: resource, name, image, web: kind === 'web', ...(environmentSpec.services[name]!.healthCheckPath ? { healthCheckPath: environmentSpec.services[name]!.healthCheckPath } : {}) }),
   });
-  if (!execution.applyRunId) return { blocked: execution.error ?? 'The release could not start.' };
-  for (const name of firstImage ? ['image'] : selected) {
-    if (!results.some((result) => result.service === name)) {
-      results.push({ service: name, status: 'failed', message: `${name} was not released because an earlier step did not finish. ${execution.error ?? ''}`.trim() });
-    }
-  }
-  return { results, applyRunId: execution.applyRunId,
-    source: { kind: 'local-commit', revision: source.commitSha, commitSha: source.commitSha, ...(source.uncommittedChangesExcluded ? { uncommittedChangesExcluded: true } : {}) } };
 }
