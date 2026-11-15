@@ -1115,6 +1115,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
       // status reports what only live observation shows, starting with background workers.
       if (envSpec && isEngineManaged(envSpec) && !repositoryDnsOnly) {
+        const cloud = envSpec.hosting.provider === 'aws' ? 'AWS' : envSpec.hosting.provider === 'azure' ? 'Azure' : undefined;
+        if (cloud) {
+          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: 'not read' }, {
+            warnings: [`hv_status does not read live worker state on ${cloud} yet.`],
+            hint: 'Run hv_health for the web service and hv_plan scope="infrastructure" for drift.',
+            next: ['hv_health', 'hv_plan'],
+          });
+        }
         const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
         if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
         const ages = await secretAges(ctx, project, specResult.spec, envName);
