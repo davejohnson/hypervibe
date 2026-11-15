@@ -153,3 +153,14 @@ export const ENGINE_ACTION_TYPE: Record<Exclude<EngineChangeAction, 'read'>, Pla
   noop: 'noop',
   import: 'update',
 };
+
+/** The outcome of releasing code to one service: released, failed, or unknown and safe to check again. */
+export interface EngineReleaseResult {
+  service: string;
+  status: 'released' | 'failed' | 'unknown';
+  imageUri?: string;
+  url?: string;
+  health?: { status: number; path: string };
+  message: string;
+  buildLogsUrl?: string;
+}

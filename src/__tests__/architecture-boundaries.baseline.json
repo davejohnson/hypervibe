@@ -187,11 +187,6 @@
   ],
   "cloud-sdk-outside-adapters": [
     "src/application/aws-setup.ts -> @aws-sdk/client-iam",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-codebuild",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-ecr",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-ecs",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-lambda",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-s3",
     "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-cloudwatch-logs",
     "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-ecs",
     "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-iam",

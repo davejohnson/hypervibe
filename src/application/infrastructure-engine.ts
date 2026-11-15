@@ -30,7 +30,8 @@ import {
   gcpEngineBackend,
   type GcpCloudRunEngineInput,
 } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
-import type { EngineAuthentication, EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
+import type { EngineAuthentication, EngineReleaseResult, EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
+export type { EngineReleaseResult } from '../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -1391,16 +1392,6 @@ async function recordServiceBindings(
 }
 
 // ---------------------------------------------------------------- Release (image only)
-
-export interface EngineReleaseResult {
-  service: string;
-  status: 'released' | 'failed' | 'unknown';
-  imageUri?: string;
-  url?: string;
-  health?: { status: number; path: string };
-  message: string;
-  buildLogsUrl?: string;
-}
 
 /**
  * Releases application code to engine-managed services. Builds an immutable
