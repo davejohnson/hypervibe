@@ -289,7 +289,6 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
         ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
-        ...(workload !== 'job' && service.startCommand ? { startCommand: service.startCommand } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -1567,7 +1566,9 @@ async function releaseOne(
   const serviceSpec = spec.environments[environmentName]!.services[name]!;
   const build = await buildServiceImage(context, project, spec, environmentName, name, source, builtImages);
   if (!build.success) return { service: name, status: 'failed', message: build.error, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}) };
-  const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri, kind);
+  // Scheduled jobs keep their command in infrastructure; services and workers get theirs with the image.
+  const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri, kind,
+    kind === 'jobs' ? undefined : { startCommand: serviceSpec.startCommand });
   const result: EngineReleaseResult = { service: name, imageUri: build.imageUri, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}), ...released };
   if (released.status === 'released' && released.url && serviceSpec.workloadKind !== 'worker') {
     const path = serviceSpec.healthCheckPath ?? '/';

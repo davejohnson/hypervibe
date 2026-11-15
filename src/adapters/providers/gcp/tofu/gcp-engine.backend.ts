@@ -90,8 +90,6 @@ export interface GcpCloudRunServiceInput {
   maxInstances?: number;
   /** web: keep one instance running with CPU available between requests. */
   alwaysOn?: boolean;
-  /** web/worker: shell command that starts the service, replacing the image's own. */
-  startCommand?: string;
   /** Non-secret runtime configuration only. */
   env?: Record<string, string>;
   /** Runtime secrets wired by reference through Secret Manager. */
@@ -327,7 +325,6 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
   }
   const container: Record<string, unknown> = {
     image: service.initialImage,
-    ...(service.startCommand?.trim() ? { command: ['/bin/sh'], args: ['-lc', service.startCommand.trim()] } : {}),
     ...(isWorker ? {} : { ports: [{ container_port: service.port ?? 8080 }] }),
     resources: [{
       limits: { cpu: service.cpu ?? '1', memory: service.memory ?? '512Mi' },
@@ -363,11 +360,12 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
       }] } : {}),
     }],
     lifecycle: [{
-      // Narrow release ownership: only the running image (and the client
-      // markers gcloud/CI stamp on deploy) belong to the release writer.
-      // Every other template field remains engine-managed, so infrastructure
-      // changes keep the currently deployed image instead of rolling back.
-      ignore_changes: ['template[0].containers[0].image', 'client', 'client_version'],
+      // Narrow release ownership: the running image, the command that starts it
+      // (it only makes sense with the app's image, never the placeholder a service
+      // is created with) and the client markers gcloud/CI stamp on deploy belong
+      // to the release writer. Every other template field remains engine-managed,
+      // so infrastructure changes keep the deployed image instead of rolling back.
+      ignore_changes: ['template[0].containers[0].image', 'template[0].containers[0].command', 'template[0].containers[0].args', 'client', 'client_version'],
     }],
   };
 }

@@ -70,7 +70,9 @@ export interface ReleaseWorkflowInput {
   provider: string;
   releaseIdentity: string;
   /** generatedDockerfile is used only when the repository has no Dockerfile of its own; it carries that service's start command. */
-  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string }>;
+  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
+    /** Services and workers: the declared start command, applied with each release. */
+    startCommand?: string }>;
 }
 
 /** A GitHub Actions workflow with no stored credentials; every value is non-secret. */
@@ -129,7 +131,7 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
       "          cat > release.mjs <<'HYPERVIBE_RELEASE'",
       ...RELEASE_SCRIPT.split('\n').map((line) => `          ${line}`),
       '          HYPERVIBE_RELEASE',
-      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}`,
+      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
     );
   }
   return lines.join('\n') + '\n';

@@ -3,6 +3,9 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
 import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
+import { ciReleaseTargets } from '../launch.js';
+import { startCommandFields } from '../../adapters/providers/gcp/gcp-cloud-run.client.js';
+import { RELEASE_SCRIPT } from '../../adapters/providers/gcp/gcp-ci-release-script.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from '../gcp-database-shape.js';
 
 // Contract (docs/development/support-matrix.md): settings an app needs to run for real
@@ -47,11 +50,28 @@ describe('production settings on Google Cloud', () => {
     expect(services.plain.template[0].containers[0].resources[0].cpu_idle).toBe(true);
   });
 
-  it('starts web services and workers with their declared command, and the image default otherwise', () => {
-    expect(services.web.template[0].containers[0]).toMatchObject({ command: ['/bin/sh'], args: ['-lc', 'sh scripts/start.sh'] });
+  // A service is created with a placeholder image that cannot run the app's command, so the
+  // command is never part of creation: it arrives with the app's image at release.
+  it('creates services and workers without the start command and leaves it to the release', () => {
     const worker = files['workerpools.tf.json'].resource.google_cloud_run_v2_worker_pool.worker;
-    expect(worker.template[0].containers[0]).toMatchObject({ command: ['/bin/sh'], args: ['-lc', 'python scripts/worker.py'] });
-    expect(services.plain.template[0].containers[0]).not.toHaveProperty('command');
+    for (const workload of [services.web, services.plain, worker]) {
+      expect(workload.template[0].containers[0]).not.toHaveProperty('command');
+      expect(workload.template[0].containers[0]).not.toHaveProperty('args');
+      expect(workload.lifecycle[0].ignore_changes).toEqual(expect.arrayContaining(
+        ['template[0].containers[0].image', 'template[0].containers[0].command', 'template[0].containers[0].args']));
+    }
+  });
+
+  it('releases a declared start command with the image, and the image default otherwise', () => {
+    expect(startCommandFields('python scripts/worker.py')).toEqual({ command: ['/bin/sh'], args: ['-lc', 'python scripts/worker.py'] });
+    expect(startCommandFields(undefined)).toEqual({});
+    const spec = specFor('cloudrun');
+    const targets = ciReleaseTargets(spec.environments.staging!, { web: { serviceId: 'web-staging' }, worker: { workerPoolName: 'worker-staging' }, plain: { serviceId: 'plain-staging' } },
+      { region: 'us-west1', gcpProjectId: 'demo-project', environmentName: 'staging' });
+    expect(targets.map((target) => [target.name, target.startCommand])).toEqual([['web', 'sh scripts/start.sh'], ['worker', 'python scripts/worker.py'], ['plain', undefined]]);
+    // The workflow script applies it: '-' keeps the current command, base64 text replaces it.
+    expect(RELEASE_SCRIPT).toContain("startCommand !== '-'");
+    expect(RELEASE_SCRIPT).toContain("containers[0].args = ['-lc', command]");
   });
 
   it('keeps replaced and deleted files for 30 days only in a versioned bucket', () => {

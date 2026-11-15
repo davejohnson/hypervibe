@@ -50,6 +50,22 @@ describe('Cloud Run image release', () => {
     expect(calls.filter((call) => call.method === 'PATCH')).toHaveLength(1);
   });
 
+  it('sets the declared start command with the image, and clears an old one when none is declared', async () => {
+    const withCommand = (image: string) => { const value = service(image); (value.template.containers[0] as any).command = ['/old']; (value.template.containers[0] as any).args = ['x']; return value; };
+    const release = async (start: { startCommand: string | undefined } | undefined) => {
+      const calls = cloudRun((call, all) => call.method === 'PATCH' ? { status: 200, body: { name: 'operations/1', done: true } }
+        : { status: 200, body: withCommand(all.some((entry) => entry.method === 'PATCH') ? newImage : oldImage) });
+      await releaseImage('t', target, 'web', newImage, 'services', start);
+      return calls.find((call) => call.method === 'PATCH')!.body.template.containers[0];
+    };
+    expect(await release({ startCommand: 'python scripts/worker.py' })).toMatchObject({ image: newImage, command: ['/bin/sh'], args: ['-lc', 'python scripts/worker.py'] });
+    const cleared = await release({ startCommand: undefined });
+    expect(cleared).not.toHaveProperty('command');
+    expect(cleared).not.toHaveProperty('args');
+    // Without a start instruction (older callers) the observed command is sent back untouched.
+    expect(await release(undefined)).toMatchObject({ command: ['/old'], args: ['x'] });
+  });
+
   it('never creates a missing service', async () => {
     const calls = cloudRun(() => ({ status: 404 }));
     expect(await releaseImage('t', target, 'web', newImage)).toMatchObject({ status: 'failed', message: expect.stringContaining('does not exist') });
