@@ -1,7 +1,9 @@
 import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
-import { AZURE_SCOPES, azureRest } from './azure-ops.js';
+import { AZURE_SCOPES, azureRest } from '../adapters/providers/azure/azure-ops.client.js';
+import { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
+export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { azureEngineAuthentication, azureEngineBackend } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 import {
@@ -22,8 +24,8 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
   AzureTokens, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
   type AzureKeyVaultSecretStore, type SqlRunner,
-} from './azure-ops.js';
-import { azureDeployAppName } from './azure-setup.js';
+} from '../adapters/providers/azure/azure-ops.client.js';
+import { azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
 import type { EngineSecretStore } from './engine-secrets.js';
 import { engineOutsideKeys } from './engine-secrets.js';
@@ -43,8 +45,6 @@ export const AZURE_IMAGE_BUILD_OPERATION = 'azureImageBuild';
 export const AZURE_STORAGE_EMPTY_OPERATION = 'azureStorageEmpty';
 export const AZURE_DATABASE_DROP_OPERATION = 'azureDatabaseDrop';
 export const AZURE_TEARDOWN_CLEANUP_OPERATION = 'azureTeardownCleanup';
-/** The one image repository in the registry; tags are commit SHAs. */
-export const AZURE_IMAGE_REPOSITORY = 'app';
 
 export type AzureProfile = 'production' | 'testing';
 

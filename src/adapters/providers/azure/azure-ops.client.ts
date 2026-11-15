@@ -1,8 +1,8 @@
-import { scramVerifier } from '../utils/scram.js';
+import { scramVerifier } from '../../../utils/scram.js';
 import crypto from 'crypto';
 import pg from 'pg';
-import type { AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
-import { azureSecretName } from '../adapters/providers/azure/tofu/azure-engine.config.js';
+import type { AzureEngineCredentials } from './azure-engine.adapter.js';
+import { azureSecretName } from './tofu/azure-engine.config.js';
 
 /**
  * The few Azure calls Hypervibe makes outside OpenTofu, all as the project's

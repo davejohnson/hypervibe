@@ -353,7 +353,7 @@ new violation of these rules. Existing violations are listed in its baseline fil
 which may only shrink:
 
 - `src/domain` does not import adapters or application code.
-- Cloud SDKs are imported only under `src/adapters`.
+- Cloud SDKs are imported, and cloud API hosts are called, only under `src/adapters`.
 - Tools and interfaces do not import provider adapters or per-cloud modules.
 - Nothing new depends on the Railway adapter.
 - Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`

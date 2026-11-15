@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { AzureTokens } from '../azure-ops.js';
-import { azurePlatformError, buildWithAcrTasks, releaseAzureApp, templateWithImage } from '../infrastructure-engine-azure-release.js';
+import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
+import { azurePlatformError, buildWithAcrTasks, releaseAzureApp, templateWithImage } from '../../adapters/providers/azure/azure-release.client.js';
 
 const json = (status: number, body: unknown = {}) => new Response(JSON.stringify(body), { status });
 function fake(route: (method: string, url: string, body?: string) => Response) {
@@ -97,7 +97,7 @@ describe('Container Apps releases', () => {
 
 describe('Azure image builds', () => {
   it('generates a Dockerfile ACR Tasks can build without BuildKit', async () => {
-    const { azureReleaseDockerfile } = await import('../infrastructure-engine-azure-release.js');
+    const { azureReleaseDockerfile } = await import('../../adapters/providers/azure/azure-release.client.js');
     const dockerfile = azureReleaseDockerfile({ runtime: { kind: 'node', version: '24', installCommand: 'npm ci' } as never, startCommand: 'npm start' });
     expect(dockerfile).not.toMatch(/--mount|# syntax/);
     expect(dockerfile).toContain('RUN npm ci');

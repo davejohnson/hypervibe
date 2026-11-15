@@ -208,6 +208,22 @@
   "engine-name-branch": [
     "src/application/migrate.ts x1"
   ],
+  "cloud-api-outside-adapters": [
+    "src/application/aws-sign-in.ts -> signin.aws.amazon.com",
+    "src/application/infrastructure-engine-aws.ts -> amazonaws.com",
+    "src/application/infrastructure-engine-azure.ts -> management.azure.com",
+    "src/application/infrastructure-engine-azure.ts -> vault.azure.net",
+    "src/application/infrastructure-engine-ci.ts -> googleapis.com",
+    "src/application/infrastructure-engine-database.ts -> googleapis.com",
+    "src/application/infrastructure-engine-domain.ts -> googleapis.com",
+    "src/application/infrastructure-engine.ts -> googleapis.com",
+    "src/application/migration-transfer-gcp.ts -> googleapis.com",
+    "src/application/secret-rotation.ts -> googleapis.com",
+    "src/domain/services/cloud-prepare.execute.ts -> googleapis.com",
+    "src/domain/services/connection-guidance.ts -> login.microsoftonline.com",
+    "src/domain/services/connection-guidance.ts -> signin.aws.amazon.com",
+    "src/domain/services/gcp-preparation-adoption.ts -> googleapis.com"
+  ],
   "duplicated-exported-function": [
     "azureResourceGroupId: src/adapters/providers/azure/azure-environment-scope.ts, src/adapters/providers/azure/tofu/azure-engine.backend.ts"
   ]
