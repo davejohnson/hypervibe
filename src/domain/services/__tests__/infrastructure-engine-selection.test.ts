@@ -24,6 +24,26 @@ describe('engine selection across the GCP cutover', () => {
     expect(engineSelectionProblem(specFor('railway', 'opentofu').environments.staging)).toContain('not supported');
   });
 
+  it.each(['cloudrun', 'aws', 'azure'] as const)('refuses capabilities no engine builds yet on %s', (provider) => {
+    const spec = specFor(provider, 'opentofu');
+    const environment = spec.environments.staging;
+    environment.backups = { mode: 'daily' } as never;
+    environment.email = { enabled: true } as never;
+    environment.domainRegistration = { provider: 'cloudflare' } as never;
+    environment.services.web!.volume = { mountPath: '/data' } as never;
+    environment.database = { engine: 'postgres', provider: provider === 'cloudrun' ? 'cloudsql' : provider === 'aws' ? 'rds' : 'azure-postgres', resilience: {} } as never;
+    const problems = engineEnvironmentProblems(spec, 'staging').join('\n');
+    for (const field of ['backups', 'email', 'domainRegistration', 'filesystem volumes', 'database.resilience']) expect(problems).toContain(field);
+  });
+
+  it('keeps domainTarget available on AWS and Azure, where the engine recommends it', () => {
+    for (const provider of ['aws', 'azure'] as const) {
+      const spec = specFor(provider, 'opentofu');
+      spec.environments.staging.domainTarget = { environment: 'production' } as never;
+      expect(engineEnvironmentProblems(spec, 'staging')).toEqual([]);
+    }
+  });
+
   it('accepts outside keys without losing GCP capability guards', () => {
     const spec = specFor('cloudrun');
     expect(engineEnvironmentProblems(spec, 'staging')).toEqual([]);
