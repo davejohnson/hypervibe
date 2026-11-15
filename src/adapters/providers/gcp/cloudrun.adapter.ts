@@ -3085,7 +3085,7 @@ export class CloudRunAdapter implements
   /** Only selected, reviewed credential updates remain outside the infrastructure engine. */
   async setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options: DeploymentMutationOptions = {}): Promise<Receipt> {
     if (options.requireCredentialUpdate) return this.setCredentialEnvVars(environment, service, vars);
-    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is moving to OpenTofu.' };
+    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is managed by the OpenTofu engine.' };
   }
 
   private async setCredentialEnvVars(environment: Environment, service: Service, vars: Record<string, string>): Promise<Receipt> {
@@ -3200,7 +3200,7 @@ providerRegistry.register({
       lifecycle: {
         hosting: {
           status: 'planned',
-          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+          reason: 'The OpenTofu engine manages infrastructure. Authentication and operational tools remain available.',
         },
       },
     },

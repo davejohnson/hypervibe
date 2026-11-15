@@ -71,7 +71,7 @@ not proof that this lifecycle is implemented.
 | Hosting | Admitted PostgreSQL providers | Implementation boundary |
 | --- | --- | --- |
 | Railway | Railway | Private temporary workload, selected raw references, immutable image and retained exact storage/execution identities. Ready for live validation, not live-verified. |
-| Cloud Run, ECS, Azure Container Apps | None | Explicitly unsupported for this lifecycle. |
+| Cloud Run, Azure Container Apps | None | Explicitly unsupported for this lifecycle. |
 
 Cloud SQL, RDS and Azure PostgreSQL
 PostgreSQL are also unsupported bootstrap targets. Their native database

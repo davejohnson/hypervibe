@@ -159,7 +159,7 @@ Live branch-protection enforcement has not been verified.
 ## Provider boundary review
 
 The credential lifecycle has registered selected-key writers for Railway,
-Cloud Run, ECS Express and Azure Container Apps. It supports both staged updates and providers that start a revision
+Cloud Run and Azure Container Apps. It supports both staged updates and providers that start a revision
 as part of a configuration write. The plan discloses that activation effect.
 The older `scope=secrets` deferred-only contract remains distinct; see
 [runtime credential providers](runtime-credential-providers.md) for the native
@@ -179,7 +179,6 @@ input where available. Write-only destinations remain pending for review.
 | --- | --- | --- |
 | Railway | [Service instance configuration](https://docs.railway.com/integrations/api/manage-services), [private registries](https://docs.railway.com/builds/private-registries); pinned `ServiceInstanceUpdateInput.registryCredentials` and `RegistryCredentialsInput`. Scope includes project, environment, service, instance and image. | Ready for live validation; exact existing instance only. |
 | Cloud Run | [Remote upstream authentication](https://docs.cloud.google.com/artifact-registry/docs/repositories/configure-remote-authentication); exact Artifact Registry repository and existing Secret Manager reference. | Ready for live validation; update the existing remote repository's credential version, retaining workload identity, image and upstream. Standard repositories use native workload identity. |
-| ECS Express | [Repository credentials](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ExpressGatewayRepositoryCredentials.html), [idempotent secret versions](https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_PutSecretValue.html); exact existing Secrets Manager ARN. | Ready for live validation; update existing JSON username/password, preserving other fields and task definitions. Native ECR access remains workload identity. |
 | Azure Container Apps | [Registry references](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity-image-pull), [secret and Key Vault references](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets); exact app passwordSecretRef. | Ready for live validation; preserve direct app secrets or exact Key Vault identity/reference mode while updating the selected backing secret. |
 
 Provider validation uses fixed official GET endpoints, never an application
