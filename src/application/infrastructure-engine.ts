@@ -638,7 +638,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   environmentName: string;
 }): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const engine = cloudEngineFor(params.spec, params.environmentName);
-  if (!engine) return { blocked: [`Environment ${params.environmentName} is not managed by the OpenTofu engine. Use Cloud Run or select hosting.engine="opentofu" for AWS.`] };
+  if (!engine) return { blocked: [`Environment ${params.environmentName} is not managed by the OpenTofu engine. Its hosting provider is not Google Cloud, AWS or Azure.`] };
   return engine.plan(ctx, params);
 }
 

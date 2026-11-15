@@ -42,7 +42,8 @@ Read-only inspection is distinct from explicit, mapping-based adoption.
 
 ## Provider Scope
 
-New cloud development targets GCP, AWS and Azure. Prove one complete cloud journey
+New cloud development targets GCP, AWS and Azure. Those three always use the
+managed OpenTofu engine and Railway never does; the engine is not a setting. Prove one complete cloud journey
 before extending it; neither a registry entry nor a mocked test makes a provider
 supported. Record implemented capabilities, verified paths and remaining gaps in the
 [support matrix](docs/development/support-matrix.md), the single statement of scope.

@@ -82,7 +82,9 @@ describe('GCP engine public routing', () => {
   it('infers the engine from the GCP provider for previously saved specs', () => {
     const absent = projectSpecSchema.parse({ version: 1, project: 'routing-probe', environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} } } } });
     const explicit = projectSpecSchema.parse({ version: 1, project: 'routing-probe', environments: { staging: { hosting: { provider: 'cloudrun', engine: 'opentofu' }, services: { web: {} } } } });
-    expect(absent.environments.staging.hosting.engine).toBeUndefined();
+    // An older spec's engine flag is dropped on read; the two specs are the same document.
+    expect(explicit.environments.staging.hosting).toEqual(absent.environments.staging.hosting);
+    expect(explicit.environments.staging.hosting).not.toHaveProperty('engine');
     expect(engine.isEngineManaged(absent.environments.staging)).toBe(true);
     expect(engine.isEngineManaged(explicit.environments.staging)).toBe(true);
   });
@@ -133,17 +135,13 @@ describe('GCP engine public routing', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('rejects an engine selection for a provider that engine does not implement', async () => {
+  it('ignores an older engine flag on Railway: the spec is accepted and the engine is never reached', async () => {
     const f = fixture('railway', 'opentofu');
     const result = await f.commands.execute('hv_spec', { project: f.project.name, spec: f.spec });
-    expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining('is not supported with hosting.provider="railway"') } });
-    new ProjectSpecRepository().insert(f.project.id, 1, f.spec);
-    const deployed = await f.commands.execute('hv_deploy', { project: f.project.name, env: 'staging' });
-    expect(deployed.ok).toBe(false);
+    expect(result.ok).toBe(true);
     expect(f.release).not.toHaveBeenCalled();
     expect(f.plan).not.toHaveBeenCalled();
   });
-
   it('admits engine-supported GCP capabilities while keeping legacy writers planned', () => {
     const f = fixture('cloudrun');
     const supported = projectSpecSchema.parse({ ...f.spec, environments: { staging: {

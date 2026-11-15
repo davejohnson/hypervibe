@@ -116,7 +116,7 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
     }
   }
   const target: Record<string, unknown> = {
-    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1', engine: 'opentofu' },
+    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1' },
     services: Object.fromEntries(Object.entries(source.services).map(([name, service]) => [name, {
       workloadKind: service.workloadKind,
       ...(service.startCommand ? { startCommand: service.startCommand } : {}),

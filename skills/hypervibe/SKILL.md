@@ -93,11 +93,10 @@ After a verified copy, a re-run releases without copying again; pass
 `refreshData=true` only after the user approves copying again, and
 `verifyOnly=true` to compare the source and the copy (row counts, per-table
 content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
-`hv_deploy` remain available for individual steps. GCP's default `hv_plan` routes
-to the engine; AWS and Azure currently require `scope="infrastructure"` and
-`hosting.engine="opentofu"` in the spec. Set those routine implementation choices
-without asking the user to select an engine. Resources reported as unsupported stay
-blocked; do not work around them.
+`hv_deploy` remain available for individual steps. Google Cloud, AWS and Azure
+always use the managed OpenTofu engine, and `hv_plan` routes to it by default;
+there is no engine setting, so never add one to a spec or ask the user about it.
+Resources reported as unsupported stay blocked; do not work around them.
 
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`

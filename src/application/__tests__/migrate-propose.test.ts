@@ -18,7 +18,7 @@ describe('proposed migration target', () => {
       email: { enabled: true },
     } as unknown as EnvironmentSpec;
     const target = proposeTargetEnvironment(source, { domain: 'gcp.example.com' }) as unknown as Record<string, any>;
-    expect(target.hosting).toEqual({ provider: 'cloudrun', region: 'us-central1', engine: 'opentofu' });
+    expect(target.hosting).toEqual({ provider: 'cloudrun', region: 'us-central1' });
     expect(target.database).toEqual({ provider: 'cloudsql' });
     expect(target.storage.documents).toEqual({ provider: 'gcs', type: 'bucket', region: 'us-central1', injectInto: ['staging-web', 'staging-worker'], access: 's3' });
     expect(target.envVars.APP_URL).toBe('https://gcp.example.com');
