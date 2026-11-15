@@ -39,11 +39,9 @@ lost acknowledgment and permanently pending state after a documented rejection.
 | Registered provider | Native contract and identity | Capability status |
 | --- | --- | --- |
 | `github-actions` | GitHub.com numeric repository ID plus owner/repository; case-insensitive variable name. Repository Variables read/write permission; complete GET inventory, POST 201, PATCH 204. | Implemented with offline transport and shared lifecycle coverage; live permission/convergence qualification remains untested. |
-| `gitlab-ci` | Instance URL plus numeric project ID; project variables include key, environment scope, protected/masked/hidden/raw flags and `env_var`/`file` type. Same key may exist at different environment scopes. | Explicitly unsupported by this initial plain repository-variable facet. No inference from the separate GitLab CI variable implementation. |
 
 Official contracts: [GitHub repository variables](https://docs.github.com/en/rest/actions/variables),
-[GitHub naming and limits](https://docs.github.com/en/actions/reference/workflows-and-actions/variables),
-[GitLab project variables](https://docs.gitlab.com/api/project_level_variables/).
+[GitHub naming and limits](https://docs.github.com/en/actions/reference/workflows-and-actions/variables).
 GitHub documents no conditional compare-and-swap for these writes: pre-write
 observation and post-write verification reduce drift risk but do not promise an
 atomic transaction against concurrent administrators. Repository inventory does

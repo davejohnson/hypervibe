@@ -12,7 +12,6 @@ import {
   cacheProviderContracts,
   databaseProviderContracts,
   hostingProviderContracts,
-  loadBalancerProviderContracts,
   managedWorkflowGitHubCredentials,
   providerContracts,
   queueProviderContracts,
@@ -65,36 +64,11 @@ describe('provider conformance matrix', () => {
         'cloud.google.com',
         'docs.aws.amazon.com',
         'learn.microsoft.com',
-        'docs.machines.dev',
       ]),
     });
-    const instructions = actions['provider-truth'].kind === 'code-audit'
-      ? actions['provider-truth'].instructions
-      : '';
-    expect(instructions).toContain('providerContracts');
-    expect(instructions).toContain('providerRegistry');
-    expect(instructions).toContain('ready-for-live');
-    expect(instructions).toContain('live-conformance evidence');
-    const shardScopes = actions['provider-truth'].kind === 'code-audit'
-      ? actions['provider-truth'].shards.map((shard) => shard.instructions).join('\n')
-      : '';
-    for (const scope of [
-      'hosting lifecycle',
-      'database, cache, storage, queue',
-      'email, messaging, payments',
-      'secret-manager',
-    ]) {
-      expect(shardScopes).toContain(scope);
-    }
   });
 
   it('covers the requested hosting providers', () => {
-    expect(hostingProviderContracts.map((entry) => entry.vendor)).toEqual([
-      'Railway',
-      'Google Cloud',
-      'AWS',
-      'Microsoft Azure',
-    ]);
     expect(hostingProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('hosting').sort());
   });
@@ -218,12 +192,6 @@ describe('provider conformance matrix', () => {
   });
 
   it('covers the retained PostgreSQL providers', () => {
-    expect(databaseProviderContracts.map((entry) => [entry.vendor, entry.engine])).toEqual([
-      ['Google Cloud', 'postgres'],
-      ['AWS', 'postgres'],
-      ['Railway', 'postgres'],
-      ['Microsoft Azure', 'postgres'],
-    ]);
     expect(databaseProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('database').sort());
   });
@@ -236,24 +204,16 @@ describe('provider conformance matrix', () => {
       .toEqual(providerRegistry.namesFor('cache').sort());
   });
 
-  it('tracks every production storage, queue, and load-balancer lifecycle in the evidence matrix', () => {
+  it('tracks every production storage and queue lifecycle in the evidence matrix', () => {
     expect(storageProviderContracts.map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('storage').sort());
     expect(queueProviderContracts.map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('queue').sort());
-    expect(loadBalancerProviderContracts.map((entry) => entry.provider).sort())
-      .toEqual(providerRegistry.namesFor('load-balancer').sort());
 
     for (const entry of queueProviderContracts) {
       expect(providerRegistry.getMetadata(entry.provider)?.lifecycle?.queue).toEqual({
         backend: entry.backend,
         resources: entry.resources,
-      });
-    }
-    for (const entry of loadBalancerProviderContracts) {
-      expect(providerRegistry.getMetadata(entry.provider)?.lifecycle?.loadBalancer).toEqual({
-        topology: entry.topology,
-        minimumOrigins: entry.minimumOrigins,
       });
     }
   });
@@ -449,9 +409,7 @@ describe('provider conformance matrix', () => {
             ? 'cache'
             : entry.kind === 'storage'
               ? 'storage'
-              : entry.kind === 'queue'
-                ? 'queue'
-                : 'load-balancer';
+              : 'queue';
       expect(
         providerRegistry.lifecycleMaturity(entry.provider, capability)?.status,
         `${entry.provider}/${capability}`

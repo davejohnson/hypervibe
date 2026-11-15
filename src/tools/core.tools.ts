@@ -41,7 +41,7 @@ import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
 import { planHostedDns } from '../application/dns-hosting.js';
-import { planPagesEmailDns } from '../application/dns-integrations.js';
+import { planEmailDns } from '../application/dns-integrations.js';
 import { isAwsEngineEnvironment, planAwsTeardown } from '../application/infrastructure-engine-aws.js';
 import { isAzureEngineEnvironment, planAzureTeardown } from '../application/infrastructure-engine-azure.js';
 import {
@@ -60,7 +60,6 @@ import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.j
 import {
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
-  isRepositoryDnsEnvironment,
   unresolvedGitHubCheckRuntimeIssues,
 } from '../domain/services/github-infrastructure.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -457,11 +456,6 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
     const environment = spec.github.canonicalEnvironment
       ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository');
     add('github', environment, 'GitHub repository infrastructure', repository ? [repository] : []);
-    if (spec.github.pages?.customDomain) {
-      add('cloudflare', environment, 'GitHub Pages custom-domain DNS', [
-        ...cloudflareScopeHintsForDomain(spec.github.pages.customDomain),
-      ]);
-    }
   }
 
   const items = Array.from(required.values())
@@ -789,8 +783,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const routingSpec = specStore.get(project);
       const routingEnvironment = routingSpec ? commandEnvironment(routingSpec.spec, env) : env?.trim() || 'staging';
-      const repositoryDnsOnly = Boolean(routingSpec && isRepositoryDnsEnvironment(routingSpec.spec, routingEnvironment));
-      const cloudRunEnvironment = !repositoryDnsOnly && routingSpec?.spec.environments[routingEnvironment]?.hosting.provider === 'cloudrun';
+      const cloudRunEnvironment = routingSpec?.spec.environments[routingEnvironment]?.hosting.provider === 'cloudrun';
       const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, routingEnvironment);
       const retainedExecution = Boolean(retainedEnvironment && ctx.repos.components.findByEnvironmentId(retainedEnvironment.id)
         .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
@@ -872,7 +865,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec && !repositoryDnsOnly && !retainedExecutionRecovery && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
+      const preparedLocalEnv = currentSpec && !retainedExecutionRecovery && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -899,7 +892,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         && ![services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined)) {
         const hosted = await planHostedDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
           specRevision: result.specRevision, observed: result.observed, actions: result.actions });
-        const dns = hosted ?? await planPagesEmailDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
+        const dns = hosted ?? await planEmailDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
           specRevision: result.specRevision, actions: result.actions });
         if (dns) {
           if ('blocked' in dns) return commandError('VALIDATION', 'DNS planning is blocked.', {
@@ -1111,10 +1104,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const envName = commandEnvironment(specResult.spec, env);
       const envSpec = specResult.spec.environments[envName];
-      const repositoryDnsOnly = isRepositoryDnsEnvironment(specResult.spec, envName);
       // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
       // status reports what only live observation shows, starting with background workers.
-      if (envSpec && isEngineManaged(envSpec) && !repositoryDnsOnly) {
+      if (envSpec && isEngineManaged(envSpec)) {
         const cloud = envSpec.hosting.provider === 'aws' ? 'AWS' : envSpec.hosting.provider === 'azure' ? 'Azure' : undefined;
         if (cloud) {
           return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: 'not read' }, {
@@ -1138,59 +1130,39 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       validateInstalledProviders(specResult.spec, envName);
-      if (!envSpec || repositoryDnsOnly) {
+      if (!envSpec) {
         if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
-          const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-          if (repositoryDnsOnly && retainedEnvironment && (Object.keys(retainedEnvironment.platformBindings)
-            .some(key => !['github', 'dnsEngine'].includes(key))
-            || ctx.repos.components.findByEnvironmentId(retainedEnvironment.id).length > 0)) {
-            return commandError('VALIDATION', 'This environment has existing or unknown bound hosting resources. Reconcile them before using repository-only Pages status.', { next: ['hv_inspect', 'hv_plan'] });
-          }
           const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
           const github = await planGitHubInfrastructure({
             project: projectForStatus,
             spec: specResult.spec,
             environmentName: envName,
           });
-          const legacyDns = repositoryDnsOnly
-            ? github.actions.filter(action => action.metadata?.operation === 'githubPagesDnsSync') : [];
-          const legacyDnsIds = new Set(legacyDns.map(action => action.id));
-          const legacyDnsBlocks = github.blocked.filter(block => block.actionIds?.length
-            && block.actionIds.every(id => legacyDnsIds.has(id)));
-          const legacyDnsMessages = new Set([...legacyDns.map(action => action.reason), ...legacyDnsBlocks.map(block => block.reason)]);
-          const actions = github.actions.filter(action => !legacyDnsIds.has(action.id));
+          const actions = github.actions;
           const blocked = [
             ...planService.projectPreflight(projectForStatus, specResult.spec, envName),
-            ...github.blocked.filter(block => !legacyDnsBlocks.includes(block)),
+            ...github.blocked,
           ];
           const drift = actions.filter((action) => action.type !== 'noop');
-          const retainedDns = asRecord(retainedEnvironment?.platformBindings.dnsEngine);
-          const selectedDns = repositoryDnsOnly ? envSpec?.dns : undefined;
           return commandSuccess({
             environment: envName,
             specRevision: specResult.revision,
             specSource: specResult.source ?? { kind: 'local' },
-            verified: !selectedDns && actions.every((action) => action.verified),
-            inSync: !selectedDns && drift.length === 0,
+            verified: actions.every((action) => action.verified),
+            inSync: drift.length === 0,
             summary: summarizeActions(actions),
             drift: drift.map(({ metadata: _metadata, ...action }) => action),
             unmanaged: [],
             blocked,
-            ...(selectedDns ? { dns: { provider: selectedDns.provider, zoneId: selectedDns.zone.id,
-              zoneName: selectedDns.zone.name, status: 'unverified',
-              retainedOwnership: retainedDns?.version === 1,
-              retainedOwners: Array.isArray(retainedDns?.ownedOwners)
-                ? retainedDns.ownedOwners.filter((owner): owner is string => typeof owner === 'string') : [],
-              message: 'Saved DNS ownership is not fresh convergence evidence. Run hv_plan to observe the exact zone and records.' } } : {}),
             ...(blocked.length > 0 ? connectionRecoveryDetails(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) : {}),
           }, {
-            warnings: github.warnings.filter(warning => !legacyDnsMessages.has(warning)),
+            warnings: github.warnings,
             hint: blocked.length > 0
               ? connectionRecoveryHint(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then rerun hv_status or hv_plan.' })
-              : selectedDns ? 'Run hv_plan to check selected DNS convergence and continue the repository workflow.' : drift.length > 0
+              : drift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : 'Repository infrastructure is in sync.',
-            next: blocked.length > 0 ? ['hv_connections'] : selectedDns || drift.length > 0 ? ['hv_plan'] : undefined,
+            next: blocked.length > 0 ? ['hv_connections'] : drift.length > 0 ? ['hv_plan'] : undefined,
           });
         }
         return commandError('NOT_FOUND', `Spec has no environment "${envName}".`, {

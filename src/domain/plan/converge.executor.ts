@@ -31,7 +31,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
+    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'domain', 'email', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),
@@ -91,31 +91,6 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
       code: 'custom',
       path: ['requiresConfirm'],
       message: 'maintenance edge enablement must be marked billable and confirmation-gated',
-    });
-  }
-  if (
-    action.resource.kind === 'load-balancer'
-    && action.metadata?.operation === 'loadBalancerPoolEnsure'
-    && !action.metadata?.blockedReason
-    && ['create', 'update'].includes(action.type)
-    && action.billable !== true
-  ) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['billable'],
-      message: 'load-balancer pool mutation must be marked billable',
-    });
-  }
-  if (
-    action.resource.kind === 'load-balancer'
-    && action.metadata?.operation === 'loadBalancerEnsure'
-    && action.type === 'create'
-    && action.billable !== true
-  ) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['billable'],
-      message: 'load-balancer creation must be marked billable',
     });
   }
   if (

@@ -33,21 +33,22 @@ describe('applyMaintenanceAction', () => {
     vi.mocked(observeEnvironmentMaintenance).mockReset();
   });
 
+  // This synthetic adapter exercises shared snapshot ordering, not a provider API.
   it('persists every restoration snapshot before the first workload mutation', async () => {
     const project = new ProjectRepository().create({
       name: 'maintenance-apply',
-      defaultPlatform: 'digitalocean',
+      defaultPlatform: 'synthetic-maintenance',
     });
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'digitalocean',
-        projectId: 'do-app-1',
+        provider: 'synthetic-maintenance',
+        projectId: 'fixture-app-1',
         services: {
-          nightly: { serviceId: 'do-app-1:jobs:nightly' },
-          worker: { serviceId: 'do-app-1:workers:worker' },
-          web: { serviceId: 'do-app-1:services:web' },
+          nightly: { serviceId: 'fixture-app-1:jobs:nightly' },
+          worker: { serviceId: 'fixture-app-1:workers:worker' },
+          web: { serviceId: 'fixture-app-1:services:web' },
         },
       },
     });
@@ -56,7 +57,7 @@ describe('applyMaintenanceAction', () => {
       project: project.name,
       environments: {
         production: {
-          hosting: { provider: 'digitalocean' },
+          hosting: { provider: 'synthetic-maintenance' },
           domain: 'app.example.com',
           maintenance: { enabled: true },
           services: {
@@ -74,14 +75,14 @@ describe('applyMaintenanceAction', () => {
     const action: PlanAction = {
       id: 'maintenance:production:workload:nightly',
       type: 'update',
-      resource: { kind: 'maintenance', name: 'nightly', provider: 'digitalocean' },
+      resource: { kind: 'maintenance', name: 'nightly', provider: 'synthetic-maintenance' },
       verified: true,
       reason: 'Suspend cron workload nightly',
       metadata: {
         operation: 'maintenanceWorkloadSuspend',
         environmentName: 'production',
         serviceName: 'nightly',
-        serviceId: 'do-app-1:jobs:nightly',
+        serviceId: 'fixture-app-1:jobs:nightly',
         workloadKind: 'cron',
       },
     };
@@ -95,22 +96,22 @@ describe('applyMaintenanceAction', () => {
       },
       workloads: {
         nightly: {
-          serviceId: 'do-app-1:jobs:nightly',
+          serviceId: 'fixture-app-1:jobs:nightly',
           workloadKind: 'cron',
           state: 'running',
-          providerState: { appId: 'do-app-1', componentName: 'nightly' },
+          providerState: { appId: 'fixture-app-1', componentName: 'nightly' },
         },
         worker: {
-          serviceId: 'do-app-1:workers:worker',
+          serviceId: 'fixture-app-1:workers:worker',
           workloadKind: 'worker',
           state: 'running',
-          providerState: { appId: 'do-app-1', componentName: 'worker' },
+          providerState: { appId: 'fixture-app-1', componentName: 'worker' },
         },
         web: {
-          serviceId: 'do-app-1:services:web',
+          serviceId: 'fixture-app-1:services:web',
           workloadKind: 'web',
           state: 'running',
-          providerState: { appId: 'do-app-1', componentName: 'web' },
+          providerState: { appId: 'fixture-app-1', componentName: 'web' },
         },
       },
       database: { state: 'not-applicable' },
@@ -118,15 +119,15 @@ describe('applyMaintenanceAction', () => {
     const suspendMaintenanceWorkload = vi.fn(async (mutatingEnvironment) => {
       expect(mutatingEnvironment.platformBindings.maintenance).toMatchObject({
         workloads: {
-          nightly: { serviceId: 'do-app-1:jobs:nightly', wasRunning: true },
-          worker: { serviceId: 'do-app-1:workers:worker', wasRunning: true },
-          web: { serviceId: 'do-app-1:services:web', wasRunning: true },
+          nightly: { serviceId: 'fixture-app-1:jobs:nightly', wasRunning: true },
+          worker: { serviceId: 'fixture-app-1:workers:worker', wasRunning: true },
+          web: { serviceId: 'fixture-app-1:services:web', wasRunning: true },
         },
       });
-      return { success: true, message: 'archived app' };
+      return { success: true, message: 'suspended fixture workload' };
     });
     const adapter = {
-      name: 'digitalocean',
+      name: 'synthetic-maintenance',
       capabilities: {
         supportedBuilders: [],
         supportedComponents: [],
@@ -162,14 +163,14 @@ describe('applyMaintenanceAction', () => {
       action,
     });
 
-    expect(result).toMatchObject({ success: true, message: 'archived app' });
+    expect(result).toMatchObject({ success: true, message: 'suspended fixture workload' });
     expect(suspendMaintenanceWorkload).toHaveBeenCalledTimes(1);
     expect(new EnvironmentRepository().findById(environment.id)?.platformBindings.maintenance)
       .toMatchObject({
         workloads: {
-          nightly: { serviceId: 'do-app-1:jobs:nightly' },
-          worker: { serviceId: 'do-app-1:workers:worker' },
-          web: { serviceId: 'do-app-1:services:web' },
+          nightly: { serviceId: 'fixture-app-1:jobs:nightly' },
+          worker: { serviceId: 'fixture-app-1:workers:worker' },
+          web: { serviceId: 'fixture-app-1:services:web' },
         },
       });
   });

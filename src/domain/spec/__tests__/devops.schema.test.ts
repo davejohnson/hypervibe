@@ -5,11 +5,12 @@ import {
   resolveDevOpsSelection,
 } from '../devops-selection.js';
 
+// Synthetic provider IDs exercise the open schema without claiming adapter support.
 function base() {
   return {
     version: 1 as const,
     project: 'devops-app',
-    gitRemoteUrl: 'git@gitlab.com:acme/apps/devops-app.git',
+    gitRemoteUrl: 'git@code.example.invalid:acme/apps/devops-app.git',
     environments: {
       staging: {
         hosting: { provider: 'railway' },
@@ -25,14 +26,14 @@ describe('canonical devops desired state', () => {
     const parsed = projectSpecSchema.parse({
       ...base(),
       devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
-        ci: { provider: 'gitlab-ci' },
+        code: { provider: 'fixture-code', scope: 'https://code.example.invalid/acme/apps/devops-app' },
+        ci: { provider: 'fixture-ci' },
         canonicalEnvironment: 'staging',
       },
     });
     expect(resolveDevOpsSelection(parsed)).toEqual({
-      code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
-      ci: { provider: 'gitlab-ci' },
+      code: { provider: 'fixture-code', scope: 'https://code.example.invalid/acme/apps/devops-app' },
+      ci: { provider: 'fixture-ci' },
       canonicalEnvironment: 'staging',
       source: 'canonical',
     });
@@ -43,8 +44,8 @@ describe('canonical devops desired state', () => {
     const result = projectSpecSchema.safeParse({
       ...base(),
       devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
-        ci: { provider: 'gitlab-ci' },
+        code: { provider: 'fixture-code', scope: 'https://code.example.invalid/acme/apps/devops-app' },
+        ci: { provider: 'fixture-ci' },
       },
       github: { enabled: true },
     });
@@ -59,7 +60,7 @@ describe('canonical devops desired state', () => {
     const result = projectSpecSchema.safeParse({
       ...base(),
       devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
+        code: { provider: 'fixture-code', scope: 'https://code.example.invalid/acme/apps/devops-app' },
       },
     });
     expect(result.success).toBe(false);
@@ -73,8 +74,8 @@ describe('canonical devops desired state', () => {
     const result = projectSpecSchema.safeParse({
       ...base(),
       devops: {
-        code: { provider: 'gitlab', scope: 'https://token@gitlab.com/acme/apps/devops-app?ref=main' },
-        ci: { provider: 'gitlab-ci' },
+        code: { provider: 'fixture-code', scope: 'https://token@code.example.invalid/acme/apps/devops-app?ref=main' },
+        ci: { provider: 'fixture-ci' },
       },
     });
     expect(result.success).toBe(false);
@@ -125,8 +126,8 @@ describe('canonical devops desired state', () => {
       code: { provider: 'github', scope: 'acme/devops-app' },
     },
     {
-      code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
-      ci: { provider: 'gitlab-ci' },
+      code: { provider: 'fixture-code', scope: 'https://code.example.invalid/acme/apps/devops-app' },
+      ci: { provider: 'fixture-ci' },
     },
   ])('rejects GitHub Actions secret destinations without the canonical GitHub pair', (devops) => {
     const result = projectSpecSchema.safeParse({
@@ -155,8 +156,8 @@ describe('canonical devops desired state', () => {
     const parsed = projectSpecSchema.parse({
       ...base(),
       devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
-        ci: { provider: 'gitlab-ci' },
+        code: { provider: 'fixture-code', scope: 'https://code.example.invalid/acme/apps/devops-app' },
+        ci: { provider: 'fixture-ci' },
       },
     });
     expect(parsed.devops?.code.repository).toEqual({
@@ -175,11 +176,11 @@ describe('canonical devops desired state', () => {
         ...base(),
         devops: {
           code: {
-            provider: 'gitlab',
-            scope: 'https://gitlab.com/acme/apps/devops-app',
+            provider: 'fixture-code',
+            scope: 'https://code.example.invalid/acme/apps/devops-app',
             repository: { state: 'present', management: 'managed', defaultBranch },
           },
-          ci: { provider: 'gitlab-ci' },
+          ci: { provider: 'fixture-ci' },
         },
       });
       expect(result.success).toBe(false);

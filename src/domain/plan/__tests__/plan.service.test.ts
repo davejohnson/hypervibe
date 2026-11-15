@@ -3170,9 +3170,9 @@ describe('PlanService.plan', () => {
         environmentId: 'us-central1',
         services: { web: { serviceId: 'current-gcp-web' } },
         previousHosting: {
-          provider: 'vercel',
-          projectId: 'vercel-team',
-          services: { web: { serviceId: 'vercel-team:old-vercel-web' } },
+          provider: 'fixture-retained-hosting',
+          projectId: 'fixture-retained-hosting-team',
+          services: { web: { serviceId: 'fixture-retained-hosting-team:old-fixture-retained-hosting-web' } },
         },
       },
     });
@@ -3196,12 +3196,12 @@ describe('PlanService.plan', () => {
     const result = await new PlanService().plan(project, 'staging');
 
     expect(result).toMatchObject({
-      error: expect.stringContaining('vercel'),
+      error: expect.stringContaining('fixture-retained-hosting'),
     });
     expect((new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!
       .platformBindings as Record<string, unknown>)).toMatchObject({
       provider: 'cloudrun',
-      previousHosting: { provider: 'vercel' },
+      previousHosting: { provider: 'fixture-retained-hosting' },
     });
   });
 

@@ -41,7 +41,7 @@ function setup(provider = 'railway') {
   return { ctx, project, spec: stored.spec, environment, descriptor, operationId, observed, body, fetch };
 }
 
-it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'fly', 'digitalocean', 'vercel'])('records an app-defined operation receipt for the exact accepted deployment on %s without executing the operation', async provider => {
+it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])('records an app-defined operation receipt for the exact accepted deployment on %s without executing the operation', async provider => {
   const f = setup(provider);
   const { verifyCredentialOperations, credentialOperationEvidence } = await import('../credential-operation-verification.js');
   const result = await verifyCredentialOperations(f.ctx, f.project, f.spec, f.descriptor.role);

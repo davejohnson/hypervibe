@@ -1385,42 +1385,6 @@ describe('hv_spec', () => {
     await t.close();
   });
 
-  it('treats repository-only Pages as project desired state and defaults planning to repository', async () => {
-    const t = await makeClient();
-    const set = await t.call('hv_spec', {
-      spec: {
-        project: 'pages-only-app',
-        gitRemoteUrl: 'git@github.com:davejohnson/pages-only-app.git',
-        github: {
-          canonicalEnvironment: 'repository',
-          pages: { sourcePath: 'apps/website', customDomain: 'pages-only-app.dev' },
-        },
-        environments: {},
-      },
-    });
-
-    expect(set.ok).toBe(true);
-    expect(set.data.connections.missing).toEqual(expect.arrayContaining([
-      expect.objectContaining({ provider: 'cloudflare', scope: 'pages-only-app.dev', environments: ['repository'] }),
-      expect.objectContaining({ provider: 'github', scope: 'davejohnson/pages-only-app', environments: ['repository'] }),
-    ]));
-
-    const plan = await t.call('hv_plan', { project: 'pages-only-app' });
-    expect(plan.ok).toBe(true);
-    expect(plan.data.environment).toBe('repository');
-    expect(plan.data.actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'repo:github-infrastructure-pr', type: 'update' }),
-    ]));
-
-    const withoutDeployEnvFile = await t.call('hv_plan', {
-      project: 'pages-only-app',
-      includeEnvFile: false,
-    });
-    expect(withoutDeployEnvFile.ok).toBe(true);
-    expect(withoutDeployEnvFile.data.environment).toBe('repository');
-    await t.close();
-  });
-
   it('defaults repository-only canonical GitHub Actions secret plans to repository', async () => {
     const t = await makeClient();
     const set = await t.call('hv_spec', {

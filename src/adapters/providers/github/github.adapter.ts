@@ -9,8 +9,6 @@ import {
 
 const GITHUB_API_URL = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
-const GITHUB_PAGES_HEALTH_ATTEMPTS = 3;
-const GITHUB_PAGES_HEALTH_RETRY_MS = 1_000;
 const require = createRequire(import.meta.url);
 
 function encodeFileContent(content: string): string {
@@ -49,63 +47,6 @@ export interface GitHubVerifyResult {
   id?: number;
   login?: string;
   scopes?: string[];
-}
-
-export interface GitHubPagesConfig {
-  url?: string;
-  html_url?: string;
-  status?: string;
-  cname?: string | null;
-  custom_404: boolean;
-  https_enforced?: boolean;
-  public: boolean;
-  source?: {
-    branch: string;
-    path: string;
-  };
-  build_type?: string;
-  https_certificate?: {
-    state: string;
-    description: string;
-    domains: string[];
-    expires_at?: string;
-  };
-  protected_domain_state?: string | null;
-  pending_domain_unverified_at?: string | null;
-}
-
-export interface GitHubPagesDomainHealth {
-  host?: string;
-  uri?: string;
-  nameservers?: string;
-  dns_resolves?: boolean;
-  is_proxied?: boolean;
-  is_cloudflare_ip?: boolean;
-  is_fastly_ip?: boolean;
-  is_old_ip_address?: boolean;
-  is_a_record?: boolean;
-  has_cname_record?: boolean;
-  has_mx_records_present?: boolean;
-  is_valid_domain?: boolean;
-  is_apex_domain?: boolean;
-  should_be_a_record?: boolean;
-  is_cname_to_github_user_domain?: boolean;
-  is_cname_to_pages_dot_github_dot_com?: boolean;
-  is_cname_to_fastly?: boolean;
-  is_pointed_to_github_pages_ip?: boolean;
-  is_non_github_pages_ip_present?: boolean;
-  is_https_eligible?: boolean;
-  is_served_by_pages?: boolean;
-  is_valid?: boolean;
-  responds_to_https?: boolean;
-  enforces_https?: boolean;
-  https_error?: string | null;
-  caa_error?: string | null;
-}
-
-export interface GitHubPagesHealthCheck {
-  domain?: GitHubPagesDomainHealth;
-  alt_domain?: GitHubPagesDomainHealth | null;
 }
 
 export interface GitHubLabel {
@@ -308,60 +249,6 @@ export class GitHubAdapter {
     }
   }
 
-  async getPagesConfig(owner: string, repo: string): Promise<GitHubPagesConfig | null> {
-    try {
-      return await this.request<GitHubPagesConfig>('GET', `/repos/${owner}/${repo}/pages`);
-    } catch (error) {
-      // 404 means Pages is not enabled (GitHub returns "Not Found" message)
-      if (isGitHubNotFound(error)) {
-        return null;
-      }
-      throw error;
-    }
-  }
-
-  async getPagesHealthCheck(owner: string, repo: string): Promise<GitHubPagesHealthCheck> {
-    for (let attempt = 0; attempt < GITHUB_PAGES_HEALTH_ATTEMPTS; attempt += 1) {
-      const health = await this.request<GitHubPagesHealthCheck>(
-        'GET',
-        `/repos/${owner}/${repo}/pages/health`,
-        undefined,
-        { acceptEmpty202: true }
-      );
-      if (health.domain || health.alt_domain) return health;
-      if (attempt < GITHUB_PAGES_HEALTH_ATTEMPTS - 1) {
-        await new Promise((resolve) => setTimeout(resolve, GITHUB_PAGES_HEALTH_RETRY_MS));
-      }
-    }
-    throw new GitHubApiError('GitHub Pages DNS health check is still pending', 202);
-  }
-
-  async createPagesSite(
-    owner: string,
-    repo: string,
-    options: { buildType: 'workflow' }
-  ): Promise<void> {
-    await this.request<unknown>('POST', `/repos/${owner}/${repo}/pages`, {
-      build_type: options.buildType,
-    });
-  }
-
-  async updatePagesSite(
-    owner: string,
-    repo: string,
-    config: { buildType?: 'workflow'; cname?: string | null; httpsEnforced?: boolean }
-  ): Promise<void> {
-    await this.request<void>('PUT', `/repos/${owner}/${repo}/pages`, {
-      ...(config.buildType ? { build_type: config.buildType } : {}),
-      ...(config.cname !== undefined ? { cname: config.cname } : {}),
-      ...(config.httpsEnforced !== undefined ? { https_enforced: config.httpsEnforced } : {}),
-    });
-  }
-
-  async deletePagesSite(owner: string, repo: string): Promise<void> {
-    await this.request<void>('DELETE', `/repos/${owner}/${repo}/pages`);
-  }
-
   /**
    * Create or update a file in a repository via the Contents API.
    */
@@ -377,7 +264,6 @@ export class GitHubAdapter {
   async getRepository(owner: string, repo: string): Promise<{
     id?: number;
     full_name?: string;
-    has_pages?: boolean;
     default_branch: string;
     html_url?: string;
     clone_url?: string;
@@ -1393,19 +1279,6 @@ async function inspectGitHubResources(
       ...(ref ? { ref: { name: ref.ref, sha: ref.object.sha } } : { name: selected }),
     };
   }
-  if (resource === 'pages') {
-    const [config, health] = await Promise.all([
-      adapter.getPagesConfig(owner, repo),
-      adapter.getPagesHealthCheck(owner, repo),
-    ]);
-    return {
-      observation: config ? 'present' : 'absent',
-      resource,
-      repository: `${owner}/${repo}`,
-      config,
-      health,
-    };
-  }
   if (resource === 'pull-request') {
     const listed = await adapter.listPullRequests(owner, repo, {
       state: 'all',
@@ -1481,14 +1354,13 @@ providerRegistry.register({
     return adapter.verify();
   }),
   inspection: {
-    resources: ['repository', 'ref', 'branch', 'pages', 'pull-request', 'branch-protection', 'repository-variable'],
+    resources: ['repository', 'ref', 'branch', 'pull-request', 'branch-protection', 'repository-variable'],
     defaultResource: 'repository',
     selectors: {
       repository: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
       'repository-variable': { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'name', 'limit'], list: true, collectionKey: 'variables' },
       ref: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
       branch: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
-      pages: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
       'pull-request': { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'name', 'limit'], list: true, collectionKey: 'pullRequests' },
       'branch-protection': { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
     },

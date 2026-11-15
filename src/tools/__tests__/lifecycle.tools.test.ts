@@ -596,7 +596,7 @@ describe('hv_inspect / hv_import', () => {
     expect(result.data.providers.map((provider: { provider: string }) => provider.provider).sort())
       .toEqual(providerRegistry.names().sort());
     expect(result.data.providers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref', 'pages']) }),
+      expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref']) }),
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
       expect.objectContaining({

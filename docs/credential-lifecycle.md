@@ -4,9 +4,6 @@ Credential tracking extends `spec.secrets`, encrypted plans, accepted secret
 bindings and managed runtime rollout requirements. Inventory remains read-only.
 It is not a second credential store or an imperative sync command.
 
-The [three-phase review map](credential-lifecycle-review.md) identifies the
-inventory, adoption/provenance, and rotation acceptance surfaces.
-
 ## Review sequence
 
 1. Inspect `hv_secrets project="app" env="production" view="inventory"`.

@@ -137,7 +137,7 @@ describe('Railway storage runtime addressing contract', () => {
 
   it.each(addressing)('retains the existing non-Railway runtime projection with canonical $nativeStyle addressing', async ({ nativeStyle, canonicalStyle }) => {
     const f = fixture(), provider = transport(nativeStyle);
-    f.environment.platformBindings.provider = 'fly';
+    f.environment.platformBindings.provider = 'fixture-external-hosting';
     const result = await provider.adapter.getRuntimeEnv(f.environment, scope, 'bucket-id', 'documents');
     expect(result).toEqual({ AWS_ENDPOINT_URL: 'https://storage.example.invalid', AWS_ACCESS_KEY_ID: 'private-access-sentinel',
       AWS_SECRET_ACCESS_KEY: 'private-secret-sentinel', AWS_S3_BUCKET_NAME: 'documents-example',

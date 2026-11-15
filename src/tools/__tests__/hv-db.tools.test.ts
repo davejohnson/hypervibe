@@ -62,7 +62,7 @@ function seedDbProject() {
   new ComponentRepository().create({
     environmentId: environment.id,
     type: 'postgres',
-    bindings: { provider: 'supabase', connectionString: 'postgres://user:secretpw@db.example.com:5432/app' },
+    bindings: { provider: 'railway', connectionString: 'postgres://user:secretpw@db.example.com:5432/app' },
     externalId: 'db-1',
   });
   return { project, environment };
@@ -499,7 +499,7 @@ describe('hv_db_query', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data.access).toMatchObject({
-      provider: 'supabase',
+      provider: 'railway',
       mode: 'existing',
       leaseCreated: false,
       cleanup: 'no_op',

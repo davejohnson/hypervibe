@@ -48,8 +48,8 @@ describe('managed backup target admission', () => {
     const f = fixture();
     delete f.spec.database;
     f.context.components = [];
-    f.spec.hosting.provider = 'vercel';
-    f.environment.platformBindings = { provider: 'vercel', storage: f.storage };
+    f.spec.hosting.provider = 'fixture-hosting';
+    f.environment.platformBindings = { provider: 'fixture-hosting', storage: f.storage };
     if (f.spec.backups?.mode === 'daily') f.spec.backups.fileReferenceQueries = [];
     const result = await resolveManagedBackupTarget(f.context);
     expect(result.state).toBe('ready');

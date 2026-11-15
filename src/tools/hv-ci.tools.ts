@@ -303,11 +303,11 @@ function ciStatusOptionWarnings(
 export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_ci_status',
-    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. GitHub Pages and branch protection remain feature-scoped GitHub observations.',
+    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. Branch protection remains a feature-scoped GitHub observation.',
     {
       project: projectField,
       repo: repoField,
-      include: z.array(z.enum(['definitions', 'workflows', 'runs', 'jobs', 'logs', 'artifacts', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["definitions"] for canonical devops specs and ["workflows"] for legacy GitHub). jobs/logs require runId. artifacts exposes names/provenance but never artifact contents.'),
+      include: z.array(z.enum(['definitions', 'workflows', 'runs', 'jobs', 'logs', 'artifacts', 'branch-protection'])).optional().describe('Sections to include (default: ["definitions"] for canonical devops specs and ["workflows"] for legacy GitHub). jobs/logs require runId. artifacts exposes names/provenance but never artifact contents.'),
       definition: z.string().optional().describe('Provider-native definition id or path (required when include contains "runs"). Prefer this portable field; do not pass a different workflow alias.'),
       workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility. Omit when definition is supplied.'),
       runId: opaqueIdField.optional().describe('Opaque provider-native run id, required for jobs/logs and optional as an artifacts filter.'),
@@ -336,7 +336,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
           },
         };
         for (const section of sections) {
-          if (section === 'pages' || section === 'branch-protection') {
+          if (section === 'branch-protection') {
             throw new HvError('UNSUPPORTED', `${section} is a code-host feature, not a primary-CI section for ${canonical.ciProvider}.`);
           }
           try {
@@ -522,20 +522,6 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
                   }
                   : null,
                 }));
-              break;
-            }
-            case 'pages': {
-              const pages = await adapter.getPagesConfig(owner, repo);
-              data.pages = pages
-                ? {
-                    enabled: true,
-                    url: pages.url,
-                    status: pages.status,
-                    customDomain: pages.cname,
-                    httpsEnforced: pages.https_enforced,
-                    certificateState: pages.https_certificate?.state,
-                  }
-                : { enabled: false };
               break;
             }
             case 'branch-protection': {

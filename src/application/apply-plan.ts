@@ -74,13 +74,7 @@ import {
   resolveGitHubInfrastructureRepository,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
-  isRepositoryDnsEnvironment,
 } from '../domain/services/github-infrastructure.service.js';
-import {
-  applyGitHubPages,
-  applyGitHubPagesBindingCleanup,
-  applyGitHubPagesDns,
-} from '../domain/services/github-pages.service.js';
 import { setupCustomDomain, teardownCustomDomain } from '../domain/services/domain.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
@@ -140,7 +134,6 @@ import {
 import {
   applyProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
-import { applyLoadBalancerAction } from '../domain/services/load-balancer-plan.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import {
@@ -689,7 +682,6 @@ async function executeRepositoryPlanApply(
     }
     if (
       action.resource.name !== expectedRepository
-      && authority.capability !== 'github.pages-dns.sync'
       && authority.capability !== 'github.delegated-secret.sync'
     ) {
       return blockedActionIdentity(
@@ -708,28 +700,6 @@ async function executeRepositoryPlanApply(
         });
       case 'github.setting.sync':
         return applyGitHubNativeSetting({ action });
-      case 'github.pages.sync':
-        return applyGitHubPages({
-          spec: params.spec,
-          action,
-          project: projectForApply,
-          environmentName: params.envName,
-        });
-      case 'github.pages-binding.cleanup':
-        return applyGitHubPagesBindingCleanup({
-          spec: params.spec,
-          action,
-          project: projectForApply,
-          environmentName: params.envName,
-        });
-      case 'github.pages-dns.sync':
-        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-          return blockedActionIdentity(action, `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`);
-        }
-        return applyGitHubPagesDns({
-          spec: params.spec,
-          action,
-        });
       case 'github.delegated-secret.sync':
         if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
           return blockedActionIdentity(
@@ -838,13 +808,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  const repositoryDnsOnly = planScope === 'full' && isRepositoryDnsEnvironment(spec, envName);
-  if (repositoryDnsOnly && environment && (Object.keys(environment.platformBindings)
-    .some(key => !['github', 'dnsEngine'].includes(key))
-    || ctx.repos.components.findByEnvironmentId(environment.id).length > 0)) {
-    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
-      reason: 'This environment has existing or unknown bound hosting resources. Preserve and reconcile those resources before applying a repository-only Pages plan.' }] };
-  }
   try {
     const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
     if (pendingVariables && (planScope !== 'full' || envName !== pendingVariables
@@ -866,7 +829,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   // These exceptions depend on the validated persisted scope and, for retained
   // tasks, its exact acknowledged execution. User-supplied scope labels cannot
   // authorize infrastructure through the credential/recovery executor.
-  if (isEngineManaged(spec.environments[envName]) && planScope !== 'credentials' && !observationOrCleanup && !repositoryDnsOnly) {
+  if (isEngineManaged(spec.environments[envName]) && planScope !== 'credentials' && !observationOrCleanup) {
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'cloudrun',
       reason: 'Cloud Run infrastructure requires an OpenTofu plan. Run hv_plan again before applying this older plan.' }] };
   }
@@ -916,7 +879,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const rawEnvironmentSpec = spec.environments[envName];
   const envSpec = rawEnvironmentSpec && planScope === 'backup-provisioning'
     ? withBackupStorageDefaults(rawEnvironmentSpec) : rawEnvironmentSpec;
-  if (!envSpec || repositoryDnsOnly) {
+  if (!envSpec) {
     if (secretsOnly) return { kind: 'env_missing', envName };
     return shouldPlanGitHubInfrastructure(spec, envName)
       || shouldPlanGitHubDelegatedSecrets(spec, envName)
@@ -1475,18 +1438,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (capability === 'hosting.environment.ensure') {
       return ensureHostingEnvironment(ctx, applyProject, envName, action);
     }
-    if (
-      capability === 'load-balancer.monitor.mutate'
-      || capability === 'load-balancer.pool.mutate'
-      || capability === 'load-balancer.mutate'
-    ) {
-      return applyLoadBalancerAction({
-        project: applyProject,
-        envName,
-        environmentSpec: envSpec,
-        action,
-      });
-    }
     if (capability === 'domain.registration.mutate') {
       const expectedDomain = envSpec.domain?.trim().replace(/\.$/, '').toLowerCase();
       if (!expectedDomain || action.resource.name !== expectedDomain) {
@@ -1609,41 +1560,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
       return applyGitHubInfrastructure({ action });
-    }
-    if (capability === 'github.pages.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (action.resource.name !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `Reviewed repository is ${action.resource.name}; GitHub Pages currently targets ${expectedRepository ?? 'no repository'}.`
-        );
-      }
-      return applyGitHubPages({ spec, action, project: applyProject, environmentName: envName });
-    }
-    if (capability === 'github.pages-binding.cleanup') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (action.resource.name !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `Reviewed repository is ${action.resource.name}; GitHub Pages binding cleanup currently targets ${expectedRepository ?? 'no repository'}.`
-        );
-      }
-      return applyGitHubPagesBindingCleanup({
-        spec,
-        action,
-        project: applyProject,
-        environmentName: envName,
-      });
-    }
-    if (capability === 'github.pages-dns.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`
-        );
-      }
-      return applyGitHubPagesDns({ spec, action });
     }
     if (capability === 'github.delegated-secret.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);

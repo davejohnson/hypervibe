@@ -1,5 +1,17 @@
 # Provider conformance
 
+This guide describes the implemented test harness and its profile coverage.
+The [common cloud journey](development/user-journey.md) defines the broader product
+acceptance target. A profile pass establishes only that profile's declared scope.
+
+Registry and capability-matrix checks describe declared adapter boundaries; they
+do not prove a cloud journey. The former opt-in `test:providers:roadmap` gate was
+removed because it required every historical matrix entry to say `supported`
+using metadata and synthetic credentials alone. Ordinary registry checks and
+live lifecycle profiles remain. Unavailable-feature tests protect today's stop
+points; replace them with behavioral coverage when the feature is implemented,
+rather than treating the rejection as a permanent product requirement.
+
 Provider support requires a disposable live fixture that creates its declared
 resources through Hypervibe, serves the expected application response, updates
 without replacement, converges to a noop, tears down, and independently confirms
@@ -23,7 +35,6 @@ provider status or assert that a live run has passed.
 | --- | --- | --- |
 | `gcp-engine` | One public Cloud Run web service and its public-invoker IAM member | Committed local fixture archive through the installed Hypervibe release path; exact JSON body and `create`/`update` revision; encrypted engine-state identity projection and exact Cloud Run GET after teardown |
 | `railway` | Web service, PostgreSQL, Redis, object bucket, associated volumes, PostgreSQL-backed queue wiring | Prepared repository and managed GitHub workflow, exact commit and release artifact; exact JSON revision and SQL probe; complete native project service/volume/bucket inventory before teardown and after deletion |
-| `cloudflare-load-balancer` | Health monitor, origin pool and hostname load balancer | Two prepared dedicated Railway origins are retained platform prerequisites; exact fixture body through the load balancer; in-place health-monitor update; registered exact-ID reads confirm all three resources absent |
 
 The GCP profile is deliberately **web-only**. It does not prove Cloud SQL,
 Memorystore, storage, queues, secret containers, scheduled jobs, or their complete
@@ -39,17 +50,9 @@ service, volume and bucket in its dedicated initially empty Railway project.
 It does not claim every Railway workload kind, custom-domain, data-transfer or
 backup feature has passed live.
 
-The Cloudflare profile refuses any mutation outside its load-balancer resources.
-Its dedicated origins must already be serving the fixture with revision `live`
-through the supported managed release workflow. Origin services are not created
-or deleted by this profile. Their lifecycle is covered separately by Railway's
-profile. The Cloudflare inventory retains exact account/zone scope and IDs even
-when apply fails or removes local bindings; unresolved creation without a saved
-ID remains a cleanup failure.
-
-The [AWS engine](opentofu-engine-aws.md) has its own implementation and evidence,
-but no complete disposable lifecycle profile in this runner yet. Azure infrastructure
-remains planned and unavailable. Legacy
+The [AWS engine](opentofu-engine-aws.md) and [Azure engine](opentofu-engine-azure.md)
+have implementation notes and recorded live testing-environment evidence, but
+neither has a complete disposable lifecycle profile in this runner yet. Legacy
 GCP adapter lifecycle registrations are also planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
 are unavailable after the engine cutover. Selecting these unavailable profiles
@@ -62,7 +65,6 @@ Build and select exactly one profile:
 ```sh
 HYPERVIBE_LIVE_PROFILE=gcp-engine npm run test:providers:fixtures
 HYPERVIBE_LIVE_PROFILE=railway npm run test:providers:fixtures
-HYPERVIBE_LIVE_PROFILE=cloudflare-load-balancer npm run test:providers:fixtures
 ```
 
 Selection is explicit. Missing credentials, repository access, marker, or platform
