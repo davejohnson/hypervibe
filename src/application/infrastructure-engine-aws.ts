@@ -415,7 +415,9 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     const sharedPlanned = await engine.plan({ backend: awsEngineBackend, configuration: buildAwsSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
-    sharedActions = sharedPlanned.actions;
+    // Creating the cluster takes about 10 minutes, so it runs while the image builds and the
+    // environment is created; only the database login waits for it.
+    sharedActions = sharedPlanned.actions.map((action) => action.type === 'noop' ? action : { ...action, background: true });
   }
   const sharedChanging = sharedActions.filter((action) => action.type !== 'noop').map((action) => action.id);
   // 1. Registry and build project (their own state, applied first).
