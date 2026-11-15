@@ -26,7 +26,7 @@ export function chooseAzureLocation(spec?: ProjectSpec): string {
 /** Azure engine environments in the spec, which get a GitHub Actions credential at setup. */
 export function azureEnvironments(spec?: ProjectSpec): string[] {
   return Object.entries(spec?.environments ?? {})
-    .filter(([, environment]) => environment.hosting.provider === 'azure' && environment.hosting.engine === 'opentofu')
+    .filter(([, environment]) => environment.hosting.provider === 'azure')
     .map(([name]) => name).sort();
 }
 

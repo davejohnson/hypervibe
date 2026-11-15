@@ -1,4 +1,4 @@
-import { engineSelectionProblem, isEngineManaged } from '../services/infrastructure-engine-selection.js';
+import { isEngineManaged } from '../services/infrastructure-engine-selection.js';
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
 import { planServiceInstances } from '../services/service-instance.service.js';
 import { pendingRepositoryVariableEnvironment, planRepositoryVariables } from '../services/repository-variables.service.js';
@@ -1696,8 +1696,6 @@ export class PlanService {
     }
     const scope = options?.scope ?? 'full';
     const selectedEnvironment = specResult.spec.environments[environmentName];
-    const selectionProblem = selectedEnvironment && engineSelectionProblem(selectedEnvironment);
-    if (selectionProblem) return { error: selectionProblem };
     const retainedEnvironment = scope === 'full' ? this.envRepo.findByProjectAndName(project.id, environmentName) : undefined;
     const retainedExecutionRecovery = Boolean(retainedEnvironment && this.componentRepo.findByEnvironmentId(retainedEnvironment.id)
       .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));

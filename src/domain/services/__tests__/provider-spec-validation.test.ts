@@ -95,20 +95,20 @@ describe('validateProjectSpecProviders', () => {
     const write = (environments: Record<string, unknown>) =>
       projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments });
     const production = { hosting: { provider: 'railway' }, services: {} };
-    const aws = { hosting: { provider: 'aws' }, services: {} };
+    const aws = { hosting: { provider: 'not-a-provider' }, services: {} };
     const previous = write({ production, aws });
     const editProduction = write({ production: { ...production, domain: 'app.example.com' }, aws });
     expect(introducedProviderSpecValidationFailure(previous, editProduction)).toBeUndefined();
     const editAws = write({ production, aws: { ...aws, domain: 'aws.example.com' } });
     expect(introducedProviderSpecValidationFailure(previous, editAws)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
-    const addAzure = write({ production, aws, azure: { hosting: { provider: 'azure' }, services: {} } });
+    const addAzure = write({ production, aws, azure: { hosting: { provider: 'also-not-a-provider' }, services: {} } });
     expect(introducedProviderSpecValidationFailure(previous, addAzure)).toMatchObject({ details: { path: 'environments.azure.hosting.provider' } });
     expect(introducedProviderSpecValidationFailure(null, editProduction)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
   });
   it('scopes validation to the requested environment so another environment cannot block it', () => {
     const candidate = projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments: {
       production: { hosting: { provider: 'railway' }, services: {} },
-      aws: { hosting: { provider: 'aws' }, services: {} },
+      aws: { hosting: { provider: 'not-a-provider' }, services: {} },
     } });
     expect(firstProviderSpecValidationFailure(candidate)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
     expect(firstProviderSpecValidationFailure(candidate, 'production')).toBeUndefined();
