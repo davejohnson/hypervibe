@@ -1,3 +1,4 @@
+import { disableSecretVersion, enabledSecretVersions, latestSecretVersion } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import crypto from 'crypto';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -5,7 +6,7 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import type { CommandContext } from './context.js';
 import {
   ENGINE_CACHE_URL_KEY, ENGINE_DATABASE_URL_KEY, type EngineBinding, engineSecretId, engineSecretKeys, isEngineManaged,
-  resolveEngineContext, secretManagerFetch, writeSecretVersion,
+  resolveEngineContext, writeSecretVersion,
 } from './infrastructure-engine.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
 import { contextRows } from './local-connect-page.js';
@@ -43,7 +44,7 @@ export interface SecretAge {
 export const DEFAULT_ROTATION_DAYS = 90;
 
 async function latestCreated(token: string, gcpProjectId: string, secretId: string): Promise<string | undefined> {
-  const response = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}/versions/latest`);
+  const response = await latestSecretVersion(token, gcpProjectId, secretId);
   if (!response.ok) return undefined;
   return ((await response.json()) as { createTime?: string }).createTime;
 }
@@ -207,13 +208,13 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   let disabledVersions = 0;
   for (const secret of selected.filter((entry) => entry.kind !== 'database')) {
     const secretId = engineSecretId(params.environmentName, secret.key);
-    const listed = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${engine.gcpProjectId}/secrets/${secretId}/versions?filter=state:ENABLED`);
+    const listed = await enabledSecretVersions(token, engine.gcpProjectId, secretId);
     if (!listed.ok) continue;
     const versions = (((await listed.json()) as { versions?: Array<{ name: string }> }).versions ?? []).map((version) => version.name);
     const latest = versions.map((name) => Number(name.split('/').pop())).sort((a, b) => b - a)[0];
     for (const name of versions) {
       if (Number(name.split('/').pop()) === latest) continue;
-      const disabled = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/${name}:disable`, { method: 'POST', body: '{}' });
+      const disabled = await disableSecretVersion(token, name);
       if (disabled.ok) disabledVersions++;
     }
   }
