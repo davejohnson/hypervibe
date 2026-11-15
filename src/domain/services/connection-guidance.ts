@@ -289,42 +289,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
     ],
   },
-  'azure-managed-redis': {
-    provider: 'azure-managed-redis',
-    displayName: 'Azure Managed Redis',
-    tokenType: 'Microsoft Entra application service principal (tenantId, clientId, and clientSecret) for one Azure subscription',
-    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-    setupUrls: [
-      {
-        label: 'Create or review the Microsoft Entra application',
-        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-      },
-      {
-        label: 'Microsoft Entra service-principal setup guide',
-        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
-      },
-      {
-        label: 'Azure Managed Redis built-in role',
-        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/databases',
-      },
-      {
-        label: 'Azure Managed Redis REST operations',
-        url: 'https://learn.microsoft.com/en-us/rest/api/redis/redisenterprisecache/',
-      },
-    ],
-    permissions: [
-      'At the exact resource-group scope, assign Azure Managed Redis Contributor (role ID 3015e5ed-6856-4ab3-b2f0-b8492aa30ca6). It creates/manages Managed Redis resources without granting cache data access.',
-      'The service principal must be allowed to invoke the database listKeys action so Hypervibe can wire the generated TLS endpoint; confirm that a custom deny assignment does not remove this action.',
-      'Also grant Microsoft.Resources/subscriptions/resourceGroups/read at the same scope when it is not already included by the role assignment.',
-    ],
-    credentialExample: 'hv_connections provider="azure-managed-redis" credentialsRef="file:/absolute/path/azure-managed-redis.json"',
-    notes: [
-      'The JSON file contains only tenantId, subscriptionId, clientId, and clientSecret. Reuse the verified azure-container-apps connection when possible; resource-group identity and placement are lifecycle state, never credentials.',
-      'Hypervibe creates one public-network-enabled, TLS-only Azure Managed Redis cluster in the exact resource group owned by the same Azure Container Apps environment. The default database uses encrypted client protocol and access-key authentication; non-Azure hosting is rejected.',
-      'Set cache.region and cache.size in desired state when the documented defaults are unsuitable. Azure Managed Redis network, subnetwork, and tier fields are rejected by this public-endpoint lifecycle instead of being ignored.',
-      'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
-    ],
-  },
   azureblob: {
     provider: 'azureblob',
     displayName: 'Azure Blob Storage',
@@ -502,24 +466,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'database connection URL',
     permissions: ['Use a database user with the least privileges required for the intended hv_db query or migration operation.'],
     credentialExample: 'hv_connections provider="database" credentialsRef="dotenv:/absolute/path/.env#DATABASE_URL"',
-  },
-  elasticache: {
-    provider: 'elasticache',
-    displayName: 'Amazon ElastiCache',
-    tokenType: 'the verified AWS IAM access key pair used by ECS (accessKeyId/secretAccessKey) and scoped to one account',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    permissions: [
-      'Reuse the verified ecs connection; do not create a separate placement credential. For verification and observation add elasticache:DescribeServerlessCaches plus ec2:DescribeVpcs, ec2:DescribeSubnets, and ec2:DescribeSecurityGroups to that IAM principal.',
-      'For lifecycle management through hv_plan/hv_apply: elasticache:CreateServerlessCache, elasticache:DeleteServerlessCache, elasticache:AddTagsToResource, ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress, ec2:DeleteSecurityGroup, and ec2:CreateTags.',
-      'If the account has never used ElastiCache, allow iam:CreateServiceLinkedRole only when iam:AWSServiceName equals elasticache.amazonaws.com, or have an administrator create that service-linked role first.',
-    ],
-    credentialExample: 'hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
-    notes: [
-      'The JSON needs only accessKeyId and secretAccessKey. Region and size belong in environments.<name>.cache; network, subnet, and security-group IDs are never connection credentials.',
-      'The ECS project action creates and binds a tagged workload security group in the region\'s exact default VPC. ElastiCache re-observes that binding read-only, creates a dedicated managed security group accepting TCP 6379 only from the workload group, and creates TLS-only serverless Valkey in the exact default subnets.',
-      'Deletion waits for provider-confirmed cache absence before removing the managed security group. Cache deletion is data-bearing and exact-action confirmation remains required.',
-      'Scope mutation permissions to the intended account, region, default VPC, and Hypervibe-tagged resources where AWS supports resource-level conditions.',
-    ],
   },
   ecs: {
     provider: 'ecs',
@@ -891,9 +837,6 @@ function credentialExample(
       break;
     case 'stripe':
       if (options.scope) example = example.replace('scope="development"', `scope="${options.scope}"`);
-      break;
-    case 'elasticache':
-      if (options.scope) example = example.replace('provider="ecs"', `provider="ecs" scope="${options.scope}"`);
       break;
   }
   if (options.scope && !example.includes(`scope="${options.scope}"`)) {

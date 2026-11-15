@@ -85,6 +85,7 @@ contracts; use Git history for the old material rather than an archive in docs.
 | --- | --- |
 | Cloud journey, feature scope or completion claims | [Common cloud journey](docs/development/user-journey.md) |
 | Onboarding and customer experience | [Product](docs/development/product.md) |
+| What is in scope or supported on each cloud | [Support matrix](docs/development/support-matrix.md) |
 | Provider APIs or shared capabilities | [Provider evidence](docs/development/provider-evidence.md) |
 | Spec, plan, apply, observation, import or teardown | [Lifecycle](docs/development/lifecycle.md) |
 | Authentication, secrets or IAM | [Connections](docs/development/connections.md) |
