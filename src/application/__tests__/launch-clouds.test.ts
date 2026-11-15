@@ -3,11 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const gcpBootstrap = vi.fn();
 const connectAzure = vi.fn();
 const resolveAzureConnection = vi.fn();
+const connectAws = vi.fn();
+const resolveAwsEngineContext = vi.fn();
 vi.mock('../../domain/services/gcp-bootstrap.service.js', () => ({ runGcpBootstrap: gcpBootstrap }));
 vi.mock('../azure-connect.js', () => ({ connectAzure }));
 vi.mock('../infrastructure-engine-azure.js', async (original) => ({ ...(await original<object>()), resolveAzureConnection }));
+vi.mock('../aws-connect.js', () => ({ connectAws }));
+vi.mock('../infrastructure-engine-aws.js', async (original) => ({ ...(await original<object>()), resolveAwsEngineContext }));
 
-const { launchEnvironment, estimateAzureMonthlyCost } = await import('../launch.js');
+const { launchEnvironment, estimateAwsMonthlyCost, estimateAzureMonthlyCost } = await import('../launch.js');
 
 const project = { id: 'p1', name: 'demo' } as never;
 const ctx = { repos: { projects: { findById: () => undefined }, environments: { findByProjectAndName: () => undefined } } } as never;
@@ -18,17 +22,27 @@ const launch = (provider: 'aws' | 'azure', name = 'dev', extra: Record<string, u
   launchEnvironment(ctx, { project, spec: { environments: { [name]: environment(provider, extra) } } as never, specRevision: 1, environmentName: name, ...params });
 
 describe('hv_launch on AWS and Azure', () => {
-  beforeEach(() => { gcpBootstrap.mockReset(); connectAzure.mockReset(); resolveAzureConnection.mockReset(); });
+  beforeEach(() => { for (const mock of [gcpBootstrap, connectAzure, resolveAzureConnection, connectAws, resolveAwsEngineContext]) mock.mockReset(); });
 
-  it('never runs Google Cloud setup for an AWS environment', async () => {
-    await expect(launch('aws')).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/does not run AWS/) });
+  it('connects AWS through its own sign-in, never Google Cloud setup', async () => {
+    resolveAwsEngineContext.mockResolvedValue({ blocked: 'no access' });
+    connectAws.mockResolvedValueOnce({ status: 'waiting', url: 'http://127.0.0.1:1/aws', message: 'Sign in' });
+    await expect(launch('aws')).resolves.toEqual({ status: 'needs_connection', provider: 'aws', url: 'http://127.0.0.1:1/aws', message: 'Sign in' });
+    connectAws.mockResolvedValueOnce({ status: 'needs_approval', accountId: '123456789012', region: 'us-west-2', signedInAs: 'me', changes: [], message: 'Approve' });
+    await expect(launch('aws')).resolves.toMatchObject({ status: 'needs_access', accessId: 'aws-setup', grants: { accountId: '123456789012' } });
+    expect(connectAws.mock.lastCall?.[0]).not.toHaveProperty('approveAccountId');
+    await expect(launch('aws', 'dev', {}, { approveAccess: ['aws-setup'] })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/awsAccountId/) });
+    connectAws.mockResolvedValueOnce({ status: 'failed', message: 'nope' });
+    await launch('aws', 'dev', {}, { approveAccess: ['aws-setup'], awsAccountId: '123456789012' });
+    expect(connectAws).toHaveBeenLastCalledWith(expect.objectContaining({ approveAccountId: '123456789012' }));
     expect(gcpBootstrap).not.toHaveBeenCalled();
   });
 
-  it('refuses Azure environments it cannot finish before connecting anything', async () => {
-    await expect(launch('azure', 'staging')).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/production profile/) });
-    await expect(launch('azure', 'dev', { deploy: { strategy: 'branch' } })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/GitHub Actions/) });
+  it.each(['aws', 'azure'] as const)('refuses %s environments it cannot finish before connecting anything', async (provider) => {
+    await expect(launch(provider, 'staging')).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/production profile/) });
+    await expect(launch(provider, 'dev', { deploy: { strategy: 'branch' } })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/GitHub Actions/) });
     expect(connectAzure).not.toHaveBeenCalled();
+    expect(connectAws).not.toHaveBeenCalled();
     expect(gcpBootstrap).not.toHaveBeenCalled();
   });
 
@@ -44,6 +58,13 @@ describe('hv_launch on AWS and Azure', () => {
 
     await expect(launch('azure', 'dev', {}, { approveAccess: ['azure-setup'] })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/azureSubscriptionId/) });
     expect(gcpBootstrap).not.toHaveBeenCalled();
+  });
+
+  it('prices AWS with AWS resources', () => {
+    const lines = estimateAwsMonthlyCost(environment('aws', { database: { provider: 'rds' } }) as never).map((line) => line.item).join('\n');
+    expect(lines).toMatch(/Lambda/);
+    expect(lines).toMatch(/Aurora/);
+    expect(lines).not.toMatch(/Cloud Run|Cloud SQL/);
   });
 
   it('prices Azure with Azure resources', () => {

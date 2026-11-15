@@ -52,10 +52,11 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
 
 interface Source { commitSha: string; archive: Buffer; uncommittedChangesExcluded: boolean }
 
-async function localSource(directory: string, dockerfileFor: (repositoryDockerfile?: string) => string): Promise<Source | { blocked: string }> {
+async function localSource(directory: string, dockerfileFor: (repositoryDockerfile?: string) => string, reviewedCommit?: string): Promise<Source | { blocked: string }> {
   try {
     const git = async (args: string[]) => String((await execFileAsync('git', ['-C', directory, ...args])).stdout);
-    const commitSha = (await git(['rev-parse', 'HEAD'])).trim();
+    // A reviewed plan names its commit; build exactly that one even if HEAD moved since.
+    const commitSha = reviewedCommit ?? (await git(['rev-parse', 'HEAD'])).trim();
     if (!/^[0-9a-f]{40}$/.test(commitSha)) return { blocked: 'The local repository has no commit to release.' };
     let repositoryDockerfile: string | undefined;
     try { repositoryDockerfile = await git(['show', `${commitSha}:Dockerfile`]); } catch { /* no repository Dockerfile */ }
@@ -68,6 +69,22 @@ async function localSource(directory: string, dockerfileFor: (repositoryDockerfi
   } catch (error) {
     return { blocked: `Hypervibe could not package this repository: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}` };
   }
+}
+
+/**
+ * Builds one commit of the local repository for an environment (used by the
+ * infrastructure apply for the first image), returning the digest-pinned image.
+ */
+export async function buildAwsCommitImage(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, directory: string, commitSha: string)
+  : Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
+  const services = spec.environments[environmentName]!.services;
+  const web = Object.keys(services).find((name) => (services[name]!.workloadKind ?? 'web') === 'web');
+  const startCommand = services[web ?? Object.keys(services)[0]!]?.startCommand;
+  const source = await localSource(directory, (repositoryDockerfile) => awsReleaseDockerfile({
+    ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(spec.runtime ? { runtime: spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
+  }), commitSha);
+  if ('blocked' in source) return { error: source.blocked };
+  return buildImage(context, source);
 }
 
 /** Uploads the commit, builds it in CodeBuild and returns the digest-pinned image. */

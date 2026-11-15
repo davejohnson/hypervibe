@@ -15,6 +15,8 @@ import { applyDnsPlan } from './dns-hosting.js';
 import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { connectAzure } from './azure-connect.js';
+import { connectAws } from './aws-connect.js';
+import { awsProfileFor, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import { azureProfileFor, resolveAzureConnection } from './infrastructure-engine-azure.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -54,10 +56,27 @@ export type LaunchResult =
   | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
-export const LAUNCH_ACCESS_IDS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release', 'azure-setup'] as const;
+export const LAUNCH_ACCESS_IDS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release', 'azure-setup', 'aws-setup'] as const;
 export type LaunchAccessId = typeof LAUNCH_ACCESS_IDS[number];
 
 export interface CostLine { item: string; estimate: string }
+
+/** Approximate list prices for an AWS testing environment (us-east-1). Never a quote. */
+export function estimateAwsMonthlyCost(environment: EnvironmentSpec): CostLine[] {
+  const lines: CostLine[] = [];
+  const workloads = Object.values(environment.services);
+  const web = workloads.filter((service) => (service.workloadKind ?? 'web') === 'web').length;
+  if (web) lines.push({ item: `${web} web service(s) on Lambda`, estimate: '$0 while idle; the first million requests and 400,000 GB-seconds a month are free, then about $0.20 per million requests plus compute time' });
+  const workers = workloads.filter((service) => service.workloadKind === 'worker').length;
+  if (workers) lines.push({ item: `${workers} worker(s) on Fargate that start when jobs are due`, estimate: '$0 while idle; about 1–2 cents per hour while working' });
+  const cron = workloads.filter((service) => service.workloadKind === 'cron').length;
+  if (cron) lines.push({ item: `${cron} scheduled job(s) on Fargate`, estimate: '$0 between runs; a few cents a month for short runs' });
+  if (environment.database) lines.push({ item: 'Aurora Serverless Postgres that pauses when idle', estimate: '$0 compute while paused, plus about $0.10 per GB stored per month; about 6–12 cents per hour while in use' });
+  const buckets = Object.keys(environment.storage ?? {}).length;
+  if (buckets) lines.push({ item: `${buckets} S3 bucket(s)`, estimate: 'about $0.023 per GB stored per month' });
+  lines.push({ item: 'Image registry, builds, settings, logs', estimate: 'usually under $1 per month' });
+  return lines;
+}
 
 /** Approximate list prices for an Azure testing environment (East US 2). Never a quote. */
 export function estimateAzureMonthlyCost(environment: EnvironmentSpec): CostLine[] {
@@ -153,6 +172,8 @@ async function runLaunch(ctx: CommandContext, params: {
   billingAccountName?: string;
   /** Azure: the subscription the person chose after needs_subscription. */
   azureSubscriptionId?: string;
+  /** AWS: the account a needs_access "aws-setup" result was shown for. */
+  awsAccountId?: string;
   confirmActions?: string[];
   /** Exact persisted plan returned for review; its approval never transfers to another plan. */
   planId?: string;
@@ -169,15 +190,14 @@ async function runLaunch(ctx: CommandContext, params: {
     return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Choose hosting.provider="cloudrun" with hv_spec first.' };
   }
   // Each cloud has its own access; never fall through to Google Cloud setup.
-  if (environmentSpec.hosting.provider === 'aws') {
-    return { status: 'blocked', message: 'hv_launch does not run AWS environments yet. Connect with hv_connections provider="aws" action="connect", then run hv_plan scope="infrastructure", hv_apply and hv_deploy.' };
-  }
-  if (environmentSpec.hosting.provider === 'azure') {
-    if (azureProfileFor(params.environmentName) === 'production') {
-      return { status: 'blocked', message: `hv_launch runs only Azure testing environments for now; ${params.environmentName} uses the production profile, which is not built yet. Launch a testing environment (for example "dev" or "preview").` };
+  const cloud = environmentSpec.hosting.provider === 'azure' ? 'Azure' : environmentSpec.hosting.provider === 'aws' ? 'AWS' : undefined;
+  if (cloud) {
+    const profile = cloud === 'Azure' ? azureProfileFor(params.environmentName) : awsProfileFor(params.environmentName);
+    if (profile === 'production') {
+      return { status: 'blocked', message: `hv_launch runs only ${cloud} testing environments for now; ${params.environmentName} uses the production profile, which is not built yet. Launch a testing environment (for example "dev" or "preview").` };
     }
     if (environmentSpec.deploy?.strategy === 'branch') {
-      return { status: 'blocked', message: 'Releases from GitHub Actions are not built for Azure yet. Set deploy.strategy="manual" with hv_spec; hv_deploy releases from this computer.' };
+      return { status: 'blocked', message: `Releases from GitHub Actions are not built for ${cloud} yet. Set deploy.strategy="manual" with hv_spec; hv_deploy releases from this computer.` };
     }
   }
 
@@ -213,9 +233,9 @@ async function runLaunch(ctx: CommandContext, params: {
   const resourceAccess = neededResourceAccess(environmentSpec);
   const approvedAccess = new Set<string>(params.approveAccess ?? []);
 
-  const prepared = environmentSpec.hosting.provider === 'azure'
-    ? await prepareAzureLaunch(params, approvedAccess)
-    : await prepareGcpLaunch(ctx, params, environmentSpec, approvedAccess, resourceAccess);
+  const prepared = environmentSpec.hosting.provider === 'azure' ? await prepareAzureLaunch(params, approvedAccess)
+    : environmentSpec.hosting.provider === 'aws' ? await prepareAwsLaunch(ctx, params, approvedAccess)
+      : await prepareGcpLaunch(ctx, params, environmentSpec, approvedAccess, resourceAccess);
   if (prepared) return prepared;
 
   if (params.stopAfter === 'prepare') return { status: 'ready', phase: 'prepare', infrastructureRounds: 0 };
@@ -250,7 +270,8 @@ async function runLaunch(ctx: CommandContext, params: {
         planId: planned.planRunId,
         confirmActions: tokens,
         changes: pending.map(summarize),
-        estimatedMonthlyCost: environmentSpec.hosting.provider === 'azure' ? estimateAzureMonthlyCost(environmentSpec) : estimateMonthlyCost(environmentSpec),
+        estimatedMonthlyCost: environmentSpec.hosting.provider === 'azure' ? estimateAzureMonthlyCost(environmentSpec)
+          : environmentSpec.hosting.provider === 'aws' ? estimateAwsMonthlyCost(environmentSpec) : estimateMonthlyCost(environmentSpec),
       };
     }
     let applied: Awaited<ReturnType<typeof applyInfrastructureEngine>>;
@@ -402,6 +423,27 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
     if (!confirm) return { status: 'needs_access', accessId: request.id, access: request.description, grants: result };
   }
   return undefined;
+}
+
+/**
+ * AWS access: reused when this account is already connected; otherwise one AWS
+ * sign-in in the browser, where the person approves the exact setup. The chat
+ * fallback is approveAccess "aws-setup" for the account it was shown for.
+ */
+async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
+  const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName);
+  if (!('blocked' in existing)) return undefined;
+  const shownAccount = approvedAccess.has('aws-setup') ? params.awsAccountId : undefined;
+  if (approvedAccess.has('aws-setup') && !shownAccount) return { status: 'blocked', message: 'Approving AWS setup needs the awsAccountId it was shown for.' };
+  const connected = await connectAws({ project: params.project, spec: params.spec, ...(shownAccount ? { approveAccountId: shownAccount } : {}) });
+  switch (connected.status) {
+    case 'connected': return undefined;
+    case 'waiting': return { status: 'needs_connection', provider: 'aws', url: connected.url, message: connected.message };
+    case 'failed': return { status: 'blocked', message: connected.message };
+    case 'needs_approval':
+      return { status: 'needs_access', accessId: 'aws-setup', access: connected.message,
+        grants: { accountId: connected.accountId, region: connected.region, changes: connected.changes } };
+  }
 }
 
 /**
