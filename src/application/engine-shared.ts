@@ -1,5 +1,11 @@
 import crypto from 'crypto';
+import { RunRepository } from '../adapters/db/repositories/run.repository.js';
+import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
+import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
+import type { InfrastructurePlanResult } from './infrastructure-engine.js';
 
 /** Helpers every cloud engine uses. Add shared engine behavior here, not to one cloud's module. */
 
@@ -23,4 +29,75 @@ export function specWithoutEnvironment(spec: ProjectSpec, environmentName: strin
       return [key, remaining.length ? { environments: remaining } : null];
     }));
   return { environments: { [environmentName]: null }, ...(Object.keys(secrets).length ? { secrets } : {}) };
+}
+
+/** Plan scope shared by every engine's infrastructure and release plans. */
+export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
+
+/** The pinned OpenTofu engine with Hypervibe's state cipher and private plugin cache. */
+export async function openTofuEngine(options: { timeoutMs?: number } = {}): Promise<OpenTofuEngine | { blocked: string }> {
+  const binary = await ensureEngineBinary();
+  if (!binary.ok) return { blocked: binary.error };
+  return new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) });
+}
+
+/** A plan stops on missing outside keys with the one command that collects them all. */
+export function missingOutsideKeysMessage(environmentName: string, keys: string[]): string {
+  return `${environmentName} needs ${keys.length === 1 ? 'a key' : `${keys.length} keys`} Hypervibe cannot create: ${keys.join(', ')}. `
+    + `Run hv_secrets action="collect" env="${environmentName}" to add ${keys.length === 1 ? 'it' : 'them all'} on one local page (hv_launch does this itself), then plan again.`;
+}
+
+/**
+ * Plans an environment's secrets the same way on every cloud. Outside keys must
+ * already have a value, because Hypervibe never invents them; generated keys get a
+ * create action when absent. An unknown read blocks the plan: it is never treated
+ * as absence.
+ */
+export async function planEngineSecrets(params: {
+  environmentName: string;
+  generated: string[];
+  outside: string[];
+  observe: (key: string) => Promise<'present' | 'absent' | { unknown: string }>;
+  action: (key: string, stored: boolean) => PlanAction;
+}): Promise<{ actions: PlanAction[] } | { blocked: string[]; missingOutsideKeys?: string[] }> {
+  const missing: string[] = [];
+  for (const key of params.outside) {
+    const observed = await params.observe(key);
+    if (typeof observed === 'object') return { blocked: [observed.unknown] };
+    if (observed === 'absent') missing.push(key);
+  }
+  if (missing.length) return { blocked: [missingOutsideKeysMessage(params.environmentName, missing)], missingOutsideKeys: missing };
+  const actions: PlanAction[] = [];
+  for (const key of params.generated) {
+    const observed = await params.observe(key);
+    if (typeof observed === 'object') return { blocked: [observed.unknown] };
+    actions.push(params.action(key, observed === 'present'));
+  }
+  return { actions };
+}
+
+/**
+ * Saves a reviewed engine plan and returns what the caller shows. Actions that
+ * are billable, data-bearing or flagged need exact confirmation; a teardown
+ * confirms every action.
+ */
+export function recordEnginePlan(params: {
+  projectId: string; environmentId: string; environmentName: string; specRevision: number;
+  actions: PlanAction[]; warnings: string[];
+  /** Engine-specific plan identity: plan id, state, and the cloud's own target. */
+  engine: Record<string, unknown>;
+  confirm?: 'consequential' | 'all';
+}): InfrastructurePlanResult {
+  const { environmentName, specRevision, actions, warnings } = params;
+  const runRepo = new RunRepository();
+  const run = runRepo.create({ projectId: params.projectId, environmentId: params.environmentId, type: 'plan', plan: {
+    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision,
+    observedFingerprint: null, actions, unmanaged: [], warnings, engine: params.engine,
+  } as unknown as Record<string, unknown> });
+  runRepo.updateStatus(run.id, 'succeeded');
+  return {
+    planRunId: run.id, environmentName, specRevision, actions, warnings,
+    confirmActions: (params.confirm === 'all' ? actions
+      : actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing))).map((action) => action.id),
+  };
 }

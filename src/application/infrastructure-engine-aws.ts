@@ -1,5 +1,5 @@
 import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
-import { scramVerifier, specWithoutEnvironment } from './engine-shared.js';
+import { scramVerifier, specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { RDSClient, DeleteDBClusterSnapshotCommand, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
 import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
@@ -14,9 +14,6 @@ import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { LAMBDA_RESERVED_ENV, type AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { RunRepository } from '../adapters/db/repositories/run.repository.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
-import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -28,7 +25,7 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
-import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, missingOutsideKeysMessage, type InfrastructurePlanResult } from './infrastructure-engine.js';
+import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
 import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
 
 /**
@@ -285,26 +282,18 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     ...(dependsOn.length ? { dependsOn } : {}),
     metadata: { operation: AWS_SNAPSHOT_DELETE_OPERATION, accountId: context.connection.accountId, identifier },
   });
-  const record = (actions: PlanAction[], warnings: string[], engine: Record<string, unknown>) => {
-    const document = {
-      kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-      observedFingerprint: null, actions, unmanaged: [], warnings,
-      engine: { state: context.state, teardown: true, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix }, ...engine },
-    } as unknown as PlanRunDocument;
-    const runRepo = new RunRepository();
-    const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-    runRepo.updateStatus(run.id, 'succeeded');
-    return { planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings, confirmActions: actions.map((action) => action.id) };
-  };
+  const record = (actions: PlanAction[], warnings: string[], engine: Record<string, unknown>) => recordEnginePlan({
+    projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings, confirm: 'all',
+    engine: { state: context.state, teardown: true, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix }, ...engine },
+  });
   if (!spec.environments[environmentName]) {
     return record([snapshotAction(tornDown.finalSnapshot!.identifier, [])], ['Deleting the snapshot cannot be undone.'], { planId: `snapshot-${crypto.randomUUID()}` });
   }
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...engineSecretKeys(spec, environmentName), ...imported]);
   if (built.blocked) return { blocked: built.blocked };
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { blocked: [binary.error] };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { blocked: [engine.blocked] };
   const planId = crypto.randomUUID();
   const planned = await engine.plan({ backend: awsEngineBackend, configuration: built.configuration, auth: context.auth, state: context.state, planId, destroy: true });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
@@ -444,33 +433,28 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const generated = engineSecretKeys(spec, environmentName);
   // Outside keys (declared in the spec or copied by a migration) must have a value; Hypervibe never invents them.
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
-  const missingKeys: string[] = [];
-  for (const key of imported) {
-    const observed = await parameterExists(ssm, `${context.parameterPath}${key}`);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    if (observed === 'absent') missingKeys.push(key);
-  }
-  if (missingKeys.length) return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)], missingOutsideKeys: missingKeys };
-  const secretActions: PlanAction[] = [];
-  for (const key of generated) {
-    const name = `${context.parameterPath}${key}`;
-    const observed = await parameterExists(ssm, name);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    secretActions.push({
-      id: `secret:${key}`, type: observed === 'present' ? 'noop' : 'create', verified: true,
-      resource: { kind: 'secret', name: key, provider: 'aws' },
-      reason: observed === 'present' ? `Secret ${key} is stored in Parameter Store.` : `Hypervibe will generate ${key} and store it in Parameter Store (${name}).`,
-      metadata: { operation: AWS_PARAMETER_OPERATION, accountId: context.connection.accountId, name },
-    });
-  }
+  const secrets = await planEngineSecrets({
+    environmentName, generated, outside: imported,
+    observe: (key) => parameterExists(ssm, `${context.parameterPath}${key}`),
+    action: (key, stored) => {
+      const name = `${context.parameterPath}${key}`;
+      return {
+        id: `secret:${key}`, type: stored ? 'noop' : 'create', verified: true,
+        resource: { kind: 'secret', name: key, provider: 'aws' },
+        reason: stored ? `Secret ${key} is stored in Parameter Store.` : `Hypervibe will generate ${key} and store it in Parameter Store (${name}).`,
+        metadata: { operation: AWS_PARAMETER_OPERATION, accountId: context.connection.accountId, name },
+      };
+    },
+  });
+  if ('blocked' in secrets) return secrets;
+  const secretActions = secrets.actions;
 
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported]);
   if (built.blocked) return { blocked: built.blocked };
   const { binding, databaseWired, input, configuration } = built;
 
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { blocked: [binary.error] };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { blocked: [engine.blocked] };
   const planId = crypto.randomUUID();
   const planned = await engine.plan({ backend: awsEngineBackend, configuration, auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
@@ -507,18 +491,8 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     ...(!binding.imageUri && workloads ? ['Services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
     ...(environmentSpec.database && !databaseWired && workloads ? ['Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login.'] : []),
   ];
-  const document = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
-    engine: { planId, state: context.state, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } },
-  } as unknown as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return {
-    planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings,
-    confirmActions: actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
-  };
+  return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
+    engine: { planId, state: context.state, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
 }
 
 async function ensureParameter(ssm: SSMClient, action: PlanAction): Promise<ActionResult> {
@@ -588,9 +562,8 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     || reviewed.aws.region !== context.connection.region || reviewed.aws.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different AWS account, region or environment. Re-run hv_plan.' };
   }
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { kind: 'blocked', reason: binary.error };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,

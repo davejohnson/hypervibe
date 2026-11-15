@@ -3,7 +3,7 @@
   "ignore": ["**/__tests__/**", "**/*.test.ts", "**/providers/railway/**"],
   "minTokens": 50,
   "minLines": 5,
-  "threshold": 1.1,
+  "threshold": 1.05,
   "reporters": ["console"],
   "silent": true
 }

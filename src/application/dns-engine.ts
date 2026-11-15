@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 import { dnsEngineBackend, buildDnsConfiguration, dnsRecordAddress, dnsRecordNativeId } from '../adapters/dns/tofu/dns-engine.backend.js';
 import { resolveDnsConnection, dnsZoneFingerprint } from '../adapters/dns-observation/connections.js';
 import type { DnsObserver } from '../adapters/dns-observation/http-observer.js';
@@ -51,9 +50,9 @@ export interface DnsEngineDependencies {
 const defaults: DnsEngineDependencies = {
   connect: resolveDnsConnection, security: inspectDomainSecurity,
   engine: async () => {
-    const binary = await ensureEngineBinary();
-    if (!binary.ok) throw new Error(binary.error);
-    return new OpenTofuEngine({ binary: binary.binary, cipher: (await import('../adapters/secrets/secret-store.js')).getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+    const engine = await (await import('./engine-shared.js')).openTofuEngine();
+    if ('blocked' in engine) throw new Error(engine.blocked);
+    return engine;
   },
 };
 const sorted = (values: string[]) => [...new Set(values)].sort();
