@@ -7,7 +7,7 @@ import { saveConnection, verifyConnection } from '../domain/services/connection-
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { signInToAws, type AwsSignInSession } from './aws-sign-in.js';
 import { escapeHtml } from './local-paste-page.js';
-import { ACCOUNT_DEPLOY_ROLE, applyAwsSetup, awsAccessCurrent, planAwsSetup, retireProjectRoles, type AwsSetupChange, type AwsSetupPlan } from './aws-setup.js';
+import { ACCOUNT_DEPLOY_ROLE, applyAwsSetup, awsAccessCurrent, planAwsSetup, retireProjectRoles, type AwsSetupChange, type AwsSetupPlan } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 
 /** Closest AWS region to the app's other environments; us-east-1 otherwise (newest services launch there first). */

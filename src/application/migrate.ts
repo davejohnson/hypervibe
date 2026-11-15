@@ -14,7 +14,7 @@ import { migrationDatabaseBindingConflict } from './migration-database-binding.j
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
-import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { putParameter } from '../adapters/providers/aws/aws-engine.client.js';
 import { isAwsEngineEnvironment, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import {
   ENGINE_DATABASE_URL_KEY,
@@ -182,10 +182,10 @@ async function migrateToAws(ctx: CommandContext, params: {
           + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
       };
     }
-    const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+    const access = { region: context.connection.region, credentials: context.credentials };
     for (const key of keys) {
       try {
-        await ssm.send(new PutParameterCommand({ Name: `${context.parameterPath}${key}`, Type: 'SecureString', Value: values[key]!, Overwrite: true }));
+        await putParameter(access, `${context.parameterPath}${key}`, values[key]!);
       } catch (error) {
         return { status: 'blocked', message: `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}); nothing was recorded as imported. Run the migration again.` };
       }

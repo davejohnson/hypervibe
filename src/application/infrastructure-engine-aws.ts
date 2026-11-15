@@ -6,7 +6,7 @@ import {
   deleteFinalSnapshot, describeDatabaseCluster, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
   putParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess,
 } from '../adapters/providers/aws/aws-engine.client.js';
-import { awsAccessCurrent } from './aws-setup.js';
+import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { LAMBDA_RESERVED_ENV, type AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';

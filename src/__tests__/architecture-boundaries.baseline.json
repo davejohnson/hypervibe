@@ -186,9 +186,7 @@
     "src/domain/spec/spec.store.ts -> src/application/results"
   ],
   "cloud-sdk-outside-adapters": [
-    "src/application/aws-setup.ts -> @aws-sdk/client-iam",
     "src/application/infrastructure-engine-database.ts -> @google-cloud/cloud-sql-connector",
-    "src/application/migrate.ts -> @aws-sdk/client-ssm",
     "src/domain/services/cloud-prepare.execute.ts -> google-auth-library",
     "src/domain/services/object-storage-transfer.service.ts -> @aws-sdk/client-s3"
   ],

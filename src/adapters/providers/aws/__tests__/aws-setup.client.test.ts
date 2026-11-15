@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { awsConnectionScope, chooseAwsRegion } from '../aws-connect.js';
-import { appBoundaryDocument, deployPolicyDocument, trustedGitHubOwners } from '../aws-setup.js';
+import { awsConnectionScope, chooseAwsRegion } from '../../../../application/aws-connect.js';
+import { appBoundaryDocument, deployPolicyDocument, trustedGitHubOwners } from '../aws-setup.client.js';
 
 type Statement = { Sid: string; Effect: string; Action: string | string[]; Resource: string | string[]; Condition?: Record<string, Record<string, unknown>> };
 
@@ -41,7 +41,7 @@ describe('AWS setup', () => {
 
 describe('saved AWS access', () => {
   it('accepts the account deploy role as well as per-project roles from earlier versions', async () => {
-    const { AwsEngineCredentialsSchema } = await import('../../adapters/providers/aws/aws-engine.adapter.js');
+    const { AwsEngineCredentialsSchema } = await import('../aws-engine.adapter.js');
     const base = { accessKeyId: 'AKIAEXAMPLEEXAMPLE12', secretAccessKey: 'x'.repeat(40), accountId: '123456789012', region: 'us-west-2' };
     expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-deploy' }).success).toBe(true);
     expect(AwsEngineCredentialsSchema.safeParse({ ...base, roleArn: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-deploy-billforge' }).success).toBe(true);
