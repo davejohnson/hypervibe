@@ -1,3 +1,4 @@
+import type { EngineConnectStep } from './cloud-engines.js';
 import { AzureEngineCredentialsSchema } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -126,4 +127,28 @@ async function finishSetup(project: Project, session: AzureSignInSession, plan: 
   if (verified.kind !== 'verified') return { status: 'failed', message: 'Azure access was created and saved, but the deploy identity could not be used yet. Run setup again in a few minutes.' };
   return { status: 'connected', subscriptionId: plan.subscriptionId, location: plan.location, resourceGroup: plan.resourceGroup,
     message: `Hypervibe can now deploy ${project.name} to Azure (${plan.subscriptionName}, ${plan.location}). The sign-in is no longer used.` };
+}
+
+/** Azure's guided connection as one engine step; `input.azureSubscriptionId` chooses and `input.azureApproved` approves. */
+export async function connectAzureStep(params: { project: Project; spec?: ProjectSpec; input: Record<string, unknown> }): Promise<EngineConnectStep> {
+  const subscriptionId = typeof params.input.azureSubscriptionId === 'string' ? params.input.azureSubscriptionId : undefined;
+  const approved = params.input.azureApproved === true;
+  if (approved && !subscriptionId) return { status: 'invalid', result: {}, message: 'azureApproved needs the azureSubscriptionId from the preview.' };
+  const result = await connectAzure({ project: params.project, ...(params.spec ? { spec: params.spec } : {}),
+    ...(subscriptionId ? { subscriptionId } : {}), ...(approved ? { approved: true } : {}) });
+  if (result.status === 'needs_subscription') {
+    return { status: 'needs_choice', result,
+      hint: 'Ask the user which subscription to use (it is billed for the app); list each by name. Then call again with azureSubscriptionId set to their choice.',
+      ask: 'Ask the user which Azure subscription the app should run in and be billed to.' };
+  }
+  if (result.status === 'needs_approval') {
+    return { status: 'needs_approval', result,
+      hint: 'Show the user the subscription, region and each change in one short list, then ask them to approve. On approval call again with azureSubscriptionId set to this subscriptionId and azureApproved=true.',
+      ask: `Ask the user to approve setting up Hypervibe in Azure subscription ${result.subscriptionName}.` };
+  }
+  if (result.status === 'waiting') {
+    return { status: 'waiting', result, hint: 'Tell the user an Azure sign-in page is open in their browser (give the link). Call action="connect" again after they sign in.',
+      ask: 'Ask the user to sign in to Azure in the browser tab that opened, then continue.' };
+  }
+  return result.status === 'connected' ? { status: 'connected', result, next: ['hv_spec'] } : { status: 'failed', result, message: result.message };
 }
