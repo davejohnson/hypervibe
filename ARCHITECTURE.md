@@ -44,7 +44,8 @@ Read-only inspection is distinct from explicit, mapping-based adoption.
 
 New cloud development targets GCP, AWS and Azure. Prove one complete cloud journey
 before extending it; neither a registry entry nor a mocked test makes a provider
-supported. Record implemented capabilities, verified paths and remaining gaps.
+supported. Record implemented capabilities, verified paths and remaining gaps in the
+[support matrix](docs/development/support-matrix.md), the single statement of scope.
 
 Preserve Railway for existing applications, including established state, bindings,
 data and working workflows. A change to the cloud engine does not authorize moving

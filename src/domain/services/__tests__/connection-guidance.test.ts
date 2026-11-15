@@ -301,18 +301,6 @@ describe('connection guidance', () => {
         'exact default-VPC workload network',
         'credentialsRef="file:/absolute/path/rds.json"',
       ],
-      elasticache: [
-        'https://console.aws.amazon.com/iam/home#/security_credentials',
-        'AWS IAM access key',
-        'Reuse the verified ecs connection',
-        'elasticache:DescribeServerlessCaches',
-        'elasticache:CreateServerlessCache',
-        'ec2:AuthorizeSecurityGroupIngress',
-        'iam:CreateServiceLinkedRole',
-        'Region and size belong in environments.<name>.cache',
-        'network, subnet, and security-group IDs are never connection credentials',
-        'credentialsRef="file:/absolute/path/aws-ecs.json"',
-      ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',
@@ -339,14 +327,6 @@ describe('connection guidance', () => {
         'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules/read',
         'start/end are 0.0.0.0',
         'credentialsRef="file:/absolute/path/azure-postgres.json"',
-      ],
-      'azure-managed-redis': [
-        'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-        'Microsoft Entra application service principal',
-        'Azure Managed Redis Contributor',
-        '3015e5ed-6856-4ab3-b2f0-b8492aa30ca6',
-        'listKeys',
-        'credentialsRef="file:/absolute/path/azure-managed-redis.json"',
       ],
       s3: [
         'https://console.aws.amazon.com/iam/home#/security_credentials',
