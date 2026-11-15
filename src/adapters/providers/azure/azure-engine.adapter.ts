@@ -86,7 +86,7 @@ providerRegistry.register({
     setupHelpUrl: 'https://portal.azure.com/',
     maturity: {
       lifecycle: {
-        hosting: { status: 'planned', reason: 'The OpenTofu Azure engine (testing profile) is built but not yet verified live.' },
+        hosting: { status: 'planned', reason: 'The OpenTofu engine manages Azure infrastructure; this connection provides Hypervibe\'s access only.' },
       },
     },
   },

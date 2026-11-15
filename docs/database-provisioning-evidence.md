@@ -1,7 +1,8 @@
 # Database provisioning and persistence review
 
-Reviewed 2026-10-24 against all eight registered database providers, including
-the database adapters supplied by hosting providers. The machine-readable
+Reviewed 2026-10-24 against the eight database providers registered at that
+date. Cloud SQL, RDS and Azure PostgreSQL creation has since moved to the
+OpenTofu engines, so their rows below describe retired adapter paths. The machine-readable
 [provider matrix](../test/provider-contracts/database-provisioning-provider-matrix.json)
 records each native create API, storage model, identity, completion boundary,
 recovery behavior, prerequisites and coverage gap. Official documentation was

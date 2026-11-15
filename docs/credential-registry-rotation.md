@@ -1,31 +1,26 @@
 # Container registry credential rotation
 
 The same reviewed credential lifecycle now registers password-copy capabilities
-for Railway, ECS, Azure Container Apps and Cloud Run remote Artifact
+for Railway, Azure Container Apps and Cloud Run remote Artifact
 Registry repositories. Providers without one declare their native registry/build-input
 models and direct external package tokens to their actual CI/build consumers.
 No adapter creates a missing service, secret or registry to make inspection work.
 
 The challenged assumption was that a registry credential could only be updated
 through Railway, or that deployment credentials and image-pull credentials were
-interchangeable. Counterexamples are an ECS task with an existing Secrets Manager
-reference, an Azure app with a registry passwordSecretRef, an image
+interchangeable. Counterexamples are an Azure app with a registry passwordSecretRef, an image
 with its own encrypted credential, and a Cloud Run image backed by a remote
 Artifact Registry upstream. Each has a distinct, documented native destination.
 The provider/source roster is enforced in
 `test/provider-contracts/scoped-secret-provider-contracts.test.ts` and the
 [credential lifecycle table](credential-lifecycle.md#provider-boundary-review).
 
-The new serialized HTTP contract tests first failed for all four missing provider
+The new serialized HTTP contract tests first failed for the missing provider
 factories. The direct native-copy tests then passed. Two additional pinned and
 versionless Azure Key Vault cases failed against the initial direct-secret-only
 writer before the Key Vault implementation made them pass. Tests use synthetic
 responses shaped from official contracts, not recorded live service observations.
 
-- ECS reads and updates only the existing repositoryCredentials ARN. JSON fields
-  other than username/password remain intact. The encrypted plan's stable operation
-  ID supplies PutSecretValue's ClientRequestToken. Reconciliation privately reads
-  accepted contents and reuses the same native idempotency identity.
 - Azure preserves the complete app configuration, unrelated secret values and
   Key Vault references. Direct secrets wait for rollout. Existing Key Vault
   secrets use [Set Secret](https://learn.microsoft.com/en-us/rest/api/keyvault/secrets/set-secret)

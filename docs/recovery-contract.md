@@ -153,8 +153,8 @@ hosting providers; adding a provider requires updating that explicit review.
 | RDS | [Snapshot restore](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html) creates a new instance. Snapshot identity is not a volume-instance identity; an available instance can still be loading data. | Checkpoint and drill unsupported by Hypervibe. |
 | Azure PostgreSQL | [Backup/restore](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore): PITR creates a server; on-demand backup eligibility depends on tier/storage. [Restore configuration](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/how-to-restore-full-backup) requires its own checks. | Checkpoint and drill unsupported by Hypervibe. |
 
-Managed immutable-image rollback recipes exist for Railway, Cloud Run, ECS
-Express and Azure Container Apps.
+Managed immutable-image rollback recipes exist for Railway, Cloud Run and
+Azure Container Apps.
 capability in Hypervibe. The coverage test invokes every registered provider recipe;
 it does not claim that a generated recipe has been exercised live. Direct-provider
 deployment history still lacks the required immutable recovery evidence and is
@@ -164,7 +164,6 @@ not accepted as rollback authority.
 | --- | --- |
 | Railway | [Deployment actions](https://docs.railway.com/deployments/deployment-actions) depend on retention of the selected deployment image. Historical deployment identity does not prove current availability. |
 | Cloud Run | [Revisions](https://docs.cloud.google.com/run/docs/managing/revisions) are immutable but can be removed. The [revision API](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.revisions) distinguishes resolved image digest from readiness. |
-| ECS Express | [Service updates](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-update-full.html) use image identity plus health/traffic checks; [service revisions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-revision.html) identify immutable configurations. |
 | Azure Container Apps | [Revisions](https://learn.microsoft.com/en-us/azure/container-apps/revisions) do not version application-scoped secrets, ingress and registry credentials. Restoring an old revision does not restore all configuration. |
 
 ## Acceptance and remaining work

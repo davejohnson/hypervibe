@@ -60,7 +60,6 @@ copying an API-management token into runtime, or changing deployment strategy.
 | GitHub | Implemented only for `packageReadToken` on an existing verified exact-scope connection. |
 | Railway | Unsupported by this capability; complete credential input remains required. |
 | Cloud Run | Unsupported by this capability; existing explicit/native authentication behavior is unchanged. |
-| ECS Express | Unsupported by this capability; existing AWS credential selection is unchanged. |
 | Azure Container Apps | Unsupported by this capability; complete credential input remains required. |
 
 The roster and opt-in check run in ordinary `npm test`, alongside the actual
