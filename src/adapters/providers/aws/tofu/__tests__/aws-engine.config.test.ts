@@ -50,6 +50,10 @@ describe('AWS web services', () => {
     const variables = fn.environment[0]!.variables;
     expect(variables).not.toHaveProperty('AWS_DEFAULT_REGION');
     expect(variables).toMatchObject({ AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1', NODE_OPTIONS: '--require /opt/hypervibe/load-secrets.cjs', AWS_LWA_INVOKE_MODE: 'response_stream' });
+    // The URL and both public permissions write one function policy; Lambda rejects concurrent writes with 409.
+    const permissions = (config.files['services.tf.json'] as { resource: { aws_lambda_permission: Record<string, { depends_on?: string[] }> } }).resource.aws_lambda_permission;
+    expect(permissions.web_url!.depends_on).toEqual(['aws_lambda_function_url.web']);
+    expect(permissions.web_invoke!.depends_on).toEqual(['aws_lambda_permission.web_url']);
   });
 });
 

@@ -6,6 +6,7 @@ import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapte
 import {
   deleteFinalSnapshot, describeDatabaseCluster, dropAuroraEnvironmentDatabase, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
   putParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess, type AwsEnvironmentDatabase,
+  clusterSnapshotState,
 } from '../adapters/providers/aws/aws-engine.client.js';
 import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
@@ -329,6 +330,20 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     reason: `Hypervibe will permanently drop database ${context.database.name} and its logins from the shared testing cluster; the other testing environments keep theirs.`,
     metadata: { operation: AWS_DATABASE_DROP_OPERATION, accountId, clusterIdentifier: context.shared.clusterIdentifier, database: context.database },
   })] : [];
+  const finalSnapshotName = `${context.shared.prefix}-postgres-final`;
+  // Destroying the cluster takes a final snapshot under a fixed name, which fails while an earlier teardown's snapshot holds it.
+  const previousSnapshot: PlanAction[] = [];
+  if (sharedActions.some((action) => action.id === 'shared:database')) {
+    const existing = await clusterSnapshotState(awsAccess(context), finalSnapshotName);
+    if (existing.state === 'unknown') return { blocked: [`Hypervibe could not check whether an earlier final snapshot ${finalSnapshotName} exists: ${redactEngineOutput(existing.error, context.auth.redact)}. Plan the teardown again.`] };
+    if (existing.state === 'present') {
+      previousSnapshot.push({
+        ...snapshotAction(finalSnapshotName, environmentActions.map((action) => action.id)), id: 'database-snapshot:previous',
+        reason: `An earlier teardown's final snapshot ${finalSnapshotName}${existing.createdAt ? ` (taken ${existing.createdAt.slice(0, 10)})` : ''} holds the name this teardown's snapshot needs, and AWS cannot rename snapshots. Hypervibe will permanently delete it first; its data can no longer be restored.`,
+      });
+      for (let i = 0; i < sharedActions.length; i += 1) sharedActions[i] = { ...sharedActions[i]!, dependsOn: [...new Set([...(sharedActions[i]!.dependsOn ?? []), 'database-snapshot:previous'])] };
+    }
+  }
   const engineActions = [...environmentActions, ...buildActions, ...dropActions, ...sharedActions];
   const families = [...(built.input.workers ?? []), ...(built.input.jobs ?? [])].map((task) => task.resourceName);
   const cleanup: PlanAction = {
@@ -340,9 +355,9 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
       ...(lastOnShared && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.shared.prefix}-postgres-final` } : {}) },
   };
   const destroysDatabase = sharedActions.some((action) => action.id === 'shared:database');
-  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(`${context.shared.prefix}-postgres-final`, ['shared:database'])] : [];
+  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(finalSnapshotName, ['shared:database'])] : [];
   if (snapshot.length) cleanup.dependsOn = [...(cleanup.dependsOn ?? []), snapshot[0]!.id];
-  const actions = [...emptyActions, ...engineActions, ...snapshot, cleanup];
+  const actions = [...emptyActions, ...previousSnapshot, ...engineActions, ...snapshot, cleanup];
   const warnings = [
     `Removes AWS environment ${environmentName} in ${context.connection.region} (account ${accountId}). This cannot be undone.`,
     ...(destroysDatabase ? [snapshot.length
@@ -411,7 +426,9 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     const sharedPlanned = await engine.plan({ backend: awsEngineBackend, configuration: buildAwsSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
-    sharedActions = sharedPlanned.actions;
+    // Creating the cluster takes about 10 minutes, so it runs while the image builds and the
+    // environment is created; only the database login waits for it.
+    sharedActions = sharedPlanned.actions.map((action) => action.type === 'noop' ? action : { ...action, background: true });
   }
   const sharedChanging = sharedActions.filter((action) => action.type !== 'noop').map((action) => action.id);
   // 1. Registry and build project (their own state, applied first).
