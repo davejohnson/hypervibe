@@ -99,6 +99,10 @@ async function waitForApp(tokens: AzureTokens, id: string, previousRevision: str
   }
 }
 
+export function runsImage(template: Record<string, unknown> | undefined, image: string): boolean {
+  return ((template?.containers ?? []) as Array<{ name?: string; image?: string }>).some((container) => container.name === 'app' && container.image === image);
+}
+
 /** Swaps the image in a Container App or job template; only the running image changes, so the engine sees no drift. */
 export function templateWithImage(template: Record<string, unknown>, image: string): Record<string, unknown> {
   const { revisionSuffix: _suffix, ...rest } = template as { revisionSuffix?: string; containers?: Array<Record<string, unknown>> };
@@ -109,10 +113,15 @@ export async function releaseAzureApp(tokens: AzureTokens, params: { id: string;
   const current = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${params.id}?${APPS_API}`);
   if (current.status === 404) return { service: params.name, status: 'failed', message: `${params.name} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   if (current.status !== 200) return { service: params.name, status: 'unknown', message: `${params.name} could not be read (${azureError(current)}).` };
-  const properties = current.body.properties as { template: Record<string, unknown>; latestRevisionName?: string };
-  const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${ARM}${params.id}?${APPS_API}`, { properties: { template: templateWithImage(properties.template, params.image) } });
-  if (![200, 201, 202].includes(patched.status)) return { service: params.name, imageUri: params.image, status: 'failed', message: `Azure rejected the release (${azureError(patched)}).` };
-  const app = await waitForApp(tokens, params.id, properties.latestRevisionName, Date.now() + (params.waitMs ?? 10 * 60_000));
+  const properties = current.body.properties as { template: Record<string, unknown>; latestRevisionName?: string; provisioningState?: string };
+  // Already running this image (for example right after the apply that created it): Azure makes no new revision, so only check it.
+  const running = runsImage(properties.template, params.image) && properties.provisioningState === 'Succeeded';
+  let app: Record<string, unknown> | undefined = current.body;
+  if (!running) {
+    const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${ARM}${params.id}?${APPS_API}`, { properties: { template: templateWithImage(properties.template, params.image) } });
+    if (![200, 201, 202].includes(patched.status)) return { service: params.name, imageUri: params.image, status: 'failed', message: `Azure rejected the release (${azureError(patched)}).` };
+    app = await waitForApp(tokens, params.id, properties.latestRevisionName, Date.now() + (params.waitMs ?? 10 * 60_000));
+  }
   if (!app) return { service: params.name, imageUri: params.image, status: 'unknown', message: `${params.name} did not report a new ready revision.` };
   const latest = (app.properties as { latestRevisionName?: string; configuration?: { ingress?: { fqdn?: string } } });
   if (!params.web) return { service: params.name, imageUri: params.image, status: 'released', message: `Released to ${params.name}; it starts with the new image when work is queued.` };
@@ -147,6 +156,7 @@ export async function releaseAzureJob(tokens: AzureTokens, params: { id: string;
   if (current.status === 404) return { service: params.name, status: 'failed', message: `${params.name} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   if (current.status !== 200) return { service: params.name, status: 'unknown', message: `${params.name} could not be read (${azureError(current)}).` };
   const template = (current.body.properties as { template: Record<string, unknown> }).template;
+  if (runsImage(template, params.image)) return { service: params.name, imageUri: params.image, status: 'released', message: `Scheduled job ${params.name} already runs this image.` };
   const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${ARM}${params.id}?${APPS_API}`, { properties: { template: templateWithImage(template, params.image) } });
   if (![200, 201, 202].includes(patched.status)) return { service: params.name, imageUri: params.image, status: 'failed', message: `Azure rejected the release (${azureError(patched)}).` };
   return { service: params.name, imageUri: params.image, status: 'released', message: `Released to scheduled job ${params.name}; its next run uses it.` };

@@ -35,12 +35,13 @@ limits:
 - [Google Cloud](docs/opentofu-engine.md) automatically uses managed OpenTofu.
   Guided launch and CI release code exist; the dated live evidence predates the
   current infrastructure cutover and does not prove the complete journey.
-- [AWS](docs/opentofu-engine-aws.md) records live testing-environment deployments
-  and teardown. Guided launch, production-profile databases, CI releases, data
-  copy and custom domains remain gaps.
-- [Azure](docs/opentofu-engine-azure.md) records live testing-environment deployments
-  and teardown. Production, guided launch, CI releases, migration and custom
-  domains remain gaps; repository Dockerfiles requiring BuildKit are unsupported.
+- [AWS](docs/opentofu-engine-aws.md) records a live guided launch of a testing
+  environment with existing access, plus earlier deployments and teardown.
+  Production-profile databases, CI releases, data copy and custom domains remain gaps.
+- [Azure](docs/opentofu-engine-azure.md) records a live guided launch of a testing
+  environment with existing access, followed by teardown. Production, CI releases,
+  migration and custom domains remain gaps; repository Dockerfiles requiring
+  BuildKit are unsupported.
 
 Local and provider-contract checks do not establish a live deployment. The linked
 provider notes distinguish implementation from recorded live evidence. Railway

@@ -62,7 +62,12 @@ export async function releaseAzureEngineServices(ctx: CommandContext, params: {
   return runLocalCommitRelease(params, source, selected, {
     cloudName: 'Azure', provider: 'azure', environmentId: context.environment.id, buildPhrase: 'with ACR Tasks', firstImage, createdNoun: 'workloads',
     resourceOf: idOf,
-    build: (packaged) => buildWithAcrTasks(context.tokens, { registryId: context.shared.registryId, loginServer: context.shared.registryLoginServer, source: packaged }),
+    build: (packaged) => {
+      // The commit the apply already built: release that image instead of building again.
+      const existing = azureBinding(ctx.repos.environments.findById(context.environment.id) ?? context.environment);
+      if (!firstImage && existing.image && existing.imageCommit === packaged.commitSha) return Promise.resolve({ image: existing.image });
+      return buildWithAcrTasks(context.tokens, { registryId: context.shared.registryId, loginServer: context.shared.registryLoginServer, source: packaged });
+    },
     recordImage: (image, packaged) => {
       const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
       ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBinding(current), kind: 'opentofu', image, imageCommit: packaged.commitSha } });
