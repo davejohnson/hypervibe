@@ -24,12 +24,8 @@ export interface EngineSecretStore {
 }
 
 export async function engineSecretStore(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
-  const { isAzureEngineEnvironment, azureSecretStore } = await import('./infrastructure-engine-azure.js');
-  if (isAzureEngineEnvironment(spec, environmentName)) return azureSecretStore(ctx, project, environmentName);
-  const { isAwsEngineEnvironment, awsSecretStore } = await import('./infrastructure-engine-aws.js');
-  if (isAwsEngineEnvironment(spec, environmentName)) return awsSecretStore(ctx, project, environmentName);
-  const { gcpSecretStore } = await import('./infrastructure-engine.js');
-  return gcpSecretStore(ctx, project, spec, environmentName);
+  const { cloudEngineFor, gcpEngine } = await import('./cloud-engines.js');
+  return (cloudEngineFor(spec, environmentName) ?? gcpEngine).secretStore(ctx, project, spec, environmentName);
 }
 
 /**

@@ -2,8 +2,7 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
-import { applyAwsInfrastructureEngine, isAwsEngineEnvironment, planAwsInfrastructureEngine } from './infrastructure-engine-aws.js';
-import { applyAzureInfrastructureEngine, isAzureEngineEnvironment, planAzureInfrastructureEngine } from './infrastructure-engine-azure.js';
+import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
@@ -690,11 +689,20 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   specRevision: number;
   environmentName: string;
 }): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
+  const engine = cloudEngineFor(params.spec, params.environmentName);
+  if (!engine) return { blocked: [`Environment ${params.environmentName} is not managed by the OpenTofu engine. Use Cloud Run or select hosting.engine="opentofu" for AWS.`] };
+  return engine.plan(ctx, params);
+}
+
+/** Google Cloud's plan: Cloud Run, Cloud SQL, storage, queues, Redis and custom domains. */
+export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
+  project: Project;
+  spec: ProjectSpec;
+  specRevision: number;
+  environmentName: string;
+}): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
-  if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} is not managed by the OpenTofu engine. Use Cloud Run or select hosting.engine="opentofu" for AWS.`] };
-  if (isAwsEngineEnvironment(spec, environmentName)) return planAwsInfrastructureEngine(ctx, params);
-  if (isAzureEngineEnvironment(spec, environmentName)) return planAzureInfrastructureEngine(ctx, params);
   const problems = engineEnvironmentProblems(spec, environmentName);
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
@@ -1150,12 +1158,22 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   planId: string;
   confirmActions: string[];
 }): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
+  const loaded = new ConvergeExecutor().loadPlan(params.planId);
+  if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
+  return cloudEngineForPlan(loaded.document as PlanRunDocument & { engine?: Record<string, unknown> }, params.spec).apply(ctx, params);
+}
+
+/** Applies a reviewed Google Cloud plan. */
+export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: {
+  project: Project;
+  spec: ProjectSpec;
+  specRevision: number;
+  planId: string;
+  confirmActions: string[];
+}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  // AWS plans carry their target; a teardown's snapshot cleanup runs after the environment left the spec.
-  if ((loaded.document as { engine?: { azure?: unknown } }).engine?.azure) return applyAzureInfrastructureEngine(ctx, params);
-  if ((loaded.document as { engine?: { aws?: unknown } }).engine?.aws || isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
@@ -1423,17 +1441,23 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   /** Local repository root; when present, the exact HEAD commit is built without any git credentials. */
   sourceDirectory?: string;
 }): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
+  const engine = cloudEngineFor(params.spec, params.environmentName);
+  if (!engine) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
+  return engine.release(ctx, params) as Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }>;
+}
+
+/** Releases code to Cloud Run services, worker pools and jobs. */
+export async function releaseGcpEngineServices(ctx: CommandContext, params: {
+  project: Project;
+  spec: ProjectSpec;
+  environmentName: string;
+  specRevision: number;
+  services?: string[];
+  revision?: string;
+  sourceDirectory?: string;
+}): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
   const { spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
-  if (!isEngineManaged(environmentSpec)) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
-  if (isAwsEngineEnvironment(spec, environmentName)) {
-    const { releaseAwsEngineServices } = await import('./infrastructure-engine-aws-release.js');
-    return releaseAwsEngineServices(ctx, params);
-  }
-  if (isAzureEngineEnvironment(spec, environmentName)) {
-    const { releaseAzureEngineServices } = await import('./infrastructure-engine-azure-release.js');
-    return releaseAzureEngineServices(ctx, params);
-  }
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);
