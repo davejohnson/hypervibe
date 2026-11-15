@@ -1,0 +1,9 @@
+{
+  "path": ["src"],
+  "ignore": ["**/__tests__/**", "**/*.test.ts", "**/providers/railway/**"],
+  "minTokens": 50,
+  "minLines": 5,
+  "threshold": 1.2,
+  "reporters": ["console"],
+  "silent": true
+}

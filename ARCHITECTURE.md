@@ -358,6 +358,8 @@ which may only shrink:
 - Nothing new depends on the Railway adapter.
 - Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`
   branches; the behavior belongs in the engine.
+- Copied code stays under the ceiling in `.jscpd.json` (`npm run check:duplication`
+  lists the clones). Lower the ceiling as duplication is removed; never raise it.
 - An exported function is not defined in two files. Shared engine helpers live in
   `src/application/engine-shared.ts`.
 
