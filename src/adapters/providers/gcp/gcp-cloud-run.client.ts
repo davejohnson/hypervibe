@@ -135,3 +135,10 @@ export function latestWakerExecution(token: string, target: CloudRunTarget, work
     headers: { Authorization: `Bearer ${token}` },
   });
 }
+
+/** One request against a project's jobs collection: create (`?jobId=`), run (`/<id>:run`) or delete (`/<id>`). */
+export function cloudRunJobRequest(token: string, target: CloudRunTarget, suffix: string, init: RequestInit = {}): Promise<Response> {
+  return fetchWithRetry(`${API}/projects/${target.gcpProjectId}/locations/${target.region}/jobs${suffix}`, {
+    ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+  });
+}

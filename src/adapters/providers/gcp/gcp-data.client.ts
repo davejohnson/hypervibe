@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 
 /**
@@ -50,4 +51,36 @@ export function readBucket(token: string, bucket: string): Promise<Response> {
 /** Reads a project by id; its `name` carries the project number. */
 export function readGcpProject(token: string, gcpProjectId: string): Promise<Response> {
   return fetchWithRetry(`https://cloudresourcemanager.googleapis.com/v3/projects/${gcpProjectId}`, { headers: { Authorization: `Bearer ${token}` } });
+}
+
+/** Lists Cloud Logging entries matching a filter. */
+export function listLogEntries(token: string, body: Record<string, unknown>): Promise<Response> {
+  return fetchWithRetry('https://logging.googleapis.com/v2/entries:list', {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+}
+
+/**
+ * V4 signed URL for one Cloud Storage object, signed locally with the
+ * deployment identity's key. It grants exactly one method on one object and
+ * expires; it carries no reusable credential.
+ */
+export function signedObjectUrl(params: { clientEmail: string; privateKey: string; bucket: string; object: string; method: 'PUT' | 'GET'; expiresSeconds: number; now?: Date }): string {
+  const now = params.now ?? new Date();
+  const datetime = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const date = datetime.slice(0, 8);
+  const scope = `${date}/auto/storage/goog4_request`;
+  const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  const path = `/${params.bucket}/${params.object.split('/').map(encode).join('/')}`;
+  const query = Object.entries({
+    'X-Goog-Algorithm': 'GOOG4-RSA-SHA256',
+    'X-Goog-Credential': `${params.clientEmail}/${scope}`,
+    'X-Goog-Date': datetime,
+    'X-Goog-Expires': String(params.expiresSeconds),
+    'X-Goog-SignedHeaders': 'host',
+  }).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
+  const canonical = [params.method, path, query, 'host:storage.googleapis.com', '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const toSign = ['GOOG4-RSA-SHA256', datetime, scope, crypto.createHash('sha256').update(canonical).digest('hex')].join('\n');
+  const signature = crypto.createSign('RSA-SHA256').update(toSign).sign(params.privateKey, 'hex');
+  return `https://storage.googleapis.com${path}?${query}&X-Goog-Signature=${signature}`;
 }
