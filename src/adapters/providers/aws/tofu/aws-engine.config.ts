@@ -260,8 +260,11 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       for (const address of [`aws_cloudwatch_log_group.${key}`, `aws_lambda_function.${key}`, `aws_lambda_function_url.${key}`]) resources[address] = mapping;
       if (service.public) {
         // Public function URLs need both permissions (Lambda requires InvokeFunction alongside InvokeFunctionUrl).
-        permissions[`${key}_url`] = { statement_id: 'public-url', action: 'lambda:InvokeFunctionUrl', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*', function_url_auth_type: 'NONE' };
-        permissions[`${key}_invoke`] = { statement_id: 'public-invoke', action: 'lambda:InvokeFunction', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*' };
+        // The URL and both permissions each write the function's policy, and Lambda rejects concurrent writes (409), so they run in turn.
+        permissions[`${key}_url`] = { statement_id: 'public-url', action: 'lambda:InvokeFunctionUrl', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*', function_url_auth_type: 'NONE',
+          depends_on: [`aws_lambda_function_url.${key}`] };
+        permissions[`${key}_invoke`] = { statement_id: 'public-invoke', action: 'lambda:InvokeFunction', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*',
+          depends_on: [`aws_lambda_permission.${key}_url`] };
         resources[`aws_lambda_permission.${key}_url`] = mapping;
         resources[`aws_lambda_permission.${key}_invoke`] = mapping;
       }
