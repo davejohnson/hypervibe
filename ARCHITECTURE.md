@@ -358,7 +358,8 @@ which may only shrink:
 - Nothing new depends on the Railway adapter.
 - Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`
   branches. It selects a `CloudEngine` from `src/application/cloud-engines.ts`;
-  new per-cloud behavior is a method on that interface.
+  new per-cloud behavior is a method on that interface (plan, apply, release,
+  secrets, teardown, guided connection, migration).
 - Copied code stays under the ceiling in `.jscpd.json` (`npm run check:duplication`
   lists the clones). Lower the ceiling as duplication is removed; never raise it.
 - An exported function is not defined in two files. Shared engine helpers live in
