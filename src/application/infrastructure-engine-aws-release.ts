@@ -1,24 +1,19 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { BatchGetBuildsCommand, CodeBuildClient, StartBuildCommand } from '@aws-sdk/client-codebuild';
 import { DescribeImagesCommand, ECRClient } from '@aws-sdk/client-ecr';
 import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, RegisterTaskDefinitionCommand, UpdateServiceCommand, type RegisterTaskDefinitionCommandInput } from '@aws-sdk/client-ecs';
 import { GetFunctionCommand, GetFunctionUrlConfigCommand, LambdaClient, ResourceNotFoundException, UpdateFunctionCodeCommand, waitUntilFunctionUpdatedV2 } from '@aws-sdk/client-lambda';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { LOAD_SECRETS_PATH, LOAD_SECRETS_SOURCE } from '../adapters/providers/aws/runtime/load-secrets.js';
-import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import type { Project } from '../domain/entities/project.entity.js';
-import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import type { CommandContext } from './context.js';
 import { awsBinding, awsResourceName, resolveAwsEngineContext, type AwsEngineContext } from './infrastructure-engine-aws.js';
-import { ENGINE_PLAN_SCOPE, ENGINE_RELEASE_OPERATION, releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
+import { packageLocalCommit, runLocalCommitRelease, selectReleaseWorkloads, type LocalCommitSource } from './engine-release.js';
+import { releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
 
-const execFileAsync = promisify(execFile);
 
 /** Pinned Lambda Web Adapter: lets an ordinary HTTP server answer Lambda function URL requests. */
 export const LAMBDA_WEB_ADAPTER_IMAGE = 'public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1';
@@ -50,25 +45,7 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
   ].join('\n');
 }
 
-interface Source { commitSha: string; archive: Buffer; uncommittedChangesExcluded: boolean }
-
-async function localSource(directory: string, dockerfileFor: (repositoryDockerfile?: string) => string): Promise<Source | { blocked: string }> {
-  try {
-    const git = async (args: string[]) => String((await execFileAsync('git', ['-C', directory, ...args])).stdout);
-    const commitSha = (await git(['rev-parse', 'HEAD'])).trim();
-    if (!/^[0-9a-f]{40}$/.test(commitSha)) return { blocked: 'The local repository has no commit to release.' };
-    let repositoryDockerfile: string | undefined;
-    try { repositoryDockerfile = await git(['show', `${commitSha}:Dockerfile`]); } catch { /* no repository Dockerfile */ }
-    const dockerfile = dockerfileFor(repositoryDockerfile);
-    const archive = (await execFileAsync('git', ['-C', directory, 'archive', '--format=zip',
-      `--add-virtual-file=${AWS_DOCKERFILE}:${dockerfile}`, `--add-virtual-file=${LOADER_IN_SOURCE}:${LOAD_SECRETS_SOURCE}`, commitSha],
-    { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 })).stdout as Buffer;
-    const dirty = (await git(['status', '--porcelain', '--untracked-files=no'])).trim().length > 0;
-    return { commitSha, archive, uncommittedChangesExcluded: dirty };
-  } catch (error) {
-    return { blocked: `Hypervibe could not package this repository: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}` };
-  }
-}
+type Source = LocalCommitSource;
 
 /** Uploads the commit, builds it in CodeBuild and returns the digest-pinned image. */
 async function buildImage(context: AwsEngineContext, source: Source): Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
@@ -204,14 +181,15 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   if (!params.sourceDirectory) return { blocked: 'AWS releases build from this project\'s local git repository; run Hypervibe from the repository.' };
   const context = await resolveAwsEngineContext(ctx, params.project, params.environmentName);
   if ('blocked' in context) return context;
-  const selected = params.services?.length ? params.services : Object.keys(environmentSpec.services);
-  const unknownNames = selected.filter((name) => !environmentSpec.services[name]);
-  if (unknownNames.length) return { blocked: `${unknownNames.join(', ')} is not a service in this environment.` };
-  const web = selected.find((name) => (environmentSpec.services[name]!.workloadKind ?? 'web') === 'web');
-  const startCommand = environmentSpec.services[web ?? selected[0]!]?.startCommand;
-  const source = await localSource(params.sourceDirectory, (repositoryDockerfile) => awsReleaseDockerfile({
-    ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(params.spec.runtime ? { runtime: params.spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
-  }));
+  const workloads = selectReleaseWorkloads(environmentSpec, params.services);
+  if ('blocked' in workloads) return workloads;
+  const { selected, web, startCommand } = workloads;
+  const source = await packageLocalCommit(params.sourceDirectory, {
+    format: 'zip', dockerfileName: AWS_DOCKERFILE, addFiles: { [LOADER_IN_SOURCE]: LOAD_SECRETS_SOURCE },
+    dockerfileFor: (repositoryDockerfile) => awsReleaseDockerfile({
+      ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(params.spec.runtime ? { runtime: params.spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
+    }),
+  });
   if ('blocked' in source) return source;
 
   // Workloads exist only once an image does; until then this release only builds.
@@ -221,69 +199,19 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
     if (exists === 'unknown') return { blocked: 'Hypervibe could not read the web service on AWS; try again.' };
     if (!exists) return { blocked: `Create the infrastructure first: ${web} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   }
-  const provider = 'aws';
-  const actions: PlanAction[] = [
-    { id: 'build:image', type: 'update', verified: true, resource: { kind: 'service', name: 'image', provider },
-      reason: `Build commit ${source.commitSha.slice(0, 12)} in CodeBuild.`, metadata: { operation: ENGINE_RELEASE_OPERATION, workloadKind: 'build' } },
-    ...(firstImage ? [] : selected.map((name): PlanAction => ({
-      id: `release:${name}`, type: 'update', verified: true, dependsOn: ['build:image'], resource: { kind: 'service', name, provider },
-      reason: `Release commit ${source.commitSha.slice(0, 12)} to ${name}; only the running image changes.`,
-      metadata: { operation: ENGINE_RELEASE_OPERATION, resource: awsResourceName(context.prefix, name), workloadKind: environmentSpec.services[name]!.workloadKind ?? 'web' },
-    }))),
-  ];
-  const runRepo = new RunRepository();
-  const planRun = runRepo.create({ projectId: params.project.id, environmentId: context.environment.id, type: 'plan', plan: {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName: params.environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings: [], engine: { planId: `release-${crypto.randomUUID()}`, release: true },
-  } as unknown as Record<string, unknown> });
-  runRepo.updateStatus(planRun.id, 'succeeded');
-
-  const results: EngineReleaseResult[] = [];
-  let imageUri: string | undefined;
-  const execution = await new ConvergeExecutor().execute({
-    planRunId: planRun.id,
-    currentSpecRevision: params.specRevision,
-    handler: async (action) => {
-      try {
-        if (action.id === 'build:image') {
-          const built = await buildImage(context, source);
-          if ('error' in built) {
-            results.push({ service: 'image', status: built.unknown ? 'unknown' : 'failed', message: built.error, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}) });
-            return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
-          }
-          imageUri = built.imageUri;
-          // Recorded before any workload switches, so the engine creates new workloads from this image.
-          const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri } });
-          if (firstImage) {
-            results.push({ service: 'image', status: 'released', imageUri, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}),
-              message: 'Built the first image. Run hv_plan scope="infrastructure" and hv_apply to create the services from it.' });
-          }
-          return { success: true, message: `Built ${imageUri}.`, data: { imageUri } };
-        }
-        const name = action.resource.name;
-        const kind = String(action.metadata?.workloadKind);
-        const resource = String(action.metadata?.resource);
-        const result = kind === 'web'
-          ? await releaseFunction(context, name, resource, imageUri!, environmentSpec.services[name]!.healthCheckPath ?? '/')
-          : await releaseTask(context, name, resource, imageUri!, kind === 'worker');
-        results.push(result);
-        const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}) };
-        if (result.status === 'released') return { success: true, message: result.message, data };
-        return { success: false, ...(result.status === 'unknown' ? { status: 'pending' as const } : {}), message: result.message, error: result.message, data };
-      } catch (error) {
-        const message = `AWS rejected the release step: ${error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : String(error)}`;
-        results.push({ service: action.resource.name, status: 'unknown', message });
-        return { success: false, status: 'pending', message, error: message };
-      }
+  return runLocalCommitRelease(params, source, selected, {
+    cloudName: 'AWS', provider: 'aws', environmentId: context.environment.id, buildPhrase: 'in CodeBuild', firstImage, createdNoun: 'services',
+    resourceOf: (name) => awsResourceName(context.prefix, name),
+    build: async (packaged) => {
+      const built = await buildImage(context, packaged);
+      return 'error' in built ? built : { image: built.imageUri, ...(built.logsUrl ? { logsUrl: built.logsUrl } : {}) };
     },
+    recordImage: (imageUri) => {
+      const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+      ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri } });
+    },
+    releaseWorkload: ({ name, kind, resource, image }) => kind === 'web'
+      ? releaseFunction(context, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/')
+      : releaseTask(context, name, resource, image, kind === 'worker'),
   });
-  if (!execution.applyRunId) return { blocked: execution.error ?? 'The release could not start.' };
-  for (const name of firstImage ? ['image'] : selected) {
-    if (!results.some((result) => result.service === name)) {
-      results.push({ service: name, status: 'failed', message: `${name} was not released because an earlier step did not finish. ${execution.error ?? ''}`.trim() });
-    }
-  }
-  return { results, applyRunId: execution.applyRunId,
-    source: { kind: 'local-commit', revision: source.commitSha, commitSha: source.commitSha, ...(source.uncommittedChangesExcluded ? { uncommittedChangesExcluded: true } : {}) } };
 }
