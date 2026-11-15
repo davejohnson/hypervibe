@@ -56,10 +56,6 @@ import {
   DATABASE_RESILIENCE_OPERATIONS,
   isDatabaseResilienceAction,
 } from '../services/database-resilience-plan.service.js';
-import {
-  isLoadBalancerAction,
-  LOAD_BALANCER_OPERATIONS,
-} from '../services/load-balancer-plan.service.js';
 import { EMAIL_OPERATIONS } from '../services/email-plan.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
@@ -99,9 +95,6 @@ export type PlanMutationCapability =
   | 'appstore.mutate'
   | 'queue.mutate'
   | 'storage.mutate'
-  | 'load-balancer.monitor.mutate'
-  | 'load-balancer.pool.mutate'
-  | 'load-balancer.mutate'
   | 'hosting.delegated-secret.sync'
   | 'stripe.hosting-env.sync'
   | 'stripe.catalog.mutate'
@@ -327,30 +320,6 @@ function cacheDesiredConfigIsPinned(action: PlanAction): boolean {
     const value = action.metadata?.[key];
     return value === null || (typeof value === 'string' && value.length > 0);
   });
-}
-
-function loadBalancerOriginsArePinned(action: PlanAction): boolean {
-  const origins = action.metadata?.origins;
-  if (!Array.isArray(origins) || origins.length < 2 || !metadataSha256(action, 'originsHash')) {
-    return false;
-  }
-  const names = new Set<string>();
-  for (const value of origins) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const origin = value as Record<string, unknown>;
-    if (
-      typeof origin.name !== 'string'
-      || !origin.name
-      || names.has(origin.name)
-      || typeof origin.address !== 'string'
-      || !origin.address
-      || typeof origin.hostHeader !== 'string'
-      || !origin.hostHeader
-      || origin.enabled !== true
-    ) return false;
-    names.add(origin.name);
-  }
-  return true;
 }
 
 function operationTypeIsValid(action: PlanAction): boolean {
@@ -818,69 +787,6 @@ export function resolvePlanActionAuthority(
     )
   ) {
     return authority(action, 'storage.mutate');
-  }
-  if (
-    isLoadBalancerAction(action)
-    && exactResource(action, 'load-balancer')
-    && action.resource.name === metadataString(action, 'hostname')
-    && metadataString(action, 'accountId')
-    && metadataString(action, 'zoneId')
-    && metadataString(action, 'configHash')
-  ) {
-    const operation = action.metadata?.operation;
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
-      && hasType(action, 'create', 'update')
-      && action.id === 'load-balancer:monitor'
-      && metadataString(action, 'externalName')
-    ) {
-      return authority(action, 'load-balancer.monitor.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-      && hasType(action, 'create', 'update')
-      && action.id === 'load-balancer:pool'
-      && metadataString(action, 'externalName')
-      && (metadataStringArray(action, 'services')?.length ?? 0) >= 2
-      && (Boolean(action.metadata?.blockedReason) || loadBalancerOriginsArePinned(action))
-      && (Boolean(action.metadata?.blockedReason) || action.billable === true)
-    ) {
-      return authority(action, 'load-balancer.pool.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.ensure
-      && hasType(action, 'create', 'update')
-      && action.id === `load-balancer:${action.resource.name}`
-      && (metadataStringArray(action, 'services')?.length ?? 0) >= 2
-      && (action.type !== 'create' || action.billable === true)
-    ) {
-      return authority(action, 'load-balancer.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.destroy
-      && action.type === 'destroy'
-      && action.id === `load-balancer:${action.resource.name}:destroy`
-      && metadataString(action, 'externalId')
-    ) {
-      return authority(action, 'load-balancer.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.poolDestroy
-      && action.type === 'destroy'
-      && action.id === 'load-balancer:pool:destroy'
-      && metadataString(action, 'externalId')
-    ) {
-      return authority(action, 'load-balancer.pool.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.monitorDestroy
-      && action.type === 'destroy'
-      && action.id === 'load-balancer:monitor:destroy'
-      && metadataString(action, 'externalId')
-    ) {
-      return authority(action, 'load-balancer.monitor.mutate');
-    }
-    return null;
   }
   if (
     isDelegatedSecretAction(action)

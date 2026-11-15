@@ -11,7 +11,7 @@ import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 
 export interface ProviderSpecIssue {
   environment: string;
-  field: 'hosting.engine' | 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
+  field: 'hosting.engine' | 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'devops.code.provider' | 'devops.ci.provider';
   provider: string;
   service?: string;
   workloadKind?: WorkloadKind;
@@ -68,7 +68,7 @@ function hostingCompatibilityIssue(params: {
 
 function mutationMaturityIssue(params: {
   environment: string;
-  field: Extract<ProviderSpecIssue['field'], 'hosting.provider' | 'database.provider' | 'cache.provider' | 'storage.provider' | 'queues' | 'loadBalancer.provider'>;
+  field: Extract<ProviderSpecIssue['field'], 'hosting.provider' | 'database.provider' | 'cache.provider' | 'storage.provider' | 'queues'>;
   provider: string;
   capability: ProviderLifecycleCapability;
 }): ProviderSpecIssue | undefined {
@@ -395,26 +395,6 @@ export function validateProjectSpecProviders(spec: ProjectSpec, environment?: st
           environmentSpec,
           provider: queueProvider,
         }));
-      }
-    }
-    if (environmentSpec.loadBalancer) {
-      const loadBalancerProvider = environmentSpec.loadBalancer.provider;
-      if (!providerRegistry.supports(loadBalancerProvider, 'load-balancer')) {
-        issues.push({
-          environment,
-          field: 'loadBalancer.provider',
-          provider: loadBalancerProvider,
-          capability: 'load-balancer',
-          available: providerRegistry.namesForMutation('load-balancer'),
-        });
-      } else {
-        const maturityIssue = mutationMaturityIssue({
-          environment,
-          field: 'loadBalancer.provider',
-          provider: loadBalancerProvider,
-          capability: 'load-balancer',
-        });
-        if (maturityIssue) issues.push(maturityIssue);
       }
     }
   }

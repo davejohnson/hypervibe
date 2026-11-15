@@ -279,18 +279,6 @@ export const cacheSpecSchema = z.object({
   size: z.string().trim().min(1).optional(),
 }).strict();
 
-/**
- * Provider-managed traffic distribution in front of deployed web services.
- * The schema is provider-neutral; capability support is resolved during plan.
- */
-export const loadBalancerSpecSchema = z.object({
-  provider: providerIdSchema,
-  /** Two or more equivalent public web services that can receive traffic. */
-  services: z.array(z.string().min(1)).min(2),
-  /** HTTPS endpoint used by the provider's active health monitor. */
-  healthCheckPath: z.string().regex(/^\/[\S]*$/, 'healthCheckPath must be an absolute path beginning with /').default('/health'),
-}).strict();
-
 export const deploySpecSchema = z.object({
   strategy: z.enum(['branch', 'manual']).default('manual'),
   trigger: z.enum(['ci', 'native']).optional(),
@@ -1596,7 +1584,6 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
   domainTarget: z.object({ environment: z.string().min(1), service: z.string().min(1) }).strict().optional(),
   /** One-time custom-domain replacement revision. A new value plans a confirmation-gated provider delete/recreate. */
   domainRecreateRevision: z.string().min(1).max(100).optional(),
-  loadBalancer: loadBalancerSpecSchema.optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: emailSpecSchema.default({ enabled: false }),
   /** Removed Twilio messaging desired state; kept only to explain the replacement. */
@@ -1668,8 +1655,6 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
         message: 'Traffic switching requires a domainTarget, a Cloudflare-proxied domain, and enabled application maintenance. Explicit DNS intent must enable its Cloudflare proxy. Keep the original app paused while routing to its replacement.' });
     }
-    if (environment.loadBalancer) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
-      message: 'Traffic switching cannot also manage a load balancer for the same hostname.' });
   }
   const databaseBootstrap = environment.database?.freshInitialization?.bootstrap;
   if (databaseBootstrap && !Object.hasOwn(environment.services, databaseBootstrap.service)) {
@@ -1845,41 +1830,6 @@ export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z
         message: `webhook "${name}" service "${webhook.service}" must be a public web service`,
         path: ['webhooks', name, 'service'],
       });
-    }
-  }
-  if (environment.loadBalancer) {
-    if (!environment.domain) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'loadBalancer requires domain because the domain is its public hostname',
-        path: ['loadBalancer'],
-      });
-    }
-    const seenServices = new Set<string>();
-    for (const [index, serviceName] of environment.loadBalancer.services.entries()) {
-      if (seenServices.has(serviceName)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `loadBalancer service "${serviceName}" is declared more than once`,
-          path: ['loadBalancer', 'services', index],
-        });
-        continue;
-      }
-      seenServices.add(serviceName);
-      const service = environment.services[serviceName];
-      if (!service) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `loadBalancer targets unknown service "${serviceName}"`,
-          path: ['loadBalancer', 'services', index],
-        });
-      } else if (service.workloadKind !== 'web' || service.public === false) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `loadBalancer service "${serviceName}" must be a public web service`,
-          path: ['loadBalancer', 'services', index],
-        });
-      }
     }
   }
   if (environment.api) {

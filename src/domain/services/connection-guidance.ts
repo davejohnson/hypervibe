@@ -395,26 +395,24 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
-    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, load balancing, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, load balancing, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
+    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
     setupUrl: CLOUDFLARE_TOKEN_URLS.user,
     setupUrls: [
       {
-        label: 'Create pre-filled User API Token for DNS/custom domains; add optional Registrar, email, or load-balancer permissions below',
+        label: 'Create pre-filled User API Token for DNS/custom domains; add optional Registrar or email permissions below',
         url: CLOUDFLARE_TOKEN_URLS.user,
       },
       {
-        label: 'Create pre-filled Account API Token for durable DNS/custom-domain automation; add optional email or load-balancer permissions below',
+        label: 'Create pre-filled Account API Token for durable DNS/custom-domain automation; add optional email permissions below',
         url: CLOUDFLARE_TOKEN_URLS.account,
       },
     ],
     permissions: [
-      `For the simplest setup, create a Cloudflare User API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.user} and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS and custom domains; add the optional permissions below for email routing, load balancing, or Registrar.`,
+      `For the simplest setup, create a Cloudflare User API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.user} and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS and custom domains; add the optional permissions below for email routing or Registrar.`,
       `For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.account} and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.`,
       'For DNS/custom domains with either token type: grant Zone -> Zone -> Read.',
       'For DNS/custom domains with either token type: grant Zone -> DNS -> Edit.',
       'For Railway/custom-domain verification and some zone lookups: grant Zone -> Zone Settings -> Read or Edit.',
-      'For environments declaring loadBalancer: grant the Cloudflare API token Load Balancers Read and Load Balancers Write on the target zone.',
-      'For environments declaring loadBalancer: grant Load Balancing: Monitors and Pools Read and Load Balancing: Monitors and Pools Write on the owning account.',
       'For DNS/custom domains with either token type: Zone Resources must be Include -> Specific zone -> the target domain, for example hlspropertycare.com.',
       'For account-scoped permissions: Account Resources must be Include -> Specific account -> the target account. The user-token template initially selects all accounts/zones because Cloudflare template URLs accept ids, not domain names; narrow both selectors before creating the token.',
       'For email routing only: grant Zone -> Email Routing Rules -> Edit.',
