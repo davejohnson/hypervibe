@@ -5,7 +5,7 @@ same lifecycle as GCP (`hv_spec` → `hv_plan` → approved `hv_apply`), with th
 same local encrypted state, saved plans, approvals and receipts. This page
 records the AWS-specific decisions and why they were made.
 
-## Status (2026-11-12)
+## Status (2026-11-14)
 
 | Piece | State |
 | --- | --- |
@@ -16,8 +16,10 @@ records the AWS-specific decisions and why they were made.
 | Image builds and releases (`hv_deploy`) | Built; verified live (demo app) |
 | Web (Lambda), on-demand worker and cron (Fargate) | Built; verified live (demo app): database over verified TLS, generated secret, storage with the runtime role, worker woken by requests and by the next-due timer while Aurora was paused, no drift after releases |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
+| `hv_launch` for testing environments (one reviewed plan: registry and build project in their own state, the first image built inside the apply, then everything else) | Built; verified live (demo app, 2026-11-14): one round, no sign-in (account access reused), web health-checked, database, secret, storage and cron working, worker jobs done 87 s (cold start) and 0.7 s after due, empty plan after |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
-| CI releases, data copy | Not built |
+| CI releases, data copy, `hv_launch` for staging and production | Not built |
+| Live worker state in `hv_status` | Not built; use `hv_health` and `hv_plan` |
 
 ## Access
 
