@@ -3,7 +3,7 @@ import {
   CreateRoleCommand, CreateUserCommand, DeletePolicyVersionCommand, GetPolicyCommand, GetPolicyVersionCommand, GetRoleCommand, GetUserCommand, IAMClient,
   ListAccessKeysCommand, ListOpenIDConnectProvidersCommand, ListPolicyVersionsCommand, NoSuchEntityException, PutUserPolicyCommand, UpdateAssumeRolePolicyCommand,
 } from '@aws-sdk/client-iam';
-import type { AwsSignInSession } from './aws-sign-in.js';
+import type { AwsSignInSession } from './aws-signin.client.js';
 
 /**
  * One-time AWS setup, mirroring GCP: the person signs in once (any admin,
