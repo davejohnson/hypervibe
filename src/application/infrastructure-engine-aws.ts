@@ -4,12 +4,14 @@ import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import {
-  deleteFinalSnapshot, describeDatabaseCluster, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
-  putParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess,
+  deleteFinalSnapshot, describeDatabaseCluster, dropAuroraEnvironmentDatabase, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
+  putParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess, type AwsEnvironmentDatabase,
 } from '../adapters/providers/aws/aws-engine.client.js';
 import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
-import { awsRegistryUrl, buildAwsBuildConfiguration, LAMBDA_RESERVED_ENV, type AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
+import {
+  awsKey, awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsSharedConfiguration, LAMBDA_RESERVED_ENV, type AwsEngineInput, type AwsSharedInput,
+} from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { localRepositoryFor } from './local-repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
@@ -37,6 +39,7 @@ export const AWS_BUCKET_EMPTY_OPERATION = 'awsBucketEmpty';
 export const AWS_TEARDOWN_CLEANUP_OPERATION = 'awsTeardownCleanup';
 export const AWS_SNAPSHOT_DELETE_OPERATION = 'awsSnapshotDelete';
 export const AWS_IMAGE_BUILD_OPERATION = 'awsImageBuild';
+export const AWS_DATABASE_DROP_OPERATION = 'awsDatabaseDrop';
 
 export type AwsProfile = 'production' | 'testing';
 
@@ -51,6 +54,8 @@ export interface AwsEngineBinding {
   imageUri?: string;
   /** The app's database login exists and DATABASE_URL is in Parameter Store. */
   databaseLoginAt?: string;
+  /** The environment's database is on the project's shared testing cluster (earlier versions gave each environment its own). */
+  sharedDatabase?: boolean;
   /** Waker login secrets Hypervibe has written (workers can be added after the app login exists). */
   wakerLogins?: string[];
   services?: Record<string, { url?: string; resource: string }>;
@@ -66,6 +71,10 @@ export interface AwsEngineContext {
   state: EngineStateIdentity;
   /** The registry and build project, applied before the environment so its first image is built in the same apply. */
   buildState: EngineStateIdentity;
+  /** The project's shared testing cluster: its own state, kept while any testing environment uses it. */
+  shared: { prefix: string; state: EngineStateIdentity; clusterIdentifier: string; clusterArn: string };
+  /** This environment's database and logins on the shared cluster. */
+  database: AwsEnvironmentDatabase;
   prefix: string;
   parameterPath: string;
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
@@ -95,8 +104,16 @@ export async function resolveAwsEngineContext(ctx: CommandContext, project: Proj
   const environment = ctx.repos.environments.findByProjectAndName(project.id, environmentName)
     ?? ctx.repos.environments.create({ projectId: project.id, name: environmentName });
   const prefix = `hv-${project.name}-${environmentName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 28).replace(/-+$/, '');
+  const sharedPrefix = `hv-${project.name}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 21).replace(/-+$/, '') + '-shared';
+  const databaseName = `app_${awsKey(environmentName)}`.slice(0, 40).replace(/_+$/, '');
   return {
     connection: parsed.data, auth, environment, prefix,
+    shared: {
+      prefix: sharedPrefix, clusterIdentifier: `${sharedPrefix}-postgres`,
+      clusterArn: awsSharedClusterArn({ accountId: parsed.data.accountId, region: parsed.data.region, prefix: sharedPrefix }),
+      state: { provider: 'aws', projectId: project.id, environmentId: 'shared-testing', partition: 'project-shared' },
+    },
+    database: { name: databaseName, owner: `${databaseName}_owner`, waker: `${databaseName}_waker` },
     parameterPath: `/hypervibe/${environment.id.toLowerCase()}/`,
     state: { provider: 'aws', projectId: project.id, environmentId: environment.id, partition: 'environment' },
     buildState: { provider: 'aws', projectId: project.id, environmentId: `${environment.id}-build`, partition: 'environment' },
@@ -134,9 +151,7 @@ export function awsResourceName(prefix: string, service: string): string {
   return `${prefix}-${service}`.slice(0, 60);
 }
 
-export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment'>, extra: {
-  engineVersion?: string;
-  tlsRequiredByDefault?: boolean;
+export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment' | 'shared' | 'database'>, extra: {
   secretKeys: string[];
   /** The image the plan builds first, when the environment has none yet. */
   image?: string;
@@ -163,7 +178,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
     environmentId: context.environment.id, parameterPath: context.parameterPath,
-    ...(environmentSpec.database && extra.engineVersion ? { database: { engineVersion: extra.engineVersion, minCapacity: 0, maxCapacity: 2, ...(extra.tlsRequiredByDefault ? { tlsRequiredByDefault: true } : {}) } } : {}),
+    ...(environmentSpec.database ? { database: { clusterArn: context.shared.clusterArn, name: context.database.name } } : {}),
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: bucketName(storage) })),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
@@ -201,22 +216,31 @@ export async function awsSecretStore(ctx: CommandContext, project: Project, envi
   };
 }
 
+/** The AWS testing environments with a database: they share one cluster. */
+export function awsSharedDatabaseEnvironments(spec: ProjectSpec): string[] {
+  return Object.keys(spec.environments).filter((name) => isAwsEngineEnvironment(spec, name) && awsProfileFor(name) === 'testing' && spec.environments[name]!.database).sort();
+}
+
+/** The shared cluster's input, sized for the testing environments in the spec (which must agree on the Postgres major). */
+async function awsSharedInputFor(context: AwsEngineContext, spec: ProjectSpec, environments: string[]): Promise<AwsSharedInput | { blocked: string[] }> {
+  const majors = [...new Set(environments.map((name) => (spec.environments[name]!.database as { version?: number }).version ?? 17))];
+  if (majors.length > 1) return { blocked: [`The AWS testing environments share one database cluster, so they must use the same Postgres version (${environments.join(', ')} use ${majors.join(' and ')}).`] };
+  const major = majors[0]!;
+  const engineVersion = await newestAuroraVersion(awsAccess(context), major).catch(() => undefined);
+  if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
+  // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
+  const tlsDefault = await tlsRequiredByDefault(awsAccess(context), engineVersion.split('.')[0]!).catch(() => undefined);
+  return { accountId: context.connection.accountId, region: context.connection.region, prefix: context.shared.prefix, environmentId: 'shared-testing',
+    database: { engineVersion, minCapacity: 0, maxCapacity: 2, ...(tlsDefault ? { tlsRequiredByDefault: true } : {}) } };
+}
+
 /** The engine configuration for an environment as it stands: what plans compare against and teardown destroys. */
 async function awsEngineConfigurationFor(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, ownedSecretKeys: string[], image?: string) {
   const environmentSpec = spec.environments[environmentName]!;
-  let engineVersion: string | undefined;
-  let tlsDefault: boolean | undefined;
-  if (environmentSpec.database) {
-    const major = (environmentSpec.database as { version?: number }).version ?? 17;
-    engineVersion = await newestAuroraVersion(awsAccess(context), major).catch(() => undefined);
-    if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
-    // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
-    tlsDefault = await tlsRequiredByDefault(awsAccess(context), engineVersion.split('.')[0]!).catch(() => undefined);
-  }
   const binding = awsBinding(context.environment);
   // The login is created in the same apply, before anything starts, so workloads are wired to DATABASE_URL from the start.
   const secretKeys = [...ownedSecretKeys, ...(environmentSpec.database ? [ENGINE_DATABASE_URL_KEY] : [])];
-  const input = buildAwsEngineInput(spec, environmentName, context, { ...(engineVersion ? { engineVersion } : {}), ...(tlsDefault ? { tlsRequiredByDefault: true } : {}), secretKeys, ...(image ? { image } : {}) });
+  const input = buildAwsEngineInput(spec, environmentName, context, { secretKeys, ...(image ? { image } : {}) });
   return { binding, input, configuration: awsEngineBackend.buildConfiguration(input), buildConfiguration: buildAwsBuildConfiguration(input) };
 }
 
@@ -262,7 +286,10 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   }
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...engineSecretKeys(spec, environmentName), ...imported]);
-  if (built.blocked) return { blocked: built.blocked };
+  // The shared cluster goes with the last testing environment that uses it; otherwise only this environment's database is dropped.
+  const ownCluster = Boolean(awsBinding(context.environment).databaseLoginAt && !awsBinding(context.environment).sharedDatabase);
+  const usesShared = Boolean(spec.environments[environmentName]!.database) && !ownCluster;
+  const lastOnShared = usesShared && awsSharedDatabaseEnvironments(spec).every((name) => name === environmentName);
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { blocked: [engine.blocked] };
   const planId = crypto.randomUUID();
@@ -273,6 +300,15 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   const buildPlanned = await engine.plan({ backend: awsEngineBackend, configuration: built.buildConfiguration, auth: context.auth, state: context.buildState, planId: buildPlanId, destroy: true });
   if (!buildPlanned.ok) return { blocked: [redactEngineOutput(buildPlanned.error, context.auth.redact)] };
   if (buildPlanned.blockers.length) return { blocked: buildPlanned.blockers };
+  let sharedPlanned: Awaited<ReturnType<typeof engine.plan>> | undefined;
+  const sharedPlanId = crypto.randomUUID();
+  if (lastOnShared) {
+    const sharedInput = await awsSharedInputFor(context, spec, [environmentName]);
+    if ('blocked' in sharedInput) return sharedInput;
+    sharedPlanned = await engine.plan({ backend: awsEngineBackend, configuration: buildAwsSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId, destroy: true });
+    if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
+    if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
+  }
 
   const accountId = context.connection.accountId;
   const destroying = planned.actions.filter((action) => action.type !== 'noop');
@@ -289,7 +325,15 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   // The registry and build project go after the workloads that pull from it.
   const buildActions = buildPlanned.actions.filter((action) => action.type !== 'noop')
     .map((action) => environmentActions.length ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...environmentActions.map((entry) => entry.id)])] } : action);
-  const engineActions = [...environmentActions, ...buildActions];
+  const afterEnvironment = (action: PlanAction): PlanAction => environmentActions.length ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...environmentActions.map((entry) => entry.id)])] } : action;
+  const sharedActions = sharedPlanned?.ok ? sharedPlanned.actions.filter((action) => action.type !== 'noop').map(afterEnvironment) : [];
+  const dropActions: PlanAction[] = usesShared && !lastOnShared ? [afterEnvironment({
+    id: 'database:postgres', type: 'destroy', verified: true, dataBearing: true, requiresConfirm: true,
+    resource: { kind: 'database', name: context.database.name, provider: 'aws' },
+    reason: `Hypervibe will permanently drop database ${context.database.name} and its logins from the shared testing cluster; the other testing environments keep theirs.`,
+    metadata: { operation: AWS_DATABASE_DROP_OPERATION, accountId, clusterIdentifier: context.shared.clusterIdentifier, database: context.database },
+  })] : [];
+  const engineActions = [...environmentActions, ...buildActions, ...dropActions, ...sharedActions];
   const families = [...(built.input.workers ?? []), ...(built.input.jobs ?? [])].map((task) => task.resourceName);
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
@@ -297,20 +341,21 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     reason: `Hypervibe will delete this environment's settings in Parameter Store (${context.parameterPath}), the task revisions its releases registered and its build logs.`,
     ...(engineActions.length ? { dependsOn: engineActions.map((action) => action.id) } : {}),
     metadata: { operation: AWS_TEARDOWN_CLEANUP_OPERATION, accountId, parameterPath: context.parameterPath, families, logGroups: [`/hypervibe/${context.prefix}/builds`],
-      ...(built.input.database && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.prefix}-postgres-final` } : {}) },
+      ...(lastOnShared && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.shared.prefix}-postgres-final` } : {}) },
   };
-  const destroysDatabase = engineActions.some((action) => action.id === 'database:postgres');
-  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(`${context.prefix}-postgres-final`, ['database:postgres'])] : [];
+  const destroysDatabase = sharedActions.some((action) => action.id === 'shared:database');
+  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(`${context.shared.prefix}-postgres-final`, ['shared:database'])] : [];
   if (snapshot.length) cleanup.dependsOn = [...(cleanup.dependsOn ?? []), snapshot[0]!.id];
   const actions = [...emptyActions, ...engineActions, ...snapshot, cleanup];
   const warnings = [
     `Removes AWS environment ${environmentName} in ${context.connection.region} (account ${accountId}). This cannot be undone.`,
     ...(destroysDatabase ? [snapshot.length
       ? 'The database\'s final snapshot is deleted too, so its data cannot be restored.'
-      : `The database keeps a final snapshot (${context.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month. Plan with deleteFinalSnapshot=true to remove it as well.`] : []),
+      : `This is the last testing environment on the shared database cluster, so the cluster is removed too. It keeps a final snapshot (${context.shared.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month. Plan with deleteFinalSnapshot=true to remove it as well.`] : []),
+    ...(dropActions.length ? [`${environmentName}'s database is dropped with no snapshot; the shared cluster's backups can restore the whole cluster to a point in the last day.`] : []),
     `Hypervibe's access to this account stays, for other environments of ${project.name}.`,
   ];
-  return record(actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState } });
+  return record(actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}) });
 }
 
 export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -354,11 +399,25 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const commit = !awsBinding(context.environment).imageUri && workloads ? localCommit(project) : undefined;
   const firstImage = commit ? `${awsRegistryUrl({ accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix })}:${commit.commitSha}` : undefined;
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported], firstImage);
-  if (built.blocked) return { blocked: built.blocked };
   const { binding, input, configuration } = built;
+  if (environmentSpec.database && binding.databaseLoginAt && !binding.sharedDatabase) {
+    return { blocked: [`${environmentName} was created with its own database cluster, before testing environments shared one. Tear it down (hv_plan scope="teardown") and launch it again to move it onto the shared cluster.`] };
+  }
 
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { blocked: [engine.blocked] };
+  // 0. The project's shared testing cluster (its own state, so other testing environments keep it).
+  const sharedPlanId = crypto.randomUUID();
+  let sharedActions: PlanAction[] = [];
+  if (environmentSpec.database) {
+    const sharedInput = await awsSharedInputFor(context, spec, awsSharedDatabaseEnvironments(spec));
+    if ('blocked' in sharedInput) return sharedInput;
+    const sharedPlanned = await engine.plan({ backend: awsEngineBackend, configuration: buildAwsSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
+    if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
+    if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
+    sharedActions = sharedPlanned.actions;
+  }
+  const sharedChanging = sharedActions.filter((action) => action.type !== 'noop').map((action) => action.id);
   // 1. Registry and build project (their own state, applied first).
   const buildPlanId = crypto.randomUUID();
   const buildPlanned = await engine.plan({ backend: awsEngineBackend, configuration: built.buildConfiguration, auth: context.auth, state: context.buildState, planId: buildPlanId });
@@ -381,14 +440,13 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const prerequisites = [...secretActions, ...buildPlanned.actions, ...imageActions].filter((action) => action.type !== 'noop').map((action) => action.id);
   const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && prerequisites.length
     ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...prerequisites])] } : action);
-  const databaseAction = engineActions.find((action) => action.id === 'database:postgres');
   // The app login is created once; each on-demand worker's waker login once its secret exists.
   const wakers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
   const wakerSecrets = wakers.map((worker) => `hypervibe/${context.prefix}/${worker.resourceName}-waker`);
   const appLogin = !binding.databaseLoginAt;
   const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));
   const loginDependsOn = [
-    ...(databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : []),
+    ...sharedChanging,
     ...wakers.map((worker) => engineActions.find((action) => action.id === `service:${worker.logicalName}`))
       .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
   ];
@@ -396,19 +454,20 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     id: appLogin ? 'database-login:postgres' : 'database-login:waker', type: 'create', verified: true,
     resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : 'worker waker login', provider: 'aws' },
     reason: appLogin
-      ? `Hypervibe will create the app's database login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
+      ? `Hypervibe will create ${environmentName}'s database ${context.database.name} on the shared testing cluster with the app's login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
       : 'Hypervibe will create the read-only database login the worker waker counts pending work with. The app login is unchanged.',
     ...(loginDependsOn.length ? { dependsOn: loginDependsOn } : {}),
-    metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: `${context.prefix}-postgres`,
-      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, wakerSecrets },
+    metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: context.shared.clusterIdentifier,
+      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, wakerSecrets, database: context.database },
   }] : [];
-  const actions = [...secretActions, ...buildPlanned.actions, ...imageActions, ...engineActions, ...loginActions];
+  const actions = [...secretActions, ...sharedActions, ...buildPlanned.actions, ...imageActions, ...engineActions, ...loginActions];
   const warnings = [
     `AWS ${context.connection.region}, ${awsProfileFor(environmentName)} profile.`,
+    ...(environmentSpec.database ? [`Testing environments share one Aurora Serverless cluster (${context.shared.clusterIdentifier}); ${environmentName} gets its own database and logins on it.`] : []),
     ...(!binding.imageUri && !commit && workloads ? ['Hypervibe could not find this project\'s local repository, so the services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
-    engine: { planId, state: context.state, build: { planId: buildPlanId, state: context.buildState }, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
+    engine: { planId, state: context.state, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}), aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
 }
 
 export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -417,7 +476,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
+  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
   const snapshotOnly = Boolean((reviewed as { teardown?: boolean } | undefined)?.teardown) && !params.spec.environments[environmentName];
@@ -425,6 +484,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const context = await resolveAwsEngineContext(ctx, params.project, environmentName);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || (reviewed.build && JSON.stringify(reviewed.build.state) !== JSON.stringify(context.buildState))
+    || (reviewed.shared && JSON.stringify(reviewed.shared.state) !== JSON.stringify(context.shared.state))
     || reviewed.aws.accountId !== context.connection.accountId
     || reviewed.aws.region !== context.connection.region || reviewed.aws.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different AWS account, region or environment. Re-run hv_plan.' };
@@ -474,19 +534,25 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           }
           return removed;
         }
+        if (metadata.operation === AWS_DATABASE_DROP_OPERATION) {
+          const { clusterIdentifier, database } = action.metadata as { clusterIdentifier: string; database: AwsEnvironmentDatabase };
+          const { clusterArn, secretArn } = await describeDatabaseCluster(access, clusterIdentifier);
+          if (!clusterArn || !secretArn) return { success: false, status: 'blocked', message: `The shared cluster ${clusterIdentifier} could not be read; re-run hv_plan.` };
+          return await dropAuroraEnvironmentDatabase(access, { clusterArn, masterSecretArn: secretArn, database });
+        }
         if (metadata.operation === AWS_DATABASE_LOGIN_OPERATION) {
           // The cluster OpenTofu just created, read from RDS: its ARN, endpoint and RDS-managed master secret.
           const identifier = (action.metadata as { clusterIdentifier: string }).clusterIdentifier;
           const { clusterArn, secretArn, endpoint } = await describeDatabaseCluster(access, identifier);
           if (!clusterArn || !secretArn || !endpoint) return { success: false, status: 'blocked', message: `Database ${identifier} is not ready yet; re-run hv_plan.` };
-          const login = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean };
+          const login = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean; database: AwsEnvironmentDatabase };
           const created = await ensureDatabaseLogin(access, { parameter: login.parameter, wakerSecrets: login.wakerSecrets, ...(login.appLogin !== undefined ? { appLogin: login.appLogin } : {}),
-            clusterArn, masterSecretArn: secretArn, endpoint, databaseUrlKey: ENGINE_DATABASE_URL_KEY });
+            clusterArn, masterSecretArn: secretArn, endpoint, databaseUrlKey: ENGINE_DATABASE_URL_KEY, database: login.database });
           if (created.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const previous = awsBinding(current);
             const written = (action.metadata as { wakerSecrets: string[] }).wakerSecrets;
-            ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu',
+            ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu', sharedDatabase: true,
               databaseLoginAt: previous.databaseLoginAt ?? new Date().toISOString(), wakerLogins: [...new Set([...(previous.wakerLogins ?? []), ...written])] } });
           }
           return created;
@@ -498,7 +564,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     },
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
-      const target = reviewed.build && segment.id === `opentofu:${reviewed.build.planId}` ? reviewed.build : { planId: reviewed.planId, state: context.state };
+      const target = [reviewed.build, reviewed.shared].find((entry) => entry && segment.id === `opentofu:${entry.planId}`) ?? { planId: reviewed.planId, state: context.state };
       const outcome = await engine.apply({ backend: awsEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };

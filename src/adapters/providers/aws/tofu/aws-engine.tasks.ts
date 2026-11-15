@@ -58,7 +58,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
       name: wakerName, type: 'EXPRESS', role_arn: '${aws_iam_role.runtime.arn}',
       definition: literal(JSON.stringify(wakerDefinition({
         cluster: '${aws_ecs_cluster.main.arn}', service: worker.resourceName,
-        databaseArn: '${aws_rds_cluster.postgres.arn}', webFunctions: (input.services ?? []).map((service) => service.resourceName),
+        databaseArn: input.database.clusterArn, databaseName: input.database.name, webFunctions: (input.services ?? []).map((service) => service.resourceName),
         secretArn: `\${aws_secretsmanager_secret.${key}_waker.arn}`, pendingWorkQuery: worker.pendingWorkQuery,
         ...(worker.nextWorkAtQuery ? { nextWorkAtQuery: worker.nextWorkAtQuery,
           timer: { name: `${wakerName}-next`, roleArn: '${aws_iam_role.runtime.arn}', machineArn: `arn:aws:states:${input.region}:${input.accountId}:stateMachine:${wakerName}` } } : {}),
@@ -130,7 +130,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
 }
 
 interface WakerParams {
-  cluster: string; service: string; databaseArn: string; secretArn: string; pendingWorkQuery: string;
+  cluster: string; service: string; databaseArn: string; databaseName: string; secretArn: string; pendingWorkQuery: string;
   /** Web functions whose requests can queue work. */
   webFunctions?: string[];
   nextWorkAtQuery?: string; timer?: { name: string; roleArn: string; machineArn: string };
@@ -148,7 +148,7 @@ interface WakerParams {
 export function wakerDefinition(params: WakerParams): Record<string, unknown> {
   const desired = (count: number) => ({ Type: 'Task', Resource: 'arn:aws:states:::aws-sdk:ecs:updateService', End: true,
     Arguments: { Cluster: params.cluster, Service: params.service, DesiredCount: count } });
-  const statement = (sql: string) => ({ ResourceArn: params.databaseArn, SecretArn: params.secretArn, Database: 'app', Sql: sql });
+  const statement = (sql: string) => ({ ResourceArn: params.databaseArn, SecretArn: params.secretArn, Database: params.databaseName, Sql: sql });
   const keepOne = [{ ErrorEquals: ['States.ALL'], Next: 'KeepOne' }];
   const countOnFailure = [{ ErrorEquals: ['States.ALL'], Next: 'Count' }];
   const timed = Boolean(params.timer && params.nextWorkAtQuery);

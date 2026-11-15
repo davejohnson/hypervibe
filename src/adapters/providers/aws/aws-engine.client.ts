@@ -20,10 +20,6 @@ export interface AwsAccess {
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
 }
 
-const APP_DATABASE = 'app';
-const APP_LOGIN = 'app_owner';
-const WAKER_LOGIN = 'hv_waker';
-
 export async function newestAuroraVersion(access: AwsAccess, major: number): Promise<string | undefined> {
   const rds = new RDSClient({ region: access.region, credentials: access.credentials });
   let marker: string | undefined;
@@ -157,12 +153,20 @@ export async function describeDatabaseCluster(access: AwsAccess, identifier: str
     ...(cluster?.Endpoint ? { endpoint: cluster.Endpoint } : {}) };
 }
 
-/** Creates the app's database login (and the worker waker's read-only login) and stores the connection URL. */
-export async function ensureDatabaseLogin(access: AwsAccess, params: {
-  parameter: string; wakerSecrets: string[]; appLogin?: boolean; clusterArn: string; masterSecretArn: string; endpoint: string; databaseUrlKey: string;
-}): Promise<ActionResult> {
+/** An environment's database on the shared testing cluster and its two logins. */
+export interface AwsEnvironmentDatabase { name: string; owner: string; waker: string }
+
+const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
+
+function checkedDatabase(database: AwsEnvironmentDatabase): AwsEnvironmentDatabase {
+  for (const name of [database.name, database.owner, database.waker]) if (!IDENTIFIER.test(name)) throw new Error(`Database name ${name} is invalid.`);
+  return database;
+}
+
+/** Runs master statements on the cluster through the Data API, waiting for a paused cluster to resume. */
+async function masterSql(access: AwsAccess, params: { clusterArn: string; masterSecretArn: string }) {
   const data = new RDSDataClient(access);
-  const sql = async (statement: string) => data.send(new ExecuteStatementCommand({ resourceArn: params.clusterArn, secretArn: params.masterSecretArn, database: APP_DATABASE, sql: statement }));
+  const sql = async (statement: string, database = 'postgres') => data.send(new ExecuteStatementCommand({ resourceArn: params.clusterArn, secretArn: params.masterSecretArn, database, sql: statement }));
   // A paused Aurora cluster wakes on the first statement; give it time.
   for (let attempt = 0; ; attempt++) {
     try { await sql('SELECT 1'); break; } catch (error) {
@@ -170,29 +174,61 @@ export async function ensureDatabaseLogin(access: AwsAccess, params: {
       await new Promise((done) => setTimeout(done, 10_000));
     }
   }
+  return sql;
+}
+
+/**
+ * Creates the environment's database on the shared cluster, its owner login (the
+ * app's) and the worker waker's read-only login, and stores the connection URL.
+ * No other login can connect to the database, so testing environments stay apart.
+ */
+export async function ensureDatabaseLogin(access: AwsAccess, params: {
+  parameter: string; wakerSecrets: string[]; appLogin?: boolean; clusterArn: string; masterSecretArn: string; endpoint: string; databaseUrlKey: string;
+  database: AwsEnvironmentDatabase;
+}): Promise<ActionResult> {
+  const { name, owner, waker } = checkedDatabase(params.database);
+  const sql = await masterSql(access, params);
+  const role = async (login: string, password: string) => {
+    const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${login}'`);
+    await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${login} LOGIN PASSWORD '${scramVerifier(password)}'`);
+  };
   if (params.appLogin !== false) {
     const password = crypto.randomBytes(24).toString('base64url');
-    const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${APP_LOGIN}'`);
-    await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${APP_LOGIN} LOGIN PASSWORD '${scramVerifier(password)}'`);
-    await sql(`GRANT ${APP_LOGIN} TO CURRENT_USER`);
-    await sql(`ALTER DATABASE ${APP_DATABASE} OWNER TO ${APP_LOGIN}`);
-    await sql(`ALTER SCHEMA public OWNER TO ${APP_LOGIN}`);
-    await putParameter(access, params.parameter, `postgresql://${APP_LOGIN}:${password}@${params.endpoint}:5432/${APP_DATABASE}?sslmode=require`);
+    await role(owner, password);
+    // Membership lets the master hand the database over now and drop it at teardown.
+    await sql(`GRANT ${owner} TO CURRENT_USER`);
+    if (!(await sql(`SELECT 1 FROM pg_database WHERE datname = '${name}'`)).records?.length) await sql(`CREATE DATABASE ${name} OWNER ${owner}`);
+    await sql(`ALTER DATABASE ${name} OWNER TO ${owner}`);
+    await sql(`REVOKE ALL ON DATABASE ${name} FROM PUBLIC`);
+    await sql(`ALTER SCHEMA public OWNER TO ${owner}`, name);
+    await putParameter(access, params.parameter, `postgresql://${owner}:${password}@${params.endpoint}:5432/${name}?sslmode=require`);
   }
-  // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy.
+  // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy,
+  // and CONNECT on this database alone keeps it out of the other environments'.
   if (params.wakerSecrets.length) {
     const wakerPassword = crypto.randomBytes(24).toString('base64url');
-    const waker = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${WAKER_LOGIN}'`);
-    await sql(`${waker.records?.length ? 'ALTER' : 'CREATE'} ROLE ${WAKER_LOGIN} LOGIN PASSWORD '${scramVerifier(wakerPassword)}'`);
-    await sql(`GRANT pg_read_all_data TO ${WAKER_LOGIN}`);
+    await role(waker, wakerPassword);
+    await sql(`GRANT pg_read_all_data TO ${waker}`);
+    await sql(`GRANT CONNECT ON DATABASE ${name} TO ${waker}`);
     const secrets = new SecretsManagerClient(access);
     for (const secretId of params.wakerSecrets) {
-      await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: WAKER_LOGIN, password: wakerPassword }) }));
+      await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: waker, password: wakerPassword }) }));
     }
   }
   return { success: true, message: params.appLogin !== false
-    ? `Created the app's database login and stored ${params.databaseUrlKey} in Parameter Store.`
+    ? `Created database ${name} and its login, and stored ${params.databaseUrlKey} in Parameter Store.`
     : 'Created the worker waker\'s read-only database login.' };
+}
+
+/** Drops an environment's database and logins from the shared cluster; the other environments' databases stay. */
+export async function dropAuroraEnvironmentDatabase(access: AwsAccess, params: { clusterArn: string; masterSecretArn: string; database: AwsEnvironmentDatabase }): Promise<ActionResult> {
+  const { name, owner, waker } = checkedDatabase(params.database);
+  const sql = await masterSql(access, params);
+  await sql(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+  for (const login of [waker, owner]) {
+    if ((await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${login}'`)).records?.length) await sql(`DROP ROLE ${login}`);
+  }
+  return { success: true, message: `Dropped database ${name} and its logins; the shared cluster stays for the other testing environments.` };
 }
 
 /** The regional S3 endpoint an app's S3 client is pointed at. */
