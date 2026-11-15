@@ -1,3 +1,13 @@
+import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
+import { secretAges } from '../application/secret-rotation.js';
+import { engineWorkerStatus, isEngineManaged } from '../application/infrastructure-engine.js';
+import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
+import { planApiPolicy } from '../domain/services/api-policy.js';
+import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { observeBackupPolicy, resolveBackupPolicies } from '../domain/services/backup-policy.service.js';
+import { planBackupPolicy } from '../domain/services/backup-policy-plan.service.js';
+import { observeBackupHealth } from '../domain/services/backup-health.service.js';
+import { assessBackupReadiness, backupEvidenceSummary } from '../domain/services/backup-readiness.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -13,12 +23,15 @@ import type { PlanAction } from '../domain/plan/plan.types.js';
 import { planIos } from '../domain/services/appstore-plan.service.js';
 import { planCache } from '../domain/services/cache-plan.service.js';
 import { planDatabaseResilience } from '../domain/services/database-resilience-plan.service.js';
+import { observeDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
 import { planQueues } from '../domain/services/queue-plan.service.js';
 import { planStorage } from '../domain/services/storage-plan.service.js';
+import { planServiceVolumes } from '../domain/services/service-volume.service.js';
 import { planDelegatedSecrets } from '../domain/services/delegated-secret.service.js';
 import { deriveHypervibeSecretValues } from '../domain/services/hypervibe-secret-value.js';
 import { withReceiptValidatedManagedSecretBindings } from '../domain/services/managed-secret-binding-receipts.js';
 import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
+import { databaseConsumerReadiness, databaseConsumerRolloutRequirements, databaseConsumersUnknown } from '../domain/services/database-consumer-readiness.service.js';
 import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
 import { githubActionsCanonicalEnvironment, resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
@@ -26,21 +39,25 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
+import { planHostedDns } from '../application/dns-hosting.js';
+import { planEmailDns } from '../application/dns-integrations.js';
+import { isAwsEngineEnvironment, planAwsTeardown } from '../application/infrastructure-engine-aws.js';
+import { isAzureEngineEnvironment, planAzureTeardown } from '../application/infrastructure-engine-azure.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
   connectionLocalEnvInputs,
-  connectionProviders,
   connectionRecoveryDetails,
   connectionRecoveryHint,
   executePlanApply,
+  planBlockRecovery,
   splitActionScopedConnectionBlocks,
   syncProjectGitRemoteUrl,
   type ConnectionBlock,
 } from '../application/apply-plan.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import {
-  githubSpecNeedsOpenAI,
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
   unresolvedGitHubCheckRuntimeIssues,
@@ -65,25 +82,32 @@ import {
 } from '../domain/spec/repository-runtime.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmail } from '../domain/services/email-plan.service.js';
-import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
-import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
+import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
+import { inspectWebhookReadiness } from '../domain/services/webhook-readiness.service.js';
+import { firstProviderSpecValidationFailure, introducedProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
+import { environmentResourceWarnings } from '../domain/services/environment-resource-parity.service.js';
 import {
   environmentVariableCoverage,
-  environmentVariableCoverageIssueId,
+  introducedEnvironmentVariableCoverageIssues,
   type EnvironmentVariableCoverageReport,
 } from '../domain/services/environment-variable-coverage.service.js';
 import { planProviderNativeDeploySources } from '../domain/services/provider-native-deploy-source.service.js';
 import { planMaintenance } from '../domain/services/maintenance-plan.service.js';
 import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
+import { eligibleCredentialRequirements } from '../application/credential-plan-handoff.js';
+import { hasDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
 
-function validateInstalledProviders(spec: ProjectSpec): void {
-  const failure = firstProviderSpecValidationFailure(spec);
+function validateInstalledProviders(spec: ProjectSpec, environment?: string): void {
+  throwProviderValidationFailure(firstProviderSpecValidationFailure(spec, environment));
+}
+
+function throwProviderValidationFailure(failure: ReturnType<typeof firstProviderSpecValidationFailure>): void {
   if (!failure) return;
   throw new HvError(
     'VALIDATION',
@@ -397,6 +421,12 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   };
 
   const devops = resolveDevOpsSelection(spec);
+  if (devops?.ci && Object.keys(spec.devops?.ci?.repositoryVariables ?? {}).length > 0) {
+    const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
+    add(registration?.connectionProvider ?? devops.ci.provider,
+      spec.devops?.canonicalEnvironment ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository'),
+      'Repository configuration variables', [devops.code.scope]);
+  }
   for (const [envName, envSpec] of Object.entries(spec.environments)) {
     add(envSpec.hosting.provider, envName, 'hosting');
     if (envSpec.database) add(envSpec.database.provider, envName, 'database');
@@ -407,7 +437,6 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
       ]);
     }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
-    if (envSpec.messaging) add('twilio', envName, 'programmable messaging');
     if (envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native' && devops?.ci) {
       const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
       add(
@@ -427,14 +456,6 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
     const environment = spec.github.canonicalEnvironment
       ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository');
     add('github', environment, 'GitHub repository infrastructure', repository ? [repository] : []);
-    if (spec.github.pages?.customDomain) {
-      add('cloudflare', environment, 'GitHub Pages custom-domain DNS', [
-        ...cloudflareScopeHintsForDomain(spec.github.pages.customDomain),
-      ]);
-    }
-    if (githubSpecNeedsOpenAI(spec.github)) {
-      add('openai', environment, 'AI-backed GitHub automations', repository ? [repository] : []);
-    }
   }
 
   const items = Array.from(required.values())
@@ -508,7 +529,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime, lockfile/package-manager, build-script, and start-script evidence; one unambiguous concrete Node or Python selection plus reviewed install/build commands is persisted on initial write. Missing/conflicting commands, custom languages, and ambiguous projects require an explicit decision or repository Dockerfile. Later native drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
+      spec: z.record(z.string(), z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external repository-app access.'),
     },
@@ -569,27 +590,24 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const checkRuntimeIssues = result.spec.github
           ? unresolvedGitHubCheckRuntimeIssues(result.spec.github, result.spec.runtime)
           : [];
-        const extras = result.adopted && result.source?.kind === 'repo'
-          ? { warnings: [
-            `${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`,
-            ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
-            ...checkRuntimeIssues,
-          ] }
-          : runtimeReview.status === 'review-required' || checkRuntimeIssues.length > 0
-            ? { warnings: [
-              ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
-              ...checkRuntimeIssues,
-            ] }
-            : undefined;
+        const warnings = [
+          ...(result.adopted && result.source?.kind === 'repo'
+            ? [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] : []),
+          ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
+          ...checkRuntimeIssues,
+          ...environmentResourceWarnings(result.spec),
+        ];
         return commandSuccess({
           project: { id: project.id, name: project.name, gitRemoteUrl },
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
           spec: result.spec,
+          backupPolicies: resolveBackupPolicies(result.spec, ctx.repos.environments.findByProjectId(project.id),
+            ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
           connections: requiredConnectionChecklist(ctx, result.spec),
-        }, extras);
+        }, { warnings });
       }
 
       const specProject = typeof spec.project === 'string' && spec.project.trim()
@@ -652,18 +670,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           : mergedInput;
         const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
         coverageReport = environmentVariableCoverage(candidateSpec);
-        const previousIssueIds = new Set(
-          previousSpec
-            ? environmentVariableCoverage(previousSpec).issues.map(environmentVariableCoverageIssueId)
-            : []
-        );
-        const introducedCoverageIssues = coverageReport.issues.filter(
-          (issue) => !previousIssueIds.has(environmentVariableCoverageIssueId(issue))
-        );
+        const introducedCoverageIssues = introducedEnvironmentVariableCoverageIssues(previousSpec, candidateSpec);
         if (introducedCoverageIssues.length > 0) {
           throw new HvError('VALIDATION', 'Environment-variable coverage is incomplete.', {
             details: introducedCoverageIssues,
-            hint: 'Declare each key in every listed matching environment using a separately chosen envVars value, envFile include, or delegated-secret target. If a key intentionally does not apply, add it to that environment\'s envVarExceptions. Hypervibe never copies values between environments.',
+            hint: 'This checks spec declarations, not whether live provider variables exist. Declare each key in every listed matching environment using a separately chosen envVars value, envFile include, or managed-secret target. If a key intentionally does not apply, add it to that environment\'s envVarExceptions. Hypervibe never copies values between environments.',
           });
         }
         const nativeChanges = providerNativeDeployChanges(candidateSpec, previousSpec);
@@ -673,7 +684,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             hint: nativeDeployConfirmationHint(nativeChanges),
           });
         }
-        validateInstalledProviders(candidateSpec);
+        throwProviderValidationFailure(introducedProviderSpecValidationFailure(previousSpec, candidateSpec));
         if (!project) {
           const initialHostingProvider = Object.values(candidateSpec.environments)[0]?.hosting.provider;
           project = ctx.repos.projects.create({
@@ -713,11 +724,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : [];
       const nativeDeploys = providerNativeDeployChanges(result.spec, null);
       const warnings = [
+        ...environmentResourceWarnings(result.spec),
         ...(nativeDeploys.length > 0 ? [nativeDeployConfirmationHint(nativeDeploys)] : []),
         ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
         ...checkRuntimeIssues,
         ...(coverageReport.issues.length > 0
-          ? [`The spec still has ${coverageReport.issues.length} pre-existing environment-variable coverage gap(s). Unrelated changes remain allowed, but new gaps are blocked.`]
+          ? [`The spec has ${coverageReport.issues.length} pre-existing or rename-exposed environment-variable declaration gap(s). These are not proof of missing live variables. Existing values and ownership remain unchanged; new input gaps are blocked.`]
           : []),
       ];
 
@@ -727,8 +739,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
           envTemplate: result.envTemplate ?? null,
+          environmentEnvFiles: result.environmentEnvFiles ?? [],
           localEnv: localEnv ?? null,
           spec: result.spec,
+          backupPolicies: resolveBackupPolicies(result.spec, ctx.repos.environments.findByProjectId(project.id),
+            ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
           environmentVariableCoverage: coverageReport,
@@ -747,33 +762,96 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values are accepted only through secretRefs and are never returned. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. A Pages-only canonical environment with explicit DNS and no hosting workloads uses the ordinary repository plan. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only exact retained abandoned-host, database, cache, or provider-resource destroy actions.'),
+      credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
+      intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Cloud Run always plans infrastructure with OpenTofu; infrastructure is an explicit alias. For AWS, infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"). Both include Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; neither releases code (use hv_deploy). teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
-      envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
+      envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip default repo .env deploy input and base-value syncing; the private .env.<env> scaffold is still prepared. Ignored for repository-only plans, which never load deploy env files.'),
-      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
+      deleteFinalSnapshot: z.boolean().optional().describe('scope="teardown" only: also delete the database\'s final snapshot (or, for an environment already torn down, plan deleting just that snapshot). Default keeps it so the data can be restored.'),
+      secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs, deleteFinalSnapshot }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      if (scope === 'retained-cleanup') {
+      if (deleteFinalSnapshot !== undefined && scope !== 'teardown') {
+        return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+      }
+      const routingSpec = specStore.get(project);
+      const routingEnvironment = routingSpec ? commandEnvironment(routingSpec.spec, env) : env?.trim() || 'staging';
+      const cloudRunEnvironment = routingSpec?.spec.environments[routingEnvironment]?.hosting.provider === 'cloudrun';
+      const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, routingEnvironment);
+      const retainedExecution = Boolean(retainedEnvironment && ctx.repos.components.findByEnvironmentId(retainedEnvironment.id)
+        .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+      const retainedExecutionRecovery = retainedExecution && (scope === undefined || scope === 'full');
+      if (cloudRunEnvironment && retainedExecution && scope === 'infrastructure') {
+        return commandError('VALIDATION', 'An acknowledged database task needs observation or cleanup before new infrastructure. Run hv_plan without scope to recover its exact execution.', { next: ['hv_plan'] });
+      }
+      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'credentials') {
+        return commandError('VALIDATION', `scope="${scope}" is not supported for Cloud Run environments. Run hv_plan without scope to review OpenTofu infrastructure.`, { next: ['hv_plan'] });
+      }
+      if (scope === 'infrastructure' || scope === 'teardown' || (cloudRunEnvironment && scope !== 'credentials' && !retainedExecutionRecovery)) {
+        const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
+        if (supplied) return commandError('VALIDATION', scope === 'teardown'
+          ? 'OpenTofu teardown planning takes only project, env, scope and deleteFinalSnapshot.'
+          : 'OpenTofu infrastructure planning takes only project, env and scope.', { next: ['hv_plan'] });
+        const specResult = routingSpec;
+        if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
+        const environmentName = routingEnvironment;
+        const azureTarget = isAzureEngineEnvironment(specResult.spec, environmentName);
+        if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName) && !azureTarget) {
+          return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS and Azure environments only.', { next: ['hv_spec'] });
+        }
+        if (scope !== 'teardown') validateInstalledProviders(specResult.spec, environmentName);
+        const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
+        const planned = scope === 'teardown'
+          ? await (azureTarget ? planAzureTeardown : planAwsTeardown)(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
+          : await planInfrastructureEngine(ctx, plannerParams);
+        if ('blocked' in planned) {
+          return commandError('VALIDATION', 'The infrastructure plan is blocked.', {
+            details: { blocked: planned.blocked },
+            agentInstruction: { action: 'stop_and_report', message: 'Report each blocker in plain language. Do not work around it with provider CLIs or APIs.' },
+            next: ['hv_spec', 'hv_connections'],
+          });
+        }
+        const pending = planned.actions.filter((action) => action.type !== 'noop');
+        return commandSuccess({
+          planId: planned.planRunId,
+          scope,
+          environment: planned.environmentName,
+          specRevision: planned.specRevision,
+          actions: pending.map(({ metadata: _metadata, ...action }) => action),
+          unchanged: planned.actions.length - pending.length,
+          confirmActions: planned.confirmActions,
+        }, {
+          warnings: planned.warnings,
+          hint: pending.length === 0
+            ? 'No infrastructure changes are needed.'
+            : planned.confirmActions.length
+              ? `Review the changes with the user, then hv_apply with planId and confirmActions exactly ${JSON.stringify(planned.confirmActions)}.`
+              : 'Review the changes, then hv_apply with planId.',
+          next: pending.length === 0 ? ['hv_deploy', 'hv_status'] : ['hv_apply'],
+        });
+      }
+      if (scope === 'retained-cleanup' || scope === 'backups') {
         const incompatibleInputs = [
           services !== undefined ? 'services' : null,
           envVars !== undefined ? 'envVars' : null,
           envFile !== undefined ? 'envFile' : null,
-          includeEnvFile !== undefined ? 'includeEnvFile' : null,
+          (scope === 'retained-cleanup' ? includeEnvFile !== undefined : includeEnvFile === true) ? 'includeEnvFile' : null,
           secretRefs !== undefined ? 'secretRefs' : null,
         ].filter((name): name is string => Boolean(name));
         if (incompatibleInputs.length > 0) {
           return commandError(
             'VALIDATION',
-            `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
+            `scope="${scope}" does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
             {
-              hint: 'Remove deploy inputs so the plan can authorize only retained infrastructure teardown actions.',
+              hint: scope === 'backups' ? 'Remove deploy inputs to review only the requested backup setup.'
+                : 'Remove deploy inputs so the plan can authorize only retained infrastructure teardown actions.',
               next: ['hv_plan'],
             }
           );
@@ -781,13 +859,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const currentSpecResult = specStore.get(project);
       const currentSpec = currentSpecResult?.spec;
-      if (currentSpec) validateInstalledProviders(currentSpec);
       const plannedEnvironment = currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging';
+      if (currentSpec && scope !== 'credentials' && !retainedExecutionRecovery) validateInstalledProviders(currentSpec, plannedEnvironment);
       // Local dotenv preparation is part of the hv_plan contract. Establish
       // its git-safety and filesystem boundary before PlanService persists an
       // executable plan, so an unsafe tracked .env cannot leave an undisclosed
       // authorization record behind.
-      const preparedLocalEnv = currentSpec
+      const preparedLocalEnv = currentSpec && !retainedExecutionRecovery && scope !== 'credentials' && scope !== 'secrets' && scope !== 'database-credential-aliases' && scope !== 'backups'
         ? ensureProjectLocalEnv({
           source: currentSpecResult?.source,
           projectName: project.name,
@@ -799,14 +877,39 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         : undefined;
       const result = await planService.plan(project, plannedEnvironment, {
         ...(scope ? { scope } : {}),
-        ...(services?.length ? { serviceFilter: services } : {}),
-        ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
-        ...(envFile ? { envFile } : {}),
+        ...(credential ? { credential } : {}),
+        ...(intent ? { intent } : {}),
+        ...(services !== undefined && (scope === 'secrets' || services.length > 0) ? { serviceFilter: services } : {}),
+        ...(envVars !== undefined && (scope === 'secrets' || Object.keys(envVars).length > 0) ? { envVarOverrides: envVars } : {}),
+        ...(envFile !== undefined && (scope === 'secrets' || envFile) ? { envFile } : {}),
         ...(includeEnvFile !== undefined ? { includeEnvFile } : {}),
         ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
       if ('error' in result) {
         return commandError('VALIDATION', result.error, { next: ['hv_spec'] });
+      }
+      if (currentSpec && result.scope === 'full' && (scope === undefined || scope === 'full')
+        && ![services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined)) {
+        const hosted = await planHostedDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
+          specRevision: result.specRevision, observed: result.observed, actions: result.actions });
+        const dns = hosted ?? await planEmailDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
+          specRevision: result.specRevision, actions: result.actions });
+        if (dns) {
+          if ('blocked' in dns) return commandError('VALIDATION', 'DNS planning is blocked.', {
+            details: { blocked: dns.blocked }, next: ['hv_spec', 'hv_connections'],
+          });
+          const pendingDns = dns.actions.filter(action => action.type !== 'noop');
+          return commandSuccess({ planId: dns.planRunId, scope: 'dns-engine', environment: dns.environmentName,
+            specRevision: dns.specRevision, actions: pendingDns.map(({ metadata: _metadata, ...action }) => action),
+            unchanged: dns.actions.length - pendingDns.length, confirmActions: dns.confirmActions,
+          }, { warnings: dns.warnings, hint: 'Review the DNS changes, then apply this saved plan. Run hv_plan again to continue the application workflow.', next: ['hv_apply'] });
+        }
+        const readyDnsIds = new Set(result.actions.filter(action => action.metadata?.dnsEngineReady === true || action.metadata?.dnsEngineDeferred === true || action.metadata?.dnsCancellationVerified === true).map(action => action.id));
+        if (readyDnsIds.size) {
+          result.blocked = result.blocked.filter(block => !block.actionIds?.length || !block.actionIds.every(id => readyDnsIds.has(id)));
+          const saved = ctx.repos.runs.findById(result.planRunId);
+          if (saved?.plan) ctx.repos.runs.updatePlan(result.planRunId, { ...saved.plan, actions: result.actions });
+        }
       }
       const plannedEnvironmentSpec = specStore.get(project)?.spec.environments[result.environmentName];
 
@@ -816,9 +919,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
       const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
       const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
+      const hardBlockRecovery = hardBlocked.length > 0
+        ? planBlockRecovery(hardBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+          connectionAfter: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.',
+          connectionNext: ['hv_connections', 'hv_plan'] })
+        : undefined;
       let localEnv: RepoEnvFileWrite | undefined;
       try {
-        localEnv = mergeLocalEnvWrites(
+        localEnv = scope === 'secrets' || scope === 'credentials' ? undefined : mergeLocalEnvWrites(
           preparedLocalEnv,
           ensureProjectLocalEnv({
             source: currentSpecResult?.source,
@@ -863,11 +971,22 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           `dotenv:${localEnv.path}#${entry.key}`,
         ]))
         : undefined;
+      const credentialRequirements = currentSpec
+        ? eligibleCredentialRequirements(currentSpec, result.environmentName, result.inputRequired, Object.keys(secretRefs ?? {}))
+        : [];
+      const credentialRequest = credentialRequirements.length > 0 ? {
+        command: 'hv_cloud_requests',
+        input: { env: result.environmentName, planId: result.planRunId },
+        requirements: credentialRequirements,
+      } : undefined;
+      const hostedCredentialHint = credentialRequest
+        ? ` For externally owned runtime inputs, offer the secure owner form with hv_cloud_requests ${JSON.stringify(credentialRequest.input)}; confirm the recipient and invitation before sending. The handoff requests only this plan's eligible input requirements, not every declared key, and does not establish that live credentials are absent or invalid.`
+        : '';
       let hint: string;
       let next: string[] | undefined;
 
-      if (hardBlocked.length > 0) {
-        hint = connectionRecoveryHint(hardBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.' });
+      if (hardBlockRecovery) {
+        hint = hardBlockRecovery.hint;
       } else if (connectBeforeApply.length > 0) {
         hint = connectionRecoveryHint(connectBeforeApply, {
           project: project.name,
@@ -877,10 +996,23 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         });
       } else if (result.inputRequired.length > 0) {
         hint = delegatedSecretRefs
-          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; fill those values there, then re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
-          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
+          ? `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Hypervibe prepared ${localEnv!.path}; if values are available there, re-run hv_plan with secretRefs=${JSON.stringify(delegatedSecretRefs)}. Do not paste raw values into chat.`
+          : `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If values are already available here, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise confirm who supplies these inputs. Do not paste raw values into chat.`;
+        hint += hostedCredentialHint;
       } else if (pending.length === 0) {
-        hint = 'Everything is in sync — nothing to apply.';
+        hint = result.scope === 'credentials'
+          ? 'The reviewed credential configuration matches or has recorded synchronization. Write-only values, deployment, application operation and revocation still need their own evidence.'
+          : result.scope === 'secrets'
+          ? 'The selected secrets already match. This does not verify deployment or other environment settings.'
+          : result.scope === 'backup-readiness'
+          ? result.backupReadiness?.ready
+            ? 'Requested backup setup is in sync. This diagnostic plan authorizes no application deployment; use hv_status for current recovery evidence.'
+            : 'Requested backup setup has gaps. Review backupCoverage and backupReadiness, then re-run hv_plan scope="backups". These gaps do not block ordinary deployment.'
+          : result.databaseConsumers?.some(consumer => consumer.reason)
+          ? 'No configuration mutation is planned, but database consumer activation is pending or unknown. Review databaseConsumers; fresh SQL authentication and application operation remain separate checks.'
+          : result.databaseConsumers?.length
+          ? 'Provider configuration and database deployment snapshots match; nothing to apply. Fresh SQL authentication and application operation remain unchecked.'
+          : 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
         hint = connectionRecoveryHint(softActionScopedBlocked, {
           project: project.name,
@@ -891,10 +1023,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for consequential actions that require explicit confirmation` : ''}.`;
       }
 
-      if (hardBlocked.length > 0) {
-        next = ['hv_connections', 'hv_plan'];
+      if (hardBlockRecovery) {
+        next = hardBlockRecovery.next;
       } else if (result.inputRequired.length > 0) {
-        next = ['hv_plan'];
+        next = credentialRequest ? ['hv_cloud_requests', 'hv_plan'] : ['hv_plan'];
       } else if (pending.length > 0) {
         next = connectBeforeApply.length > 0
           ? ['hv_connections', 'hv_plan']
@@ -906,9 +1038,16 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       return commandSuccess(
         {
           planId: result.planRunId,
+          ...(result.credentialReview ? { credentialReview: result.credentialReview } : {}),
+          ...(result.databaseConsumers ? { databaseConsumers: result.databaseConsumers } : {}),
+          ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),
+          ...(result.webhookReadiness ? { webhookReadiness: result.webhookReadiness } : {}),
           scope: result.scope,
+          ...(result.backupCoverage ? { backupCoverage: result.backupCoverage } : {}),
+          ...(result.backupReadiness ? { backupReadiness: result.backupReadiness } : {}),
+          ...(result.emailSenderReadiness ? { emailSenderReadiness: result.emailSenderReadiness } : {}),
           environment: result.environmentName,
-          ...(plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
+          ...(result.scope !== 'secrets' && plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
             ? { managedDatabase: managedDatabaseContract(plannedEnvironmentSpec) }
             : {}),
           specRevision: result.specRevision,
@@ -922,23 +1061,29 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           actions: reviewActions,
           unmanaged: result.unmanaged,
           inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
+          ...(credentialRequest ? { credentialRequest } : {}),
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
-          ...(result.blocked.length > 0 || actionScopedBlocked.length > 0
+          ...(classifyPlanBlocks([...result.blocked, ...actionScopedBlocked]).connections.length > 0
             ? connectionRecoveryDetails([...result.blocked, ...actionScopedBlocked], { project: project.name, gitRemoteUrl: project.gitRemoteUrl })
             : {}),
         },
         {
           hint,
-          warnings: [...result.warnings, ...actionScopedWarnings],
+          warnings: [
+            ...result.warnings,
+            ...actionScopedWarnings,
+            ...(currentSpec && scope !== 'retained-cleanup' && scope !== 'secrets' ? environmentResourceWarnings(currentSpec, result.environmentName) : []),
+          ],
           next,
-          ...(result.inputRequired.length > 0
+          ...(hardBlockRecovery?.agentInstruction ? { agentInstruction: hardBlockRecovery.agentInstruction }
+            : result.inputRequired.length > 0
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
-                message: delegatedSecretRefs
-                  ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; ask the owner to fill the required delegated values there without pasting them into chat, then re-run hv_plan with the disclosed dotenv secretRefs.`
-                  : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
+                message: (delegatedSecretRefs
+                  ? `Stop before apply. Hypervibe prepared ${localEnv!.path}; use the disclosed dotenv secretRefs only for values already available there. Otherwise confirm who should supply the inputs; never ask for values in chat.`
+                  : 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise confirm who should supply the inputs without asking for values in chat.') + hostedCredentialHint,
               },
             }
             : {}),
@@ -957,9 +1102,26 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec.' });
       }
-      validateInstalledProviders(specResult.spec);
       const envName = commandEnvironment(specResult.spec, env);
       const envSpec = specResult.spec.environments[envName];
+      // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
+      // status reports what only live observation shows, starting with background workers.
+      if (envSpec && isEngineManaged(envSpec)) {
+        const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
+        if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
+        const ages = await secretAges(ctx, project, specResult.spec, envName);
+        if (!('blocked' in ages)) {
+          const overdue = ages.secrets.filter((secret) => secret.overdue);
+          if (overdue.length) engine.warnings.push(`${overdue.length} secret(s) are older than ${ages.everyDays} days (${overdue.map((secret) => `${secret.key} ${secret.ageDays}d`).join(', ')}). Rotate them with hv_secrets action="rotate".`);
+        }
+        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: engine.workers }, {
+          warnings: engine.warnings,
+          hint: engine.warnings.length ? 'Fix the warnings above, then check hv_status again.' : 'Run hv_plan scope="infrastructure" to check infrastructure drift.',
+          next: engine.warnings.length ? ['hv_plan'] : ['hv_plan', 'hv_health'],
+        });
+      }
+
+      validateInstalledProviders(specResult.spec, envName);
       if (!envSpec) {
         if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
           const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
@@ -968,18 +1130,19 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             spec: specResult.spec,
             environmentName: envName,
           });
+          const actions = github.actions;
           const blocked = [
             ...planService.projectPreflight(projectForStatus, specResult.spec, envName),
             ...github.blocked,
           ];
-          const drift = github.actions.filter((action) => action.type !== 'noop');
+          const drift = actions.filter((action) => action.type !== 'noop');
           return commandSuccess({
             environment: envName,
             specRevision: specResult.revision,
             specSource: specResult.source ?? { kind: 'local' },
-            verified: github.actions.every((action) => action.verified),
+            verified: actions.every((action) => action.verified),
             inSync: drift.length === 0,
-            summary: summarizeActions(github.actions),
+            summary: summarizeActions(actions),
             drift: drift.map(({ metadata: _metadata, ...action }) => action),
             unmanaged: [],
             blocked,
@@ -1000,9 +1163,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const apiPolicy = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
       const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
       const { observed, warnings } = await planService.observeEnvironment(projectForStatus, environment, envSpec);
       const local = planService.buildLocalSnapshot(projectForStatus, environment);
+      const backupCoverage = await observeBackupPolicy({ spec: envSpec, environment, components: local.components,
+        project: projectForStatus, adapterFactory });
+      const backupHealth = await observeBackupHealth({ spec: envSpec, environment, components: local.components,
+        project: projectForStatus, adapterFactory });
+      const backupReadiness = assessBackupReadiness(backupCoverage, backupHealth);
+      const backupPolicy = planBackupPolicy(backupCoverage, { explicitDatabaseBackups: Boolean(envSpec.database?.resilience?.backups),
+        attempts: environment?.platformBindings.backupPolicyAttempts });
       const managedDatabaseEnvVars = buildManagedDatabaseEnvVars(
         envSpec.database,
         local.components
@@ -1044,6 +1215,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ?.lifecycle?.databaseResilience,
       });
       const databaseResilienceDrift = databaseResilience.actions.filter((action) => action.type !== 'noop');
+      const databaseAliases = await observeDatabaseCredentialAliases({
+        project: projectForStatus, spec: envSpec, environmentName: envName,
+      });
+      const databaseAliasDrift: PlanAction[] = databaseAliases?.state === 'drift' ? [{
+        id: 'database:credential-aliases', type: 'update',
+        resource: { kind: 'database', provider: envSpec.database!.provider, name: envSpec.database!.engine },
+        verified: true,
+        reason: 'Database password aliases do not reference their issuer. Run hv_plan with scope="database-credential-aliases" to review a repair.',
+      }] : [];
       const nativeDeploySources = planProviderNativeDeploySources({
         environmentSpec: envSpec,
         observed,
@@ -1137,6 +1317,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const queues = await planQueues({ project: projectForStatus, environmentSpec: envSpec, environment });
       const queueDrift = queues.actions.filter((action) => action.type !== 'noop');
       const storage = planStorage({ environmentSpec: envSpec, environment, observed });
+      const serviceVolumes = planServiceVolumes({ environmentSpec: envSpec, environment, observed });
+      storage.actions.push(...serviceVolumes.actions);
+      storage.warnings.push(...serviceVolumes.warnings);
       const storageDrift = storage.actions.filter((action) => action.type !== 'noop');
       const delegatedSecrets = planDelegatedSecrets({
         spec: specResult.spec,
@@ -1154,6 +1337,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
+      const domainSecurity = await inspectDomainSecurity(envSpec.domain);
       const email = await planEmail({
         project: projectForStatus,
         environmentName: envName,
@@ -1161,37 +1345,38 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         environment,
         observed,
       });
+      const webhookReadiness = inspectWebhookReadiness({ environmentSpec: envSpec, environment, observed, eventSigningReadiness: email.eventSigningReadiness, inboundSigningReadiness: email.inboundSigningReadiness });
       const emailDrift = email.actions.filter((action) => action.type !== 'noop');
-      const messaging = await planTwilioMessaging({
-        project: projectForStatus,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        environment,
-        observed,
-      });
-      const messagingDrift = messaging.actions.filter((action) => action.type !== 'noop');
       const observationIncomplete = observed !== null && (
         observed.partial
         || Object.values(observed.completeness ?? {}).includes('unknown')
       );
-      const restartRequirements = runtimeRolloutRequirements({
+      const databaseConsumers = databaseConsumerReadiness({ spec: envSpec, environment, observed });
+      const databaseRuntimeUnknown = databaseConsumersUnknown(databaseConsumers);
+      const recordedRestartRequirements = runtimeRolloutRequirements({
         environment,
         provider: envSpec.hosting.provider,
         observed,
       });
+      const restartRequirements = [...new Map([
+        ...databaseConsumerRolloutRequirements(databaseConsumers, observed?.observedAt ?? new Date().toISOString()),
+        ...recordedRestartRequirements,
+      ].map(requirement => [requirement.service, requirement])).values()].sort((a, b) => a.service.localeCompare(b.service));
       const restartRequired = restartRequirements.length > 0;
-      const hasConfigurationDrift = maintenanceDrift.length > 0
+      const pendingSchedules = planScheduleActivations({ environment, environmentSpec: envSpec, observed });
+      const hasConfigurationDrift = pendingSchedules.length > 0 || Boolean(apiPolicy.action || apiPolicy.error)
+        || maintenanceDrift.length > 0
         || nativeDeploySourceDrift.length > 0
         || drift.length > 0
         || cacheDrift.length > 0
         || databaseResilienceDrift.length > 0
+        || databaseAliasDrift.length > 0
         || iosDrift.length > 0
         || queueDrift.length > 0
         || storageDrift.length > 0
         || delegatedSecretDrift.length > 0
         || stripeDrift.length > 0
-        || emailDrift.length > 0
-        || messagingDrift.length > 0;
+        || emailDrift.length > 0;
       const blocked = planService.preflight(envSpec, envName, specResult.spec);
       for (const stripeBlock of stripeSync.blocked) {
         if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
@@ -1229,7 +1414,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : {}),
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
-          verified: observed !== null && !observed.partial,
+          verified: observed !== null && !observed.partial && databaseAliases?.state !== 'unknown',
           ...(observed
             ? {
               observedAt: observed.observedAt,
@@ -1245,10 +1430,31 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          inSync: !observationIncomplete && !databaseRuntimeUnknown && databaseAliases?.state !== 'unknown' && !hasConfigurationDrift && !restartRequired,
+          ...(databaseConsumers.length ? { databaseConsumers } : {}),
+          ...(databaseAliases ? { databaseAliases } : {}),
+          backupCoverage: { ...backupCoverage, complete: backupPolicy.complete,
+            ...backupEvidenceSummary(backupReadiness) },
+          backupHealth,
+          backupReadiness,
+          ...((envSpec.api || environment?.platformBindings.apiPolicy !== undefined) ? {
+            apiReleasePolicy: {
+              status: apiPolicy.error ? 'blocked' : apiPolicy.action ? 'drift' : 'configured',
+              ...(apiPolicy.error ? { reason: apiPolicy.error } : {}),
+              ...(apiPolicy.action ? { action: apiPolicy.action } : {}),
+              versions: Object.fromEntries(Object.entries(envSpec.api?.versions ?? {}).map(([name, value]) => [name, { path: value.path, status: value.status }])),
+              applicationBehavior: 'Verified only by the declared compatibility tests during managed releases.',
+            },
+          } : {}),
+          ...(domainSecurity ? { domainSecurity } : {}),
+          ...(webhookReadiness ? { webhookReadiness } : {}),
+          ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
+          ...(pendingSchedules.length > 0 ? { pendingScheduleActivations: pendingSchedules.map(action => ({
+            service: action.resource.name, state: 'pending', observed: action.verified,
+          })) } : {}),
           restartRequired,
           runtimeConfiguration: {
-            status: restartRequired ? 'restart_required' : 'current',
+            status: restartRequired ? 'restart_required' : databaseRuntimeUnknown ? 'unknown' : 'current',
             ...(restartRequired ? { services: restartRequirements } : {}),
           },
           runtimeHealth: runtimeHealthSummary(observed),
@@ -1261,8 +1467,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 },
               }
             : {}),
-          summary: summarizeActions([...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          summary: summarizeActions([...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...databaseAliasDrift, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions]),
+          drift: [...pendingSchedules, ...(apiPolicy.action ? [apiPolicy.action] : []), ...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...databaseAliasDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {
@@ -1292,7 +1498,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
+          warnings: [...warnings, ...backupPolicy.warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               project: project.name,
@@ -1304,16 +1510,20 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               : deployStrategy === 'branch' && deployTrigger === 'ci' && (ciNeedsSync || ciDeploy.error)
                 ? 'Run hv_plan and hv_apply to converge the selected managed CI provider; use hv_ci_status for runs after configuration is active.'
               : delegatedSecrets.inputRequired.length > 0
-                ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
+                ? 'Use a safe local secretRef if the value is available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Confirm the recipient and secure invitation; do not paste values into chat or interpret unverified live state as absence.'
               : delegatedSecrets.blockers.length > 0
                 ? `Resolve the managed-secret safety block before planning: ${delegatedSecrets.blockers.map((entry) => entry.reason).join('; ')}.`
+              : databaseAliases?.state === 'unknown'
+                ? `${databaseAliases.reason ?? 'Database password references could not be verified.'} No alias write or deployment was attempted.`
               : hasConfigurationDrift
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : restartRequired
                   ? deployStrategy === 'branch' && deployTrigger === 'ci'
-                    ? `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Trigger the managed CI deployment${stringField(ciWorkflow, 'path') ? ` (${stringField(ciWorkflow, 'path')})` : ''} with hv_ci_trigger, inspect it with hv_ci_status, then rerun hv_status. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.`
-                    : `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Complete a deployment through the configured release path, then rerun hv_status.`
-                : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
+                    ? `Runtime configuration activation or retirement remains pending for ${restartRequirements.map((entry) => entry.service).join(', ')}. Review each reason and verify intended database credentials before authorizing a release. Use hv_ci_trigger for the managed CI deployment${stringField(ciWorkflow, 'path') ? ` (${stringField(ciWorkflow, 'path')})` : ''}, inspect it with hv_ci_status, then rerun hv_status. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.`
+                    : `Runtime configuration activation or retirement remains pending for ${restartRequirements.map((entry) => entry.service).join(', ')}. Review each reason and verify intended database credentials before authorizing a release through the configured path, then rerun hv_status.`
+                : databaseRuntimeUnknown
+                  ? 'Database consumer activation or retirement evidence is unsupported or incomplete. Review databaseConsumers; configuration, fresh SQL authentication and application operation remain separate checks.'
+                  : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
           next: blocked.length > 0
             ? ['hv_connections']
             : !hasConfigurationDrift && restartRequired && deployStrategy === 'branch' && deployTrigger === 'ci'
@@ -1338,8 +1548,6 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec, then hv_plan.' });
       }
-      validateInstalledProviders(specResult.spec);
-
       const outcome = await executePlanApply(ctx, {
         project,
         spec: specResult.spec,
@@ -1364,26 +1572,24 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (outcome.kind === 'input_required') {
         return commandError('VALIDATION', 'This plan is missing required delegated secret inputs.', {
           details: { environment: outcome.envName, inputRequired: outcome.requirements },
-          hint: 'Use safe local secretRefs for values available on this Mac. Otherwise prepare a value-free handoff naming each delegated key, environment, and principal for the project owner. Do not paste raw secrets into chat.',
+          hint: 'Use safe local secretRefs for values available here. Otherwise run hv_plan for this environment and offer its hv_cloud_requests handoff for externally owned runtime inputs. Approve the invitation and private import separately, then create a fresh plan; never paste values into chat.',
           next: ['hv_plan'],
           agentInstruction: {
             action: 'ask_user',
-            message: 'Stop before apply. Use safe local secret references when available, or prepare a value-free owner handoff for the delegated-secret slots.',
+            message: 'Stop before apply. Use safe local secret references when available, or prepare a fresh plan and offer its secure hv_cloud_requests owner handoff. An invitation or imported input never authorizes applying this blocked plan.',
           },
         });
       }
       if (outcome.kind === 'blocked') {
-        return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
-          details: {
-            blocked: outcome.applyBlocked,
-            ...connectionRecoveryDetails(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }),
-          },
-          hint: connectionRecoveryHint(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then re-run hv_plan and hv_apply.' }),
-          next: ['hv_connections', 'hv_plan', 'hv_apply'],
-        });
+        const recovery = planBlockRecovery(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+          connectionAfter: 'Then re-run hv_plan and hv_apply.', connectionNext: ['hv_connections', 'hv_plan', 'hv_apply'] });
+        return commandError(recovery.code, recovery.message, recovery);
       }
 
       const { result, envName } = outcome;
+      const appliedScope = asRecord(ctx.repos.runs.findById(planId)?.plan)?.scope;
+      const credentialPlan = appliedScope === 'credentials';
+      const secretOnly = appliedScope === 'secrets' || credentialPlan;
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
       const pending = result.receipts.filter((r) => r.status === 'pending');
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
@@ -1412,17 +1618,21 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(result.error ? { error: result.error } : {}),
         },
         {
-          hint: skipped.length > 0
+          hint: credentialPlan && !result.success
+            ? `Inspect these credential receipts and resume the same hv_apply planId="${planId}". Retain the frozen replacement; uncertain writes require the explicit retry confirmation identified in the receipt.`
+            : skipped.length > 0
             ? `Skipped confirm-gated actions: ${skipped.map((r) => r.actionId).join(', ')}. Re-run hv_plan, then hv_apply with confirmActions to execute them.`
             : blockedReceipts.length > 0
               ? `Apply is blocked by actions that need user/provider intervention: ${blockedReceipts.map((r) => r.actionId).join(', ')}. Inspect receipts, complete the required action, then re-run hv_plan and hv_apply.`
               : pending.length > 0
                 ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Re-run hv_plan and hv_apply after they progress.`
             : result.success
-              ? 'Apply complete. Check hv_status to verify convergence.'
+              ? secretOnly
+                ? 'The selected secrets are saved. They take effect after the managed CI deployment; select its workflow with hv_ci_status, then use hv_ci_trigger.'
+                : 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
           warnings: outcome.actionScopedWarnings,
-          next: [result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
+          next: [credentialPlan && !result.success ? 'hv_apply' : result.success && secretOnly ? 'hv_ci_status' : result.success || pending.length > 0 ? 'hv_status' : 'hv_plan'],
         }
       );
     })

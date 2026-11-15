@@ -1,4 +1,4 @@
-import { z, type ZodRawShape } from 'zod';
+import { z } from 'zod';
 import './providers.js';
 import type { CommandContext } from './context.js';
 import {
@@ -11,6 +11,8 @@ import { registerCoreTools } from '../tools/core.tools.js';
 import { registerLifecycleTools } from '../tools/lifecycle.tools.js';
 import { registerConnectionsTools } from '../tools/connections.tools.js';
 import { registerHvDeployTools } from '../tools/hv-deploy.tools.js';
+import { registerHvLaunchTools } from '../tools/hv-launch.tools.js';
+import { registerHvMigrateTools } from '../tools/hv-migrate.tools.js';
 import { registerHvObservabilityTools } from '../tools/hv-observability.tools.js';
 import { registerHvDbTools } from '../tools/hv-db.tools.js';
 import { registerHvSecretsTools } from '../tools/hv-secrets.tools.js';
@@ -18,6 +20,12 @@ import { registerHvCiTools } from '../tools/hv-ci.tools.js';
 import { registerHvAppstoreTools } from '../tools/hv-appstore.tools.js';
 import { registerHvDevxTools } from '../tools/hv-devx.tools.js';
 import { registerHvCloudTools } from '../tools/hv-cloud.tools.js';
+import { registerHvCloudConnectionsTools } from '../tools/hv-cloud-connections.tools.js';
+import { registerHvCloudSecretsTools } from '../tools/hv-cloud-secrets.tools.js';
+import { registerCloudRequestCommands } from './cloud-requests.js';
+
+/** Commands use the classic public schema API for CLI parsing and guidance. */
+export type CommandInputShape = Record<string, z.ZodType>;
 
 export type CommandAccess = 'read' | 'write';
 
@@ -27,15 +35,15 @@ export interface CommandDefinition {
   /** Human-oriented CLI path, for example ["spec"]. */
   cliPath: string[];
   description: string;
-  inputShape: ZodRawShape;
-  inputSchema: z.ZodObject<ZodRawShape>;
+  inputShape: CommandInputShape;
+  inputSchema: z.ZodObject<CommandInputShape>;
   access: CommandAccess;
   execute(input: Record<string, unknown>): Promise<CommandEnvelope>;
 }
 
 function confirmationFieldForCommand(
   id: string,
-  inputShape: ZodRawShape
+  inputShape: CommandInputShape
 ): string | undefined {
   if (id === 'hv_spec' && inputShape.confirmNativeDeploy) {
     return 'confirmNativeDeploy';
@@ -51,7 +59,7 @@ function confirmationFieldForCommand(
 
 function addConfirmationMetadata(
   id: string,
-  inputShape: ZodRawShape,
+  inputShape: CommandInputShape,
   result: CommandEnvelope
 ): CommandEnvelope {
   if (result.ok || result.error?.code !== 'CONFIRM_REQUIRED' || result.confirmation) {
@@ -71,7 +79,7 @@ function addConfirmationMetadata(
 }
 
 export interface CommandRegistrar {
-  register<Args extends ZodRawShape>(
+  register<Args extends CommandInputShape>(
     name: string,
     description: string,
     inputShape: Args,
@@ -81,6 +89,9 @@ export interface CommandRegistrar {
   ): unknown;
 }
 
+// Access metadata (including MCP readOnlyHint) applies to the entire command.
+// hv_secrets is write-capable because collect/rotate change secrets; inventory
+// and ages remain read-only operations within that mixed command.
 const READ_ONLY_COMMANDS = new Set([
   'hv_status',
   'hv_inspect',
@@ -89,7 +100,6 @@ const READ_ONLY_COMMANDS = new Set([
   'hv_ci_status',
   'hv_appstore_status',
   'hv_runs',
-  'hv_secrets',
 ]);
 
 const ROOT_COMMANDS = new Set([
@@ -116,7 +126,7 @@ export function cliPathForCommand(id: string): string[] {
 export class CommandRegistry implements CommandRegistrar {
   private readonly definitions = new Map<string, CommandDefinition>();
 
-  register<Args extends ZodRawShape>(
+  register<Args extends CommandInputShape>(
     name: string,
     description: string,
     inputShape: Args,
@@ -194,6 +204,8 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerLifecycleTools(registry, ctx);
   registerConnectionsTools(registry, ctx);
   registerHvDeployTools(registry, ctx);
+  registerHvLaunchTools(registry, ctx);
+  registerHvMigrateTools(registry, ctx);
   registerHvObservabilityTools(registry, ctx);
   registerHvDbTools(registry, ctx);
   registerHvSecretsTools(registry, ctx);
@@ -201,6 +213,9 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerHvAppstoreTools(registry, ctx);
   registerHvDevxTools(registry, ctx);
   registerHvCloudTools(registry, ctx);
+  registerHvCloudSecretsTools(registry, ctx);
+  registerHvCloudConnectionsTools(registry, ctx);
+  registerCloudRequestCommands(registry, ctx);
 
   return registry;
 }

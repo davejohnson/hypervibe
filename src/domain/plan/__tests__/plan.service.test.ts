@@ -1,3 +1,6 @@
+import type { IProviderLifecycleAdapter } from '../../ports/provider.port.js';
+import { z } from 'zod';
+import { providerRegistry } from '../../registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -7,11 +10,11 @@ import { execFileSync } from 'child_process';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../../../adapters/providers/railway/railway-database.factory.js';
+import { railwayHttpFixture, projectId as nativeProjectId, stagingId as nativeEnvironmentId } from '../../../adapters/providers/railway/__tests__/railway-http.fixture.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/s3.adapter.js';
 import '../../../adapters/providers/azure/azure-container-apps.adapter.js';
-import '../../../adapters/providers/azure/azure-managed-redis.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
@@ -22,6 +25,7 @@ import { SpecStore } from '../../spec/spec.store.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
+import { PublicDnsClient } from '../../../adapters/dns/public-dns.client.js';
 import { ConvergeExecutor, orderActions } from '../converge.executor.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
@@ -30,6 +34,9 @@ import { isIosAction } from '../../services/appstore-plan.service.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
+import type { Component } from '../../entities/component.entity.js';
+import { environmentResourceName } from '../../services/resource-names.js';
+import { createUnresolvedDatastoreMutation } from '../../ports/database.port.js';
 import {
   buildBranchDeployWorkflow,
   resolveBranchDeployTargets,
@@ -47,6 +54,38 @@ import * as environmentMaintenanceService from '../../services/environment-maint
 import { applyStorageAction, STORAGE_OPERATIONS } from '../../services/storage-plan.service.js';
 import { CACHE_OPERATIONS } from '../../services/cache-plan.service.js';
 import '../../../application/devops-providers.js';
+import { dailyBackupEvidence } from '../../../test/backup-fixtures.js';
+import type { RecoverySourceIdentity } from '../../ports/recovery-source.port.js';
+import type { ObservedDatabase } from '../../ports/observe.port.js';
+
+// Synthetic hosting supports only the generic lifecycle contracts under test.
+const fixtureHostingProvider = providerRegistry.get('cloudrun')!;
+for (const [name, workloadKinds] of [['fixture-hosting', ['web', 'worker', 'cron']], ['fixture-web-hosting', ['web']]] as const) {
+  providerRegistry.register({
+    ...fixtureHostingProvider,
+    metadata: {
+      ...fixtureHostingProvider.metadata, name, displayName: name,
+      lifecycle: { hosting: { workloadKinds, customDomains: 'unsupported', teardownBoundary: 'services' } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+  });
+}
+
+providerRegistry.register({
+  metadata: {
+    name: 'fixture-cache', displayName: 'Fixture cache', category: 'cache',
+    credentialsSchema: z.object({ projectId: z.string().optional(), credentials: z.string().optional() }),
+    lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+  },
+  factory: () => ({}),
+  inspection: {
+    resources: ['cache'], defaultResource: 'cache',
+    selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] } },
+    inspect: async () => ({ observation: 'absent', resource: 'cache', caches: [], partial: false, truncated: false }),
+  },
+});
+
 
 let project: Project;
 
@@ -184,6 +223,7 @@ function seedAcceptedRailwayCiProject(params: {
 }
 
 beforeEach(() => {
+  vi.spyOn(PublicDnsClient.prototype, 'query').mockResolvedValue({ status: 'unknown' });
   SqliteAdapter.resetInstance();
   const dir = mkdtempSync(path.join(tmpdir(), 'hypervibe-plan-'));
   SqliteAdapter.getInstance(path.join(dir, 'test.db')).migrate();
@@ -210,6 +250,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function mockObservingAdapter(observed: ObservedState, extra: Record<string, unknown> = {}) {
@@ -222,7 +263,7 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
   };
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
     success: true,
-    adapter: {
+    adapter: ({
       ...extra,
       name: 'railway',
       capabilities: {
@@ -243,157 +284,101 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
       deploy: async () => { throw new Error('unused'); },
       setEnvVars: async () => ({ success: true, message: 'ok' }),
       observe: async () => normalizedObserved,
-    },
+    } as IProviderLifecycleAdapter),
   });
 }
 
-describe('PlanService.plan', () => {
-  it('defers an initially unbound Cloud Run seed until managed CI has exact provider bindings', async () => {
-    project = new ProjectRepository().update(project.id, {
-      defaultPlatform: 'cloudrun',
-      gitRemoteUrl: 'https://github.com/davejohnson/cloudrun-seed-app.git',
-    })!;
-    new SpecStore().replace(project, {
-      version: 1,
-      project: project.name,
-      gitRemoteUrl: project.gitRemoteUrl,
-      runtime: {
-        kind: 'node',
-        version: '22',
-        installCommand: 'npm ci',
-      },
-      environments: {
-        staging: {
-          hosting: { provider: 'cloudrun', region: 'us-central1' },
-          services: {
-            web: {
-              workloadKind: 'web' as const,
-              startCommand: 'npm start',
-              healthCheckPath: '/ready',
-              public: true,
-            },
-          },
-          database: {
-            provider: 'cloudsql',
-            engine: 'postgres',
-            seedCommand: 'npm run db:seed',
-          },
-          email: { enabled: false },
-          envVars: {},
-          envFile: { mode: 'off' },
-          deploy: {
-            strategy: 'branch',
-            trigger: 'ci',
-            branch: 'main',
-          },
-        },
-      },
-    });
+/** Existing protected-environment cases supply the new prerequisite at its provider port. */
+async function mockProtectedRailwayDatabase(source: RecoverySourceIdentity) {
+  const hosting = await adapterFactory.getProviderAdapter('railway', project);
+  const adapter = { ...createRailwayDatabaseAdapter({ hostingAdapter: hosting.adapter!, envRepo: new EnvironmentRepository() }),
+    dailyBackups: dailyBackupEvidence(source) };
+  vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter });
+}
 
-    const result = await new PlanService().plan(project, 'staging', {
-      includeEnvFile: false,
-    });
-
-    expect(result).not.toHaveProperty('error');
-    const plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.scope).toBe('managed-ci-bindings');
-    expect(plan.actions.find((action) => action.metadata?.operation === 'githubActionsRelease'))
-      .toBeUndefined();
-    expect(plan.actions.find((action) => action.metadata?.operation === 'databaseSeed'))
-      .toBeUndefined();
-    expect(plan.actions.some((action) => action.resource.kind === 'ci')).toBe(false);
-    expect(plan.warnings).toContainEqual(expect.stringContaining(
-      'Managed CI reconciliation is deferred until provider identity changes converge.'
-    ));
-    expect(new RunRepository().findById(plan.planRunId)?.status).toBe('succeeded');
-  });
-
-  it('freezes the repository HEAD into a managed Cloud Run deployment plan', async () => {
-    const oldCwd = process.cwd();
-    const oldDisableRepoSpec = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
-    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-source-sha-plan-'));
-    const spec = {
-      version: 1,
-      project: 'source-sha-app',
-      gitRemoteUrl: 'https://github.com/davejohnson/source-sha-app.git',
-      environments: {
-        staging: {
-          hosting: { provider: 'cloudrun', region: 'us-central1' },
-          services: { web: { workloadKind: 'web', public: true } },
-          email: { enabled: false },
-          envVars: {},
-          envFile: { mode: 'off' },
-          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-        },
-      },
+describe('PlanService datastore naming compatibility policy', () => {
+  // This callback contract tests orchestration, not provider response schemas.
+  it.each(['postgres', 'redis'])('retains scoped %s candidates without treating old names as new-create authority', async (engine) => {
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {} });
+    const policy = new PlanService() as unknown as {
+      observeDatastoreNames(project: Project, environment: Environment, engine: string,
+        component: Component | null, observe: (name: string) => Promise<{ provider: string; externalId: string; providerScope: Record<string, string> } | null>): Promise<unknown>;
     };
-    mkdirSync(path.join(root, '.hypervibe'));
-    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`);
-    execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
-    execFileSync('git', ['config', 'user.email', 'test@hypervibe.dev'], { cwd: root });
-    execFileSync('git', ['config', 'user.name', 'Hypervibe Test'], { cwd: root });
-    execFileSync('git', ['remote', 'add', 'origin', spec.gitRemoteUrl], { cwd: root });
-    execFileSync('git', ['add', '.hypervibe/spec.json'], { cwd: root });
-    execFileSync('git', ['commit', '-m', 'test fixture'], { cwd: root, stdio: 'ignore' });
-    const expectedSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    const desiredName = environmentResourceName(engine, environment);
+    const oldName = `${project.name}-staging-${engine}`;
+    const identity = { provider: 'test-provider', externalId: 'same-native-id', providerScope: { environmentId: 'staging' } };
+    const observe = vi.fn(async (name: string) => name === oldName ? identity : null);
+    expect(await policy.observeDatastoreNames(project, environment, engine, null, observe)).toEqual(identity);
+    expect(observe.mock.calls.map(([name]) => name)).toEqual([desiredName, oldName]);
+    expect(desiredName).toMatch(new RegExp(`^${engine}-[a-f0-9]{10}$`));
+    expect(environmentResourceName(engine, { ...environment, projectId: 'another-project' })).not.toBe(desiredName);
 
-    try {
-      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
-      process.chdir(root);
-      const sourceProject = new ProjectRepository().create({
-        name: spec.project,
-        defaultPlatform: 'cloudrun',
-        gitRemoteUrl: spec.gitRemoteUrl,
-      });
-      new EnvironmentRepository().create({
-        projectId: sourceProject.id,
-        name: 'staging',
-        platformBindings: {
-          provider: 'cloudrun',
-          projectId: 'source-sha-gcp-project',
-          environmentId: 'us-central1',
-          providerScope: {
-            projectId: 'source-sha-gcp-project',
-            region: 'us-central1',
-          },
-          services: { web: { serviceId: 'source-sha-web' } },
-        },
-      });
+    const bound = new ComponentRepository().create({ environmentId: environment.id, type: engine,
+      externalId: identity.externalId, bindings: { provider: identity.provider } });
+    const exact = vi.fn(async () => identity);
+    await policy.observeDatastoreNames(project, environment, engine, bound, exact);
+    expect(exact).toHaveBeenCalledOnce();
 
-      const result = await new PlanService().plan(sourceProject, 'staging', {
-        includeEnvFile: false,
-      });
+    const retained = { ...bound, externalId: null, bindings: { provider: identity.provider,
+      unresolvedMutation: createUnresolvedDatastoreMutation(engine === 'redis' ? 'cache' : 'database',
+        'retained-exact-old-name', identity.providerScope) } };
+    const recovery = vi.fn(async () => null);
+    await policy.observeDatastoreNames(project, environment, engine, retained, recovery);
+    expect(recovery.mock.calls).toEqual([['retained-exact-old-name']]);
 
-      expect(result).not.toHaveProperty('error');
-      const plan = result as Exclude<typeof result, { error: string }>;
-      expect(plan.specSource).toEqual({
-        kind: 'repo',
-        path: path.join(realpathSync(root), '.hypervibe', 'spec.json'),
-      });
-      expect(new RunRepository().findById(plan.planRunId)?.plan).toMatchObject({
-        sourceCommitSha: expectedSha,
-      });
-
-      spec.environments.staging.envVars = { UNCOMMITTED: 'true' };
-      writeFileSync(path.join(root, '.hypervibe', 'spec.json'), `${JSON.stringify(spec, null, 2)}\n`);
-      const dirtyResult = await new PlanService().plan(sourceProject, 'staging', {
-        includeEnvFile: false,
-      });
-      expect(dirtyResult).toEqual({
-        error: expect.stringContaining('will not plan a first Cloud Run release'),
-      });
-    } finally {
-      process.chdir(oldCwd);
-      if (oldDisableRepoSpec === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
-      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisableRepoSpec;
+    await expect(policy.observeDatastoreNames(project, environment, engine, null, async (name) => ({
+      ...identity, providerScope: { environmentId: name === oldName ? 'production' : 'staging' },
+    }))).rejects.toThrow(/Multiple/);
+    for (const unknownName of [desiredName, oldName]) {
+      await expect(policy.observeDatastoreNames(project, environment, engine, null, async (name) => {
+        if (name === unknownName) throw new Error('provider observation denied');
+        return null;
+      })).rejects.toThrow(/denied/);
     }
   });
+});
+
+describe('PlanService.plan', () => {
 
   it('errors when the project has no spec', async () => {
     const bare = new ProjectRepository().create({ name: 'no-spec' });
     expect(bare.defaultPlatform).toBe('unconfigured');
     const result = await new PlanService().plan(bare, 'staging');
     expect(result).toMatchObject({ error: expect.stringContaining('hv_spec') });
+  });
+
+  it('reports unknown DNSSEC rather than treating SERVFAIL as an unsigned healthy domain', async () => {
+    vi.mocked(PublicDnsClient.prototype.query).mockRestore();
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
+      hosting: { provider: 'railway' }, services: { web: {} }, domain: 'example.com',
+    } } });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = new URL(String(input));
+      return new Response(JSON.stringify({ Status: 2, TC: false, AD: false, CD: false,
+        Question: [{ name: `${url.searchParams.get('name')}.`, type: Number(url.searchParams.get('type')) }],
+      }));
+    });
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).toMatchObject({ domainSecurity: { dnssec: 'unknown', caa: { status: 'unknown' } } });
+  });
+
+  it('reports insecure env-configured webhooks without exposing their URL or signing value', async () => {
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: {
+      hosting: { provider: 'railway' }, services: { web: {} },
+      envVars: { STRIPE_WEBHOOK_URL: 'http://private-user:private-password@example.com/private-path', STRIPE_WEBHOOK_SECRET: 'private-signing-value' },
+    } } });
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).toMatchObject({ webhookReadiness: { status: 'needs_attention', applicationVerification: 'not_verified' } });
+    const report = JSON.stringify((result as any).webhookReadiness);
+    for (const value of ['private-user', 'private-password', 'private-path', 'private-signing-value']) expect(report).not.toContain(value);
+  });
+
+  it('rejects reserved one-off env values before provider observation', async () => {
+    const lookup = vi.spyOn(adapterFactory, 'getProviderAdapter');
+    const result = await new PlanService().plan(project, 'staging', { envVarOverrides: { HYPERVIBE_CUSTOM_SECRET: 'private-value' } });
+    expect(result).toMatchObject({ error: expect.stringContaining('HYPERVIBE_') });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private-value');
   });
 
   it('errors when the environment is not in the spec', async () => {
@@ -436,8 +421,8 @@ describe('PlanService.plan', () => {
       project: project.name,
       environments: {
         production: {
-          hosting: { provider: 'azure-container-apps' },
-          cache: { provider: 'azure-managed-redis', engine: 'redis' },
+          hosting: { provider: 'fixture-hosting' },
+          cache: { provider: 'fixture-cache', engine: 'redis' },
           services: {},
         },
       },
@@ -447,10 +432,10 @@ describe('PlanService.plan', () => {
 
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.actions.find((action) => action.id === 'cache:azure-managed-redis'))
+    expect(plan.actions.find((action) => action.id === 'cache:fixture-cache'))
       .toMatchObject({
         type: 'create',
-        dependsOn: ['project:azure-container-apps'],
+        dependsOn: ['project:fixture-hosting'],
       });
   });
 
@@ -826,8 +811,11 @@ describe('PlanService.plan', () => {
       environmentId: environment.id,
       type: 'postgres',
       externalId: 'db-1',
-      bindings: { provider: 'railway', projectId: 'rp-1', serviceId: 'db-1' },
+      bindings: { provider: 'railway', projectId: 'rp-1', serviceId: 'db-1', resourceKind: 'service',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
     });
+    // Created databases record their committed primary identity.
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'db-1' }, replicas: {} } });
     new ServiceRepository().create({ projectId: project.id, name: 'web' });
     seedVerifiedConnection('railway', { apiToken: 'railway-token' });
     seedVerifiedConnection('stripe', { secretKey: 'rk_test_staging' }, 'staging');
@@ -856,8 +844,10 @@ describe('PlanService.plan', () => {
         provider: 'railway',
         engine: 'postgres',
         externalId: 'db-1',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' },
         status: 'running',
       }],
+      completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
       partial: false,
       warnings: [],
     }, {
@@ -865,6 +855,8 @@ describe('PlanService.plan', () => {
         DATABASE_PUBLIC_URL: 'postgresql://test:password@db.example.test:5432/app',
       }),
     });
+    await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'db-1',
+      providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'db-volume', volumeInstanceId: 'db-volume-instance' } });
     vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([]);
     vi.spyOn(StripeAdapter.prototype, 'listPrices').mockResolvedValue([]);
     vi.spyOn(StripeAdapter.prototype, 'listWebhookEndpoints').mockResolvedValue([]);
@@ -1161,7 +1153,7 @@ describe('PlanService.plan', () => {
     const observedBindings: Record<string, unknown>[] = [];
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
-      adapter: {
+      adapter: ({
         name: 'railway',
         capabilities: {
           supportedBuilders: ['nixpacks'],
@@ -1200,7 +1192,7 @@ describe('PlanService.plan', () => {
             warnings: ['Could not resolve Railway environment for "staging"'],
           };
         },
-      },
+      } as IProviderLifecycleAdapter),
     });
 
     const result = await new PlanService().plan(project, 'staging');
@@ -1209,8 +1201,10 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.actions.find((a) => a.id === 'project:railway')).toBeUndefined();
     expect(plan.actions.find((a) => a.id === 'environment:staging')?.type).toBe('create');
-    expect(plan.actions.find((a) => a.id === 'service:web')?.type).toBe('create');
-    expect(plan.actions.find((a) => a.id === 'database:railway')?.type).toBe('create');
+    // Provision the namespace first; its durable identity is required to review
+    // data-bearing resources in the next plan, independently of backup intent.
+    expect(plan.scope).toBe('hosting-bindings');
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
     expect(observedBindings[0]).toMatchObject({
       provider: 'railway',
       projectId: 'rail-project-canonical',
@@ -1242,6 +1236,7 @@ describe('PlanService.plan', () => {
       platformBindings: {
         provider: 'railway',
         projectId: 'tea-owner-1',
+        environmentId: 'tea-staging-1',
         services: {},
       },
     });
@@ -1258,7 +1253,7 @@ describe('PlanService.plan', () => {
     seedVerifiedConnection('railway', { apiKey: 'derived-provider-key' });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
-      adapter: {
+      adapter: ({
         name: 'railway',
         capabilities: {
           supportedBuilders: ['dockerfile'],
@@ -1282,6 +1277,7 @@ describe('PlanService.plan', () => {
           observedAt: new Date().toISOString(),
           projectExists: true,
           projectId: 'tea-owner-1',
+          environmentId: 'tea-staging-1',
           services: [],
           databases: [{
             provider: 'railway',
@@ -1302,7 +1298,7 @@ describe('PlanService.plan', () => {
           partial: false,
           warnings: [],
         }),
-      },
+      } as IProviderLifecycleAdapter),
     });
     const observeDatabase = vi.fn(async (
       _environment: Environment,
@@ -1334,6 +1330,8 @@ describe('PlanService.plan', () => {
         getConnectionUrl: async () => null,
         destroy: async () => ({ success: true, message: 'unused' }),
         observeDatabase,
+        dailyBackups: dailyBackupEvidence({ provider: 'railway', primaryExternalId: 'database-1',
+          providerScope: { projectId: 'tea-owner-1' }, resourceIdentity: { volumeId: 'database-volume' } }),
       } as never,
     });
 
@@ -1353,6 +1351,12 @@ describe('PlanService.plan', () => {
   it('reconciles a bound Railway database when hosting reports its provider service as a workload', async () => {
     const databaseId = '6b5f-railway-postgres-service';
     const seedCommand = 'npm run db:seed';
+    // Preserve the aggregate-workload classification scenario while obtaining
+    // exact instance and persistence evidence through real serialized GraphQL.
+    const native = await railwayHttpFixture();
+    native.addService(databaseId, 'Postgres', nativeEnvironmentId).instances.get(nativeEnvironmentId)!.source = { image: 'postgres:16' };
+    native.addVolume(databaseId, nativeEnvironmentId, '/var/lib/postgresql/data');
+    native.variables.set(`${databaseId}/${nativeEnvironmentId}`, { PGDATA: '/var/lib/postgresql/data/pgdata' });
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
@@ -1369,8 +1373,8 @@ describe('PlanService.plan', () => {
       name: 'staging',
       platformBindings: {
         provider: 'railway',
-        projectId: 'rail-project-1',
-        environmentId: 'rail-environment-1',
+        projectId: nativeProjectId,
+        environmentId: nativeEnvironmentId,
         services: {},
       },
     });
@@ -1380,10 +1384,11 @@ describe('PlanService.plan', () => {
       externalId: databaseId,
       bindings: {
         provider: 'railway',
-        projectId: 'rail-project-1',
-        environmentId: 'rail-environment-1',
+        projectId: nativeProjectId,
+        environmentId: nativeEnvironmentId,
         serviceId: databaseId,
         resourceKind: 'service',
+        providerScope: { projectId: nativeProjectId, environmentId: nativeEnvironmentId },
         pluginName: 'Postgres',
         seed: {
           commandHash: sha256(seedCommand),
@@ -1391,12 +1396,14 @@ describe('PlanService.plan', () => {
         },
       },
     });
+    // Created databases record their committed primary identity.
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: databaseId }, replicas: {} } });
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),
       projectExists: true,
-      projectId: 'rail-project-1',
-      environmentId: 'rail-environment-1',
+      projectId: nativeProjectId,
+      environmentId: nativeEnvironmentId,
       services: [{
         name: 'Postgres',
         externalId: databaseId,
@@ -1420,10 +1427,15 @@ describe('PlanService.plan', () => {
     mockObservingAdapter(structuredClone(observedState));
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
-      adapter: createRailwayDatabaseAdapter({
-        hostingAdapter: { observe: async () => structuredClone(observedState) } as never,
+      adapter: { ...createRailwayDatabaseAdapter({
+        hostingAdapter: {
+          observe: async () => structuredClone(observedState),
+          inspectServiceInstance: native.adapter.inspectServiceInstance.bind(native.adapter),
+          observeDatabasePersistence: native.adapter.observeDatabasePersistence.bind(native.adapter),
+        } as never,
         envRepo: new EnvironmentRepository(),
-      }),
+      }), dailyBackups: dailyBackupEvidence({ provider: 'railway', primaryExternalId: databaseId,
+        providerScope: { projectId: nativeProjectId, environmentId: nativeEnvironmentId }, resourceIdentity: { volumeId: 'database-volume' } }) },
     });
 
     const result = await new PlanService().plan(project, 'staging');
@@ -1436,6 +1448,8 @@ describe('PlanService.plan', () => {
       unmanaged: plan.unmanaged.filter((item) => item.name === 'Postgres'),
     }).toEqual({ database: 'noop', seed: 'noop', unmanaged: [] });
 
+    expect(native.contractErrors).toEqual([]);
+    expect(native.mutations).toEqual([]);
     new EnvironmentRepository().updatePlatformBindings(environment.id, {
       services: { web: { serviceId: databaseId } },
     });
@@ -1517,21 +1531,15 @@ describe('PlanService.plan', () => {
       metadata: { operation: 'hostingEnvironmentEnsure' },
     });
     expect(plan.actions.find((action) => action.id === 'project:railway')).toBeUndefined();
-    for (const actionId of [
-      'storage:documents',
-      'database:railway',
-      'service:web',
-      'service:worker',
-    ]) {
-      expect(plan.actions.find((action) => action.id === actionId)?.dependsOn)
-        .toContain('environment:staging');
-    }
+    expect(plan.scope).toBe('hosting-bindings');
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
   });
 
-  it('creates and binds the Railway environment before returning pending for a fresh plan', async () => {
+  it.each(['omitted', 'daily', 'disabled'] as const)('creates and binds the Railway environment before storage with backup intent %s', async backupIntent => {
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
+      secrets: { APP_TOKEN: { principal: 'github:alice', environments: ['staging'] } },
       environments: {
         production: {
           hosting: { provider: 'railway' },
@@ -1540,6 +1548,8 @@ describe('PlanService.plan', () => {
         staging: {
           hosting: { provider: 'railway' },
           services: { web: {} },
+          ...(backupIntent === 'daily' ? { backups: { mode: 'daily' as const } }
+            : backupIntent === 'disabled' ? { backups: { mode: 'disabled' as const, reason: 'No backup setup requested' } } : {}),
           storage: {
             documents: {
               provider: 'railway',
@@ -1599,9 +1609,13 @@ describe('PlanService.plan', () => {
     } as never);
     const storageAdapter = vi.spyOn(adapterFactory, 'getStorageAdapter');
 
-    const planned = await new PlanService().plan(project, 'staging');
+    const planned = await new PlanService().plan(project, 'staging', { includeEnvFile: false, envVarOverrides: { DEFERRED_RUNTIME_VALUE: 'later' } });
     expect(planned).not.toHaveProperty('error');
     const plan = planned as Exclude<typeof planned, { error: string }>;
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
+    expect(plan.scope).toBe('hosting-bindings');
+    expect(plan.inputRequired).toEqual([]);
+    expect(new RunRepository().findById(plan.planRunId)?.plan).not.toHaveProperty('overrides');
     const currentSpec = new SpecStore().get(project)!;
 
     const outcome = await executePlanApply(createToolContext(), {
@@ -1610,22 +1624,19 @@ describe('PlanService.plan', () => {
       specRevision: currentSpec.revision,
       planId: plan.planRunId,
       confirmActions: [],
+      alwaysRunBootstrap: true,
     });
 
     expect(outcome).toMatchObject({
       kind: 'executed',
       result: {
         success: false,
-        receipts: expect.arrayContaining([
+        receipts: [
           expect.objectContaining({
             actionId: 'environment:staging',
             status: 'pending',
           }),
-          expect.objectContaining({
-            actionId: 'storage:documents',
-            status: 'aborted',
-          }),
-        ]),
+        ],
       },
     });
     expect(ensureEnvironment).toHaveBeenCalledOnce();
@@ -2829,169 +2840,6 @@ describe('PlanService.plan', () => {
     });
   });
 
-  it('stages GitLab CI publication only after exact provider bindings converge', async () => {
-    const repositoryScope = 'https://gitlab.com/acme/staged-app';
-    project = new ProjectRepository().update(project.id, {
-      gitRemoteUrl: `${repositoryScope}.git`,
-    })!;
-    new SpecStore().replace(project, {
-      version: 1,
-      project: project.name,
-      gitRemoteUrl: project.gitRemoteUrl,
-      runtime: { kind: 'node', version: '22' },
-      devops: {
-        code: { provider: 'gitlab', scope: repositoryScope },
-        ci: { provider: 'gitlab-ci' },
-        canonicalEnvironment: 'staging',
-      },
-      environments: {
-        staging: {
-          hosting: { provider: 'railway' },
-          services: { web: { workloadKind: 'web', startCommand: 'npm start' } },
-          envFile: { mode: 'off' },
-          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-        },
-      },
-    });
-    seedVerifiedConnection('gitlab', {
-      apiToken: 'gitlab-api-token',
-      instanceUrl: 'https://gitlab.com',
-      registryUsername: 'gitlab+deploy-token-1',
-      registryReadToken: 'gitlab-registry-read-token',
-    }, repositoryScope);
-    seedVerifiedConnection('railway', { apiToken: 'railway-token' });
-    const environments = new EnvironmentRepository();
-    const environment = environments.create({
-      projectId: project.id,
-      name: 'staging',
-      platformBindings: {
-        provider: 'railway',
-        projectId: 'rail-project',
-        environmentId: 'rail-staging',
-      },
-    });
-    mockObservingAdapter({
-      provider: 'railway',
-      observedAt: new Date().toISOString(),
-      projectExists: true,
-      projectId: 'rail-project',
-      environmentId: 'rail-staging',
-      services: [],
-      databases: [],
-      partial: false,
-      warnings: [],
-    });
-
-    const unboundResult = await new PlanService().plan(project, 'staging');
-    const unbound = unboundResult as Exclude<typeof unboundResult, { error: string }>;
-    expect(unbound.scope).toBe('managed-ci-bindings');
-    expect(unbound.actions).toEqual([
-      expect.objectContaining({ id: 'service:web', type: 'create' }),
-    ]);
-    expect(unbound.actions.some((action) => action.resource.kind === 'ci')).toBe(false);
-
-    environments.updatePlatformBindings(environment.id, {
-      services: {
-        web: {
-          serviceId: 'rail-web',
-          workloadKind: 'web',
-          resourceType: 'service',
-        },
-      },
-    });
-    new ServiceRepository().create({
-      projectId: project.id,
-      name: 'web',
-      buildConfig: {},
-      envVarSpec: {},
-    });
-    vi.restoreAllMocks();
-    mockObservingAdapter({
-      provider: 'railway',
-      observedAt: new Date().toISOString(),
-      projectExists: true,
-      projectId: 'rail-project',
-      environmentId: 'rail-staging',
-      services: [{
-        name: 'web',
-        externalId: 'rail-web',
-        workloadKind: 'web',
-        customDomains: [],
-        config: { startCommand: 'npm start' },
-        envVarKeys: [],
-        envVarHashes: {},
-        status: 'running',
-      }],
-      databases: [],
-      partial: false,
-      warnings: [],
-    });
-    const requests: Array<{ method: string; path: string }> = [];
-    const commitSha = 'a'.repeat(40);
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-      const url = new URL(String(input));
-      const method = init?.method ?? 'GET';
-      const decodedPath = decodeURIComponent(url.pathname);
-      requests.push({ method, path: decodedPath });
-      const respond = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
-        status,
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (method === 'GET' && decodedPath.endsWith('/user')) {
-        return respond({ id: 3, username: 'hypervibe' });
-      }
-      if (method === 'GET' && /\/api\/v4\/projects\/(?:42|acme\/staged-app)$/.test(decodedPath)) {
-        return respond({
-          id: 42,
-          path_with_namespace: 'acme/staged-app',
-          default_branch: 'main',
-          web_url: repositoryScope,
-          http_url_to_repo: `${repositoryScope}.git`,
-          ssh_url_to_repo: 'git@gitlab.com:acme/staged-app.git',
-          ci_config_path: '.gitlab-ci.yml',
-          permissions: { project_access: { access_level: 40 } },
-          ci_pipeline_variables_minimum_override_role: 'no_one_allowed',
-          ci_forward_deployment_enabled: true,
-          ci_forward_deployment_rollback_allowed: false,
-          container_registry_access_level: 'private',
-        });
-      }
-      if (method === 'GET' && decodedPath.endsWith('/projects/42/runners')) {
-        return respond([{
-          id: 100,
-          runner_type: 'instance_type',
-          status: 'online',
-          paused: false,
-          tag_list: ['saas-linux-small-amd64'],
-        }]);
-      }
-      if (method === 'GET' && decodedPath.includes('/repository/files/')) {
-        return respond({ message: 'not found' }, 404);
-      }
-      if (method === 'GET' && decodedPath.endsWith('/repository/branches/main')) {
-        return respond({ name: 'main', commit: { id: commitSha } });
-      }
-      throw new Error(`Unexpected GitLab request: ${method} ${url}`);
-    });
-
-    const publicationResult = await new PlanService().plan(project, 'staging');
-    const publication = publicationResult as Exclude<typeof publicationResult, { error: string }>;
-    expect(publication.scope).toBe('managed-ci-publication');
-    expect(publication.actions).toEqual([
-      expect.objectContaining({
-        id: 'ci:gitlab-ci:configuration',
-        type: 'update',
-        resource: { kind: 'ci', name: 'configuration', provider: 'gitlab-ci' },
-        dependsOn: undefined,
-        metadata: expect.objectContaining({
-          operation: 'ciConfigurationSync',
-          workflowPublicationRequired: true,
-        }),
-      }),
-    ]);
-    expect(requests.every((request) => request.method === 'GET')).toBe(true);
-  });
-
   it('isolates new and replaced service identities with only their prerequisites', async () => {
     project = new ProjectRepository().update(project.id, {
       gitRemoteUrl: 'git@github.com:dave/binding-stage.git',
@@ -3252,7 +3100,7 @@ describe('PlanService.plan', () => {
         environmentId: 'rail-env-1',
         services: { web: { serviceId: 'svc-1' } },
         previousHosting: {
-          provider: 'cloudrun',
+          provider: 'fixture-hosting',
           projectId: 'gcp-1',
           services: { web: { serviceId: 'cr-web' }, cron: { serviceId: 'cr-cron' } },
         },
@@ -3322,9 +3170,9 @@ describe('PlanService.plan', () => {
         environmentId: 'us-central1',
         services: { web: { serviceId: 'current-gcp-web' } },
         previousHosting: {
-          provider: 'vercel',
-          projectId: 'vercel-team',
-          services: { web: { serviceId: 'vercel-team:old-vercel-web' } },
+          provider: 'fixture-retained-hosting',
+          projectId: 'fixture-retained-hosting-team',
+          services: { web: { serviceId: 'fixture-retained-hosting-team:old-fixture-retained-hosting-web' } },
         },
       },
     });
@@ -3348,12 +3196,12 @@ describe('PlanService.plan', () => {
     const result = await new PlanService().plan(project, 'staging');
 
     expect(result).toMatchObject({
-      error: expect.stringContaining('vercel'),
+      error: expect.stringContaining('fixture-retained-hosting'),
     });
     expect((new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!
       .platformBindings as Record<string, unknown>)).toMatchObject({
       provider: 'cloudrun',
-      previousHosting: { provider: 'vercel' },
+      previousHosting: { provider: 'fixture-retained-hosting' },
     });
   });
 
@@ -3419,7 +3267,7 @@ describe('PlanService.plan', () => {
       });
     }
 
-    function seedObservedRailwayWeb(): Environment {
+    function seedObservedRailwayWeb(database?: ObservedDatabase): Environment {
       const environment = new EnvironmentRepository().create({
         projectId: project.id,
         name: 'staging',
@@ -3452,7 +3300,8 @@ describe('PlanService.plan', () => {
           envVarHashes: { NODE_ENV: hashEnvValue('staging') },
           status: 'running',
         }],
-        databases: [],
+        databases: database ? [database] : [],
+        completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
         partial: false,
         warnings: [],
       });
@@ -3592,12 +3441,19 @@ describe('PlanService.plan', () => {
           },
         },
       });
-      const environment = seedObservedRailwayWeb();
+      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, status: 'running' });
       new ComponentRepository().create({
         environmentId: environment.id,
         type: 'postgres',
-        bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
+        externalId: 'managed-db',
+        bindings: { provider: 'railway', connectionString: 'postgres://managed-db', resourceKind: 'service',
+          providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
       });
+      // Created databases record their committed primary identity.
+      new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'managed-db' }, replicas: {} } });
+      await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
 
       try {
         process.chdir(path.join(root, 'app'));
@@ -3753,12 +3609,19 @@ describe('PlanService.plan', () => {
           },
         },
       });
-      const environment = seedObservedRailwayWeb();
+      const environment = seedObservedRailwayWeb({ provider: 'railway', engine: 'postgres', externalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, status: 'running' });
       new ComponentRepository().create({
         environmentId: environment.id,
         type: 'postgres',
-        bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
+        externalId: 'managed-db',
+        bindings: { provider: 'railway', connectionString: 'postgres://managed-db', resourceKind: 'service',
+          providerScope: { projectId: 'rp-1', environmentId: 're-1' } },
       });
+      // Created databases record their committed primary identity.
+      new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'managed-db' }, replicas: {} } });
+      await mockProtectedRailwayDatabase({ provider: 'railway', primaryExternalId: 'managed-db',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' }, resourceIdentity: { volumeId: 'managed-volume' } });
 
       const result = await new PlanService().plan(project, 'staging', { envFile });
       const plan = result as Exclude<typeof result, { error: string }>;

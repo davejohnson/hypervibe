@@ -139,15 +139,9 @@ describe('RailwayAdapter.ensureProject', () => {
     expect((adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client.request).not.toHaveBeenCalled();
   });
 
-  it('falls back to an alternate create shape only after structured schema validation', async () => {
+  it('reports schema rejection without attempting an undocumented create shape', async () => {
     const request = vi.fn()
-      .mockRejectedValueOnce(schemaError())
-      .mockResolvedValueOnce({
-        projectCreate: { id: 'railway-2', name: 'billforge' },
-      })
-      .mockResolvedValueOnce({
-        project: { id: 'railway-2', name: 'billforge' },
-      });
+      .mockRejectedValueOnce(schemaError());
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
     (adapter as unknown as { credentials: { workspaceId?: string } }).credentials = { workspaceId: 'ws-1' };
@@ -155,12 +149,10 @@ describe('RailwayAdapter.ensureProject', () => {
 
     const receipt = await adapter.ensureProject('billforge', makeEnv());
 
-    expect(receipt.success).toBe(true);
-    expect(receipt.data?.projectId).toBe('railway-2');
-    expect(request).toHaveBeenCalledTimes(3);
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toContain('GRAPHQL_VALIDATION_FAILED');
+    expect(request).toHaveBeenCalledTimes(1);
     expect(String(request.mock.calls[0]?.[0])).toContain('workspaceId: $workspaceId');
-    expect(String(request.mock.calls[1]?.[0])).toContain('teamId: $teamId');
-    expect(String(request.mock.calls[2]?.[0])).toContain('query GetProjectIdentity');
   });
 
   it('does not retry project creation after a transport error', async () => {
@@ -339,7 +331,7 @@ describe('RailwayAdapter.ensureEnvironment', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
-  it('falls back to the alternate environment create shape only after schema validation', async () => {
+  it('reports environment schema rejection without guessing another mutation shape', async () => {
     const projectWithoutStaging = {
       id: 'railway-1',
       name: 'billforge',
@@ -348,27 +340,18 @@ describe('RailwayAdapter.ensureEnvironment', () => {
       services: { edges: [] },
       plugins: { edges: [] },
     };
-    const projectWithStaging = {
-      ...projectWithoutStaging,
-      environments: { edges: [{ node: { id: 'rail-env-staging', name: 'staging' } }] },
-    };
     const request = vi.fn()
       .mockResolvedValueOnce({ project: projectWithoutStaging })
-      .mockRejectedValueOnce(schemaError('Unknown argument "input" on environmentCreate'))
-      .mockResolvedValueOnce({ environmentCreate: { id: 'rail-env-staging', name: 'staging' } })
-      .mockResolvedValueOnce({ project: projectWithStaging });
+      .mockRejectedValueOnce(schemaError('Unknown argument "input" on environmentCreate'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
     const receipt = await adapter.ensureEnvironment(makeEnv({ projectId: 'railway-1' }));
 
-    expect(receipt).toMatchObject({
-      success: true,
-      data: { environmentId: 'rail-env-staging', created: true },
-    });
-    expect(request).toHaveBeenCalledTimes(4);
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toContain('GRAPHQL_VALIDATION_FAILED');
+    expect(request).toHaveBeenCalledTimes(2);
     expect(String(request.mock.calls[1]?.[0])).toContain('environmentCreate(input:');
-    expect(String(request.mock.calls[2]?.[0])).toContain('environmentCreate(projectId:');
   });
 
   it('does not create when environment observation fails', async () => {

@@ -5,11 +5,13 @@ import type { Run, RunPlan, RunStep, RunReceipt } from '../entities/run.entity.j
 import type {
   HostingServiceDeleteOptions,
   HostingServiceDeleteScope,
-  IProviderAdapter,
+  IProviderLifecycleAdapter,
+  DeploymentMutationOptions,
 } from '../ports/provider.port.js';
 import {
   createHostingServiceCreateRecovery,
   parseHostingServiceCreateRecovery,
+  pendingScheduleActivationSchema,
   type HostingBindings,
   type HostingServiceCreateRecovery,
   type IHostingAdapter,
@@ -22,6 +24,7 @@ import { providerRegistry } from '../registry/provider.registry.js';
 import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.transaction.js';
 import { snapshotEnvironmentBindings } from './local-state.transaction.js';
 import { prepareHostingBindingTransition } from './hosting-binding-transition.js';
+import { parseServiceVolumeBindings } from './service-volume.service.js';
 
 export interface DeployOptions {
   project: Project;
@@ -35,12 +38,16 @@ export interface DeployOptions {
    * code. Used when CI will deploy the exact commit after hv_apply succeeds.
    */
   deferProviderDeployment?: boolean;
+  /** App namespace only; mount-before-workload providers use this identity stage. */
+  deferWorkload?: boolean;
+  /** Provider-enforced creation-only admission; never reconfigure an existing workload. */
+  requireNewWorkload?: boolean;
   /** Exact code revision authorized by the persisted plan for deferred bootstrap. */
   expectedSourceCommitSha?: string;
   /** Project creation is a separate reviewed plan action during hv_apply. */
   ensureProject?: boolean;
-  /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
-  adapter: IProviderAdapter | IHostingAdapter;
+  /** The hosting adapter to use for deployment (can be IProviderLifecycleAdapter or IHostingAdapter) */
+  adapter: IProviderLifecycleAdapter | IHostingAdapter;
 }
 
 export interface DeployResult {
@@ -93,7 +100,7 @@ export class DeployOrchestrator {
     // the persisted plan — runs.plan is returned verbatim by hv_runs, so
     // values (which include DATABASE_URL and resolved secrets) must never
     // be stored. The step reads the live options.envVars at execution time.
-    if ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0)) {
+    if (!options.requireNewWorkload && ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0))) {
       steps.push({
         name: 'set_env_vars',
         action: 'setEnvVars',
@@ -147,6 +154,7 @@ export class DeployOrchestrator {
     const errors: string[] = [];
     const tx = new InfraTransaction();
     const pendingServiceCreateRecoveries = new Map<string, HostingServiceCreateRecovery>();
+    const pendingScheduleBindings = new Map<string, HostingBindings['services'][string]>();
 
     // Create run record
     const run = this.runRepo.create({
@@ -170,8 +178,18 @@ export class DeployOrchestrator {
     });
 
     try {
+      if (options.requireNewWorkload && (options.deferProviderDeployment !== true
+        || options.adapter.capabilities.supportsCreateOnlyDeploy !== true)) {
+        throw new Error(`Provider ${options.adapter.name} does not support creation-only deferred workload provisioning.`);
+      }
       for (const step of plan.steps) {
         const receipt = await this.executeStep(step, options, tx);
+        if (receipt.status === 'success' && typeof receipt.result?.service === 'string'
+          && receipt.result.scheduleActivation) {
+          const binding = (this.envRepo.findById(options.environment.id)?.platformBindings as Partial<HostingBindings>)
+            ?.services?.[receipt.result.service];
+          if (binding?.scheduleActivation) pendingScheduleBindings.set(receipt.result.service, binding);
+        }
         if (receipt.status === 'failure' && typeof receipt.result?.service === 'string') {
           const recovery = parseHostingServiceCreateRecovery(receipt.result.serviceCreateRecovery);
           if (recovery) {
@@ -201,7 +219,8 @@ export class DeployOrchestrator {
         const recoveryPersistenceError = this.persistServiceCreateRecoveries(
           options.environment.id,
           pendingServiceCreateRecoveries,
-          rollback
+          rollback,
+          pendingScheduleBindings
         );
         if (recoveryPersistenceError) errors.push(recoveryPersistenceError);
       }
@@ -233,7 +252,8 @@ export class DeployOrchestrator {
       const recoveryPersistenceError = this.persistServiceCreateRecoveries(
         options.environment.id,
         pendingServiceCreateRecoveries,
-        rollback
+        rollback,
+        pendingScheduleBindings
       );
       const caughtErrors = [String(error), ...(recoveryPersistenceError ? [recoveryPersistenceError] : [])];
       this.runRepo.updateStatus(run.id, 'failed', caughtErrors.join('; '));
@@ -267,7 +287,8 @@ export class DeployOrchestrator {
   private persistServiceCreateRecoveries(
     environmentId: string,
     recoveries: ReadonlyMap<string, HostingServiceCreateRecovery>,
-    rollback: InfraTransactionRollbackResult
+    rollback: InfraTransactionRollbackResult,
+    pendingScheduleBindings: ReadonlyMap<string, HostingBindings['services'][string]> = new Map()
   ): string | undefined {
     const recoveriesToPersist = new Map(recoveries);
     for (const failed of rollback.failed) {
@@ -303,7 +324,7 @@ export class DeployOrchestrator {
         returnedName: providerResourceName,
       }));
     }
-    if (recoveriesToPersist.size === 0) return undefined;
+    if (recoveriesToPersist.size === 0 && pendingScheduleBindings.size === 0) return undefined;
     try {
       const environment = this.envRepo.findById(environmentId);
       if (!environment) {
@@ -317,7 +338,11 @@ export class DeployOrchestrator {
         currentRecovery[serviceName] = recovery;
       }
       const updated = this.envRepo.updatePlatformBindings(environmentId, {
-        serviceCreateRecovery: currentRecovery,
+        ...(recoveriesToPersist.size > 0 ? { serviceCreateRecovery: currentRecovery } : {}),
+        ...(pendingScheduleBindings.size > 0 ? { services: {
+          ...((environment.platformBindings as Partial<HostingBindings>).services ?? {}),
+          ...Object.fromEntries(pendingScheduleBindings),
+        } } : {}),
       });
       return updated
         ? undefined
@@ -433,7 +458,7 @@ export class DeployOrchestrator {
                   name: (receipt.data.projectName as string | undefined) ?? options.project.name,
                 },
                 compensate: async () => {
-                  const adapterWithDelete = options.adapter as (IProviderAdapter | IHostingAdapter) & {
+                  const adapterWithDelete = options.adapter as (IProviderLifecycleAdapter | IHostingAdapter) & {
                     deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
                   };
                   if (typeof adapterWithDelete.deleteProject !== 'function') {
@@ -551,17 +576,29 @@ export class DeployOrchestrator {
             ...(options.envVars ?? {}),
             ...(options.envVarsByService?.[service.name] ?? {}),
           };
-          const result = options.deferProviderDeployment
+          const mutationOptions: DeploymentMutationOptions = {
+            ...(options.deferProviderDeployment ? { deferDeployment: true } : {}),
+            ...(options.deferWorkload ? { deferWorkload: true } : {}),
+            ...(options.requireNewWorkload ? { requireNewWorkload: true } : {}),
+            ...(options.expectedSourceCommitSha ? { expectedSourceCommitSha: options.expectedSourceCommitSha } : {}),
+          };
+          const retainedVolumes = parseServiceVolumeBindings(environment);
+          if (!retainedVolumes) throw new Error('Malformed retained filesystem identity blocks deployment.');
+          const retainedVolume = Object.hasOwn(retainedVolumes, service.name) ? retainedVolumes[service.name] : undefined;
+          const driver = (options.adapter as IProviderLifecycleAdapter).serviceVolumes?.staged;
+          if (retainedVolume?.state === 'staged' && !options.deferWorkload) {
+            if (Object.values(retainedVolume.components).some(c => c.state !== 'bound')) throw new Error('Retained filesystem components must converge before deploying a workload.');
+            if (driver?.runtimeMount) {
+              mutationOptions.serviceVolume = driver.runtimeMount(retainedVolume.target, retainedVolume.components);
+              if (!mutationOptions.serviceVolume) throw new Error('Exact acknowledged filesystem identity is required for workload creation.');
+            }
+          }
+          const result = Object.keys(mutationOptions).length
             ? await options.adapter.deploy(
               service,
               environment,
               serviceEnvVars,
-              {
-                deferDeployment: true,
-                ...(options.expectedSourceCommitSha
-                  ? { expectedSourceCommitSha: options.expectedSourceCommitSha }
-                  : {}),
-              }
+              mutationOptions
             )
             : await options.adapter.deploy(service, environment, serviceEnvVars);
 
@@ -570,6 +607,14 @@ export class DeployOrchestrator {
             ? result.externalId
             : undefined;
           const deployData = (result.receipt.data ?? {}) as Record<string, unknown>;
+          const scheduleActivation = deployData.scheduleActivation === undefined ? undefined
+            : pendingScheduleActivationSchema.parse(deployData.scheduleActivation);
+          if (scheduleActivation && (options.adapter.capabilities.supportsDeferredCronActivation !== true
+            || scheduleActivation.jobName !== externalId || deployData.jobName !== externalId
+            || deployData.resourceUid !== scheduleActivation.jobUid
+            || serviceWorkloadKind(service) !== 'cron')) {
+            throw new Error('Provider returned inconsistent pending schedule identity.');
+          }
           const receiptEnvironmentId = typeof deployData.environmentId === 'string'
             && deployData.environmentId.trim().length > 0
             ? deployData.environmentId
@@ -596,11 +641,12 @@ export class DeployOrchestrator {
               serviceId: externalId,
               url: result.url ?? existingServiceBinding.url,
               workloadKind: serviceWorkloadKind(service),
+              ...(scheduleActivation ? { scheduleActivation } : {}),
             };
             if (typeof deployData.imageUri === 'string') {
               services[service.name].imageUri = deployData.imageUri;
             }
-            for (const key of ['resourceType', 'jobName', 'schedulerJobName', 'releaseJobName'] as const) {
+            for (const key of ['resourceType', 'resourceUid', 'jobName', 'schedulerJobName', 'releaseJobName'] as const) {
               if (typeof deployData[key] === 'string') {
                 services[service.name][key] = deployData[key];
               }
@@ -648,7 +694,7 @@ export class DeployOrchestrator {
                   },
                 },
                 compensate: async () => {
-                  const adapterWithDelete = options.adapter as (IProviderAdapter | IHostingAdapter) & {
+                  const adapterWithDelete = options.adapter as (IProviderLifecycleAdapter | IHostingAdapter) & {
                     deleteService?: (serviceId: string, target: HostingServiceDeleteScope, options: HostingServiceDeleteOptions) => Promise<{ success: boolean; error?: string }>;
                   };
                   if (typeof adapterWithDelete.deleteService !== 'function') {
@@ -768,6 +814,7 @@ export class DeployOrchestrator {
               publicUrl: result.url,
               externalId,
               ...(providerResourceName ? { providerResourceName } : {}),
+              ...(scheduleActivation ? { scheduleActivation } : {}),
               ...(serviceCreateRecovery
                 ? { serviceCreateRecovery }
                 : {}),

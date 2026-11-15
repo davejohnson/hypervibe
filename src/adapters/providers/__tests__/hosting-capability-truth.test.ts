@@ -6,32 +6,14 @@ import {
 } from '../../../domain/services/domain-attach-policy.js';
 import { supportsWorkloadMaintenance } from '../../../domain/ports/maintenance.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
-import { EcsExpressAdapter } from '../aws/ecs-express.adapter.js';
-import { AzureContainerAppsAdapter } from '../azure/azure-container-apps.adapter.js';
-import { DigitalOceanAdapter } from '../digitalocean/digitalocean.adapter.js';
-import { FlyAdapter } from '../fly/fly.adapter.js';
-import { CloudRunAdapter } from '../gcp/cloudrun.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
-import { VercelAdapter } from '../vercel/vercel.adapter.js';
 
 const adapters = new Map<string, object>([
   ['railway', new RailwayAdapter()],
-  ['cloudrun', new CloudRunAdapter()],
-  ['ecs', new EcsExpressAdapter()],
-  ['azure-container-apps', new AzureContainerAppsAdapter()],
-  ['digitalocean', new DigitalOceanAdapter()],
-  ['vercel', new VercelAdapter()],
-  ['fly', new FlyAdapter()],
 ]);
 
 const workloadKinds = new Map<string, Array<'web' | 'worker' | 'cron'>>([
   ['railway', ['web', 'worker', 'cron']],
-  ['cloudrun', ['web', 'worker', 'cron']],
-  ['ecs', ['web']],
-  ['azure-container-apps', ['web']],
-  ['digitalocean', ['web', 'worker', 'cron']],
-  ['vercel', ['web']],
-  ['fly', ['web', 'worker']],
 ]);
 
 describe('production hosting capability truth', () => {

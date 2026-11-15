@@ -9,7 +9,7 @@ const server = http.createServer((request, response) => {
   }
   response.end(JSON.stringify({
     service: 'hypervibe-provider-conformance',
-    revision: process.env.HYPERVIBE_CONFORMANCE_REVISION || 'unknown'
+    revision: process.env.CONFORMANCE_APP_REVISION || 'unknown'
   }));
 });
 

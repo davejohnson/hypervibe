@@ -13,6 +13,12 @@ export type DatabaseType = 'postgres';
  */
 export type ProvisionableType = DatabaseType;
 
+/** Value-free selection of a provider-owned runtime URL variable on an exact
+ * bound database. The fingerprint covers identity and key presence, never values. */
+export type DatabaseRuntimeReferenceBindingObservation =
+  | { state: 'known'; directUrlVariable: string; evidenceFingerprint: string }
+  | { state: 'unknown'; reason: string };
+
 /**
  * Capabilities that a database provider supports.
  */
@@ -34,6 +40,9 @@ export interface DatabaseCapabilities {
 
   /** Whether bounded operations can acquire and release provider-owned access. */
   supportsTemporaryDatabaseAccess?: boolean;
+
+  /** Provider-owned, value-free guidance when no usable database route exists. */
+  databaseAccessHint?: string;
 
   /** Prefer provider-owned access even when a stored public-looking URL exists. */
   prefersTemporaryDatabaseAccess?: boolean;
@@ -170,7 +179,7 @@ export function databaseCreateMayHaveCommitted(error: unknown): boolean {
  * Standard binding keys used for database components
  */
 export interface DatabaseBindings {
-  /** Provider name (e.g., 'supabase', 'cloudsql', 'railway', 'rds') */
+  /** Provider name (e.g., 'cloudsql', 'railway', 'rds') */
   provider: string;
 
   /** External database/instance ID */
@@ -197,6 +206,16 @@ export interface DatabaseBindings {
  */
 export interface IDatabaseAdapter {
   readonly name: string;
+  readonly credentialLifecycle?: import('./database-credential.port.js').DatabaseCredentialLifecycle;
+  readonly credentialAliases?: import('./database-credential-aliases.port.js').IDatabaseCredentialAliases;
+  readonly dailyBackups?: import('./daily-backup.port.js').IDailyBackupPolicy<import('./daily-backup.port.js').DatabaseBackupTarget>;
+  readonly freshInitialization?: import('./database-fresh-initialization.port.js').IDatabaseFreshInitialization;
+  readonly provisionRecovery?: import('./database-provision-recovery.port.js').IDatabaseProvisionRecovery;
+
+  /** Optional read-only metadata normalization; absence means unsupported. */
+  observeRuntimeReferenceBinding?(
+    environment: Environment, component: Component
+  ): Promise<DatabaseRuntimeReferenceBindingObservation>;
 
   /** Provider capabilities */
   readonly capabilities: DatabaseCapabilities;
@@ -254,6 +273,14 @@ export interface IDatabaseAdapter {
    */
   getConnectionUrl(component: Component): Promise<string | null>;
 
+  /** Read an already existing external route for this exact component without
+   * creating access or changing its runtime URL. Null means no usable route;
+   * incomplete/failed provider observation must throw. Returned secrets stay
+   * inside the operation and must never be persisted or exposed. */
+  getExistingExternalConnectionUrl?(
+    environment: Environment, component: Component
+  ): Promise<string | null>;
+
   /**
    * Destroy a provisioned database instance.
    * Use with caution - this deletes data permanently.
@@ -285,6 +312,20 @@ export interface IDatabaseAdapter {
     component: Component,
     access: TemporaryDatabaseAccess
   ): Promise<void>;
+}
+
+/** Existing database operations remain useful when an engine owns resource lifecycle. */
+export type IDatabaseOperations = Omit<IDatabaseAdapter, 'provision' | 'destroy'>;
+
+export function supportsDatabaseOperations(value: unknown): value is IDatabaseOperations {
+  if (!value || typeof value !== 'object') return false;
+  const adapter = value as Partial<IDatabaseOperations>;
+  return typeof adapter.name === 'string'
+    && Array.isArray(adapter.capabilities?.supportedDatabases)
+    && typeof adapter.connect === 'function'
+    && typeof adapter.verify === 'function'
+    && typeof adapter.observeDatabase === 'function'
+    && typeof adapter.getConnectionUrl === 'function';
 }
 
 /** Runtime proof for every method required by the database lifecycle contract. */

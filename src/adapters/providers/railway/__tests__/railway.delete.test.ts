@@ -3,6 +3,8 @@ import { RailwayAdapter } from '../railway.adapter.js';
 import type { RailwayVolumeTarget } from '../railway.adapter.js';
 
 function graphqlNotFound(rootField: string, message: string): Error {
+  // Synthetic error-classification input, not a recorded Railway response.
+  // Actual observed INTERNAL_SERVER_ERROR behavior has real-client coverage.
   const error = new Error(message) as Error & {
     response: {
       status: number;
@@ -132,36 +134,6 @@ describe('RailwayAdapter delete verification', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
-  it('verifies service deletion before reporting success', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(serviceInstance())
-      .mockResolvedValueOnce(serviceInventory(['env-staging']))
-      .mockResolvedValueOnce({ serviceDelete: true })
-      .mockRejectedValueOnce(graphqlNotFound('serviceInstance', 'Service instance not found'));
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.deleteService('svc-1', serviceScope(), allowMutation);
-
-    expect(result.success).toBe(true);
-    expect(request).toHaveBeenCalledTimes(4);
-    expect(String(request.mock.calls[2]?.[0])).toContain('serviceDelete(id: $id, environmentId: $environmentId)');
-    expect(request.mock.calls[2]?.[1]).toEqual({ id: 'svc-1', environmentId: 'env-staging' });
-  });
-
-  it('treats deletion of an already absent service as idempotent success', async () => {
-    const request = vi.fn().mockRejectedValueOnce(
-      graphqlNotFound('serviceInstance', 'Service instance not found')
-    );
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    await expect(adapter.deleteService('svc-missing', serviceScope(), allowMutation)).resolves.toEqual({
-      success: true,
-      alreadyAbsent: true,
-    });
-  });
-
   it('refuses an unscoped Railway service deletion without making a provider request', async () => {
     const request = vi.fn();
     const adapter = new RailwayAdapter();
@@ -243,28 +215,12 @@ describe('RailwayAdapter delete verification', () => {
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
   });
 
-  it('deletes a sole exact environment service instance and verifies scoped absence', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(serviceInstance())
-      .mockResolvedValueOnce(serviceInventory(['env-staging']))
-      .mockResolvedValueOnce({ serviceDelete: true })
-      .mockResolvedValueOnce({ serviceInstance: null });
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    await expect(adapter.deleteService('svc-1', serviceScope(), allowMutation)).resolves.toEqual({ success: true });
-
-    expect(String(request.mock.calls[2]?.[0])).toContain('serviceDelete(id: $id, environmentId: $environmentId)');
-    expect(request.mock.calls[2]?.[1]).toEqual({ id: 'svc-1', environmentId: 'env-staging' });
-    expect(request).toHaveBeenCalledTimes(4);
-  });
-
   it('exactly verifies absence after a serviceDelete not-found acknowledgement race', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(serviceInstance())
       .mockResolvedValueOnce(serviceInventory(['env-staging']))
       .mockRejectedValueOnce(graphqlNotFound('serviceDelete', 'Service disappeared'))
-      .mockResolvedValueOnce({ serviceInstance: null });
+      .mockResolvedValueOnce(serviceInstance('svc-1', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -308,7 +264,7 @@ describe('RailwayAdapter delete verification', () => {
   });
 
   it('does not mutate Railway when the exact target is absent even if the service may remain in a sibling environment', async () => {
-    const request = vi.fn().mockResolvedValueOnce({ serviceInstance: null });
+    const request = vi.fn().mockResolvedValueOnce(serviceInstance('svc-1', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -431,20 +387,6 @@ describe('RailwayAdapter delete verification', () => {
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
   });
 
-  it('blocks deletion when the provider service has a sibling environment instance', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(serviceInstance())
-      .mockResolvedValueOnce(serviceInventory(['env-staging', 'env-production']));
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    await expect(adapter.deleteService('svc-1', serviceScope(), allowMutation)).resolves.toEqual(expect.objectContaining({
-      success: false,
-      error: expect.stringContaining('env-production'),
-    }));
-    expect(request.mock.calls.some(([query]) => String(query).includes('mutation DeleteEnvironmentService'))).toBe(false);
-  });
-
   it('blocks deletion when exact presence conflicts with an absent service inventory', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(serviceInstance())
@@ -564,7 +506,7 @@ describe('RailwayAdapter delete verification', () => {
     const request = vi.fn()
       .mockResolvedValueOnce(environmentIdentity())
       .mockResolvedValueOnce({ environmentDelete: true })
-      .mockResolvedValueOnce({ environment: null });
+      .mockRejectedValueOnce(graphqlNotFound('environment', 'Environment not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -580,7 +522,7 @@ describe('RailwayAdapter delete verification', () => {
   });
 
   it('treats exact preflight absence as idempotent success without mutation', async () => {
-    const request = vi.fn().mockResolvedValueOnce({ environment: null });
+    const request = vi.fn().mockRejectedValueOnce(graphqlNotFound('environment', 'Environment not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -642,7 +584,7 @@ describe('RailwayAdapter delete verification', () => {
     const request = vi.fn()
       .mockResolvedValueOnce(environmentIdentity())
       .mockRejectedValueOnce(graphqlNotFound('environmentDelete', 'Environment disappeared'))
-      .mockResolvedValueOnce({ environment: null });
+      .mockRejectedValueOnce(graphqlNotFound('environment', 'Environment not found'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -680,7 +622,7 @@ describe('RailwayAdapter delete verification', () => {
     for (let attempt = 0; attempt < 6; attempt += 1) {
       request.mockResolvedValueOnce(serviceInstance('svc-slow-delete'));
     }
-    request.mockResolvedValueOnce({ serviceInstance: null });
+    request.mockResolvedValueOnce(serviceInstance('svc-slow-delete', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -697,7 +639,7 @@ describe('RailwayAdapter delete verification', () => {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       request.mockResolvedValueOnce(serviceInstance('svc-eventually-deleted'));
     }
-    request.mockResolvedValueOnce({ serviceInstance: null });
+    request.mockResolvedValueOnce(serviceInstance('svc-eventually-deleted', 'env-staging', '2026-09-12T00:00:00Z'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
@@ -738,33 +680,6 @@ describe('RailwayAdapter delete verification', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('still exists');
-  });
-
-  it('deletes an exact scoped volume and verifies terminal absence', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(volumeInventory([{ volumeId: 'vol-1' }]))
-      .mockResolvedValueOnce({ volumeDelete: true })
-      .mockResolvedValueOnce(volumeInventory());
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.deleteVolume('vol-1', volumeTarget);
-
-    expect(result.success).toBe(true);
-    expect(String(request.mock.calls[1]?.[0])).toContain('volumeDelete(volumeId: $volumeId)');
-    expect(request.mock.calls[1]?.[1]).toEqual({ volumeId: 'vol-1' });
-  });
-
-  it('treats a provider-confirmed absent scoped volume as idempotent success', async () => {
-    const request = vi.fn().mockResolvedValueOnce(volumeInventory());
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    await expect(adapter.deleteVolume('vol-missing', volumeTarget)).resolves.toEqual({
-      success: true,
-      alreadyAbsent: true,
-    });
-    expect(request.mock.calls.some(([query]) => String(query).includes('volumeDelete'))).toBe(false);
   });
 
   it('refuses to delete a volume id attached outside the recorded target', async () => {

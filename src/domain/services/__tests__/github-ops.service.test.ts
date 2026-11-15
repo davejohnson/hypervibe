@@ -13,15 +13,18 @@ import {
   buildBranchDeployWorkflow,
   githubActionsServerProgramFingerprint,
   githubActionsWorkflowInputHash,
+  GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
   resolveBranchDeployTargets,
 } from '../github-ops.service.js';
 import { resolveReviewedBranchDeployTargets } from '../managed-ci-targets.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { managedCiReleaseTarget } from '../managed-ci-targets.js';
-import { cloudRunContainerBuildStartCommand } from '../../../adapters/providers/gcp/cloudrun-ci.release-runtime.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
+import { iosBuildContractFingerprint } from '../ios-release-evidence.js';
+import { getManagedIosReleaseRuntimeBase64 } from '../ios-release-template.service.js';
 import {
   extractGitHubScript,
   extractWorkflowShell,
@@ -99,7 +102,48 @@ describe('github tools', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('executes one reviewed Railway workflow for web, worker and cron', async () => {
+  it('carries API policy from the spec into a pre-mutation gate and its reviewed workflow lock', async () => {
+    const project = new ProjectRepository().create({ name: 'api-release', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/acme/api-release.git' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'railway', projectId: 'project', environmentId: 'staging',
+      services: { api: { serviceId: 'api' }, web: { serviceId: 'web' }, worker: { serviceId: 'worker', workloadKind: 'worker' } },
+    } });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+      runtime: { kind: 'node', version: '24' }, environments: { staging: {
+        hosting: { provider: 'railway' }, services: { api: {}, web: {}, worker: { workloadKind: 'worker' } },
+        deploy: { strategy: 'branch', trigger: 'ci' },
+        api: { service: 'api', versions: { v1: { path: '/v1', contract: 'api/v1.json' } }, compatibility: { command: 'node check.cjs' } },
+      } } });
+    new SpecStore().replace(project, spec);
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    expect(targets[0].api).toEqual(spec.environments.staging.api);
+    const workflow = buildBranchDeployWorkflow('railway', targets[0], migration);
+    const doc = parseDocument(workflow.content); expect(doc.errors).toEqual([]);
+    const steps = doc.toJS().jobs.deploy.steps as Array<{ name?: string }>;
+    const names = steps.map(step => step.name);
+    expect(names.indexOf('Verify API compatibility before deployment')).toBeLessThan(names.indexOf('Deploy image to Railway'));
+    expect(names.indexOf('Write server release evidence')).toBeLessThan(names.indexOf('Bind API compatibility evidence to server release'));
+    const executable = extractGitHubScript(workflow.content, 'Resolve previous API release');
+    const runtimeFile = path.join(tempDir, 'api-runtime.cjs');
+    const materializer = doc.toJS().jobs.deploy.steps.find((step: {name?: string}) => step.name === 'Prepare API compatibility runtime');
+    execFileSync('bash', ['-eu', '-c', materializer.run], { env: { ...process.env, ...materializer.env, HYPERVIBE_API_RUNTIME_PATH: runtimeFile } });
+    const runtime = await import('../api-release-workflow.js');
+    const outputs: Record<string, unknown> = {};
+    await new AsyncFunction('require', 'process', 'github', 'context', 'core', executable)(
+      (await import('node:module')).createRequire(import.meta.url),
+      { env: { HYPERVIBE_API_RUNTIME_PATH: runtimeFile, HYPERVIBE_API_RUNTIME_SHA256: runtime.API_RELEASE_RUNTIME_SHA256,
+        HYPERVIBE_API_ENVIRONMENT: 'staging', HYPERVIBE_API_WORKFLOW: workflow.path, HYPERVIBE_API_SHA: 'a'.repeat(40), HYPERVIBE_API_OPERATION: 'deploy', RUNNER_TEMP: tempDir } },
+      { rest: { actions: { listWorkflowRuns: async () => ({ data: { total_count: 0, workflow_runs: [] } }) } } },
+      { repo: { owner: 'acme', repo: 'api-release' }, runId: 1 }, { setOutput: (key: string, value: unknown) => { outputs[key] = value; } },
+    );
+    expect(outputs.has_baseline).toBe('false');
+    const input = { provider: 'railway', target: targets[0], migration };
+    expect(githubActionsWorkflowInputHash(input)).not.toBe(githubActionsWorkflowInputHash({ ...input, target: { ...targets[0], api: undefined } }));
+    expect(githubActionsServerProgramFingerprint(input)).toBe(githubActionsServerProgramFingerprint({ ...input, target: { ...targets[0], api: undefined } }));
+  });
+
+  it.each(['omitted', 'daily', 'disabled'] as const)(
+    'executes reviewed migrations and Railway web, worker and cron deployment with %s backups', async backupMode => {
     const project = new ProjectRepository().create({ name: 'multi-service', defaultPlatform: 'railway' });
     new EnvironmentRepository().create({
       projectId: project.id,
@@ -123,6 +167,9 @@ describe('github tools', () => {
         staging: {
           hosting: { provider: 'railway' },
           deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          migrations: { mode: 'tool', runInDeploy: true, command: 'node migrate.cjs' },
+          ...(backupMode === 'omitted' ? {} : { backups: backupMode === 'daily'
+            ? { mode: 'daily' } : { mode: 'disabled', reason: 'Disposable application data' } }),
           envVars: {
             SEED_CLIENT_TEST_DATA: 'true',
             CARE_PLAN_AI_REQUEST_TIMEOUT_MS: '30000',
@@ -137,8 +184,19 @@ describe('github tools', () => {
     });
     new SpecStore().replace(project, spec);
     const { targets, migration } = resolveBranchDeployTargets(project);
-    const workflow = buildBranchDeployWorkflow('railway', targets[0]!, migration);
     const target = targets[0]!;
+    // Owner contract: backup intent and obsolete policy metadata cannot add a
+    // release prerequisite. Compare complete generated programs, then execute
+    // their migration and provider steps below without backup files or helpers.
+    const legacyTarget = { ...target, ...(backupMode === 'omitted' ? {} : {
+      backupPolicy: { mode: backupMode, credentialNames: ['RAILWAY_API_TOKEN'] },
+    }) };
+    const workflow = buildBranchDeployWorkflow('railway', legacyTarget, migration);
+    const unmanaged = structuredClone(spec);
+    delete unmanaged.environments.staging.backups;
+    new SpecStore().replace(project, unmanaged);
+    const baseline = resolveBranchDeployTargets(project);
+    expect(workflow).toEqual(buildBranchDeployWorkflow('railway', baseline.targets[0]!, baseline.migration));
     for (const file of [{ path: workflow.path, content: workflow.content }, ...(workflow.companionFiles ?? [])]
       .filter((candidate) => /\.ya?ml$/.test(candidate.path))) {
       const document = parseDocument(file.content, { uniqueKeys: true });
@@ -154,6 +212,7 @@ describe('github tools', () => {
       'Prepare release evidence validator',
       'Verify reviewed release target',
       'Deployment safety gate: verify Hypervibe reconciliation',
+      'Run migrations',
       'Deploy image to Railway',
       'Write server release evidence',
     ]) {
@@ -188,6 +247,15 @@ describe('github tools', () => {
       'RUN --mount=type=secret,id=npm_token,required=false if [ -f /run/secrets/npm_token ]; then export NODE_AUTH_TOKEN="$(cat /run/secrets/npm_token)"; fi; npm ci --omit=dev'
     );
     expect(dockerfile).toContain('CMD ["sh", "-lc", "npm start"]');
+
+    fs.writeFileSync(path.join(tempDir, 'migrate.cjs'),
+      "require('node:fs').writeFileSync('migration-result.json', JSON.stringify({ database: process.env.DATABASE_URL }));\n");
+    execFileSync('bash', ['-eu', '-c', extractWorkflowShell(workflow.content, 'Run migrations')], {
+      cwd: tempDir,
+      env: { PATH: process.env.PATH, DATABASE_URL: 'postgres://synthetic/app' },
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(tempDir, 'migration-result.json'), 'utf8')))
+      .toEqual({ database: 'postgres://synthetic/app' });
 
     const validator = installReleaseEvidenceValidator(workflow.content, tempDir);
     expect(workflow.content.match(/name: Prepare release evidence validator/g)).toHaveLength(1);
@@ -252,7 +320,7 @@ describe('github tools', () => {
       }
       throw new Error(`Unexpected Railway operation: ${payload.query}`);
     });
-    const providerCore = { info: vi.fn(), warning: vi.fn() };
+    const providerCore = { info: vi.fn(), warning: vi.fn(), setOutput: vi.fn() };
     const deploy = new AsyncFunction(
       'fetch',
       'process',
@@ -559,7 +627,7 @@ describe('github tools', () => {
           },
         },
       }));
-    const core = { info: vi.fn(), warning: vi.fn() };
+    const core = { info: vi.fn(), warning: vi.fn(), setOutput: vi.fn() };
     const execute = new AsyncFunction('fetch', 'process', 'core', script);
     const execution = execute(fetch, {
       env: {
@@ -747,6 +815,8 @@ describe('github tools', () => {
       { env: 'production', branch: 'main', autoDeployOnPush: false, promoteFromEnvironment: 'staging', runtime: { kind: 'node', version: '24' } },
     ]);
 
+    expect(targets[1].promoteFromBranch).toBe('main');
+
     const stagingWorkflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
     expect(stagingWorkflow.content).toContain('push:');
     expect(stagingWorkflow.content).toContain('branches: [main]');
@@ -762,6 +832,26 @@ describe('github tools', () => {
     expect(productionWorkflow.content).toContain('workflow_dispatch:');
     expect(productionWorkflow.content).toContain('commit_sha:');
     expect(productionWorkflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
+  });
+
+  it('resolves promotion trust from the source branch rather than the destination branch', () => {
+    const project = new ProjectRepository().create({
+      name: 'source-branch', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/davejohnson/source-branch',
+    });
+    for (const name of ['staging', 'production']) new EnvironmentRepository().create({ projectId: project.id, name });
+    new SpecStore().replace(project, {
+      version: 1, project: project.name,
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: { web: {} }, deploy: { strategy: 'branch', trigger: 'ci', branch: 'accepted' } },
+        production: { hosting: { provider: 'railway' }, services: { web: {} }, deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
+      },
+    });
+    const { targets } = resolveBranchDeployTargets(project);
+    const production = targets.find(target => target.environmentName === 'production')!;
+    expect(production.branch).toBe('main');
+    expect(production.promoteFromBranch).toBe('accepted');
+    expect(buildBranchDeployWorkflow('railway', production, { includeStep: false }).content)
+      .toContain('HYPERVIBE_PROMOTE_FROM_BRANCH: "accepted"');
   });
 
   it('embeds Railway environment and service ids from stored specs when available', () => {
@@ -860,29 +950,6 @@ describe('github tools', () => {
       providerServiceIds: [],
     };
 
-    const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', reviewedTarget('cloudrun', {
-      ...baseTarget,
-      providerServiceIds: ['cloudrun-web'],
-      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-      providerRegion: 'us-west1',
-    }), { includeStep: false });
-    expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
-    expect(cloudRunWorkflow.requiredVariables).toEqual([]);
-    expect(cloudRunWorkflow.content).toContain('GCP_REGION: "us-west1"');
-    expect(cloudRunWorkflow.content).toContain('GCP_BOUND_PROJECT_ID: "gcp-project"');
-    expect(cloudRunWorkflow.content).toContain('process.env.GCP_PROJECT_ID !== process.env.GCP_BOUND_PROJECT_ID');
-    expect(cloudRunWorkflow.content).not.toContain('secrets.GCP_REGION');
-    expect(cloudRunWorkflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudrun-web'");
-    expect(cloudRunWorkflow.content).toContain("CLOUDRUN_JOB_NAMES: ''");
-    expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
-    expect(cloudRunWorkflow.content).toContain('docker/build-push-action@v6');
-    expect(cloudRunWorkflow.content).toContain(
-      'Artifact Registry repository is not bound; run Hypervibe plan and apply before CI deployment'
-    );
-    expect(cloudRunWorkflow.content).not.toContain("base + '?repositoryId='");
-    expect(cloudRunWorkflow.content).toContain('await waitOperation(operation, \'service \' + serviceName + \' deployment\')');
-    expect(cloudRunWorkflow.content).toContain("await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource)");
-
     const railwayWorkflow = buildBranchDeployWorkflow('railway', reviewedTarget('railway', {
       ...baseTarget,
       providerServiceIds: ['srv-railway'],
@@ -892,148 +959,10 @@ describe('github tools', () => {
     expect(railwayWorkflow.content).toContain('packages: write');
 
     const combinedContent = [
-      cloudRunWorkflow.content,
       railwayWorkflow.content,
     ].join('\n');
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud /);
 
-    expect(() => buildBranchDeployWorkflow('cloudrun', reviewedTarget('cloudrun', {
-      ...baseTarget,
-      providerScope: { projectId: 'gcp-project' },
-      providerEnvironmentId: 'not-a-region',
-      providerServiceIds: ['cloudrun-web'],
-    }), { includeStep: false })).toThrow('has no bound provider project or region');
-  });
-
-  it('separates Cloud Run service and scheduled job deploy targets', () => {
-    const projectRepo = new ProjectRepository();
-    const envRepo = new EnvironmentRepository();
-    const project = projectRepo.create({
-      name: 'cloudapp',
-      defaultPlatform: 'cloudrun',
-      gitRemoteUrl: 'https://github.com/davejohnson/cloudapp',
-    });
-    envRepo.create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'cloudrun',
-        projectId: 'cloudapp-production',
-        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-        services: {
-          web: {
-            serviceId: 'cloudapp-production-web',
-            releaseJobName: 'cloudapp-production-web-migration',
-          },
-          worker: { serviceId: 'cloudapp-production-worker' },
-          daily: { serviceId: 'cloudapp-production-daily-schedule', jobName: 'cloudapp-production-daily', resourceType: 'scheduledJob' },
-        },
-      },
-    });
-    new SpecStore().replace(project, {
-      version: 1,
-      project: project.name,
-      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
-      environments: {
-        production: {
-          hosting: { provider: 'cloudrun', region: 'us-west1' },
-          services: {
-            web: { workloadKind: 'web', startCommand: 'npm run web', healthCheckPath: '/healthz' },
-            worker: { workloadKind: 'worker', startCommand: 'npm run worker', healthCheckPath: '/ready' },
-            daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *', startCommand: 'npm run daily' },
-          },
-          migrations: { mode: 'releaseCommand', command: 'npm run db:migrate' },
-          deploy: { strategy: 'branch', branch: 'main' },
-        },
-      },
-    });
-
-    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
-    expect(targets[0]).toMatchObject({
-      providerServiceIds: ['cloudapp-production-web', 'cloudapp-production-worker'],
-      providerJobNames: ['cloudapp-production-daily'],
-      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-      releaseCommands: [{
-        serviceName: 'web',
-        providerServiceId: 'cloudapp-production-web',
-        jobName: 'cloudapp-production-web-migration',
-        command: 'npm run db:migrate',
-      }],
-      needsServiceNames: true,
-      needsJobNames: true,
-      providerRegion: 'us-west1',
-      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
-      containerStartCommand: 'npm run web',
-      runtimeResources: [
-        {
-          logicalName: 'daily',
-          workloadKind: 'cron',
-          providerResourceType: 'job',
-          providerResourceId: 'cloudapp-production-daily',
-          startCommand: 'npm run daily',
-          healthCheckPath: null,
-        },
-        {
-          logicalName: 'web',
-          workloadKind: 'web',
-          providerResourceType: 'service',
-          providerResourceId: 'cloudapp-production-web',
-          startCommand: 'npm run web',
-          healthCheckPath: '/healthz',
-        },
-        {
-          logicalName: 'worker',
-          workloadKind: 'worker',
-          providerResourceType: 'service',
-          providerResourceId: 'cloudapp-production-worker',
-          startCommand: 'npm run worker',
-          healthCheckPath: '/ready',
-        },
-      ],
-    });
-    expect(cloudRunContainerBuildStartCommand(targets[0])).toBe('npm run web');
-
-    const workflow = buildBranchDeployWorkflow('cloudrun', targets[0], { includeStep: false });
-    expect(workflow.requiredVariables).toEqual([]);
-    expect(workflow.content).toContain('GCP_REGION: "us-west1"');
-    expect(workflow.content).toContain('GCP_BOUND_PROJECT_ID: "gcp-project"');
-    expect(workflow.content).toContain("process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe'");
-    expect(workflow.content).not.toContain("process.env.GCP_ARTIFACT_REPOSITORY || 'infraprint'");
-    expect(workflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-worker'");
-    expect(workflow.content).toContain("CLOUDRUN_JOB_NAMES: 'cloudapp-production-daily'");
-    expect(workflow.content).toContain('CLOUDRUN_RELEASE_COMMANDS_B64:');
-    expect(workflow.content).toContain('CLOUDRUN_RUNTIME_RESOURCES_B64:');
-    expect(workflow.content).toContain('cloudRunContainerWithRuntime');
-    expect(executeDockerfileStep(workflow.content, tempDir)).toContain(
-      'CMD ["sh", "-lc", "npm run web"]'
-    );
-    expect(workflow.content).toContain('await runCloudRunReleaseCommands({');
-    expect(workflow.content.indexOf('await runCloudRunReleaseCommands({')).toBeLessThan(
-      workflow.content.indexOf('for (const serviceName of serviceNames)')
-    );
-    expect(workflow.content).toContain(
-      "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}"
-    );
-    expect(workflow.content).toContain('id: release_image');
-    expect(workflow.content).toContain("id: image\n        if: steps.deploy.outputs.operation != 'rollback'");
-    expect(workflow.content).toContain("id: gcp\n        if: steps.deploy.outputs.operation != 'rollback'");
-    expect(workflow.content).toContain("id: build\n        if: steps.deploy.outputs.operation != 'rollback'");
-    expect(workflow.content).toContain("if (process.env.DEPLOY_OPERATION !== 'rollback') {\n              await runCloudRunReleaseCommands({");
-    expect(workflow.content).toContain('version: 4,');
-    expect(workflow.content).toContain('HYPERVIBE_RELEASE_IMAGE_URI: ${{ steps.deploy.outputs.operation ==');
-    expect(workflow.content).toContain('Download rollback release evidence');
-    expect(workflow.content.match(/^\s+HYPERVIBE_SOURCE_ARTIFACT_ID:/gm)).toHaveLength(1);
-    expect(() => new AsyncFunction(
-      'require',
-      'process',
-      'core',
-      'fetch',
-      extractGitHubScript(workflow.content, 'Deploy image to Cloud Run')
-    )).not.toThrow();
-    expect(workflow.content).toContain('/jobs/\' + encodeURIComponent(jobName)');
-    expect(workflow.content).toContain('await waitOperation(operation, \'job \' + jobName + \' deployment\')');
-    expect(workflow.content).toContain("await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource)");
-    expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-daily-schedule'");
   });
 
   it('generates from an explicit runtime and never invents Node for custom apps', () => {
@@ -1051,7 +980,7 @@ describe('github tools', () => {
       containerStartCommand: 'npm run serve',
       runtime: { kind: 'node' as const, version: '24', installCommand: 'npm ci' },
     };
-    for (const provider of ['railway', 'cloudrun'] as const) {
+    for (const provider of ['railway'] as const) {
       const workflow = buildBranchDeployWorkflow(
         provider,
         reviewedTarget(provider, baseTarget),
@@ -1129,6 +1058,40 @@ describe('github tools', () => {
     expect(pythonWorkflow.content).toContain("python-version: '3.13'");
     expect(pythonDockerfile).toContain('python -m pip install -r requirements.txt');
     expect(pythonDockerfile).not.toContain('FROM node:20-slim');
+  });
+
+  it('requires review of the iOS provenance repair without migrating server-only workflows', () => {
+    const target: BranchDeployTarget = {
+      environmentName: 'production', kind: 'production', branch: 'main',
+      autoDeployOnPush: false, serviceNames: ['web'], providerServiceIds: ['web-1'],
+    };
+    const migration = { includeStep: false };
+    const ios = {
+      bundleId: 'com.example.app', platform: 'IOS' as const, capabilities: [],
+      release: {
+        services: ['web'], trigger: 'manual' as const,
+        build: { workingDirectory: '.', command: 'build-ios', ipaPath: 'app.ipa', requiredSecrets: [] },
+        signing: { provider: 'project' as const },
+        testflight: { groups: ['Pilot'], usesNonExemptEncryption: false, submitForBetaReview: false },
+      },
+    };
+    // The previously accepted semantic contract had no iOS renderer revision.
+    // Keeping that hash would silently retain the unsafe embedded runtime.
+    const previousContract = {
+      version: 1, rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+      provider: 'railway', target, migration,
+    };
+    const input = { provider: 'railway', target, migration };
+    expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(previousContract));
+    expect(githubActionsWorkflowInputHash({ ...input, ios })).not.toBe(canonicalJsonSha256({
+      ...previousContract, ios: { bundleId: ios.bundleId, release: ios.release },
+    }));
+    // Revision 2 validates only bundle/build identity. Keep this historical
+    // contract pinned so the added IPA configuration gate must be published.
+    expect(githubActionsWorkflowInputHash({ ...input, ios })).not.toBe(canonicalJsonSha256({
+      ...previousContract,
+      ios: { rendererRevision: 2, buildContractFingerprint: iosBuildContractFingerprint(ios), bundleId: ios.bundleId, release: ios.release },
+    }));
   });
 
   it('emits server evidence and a gated iOS release workflow with separate provenance', async () => {
@@ -1221,7 +1184,8 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain('evidence.deploymentContractFingerprint');
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
-    expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
+    expect(releaseWorkflow).toMatch(/group: hypervibe-ios-[0-9a-f]{20}/);
+    expect(releaseWorkflow).not.toContain('group: hypervibe-deploy-development');
     expect(releaseWorkflow).toContain('  build:');
     expect(releaseWorkflow).toContain('  release:\n    needs: build');
     expect(releaseWorkflow).toContain("node-version: '24'");
@@ -1240,7 +1204,7 @@ describe('github tools', () => {
     expect(releaseWorkflow).not.toContain('HYPERVIBE_RELEASE_SCRIPT');
     expect(releaseWorkflow).not.toContain('xcrun altool --upload-app');
     const releaseJobStart = releaseWorkflow.indexOf('\n  release:\n');
-    const buildJob = releaseWorkflow.slice(0, releaseJobStart);
+    const buildJob = releaseWorkflow.slice(releaseWorkflow.indexOf('\n  build:\n'), releaseJobStart);
     const releaseJob = releaseWorkflow.slice(releaseJobStart);
     expect(buildJob).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
     expect(releaseJob).toContain('APP_STORE_CONNECT_PRIVATE_KEY:');
@@ -1253,32 +1217,89 @@ describe('github tools', () => {
     expect(buildCommand).not.toContain('MATCH_PASSWORD');
     expect(buildCommand).not.toContain('MATCH_GIT_BASIC_AUTHORIZATION');
     expect(releaseWorkflow).toContain('Verify release IPA identity');
-    expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ steps.gate.outputs.sha }}');
+    expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ needs.prepare.outputs.sha }}');
     const releaseSha = 'a'.repeat(40);
-    const imageUri = `ghcr.io/owner/repo@sha256:${'b'.repeat(64)}`;
-    const evidence = {
-      version: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
-      provider: 'railway',
-      environment: 'development',
-      deploymentContractFingerprint: 'b'.repeat(64),
-      source: { repository: 'owner/repo', sha: releaseSha },
-      target: {
-        scope: target.releaseTarget!.scope,
-        bindingsFingerprint: target.releaseTarget!.bindingsFingerprint,
-        resources: target.releaseTarget!.resources.map((resource) => ({ ...resource, imageUri })),
-      },
-      programFingerprint: target.programFingerprint!,
-      verifiedAt: '2026-09-11T00:00:00.000Z',
+    // Use the emitted producer rather than a hand-shaped artifact. This image
+    // name deliberately contains "s", which exposed that the generated iOS
+    // consumer had interpreted an over-escaped whitespace matcher differently.
+    const imageUri = `ghcr.io/owner/invoice-express@sha256:${'b'.repeat(64)}`;
+    let producedEvidence = '';
+    const validator = installReleaseEvidenceValidator(workflow.content, tempDir);
+    const writeServerEvidence = new AsyncFunction(
+      'require',
+      'process',
+      'core',
+      extractGitHubScript(workflow.content, 'Write server release evidence')
+    );
+    const produceEvidence = async (credentialEnvironment: Record<string, string> = {}) => {
+      await writeServerEvidence(
+        releaseEvidenceValidatorRequire(validator, {
+          writeFileSync: (_filename, content) => { producedEvidence = String(content); },
+        }),
+        {
+          env: {
+            HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath,
+            HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+            HYPERVIBE_RELEASE_SHA: releaseSha,
+            HYPERVIBE_RELEASE_PROVIDER: 'railway',
+            HYPERVIBE_RELEASE_ENVIRONMENT: 'development',
+            HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
+            HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget!.scope),
+            HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget!.resources),
+            HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: target.releaseTarget!.bindingsFingerprint,
+            HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint!,
+            HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: 'b'.repeat(64),
+            HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true',
+            HYPERVIBE_RELEASE_IMAGE_URI: imageUri,
+            // The generated workflow resolves these defaults even on a push with
+            // no credential operation. Omitting them hides producer/consumer drift.
+            HYPERVIBE_CREDENTIAL_OPERATIONS: '{}',
+            HYPERVIBE_CREDENTIAL_DEPLOYMENTS: '[]',
+            GITHUB_REPOSITORY: 'owner/repo',
+            ...credentialEnvironment,
+          },
+        },
+        {}
+      );
+      return JSON.parse(producedEvidence);
     };
+    const evidence = await produceEvidence();
+    expect(evidence.credentialActivation).toEqual({ version: 1, operations: [] });
+    const resource = target.releaseTarget!.resources[0]!;
+    const activatedEvidence = await produceEvidence({
+      HYPERVIBE_CREDENTIAL_OPERATIONS: JSON.stringify({ [resource.logicalName]: {
+        serviceId: resource.providerResourceId, operationId: 'accepted-operation', configurationVersion: 42,
+      } }),
+      HYPERVIBE_CREDENTIAL_DEPLOYMENTS: JSON.stringify([{
+        serviceId: resource.providerResourceId, deploymentIds: ['deployment-new'], configurationVersion: 42,
+      }]),
+    });
+    expect(activatedEvidence.credentialActivation.operations).toHaveLength(1);
+    const legacyEvidence = { ...evidence };
+    delete legacyEvidence.credentialActivation;
+    const sourceRuntime = new URL('../../../../templates/ios/hypervibe-ios-release.mjs', import.meta.url).href;
+    const emittedRuntime = 'data:text/javascript;base64,' + getManagedIosReleaseRuntimeBase64();
+    for (const runtimeUrl of [sourceRuntime, emittedRuntime]) {
+      const runtime = await import(runtimeUrl);
+      for (const candidate of [legacyEvidence, evidence, activatedEvidence]) {
+        const manifest = runtime.buildReleaseManifest({
+          environment: 'development', repository: 'owner/repo', releaseSha,
+          serverEvidenceVersion: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+          serverEvidenceSha256: 'f'.repeat(64),
+        }, candidate, { id: 'app-1' }, { id: 'build-1' }, new Date().toISOString());
+        expect(manifest.services).toEqual(target.releaseTarget!.resources.map(resource => resource.logicalName));
+      }
+    }
+
     const releaseDocument = parseDocument(releaseWorkflow, { uniqueKeys: true });
     expect(releaseDocument.errors).toEqual([]);
     const parsedRelease = releaseDocument.toJS() as {
-      jobs: { build: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
+      jobs: { eligibility: { env: Record<string, unknown>; steps: Array<{ name?: string; env?: Record<string, unknown> }> } };
     };
-    const gateSteps = parsedRelease.jobs.build.steps.filter((step) => step.name === 'Verify server release gate');
+    const gateSteps = parsedRelease.jobs.eligibility.steps.filter((step) => step.name === 'Verify server release gate');
     expect(gateSteps).toHaveLength(1);
     const emittedGateEnvironment = {
-      ...parsedRelease.jobs.build.env,
+      ...parsedRelease.jobs.eligibility.env,
       ...gateSteps[0]!.env,
     };
     const expectedServerRelease = JSON.parse(String(
@@ -1291,25 +1312,33 @@ describe('github tools', () => {
     const provenanceScript = extractGitHubScript(releaseWorkflow, 'Resolve release provenance');
     const serverRun = {
       id: 91,
+      status: 'completed',
       conclusion: 'success',
       head_sha: releaseSha,
       path: workflow.path,
+      run_attempt: 2,
+      run_started_at: new Date(Date.parse(evidence.verifiedAt) - 60_000).toISOString(),
     };
     const serverArtifact = {
       id: 72,
       name: expectedServerRelease.artifactPrefix + releaseSha,
       expired: false,
+      created_at: evidence.verifiedAt,
       workflow_run: { id: serverRun.id, head_sha: releaseSha },
     };
+    const serverJob = {id: 41, run_id: serverRun.id, head_sha: releaseSha, name: 'deploy', status: 'completed', conclusion: 'success',
+      started_at: serverRun.run_started_at, completed_at: new Date(Date.parse(evidence.verifiedAt) + 60_000).toISOString()};
     const provenanceCase = (options: {
       run?: Record<string, unknown>;
       artifacts?: Array<Record<string, unknown>>;
       eventName?: string;
       inputs?: Record<string, string>;
+      job?: Record<string, unknown>;
     } = {}) => {
       const getWorkflowRun = vi.fn(async () => ({ data: options.run ?? serverRun }));
-      const listWorkflowRunArtifacts = vi.fn();
-      const paginate = vi.fn(async () => options.artifacts ?? [serverArtifact]);
+      const artifacts = options.artifacts ?? [serverArtifact];
+      const listWorkflowRunArtifacts = vi.fn(async () => ({data: {total_count: artifacts.length, artifacts}}));
+      const listJobsForWorkflowRunAttempt = vi.fn(async () => ({data: {total_count: 1, jobs: [options.job ?? serverJob]}}));
       const outputs = new Map<string, string>();
       const result = new AsyncFunction(
         'github',
@@ -1318,7 +1347,7 @@ describe('github tools', () => {
         'core',
         provenanceScript
       )(
-        { paginate, rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts } } },
+        { rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts, listJobsForWorkflowRunAttempt } } },
         {
           eventName: options.eventName ?? 'workflow_dispatch',
           payload: options.eventName === 'workflow_run'
@@ -1326,10 +1355,10 @@ describe('github tools', () => {
             : { inputs: options.inputs ?? { commit_sha: releaseSha, server_run_id: String(serverRun.id) } },
           repo: { owner: 'owner', repo: 'repo' },
         },
-        { env: { HYPERVIBE_EXPECTED_SERVER_RELEASE: JSON.stringify(expectedServerRelease) } },
+        { env: parsedRelease.jobs.eligibility.env },
         { setOutput: (name: string, value: string) => outputs.set(name, value) }
       );
-      return { getWorkflowRun, listWorkflowRunArtifacts, outputs, paginate, result };
+      return { getWorkflowRun, listWorkflowRunArtifacts, outputs, result };
     };
 
     const provenance = provenanceCase();
@@ -1339,7 +1368,7 @@ describe('github tools', () => {
       repo: 'repo',
       run_id: serverRun.id,
     });
-    expect(provenance.paginate).toHaveBeenCalledWith(provenance.listWorkflowRunArtifacts, {
+    expect(provenance.listWorkflowRunArtifacts).toHaveBeenCalledWith({
       owner: 'owner',
       repo: 'repo',
       run_id: serverRun.id,
@@ -1348,9 +1377,15 @@ describe('github tools', () => {
     expect(Object.fromEntries(provenance.outputs)).toEqual({
       artifact_id: String(serverArtifact.id),
       server_run_id: String(serverRun.id),
+      server_run_attempt: '2',
       sha: releaseSha,
     });
     await expect(provenanceCase({ eventName: 'workflow_run' }).result).resolves.toBeUndefined();
+    for (const eventName of ['workflow_run', 'workflow_dispatch']) {
+      const retained = {...serverArtifact, created_at: new Date(Date.parse(serverRun.run_started_at) - 86_400_000).toISOString()};
+      await expect(provenanceCase({eventName, artifacts: [retained]}).result).rejects.toThrow('current workflow attempt');
+      await expect(provenanceCase({eventName, job: {...serverJob, conclusion: 'skipped'}}).result).rejects.toThrow('current workflow attempt');
+    }
 
     for (const run of [
       { ...serverRun, path: '.github/workflows/not-managed.yml' },
@@ -1360,23 +1395,23 @@ describe('github tools', () => {
       await expect(rejected.result).rejects.toThrow(
         'Server release evidence must come from a successful run of'
       );
-      expect(rejected.paginate).not.toHaveBeenCalled();
+      expect(rejected.listWorkflowRunArtifacts).not.toHaveBeenCalled();
     }
     const wrongRequestedSha = provenanceCase({
       inputs: { commit_sha: 'd'.repeat(40), server_run_id: String(serverRun.id) },
     });
     await expect(wrongRequestedSha.result).rejects.toThrow(
-      'commit_sha does not match the selected server workflow run'
+      'commit_sha does not match the server release artifact'
     );
-    expect(wrongRequestedSha.paginate).not.toHaveBeenCalled();
+    expect(wrongRequestedSha.listWorkflowRunArtifacts).toHaveBeenCalledOnce();
     const mismatchedArtifact = provenanceCase({
       artifacts: [{ ...serverArtifact, name: expectedServerRelease.artifactPrefix + 'd'.repeat(40) }],
     });
-    await expect(mismatchedArtifact.result).rejects.toThrow('Expected exactly one unexpired');
+    await expect(mismatchedArtifact.result).rejects.toThrow('commit_sha does not match the server release artifact');
     const duplicateArtifacts = provenanceCase({
       artifacts: [serverArtifact, { ...serverArtifact, id: 73 }],
     });
-    await expect(duplicateArtifacts.result).rejects.toThrow(/found 2$/);
+    await expect(duplicateArtifacts.result).rejects.toThrow('Expected exactly one unexpired');
 
     const runEvidenceGate = (candidate: unknown, suffix: string) => {
       const evidencePath = path.join(tempDir, `ios-server-evidence-${suffix}.json`);
@@ -1397,12 +1432,36 @@ describe('github tools', () => {
     };
 
     expect(runEvidenceGate(evidence, 'accepted')).toBe(`sha=${releaseSha}\n`);
+    expect(runEvidenceGate(activatedEvidence, 'activated')).toBe(`sha=${releaseSha}\n`);
+    expect(runEvidenceGate(legacyEvidence, 'legacy')).toBe(`sha=${releaseSha}\n`);
+    const operation = activatedEvidence.credentialActivation.operations[0];
+    for (const [index, activation] of [
+      null,
+      { version: 2, operations: [] },
+      { version: 1, operations: [], unexpected: true },
+      { version: 1, operations: {} },
+      { version: 1, operations: [null] },
+      { version: 1, operations: [{ ...operation, serviceId: 'other-service' }] },
+      { version: 1, operations: [{ ...operation, service: 'other-logical-service' }] },
+      { version: 1, operations: [{ ...operation, configurationVersion: -1 }] },
+      { version: 1, operations: [{ ...operation, deploymentIds: [] }] },
+      { version: 1, operations: [{ ...operation, deploymentIds: ['duplicate', 'duplicate'] }] },
+      { version: 1, operations: [{ ...operation, operationId: 'invalid identity' }] },
+      { version: 1, operations: [operation, operation] },
+    ].entries()) {
+      expect(() => runEvidenceGate({ ...evidence, credentialActivation: activation }, `invalid-activation-${index}`))
+        .toThrow(/Credential activation/);
+      expect(fs.existsSync(path.join(tempDir, `ios-gate-output-invalid-activation-${index}.txt`))).toBe(false);
+    }
+
     expect(runEvidenceGate({
       ...evidence,
       deploymentContractFingerprint: 'e'.repeat(64),
     }, 'new-contract')).toBe(`sha=${releaseSha}\n`);
 
     const mismatches = [
+      { ...evidence, unexpectedReleaseField: true },
+      { ...evidence, version: 3 },
       { ...evidence, provider: 'cloudrun' },
       { ...evidence, programFingerprint: 'd'.repeat(64) },
       { ...evidence, target: { ...evidence.target, scope: { providerProjectId: 'other-project' } } },
@@ -1411,7 +1470,7 @@ describe('github tools', () => {
         ...evidence,
         target: {
           ...evidence.target,
-          resources: evidence.target.resources.map((resource, index) => (
+          resources: evidence.target.resources.map((resource: Record<string, unknown>, index: number) => (
             index === 0 ? { ...resource, providerResourceId: 'other-service' } : resource
           )),
         },

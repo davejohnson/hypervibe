@@ -1,16 +1,19 @@
-import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { request as httpsRequest } from 'node:https';
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
-import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import type {
-  IStorageAdapter,
+  IStorageOperations,
   StorageContext,
   StorageEnsureResult,
   StorageObjectClient,
   StorageObjectPayload,
+  StorageObjectRevision,
+  StorageObservationTarget,
+  StorageRuntimeTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
   providerRegistry,
@@ -20,7 +23,6 @@ import {
 const STORAGE_API = 'https://storage.googleapis.com';
 const ENVIRONMENT_LABEL = 'hypervibe_environment_id';
 const STORAGE_NAME_LABEL = 'hypervibe_storage_name';
-const PROJECT_LABEL = 'hypervibe_project';
 
 const ServiceAccountSchema = z.object({
   type: z.literal('service_account'),
@@ -32,6 +34,7 @@ const ServiceAccountSchema = z.object({
 const GcsStorageAuthenticationSchema = z.object({
   authMode: z.enum(['default', 'serviceAccount']).default('serviceAccount'),
   credentials: z.string().min(1, 'GCP service account JSON is required').optional(),
+  runtimeServiceAccountEmail: z.string().trim().email().optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.authMode === 'default' || value.credentials) return;
   ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['credentials'], message: 'GCP service account JSON is required' });
@@ -41,8 +44,8 @@ export const GcsStorageCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
   if (record.type === 'service_account') return { authMode: 'serviceAccount', credentials: JSON.stringify(record) };
-  if (!record.authMode && record.credentials) record.authMode = 'serviceAccount';
-  return { authMode: record.authMode, credentials: record.credentials };
+  return { authMode: record.authMode ?? (record.credentials ? 'serviceAccount' : undefined),
+    credentials: record.credentials, runtimeServiceAccountEmail: record.runtimeServiceAccountEmail };
 }, GcsStorageAuthenticationSchema);
 
 export type GcsStorageCredentials = z.infer<typeof GcsStorageCredentialsSchema>;
@@ -55,6 +58,8 @@ type TokenProvider = (credentials: GcsStorageCredentials, serviceAccount: Servic
 
 export interface GcsStorageAdapterOptions {
   fetch?: typeof fetch;
+  /** Raw media bytes; the default HTTPS stream does not transparently decompress. */
+  mediaFetch?: typeof fetch;
   tokenProvider?: TokenProvider;
   defaultProjectProvider?: () => Promise<string>;
 }
@@ -68,7 +73,27 @@ interface GcsBucket {
 interface GcsObject {
   name?: string;
   size?: string;
+  generation?: string;
+  metageneration?: string;
+  contentType?: string;
+  contentEncoding?: string;
+  cacheControl?: string;
+  contentDisposition?: string;
+  metadata?: Record<string, string>;
 }
+
+/** JSON API gzip objects must retain their stored representation. Global fetch
+ * decodes Content-Encoding, so object bodies use an undecoded HTTPS stream. */
+const rawGcsMediaFetch: typeof fetch = async (input, init) => new Promise((resolve, reject) => {
+  const request = httpsRequest(String(input), { method: 'GET', headers: Object.fromEntries(new Headers(init?.headers).entries()) }, response => {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(response.headers)) {
+      if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+    }
+    resolve(new Response(Readable.toWeb(response) as ReadableStream<Uint8Array>, { status: response.statusCode ?? 500, headers }));
+  });
+  request.once('error', reject); request.end();
+});
 
 async function defaultTokenProvider(_credentials: GcsStorageCredentials, serviceAccount: ServiceAccount | null) {
   const auth = new GoogleAuth({
@@ -84,22 +109,6 @@ async function defaultTokenProvider(_credentials: GcsStorageCredentials, service
     email: serviceAccount?.client_email ?? 'Google Application Default Credentials',
     expiresAt: client.credentials.expiry_date ?? Date.now() + 50 * 60 * 1_000,
   };
-}
-
-function slug(value: string): string {
-  return value.toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function bucketName(context: StorageContext, environment: Environment, name: string): string {
-  const base = slug(`hv-${context.projectName ?? environment.projectId}-${environment.name}-${name}`);
-  const suffix = createHash('sha256')
-    .update(`${context.projectId}\0${environment.id}\0${name}`)
-    .digest('hex')
-    .slice(0, 10);
-  return `${base.slice(0, 52)}-${suffix}`.replace(/-+$/g, '');
 }
 
 function errorMessage(error: unknown): string {
@@ -128,49 +137,79 @@ class GcsObjectClient implements StorageObjectClient {
   constructor(
     private readonly bucket: string,
     private readonly request: typeof fetch,
-    private readonly getToken: () => Promise<string>
+    private readonly getToken: () => Promise<string>,
+    private readonly mediaRequest: typeof fetch = request,
   ) {}
 
-  async list() {
-    const objects: Array<{ key: string; size: number }> = [];
+  async list(options?: { prefix?: string; maxObjects?: number }) {
+    const objects: Array<{ key: string; size: number; revision?: StorageObjectRevision }> = [];
+    const tokens = new Set<string>();
     let pageToken: string | undefined;
     do {
       const params = new URLSearchParams();
+      if (options?.prefix) params.set('prefix', options.prefix);
+      if (options?.maxObjects !== undefined) params.set('maxResults', String(Math.min(1000, options.maxObjects + 1)));
       if (pageToken) params.set('pageToken', pageToken);
       const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o?${params}`);
       if (!response.ok) throw await responseError(response);
       const body = await response.json() as { items?: GcsObject[]; nextPageToken?: string };
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || (body.items !== undefined && !Array.isArray(body.items))
+        || (body.nextPageToken !== undefined && (typeof body.nextPageToken !== 'string' || !body.nextPageToken))) {
+        throw new Error('GCS object listing completeness is unknown.');
+      }
       for (const object of body.items ?? []) {
-        if (object.name) objects.push({ key: object.name, size: Number(object.size ?? 0) });
+        if (!object || typeof object.name !== 'string' || !object.name || typeof object.size !== 'string'
+          || !/^\d+$/.test(object.size) || !Number.isSafeInteger(Number(object.size))) {
+          throw new Error('GCS object listing contains an incomplete object identity or size.');
+        }
+        objects.push({ key: object.name, size: Number(object.size),
+          ...(object.generation ? { revision: { generation: object.generation,
+            ...(object.metageneration ? { metageneration: object.metageneration } : {}) } } : {}) });
+        if (options?.maxObjects !== undefined && objects.length > options.maxObjects) throw new Error('GCS object listing exceeds its count limit.');
       }
       pageToken = body.nextPageToken;
+      if (pageToken && tokens.has(pageToken)) throw new Error('GCS object listing pagination did not advance.');
+      if (pageToken) tokens.add(pageToken);
     } while (pageToken);
     return objects;
   }
 
-  async get(key: string): Promise<StorageObjectPayload> {
-    const response = await this.authorized(
-      `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}?alt=media`
-    );
+  async get(key: string, expected?: StorageObjectRevision): Promise<StorageObjectPayload> {
+    if (expected?.etag || expected?.versionId || expected?.lastModified) throw new Error('GCS recovery reads require a native generation.');
+    const base = `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}`;
+    const conditions = new URLSearchParams();
+    if (expected?.generation) conditions.set('ifGenerationMatch', expected.generation);
+    if (expected?.metageneration) conditions.set('ifMetagenerationMatch', expected.metageneration);
+    const metadataResponse = await this.authorized(`${base}?${conditions}`);
+    if (!metadataResponse.ok) throw await responseError(metadataResponse);
+    const object = await metadataResponse.json() as GcsObject;
+    if (!object.generation || !object.metageneration || object.size === undefined
+      || (expected?.generation && object.generation !== expected.generation)
+      || (expected?.metageneration && object.metageneration !== expected.metageneration)) throw new Error('GCS did not identify the exact object generation.');
+    conditions.set('generation', object.generation); conditions.set('ifGenerationMatch', object.generation);
+    conditions.set('ifMetagenerationMatch', object.metageneration); conditions.set('alt', 'media');
+    const response = await this.mediaRequest(`${base}?${conditions}`, { headers: {
+      Authorization: `Bearer ${await this.getToken()}`, 'Accept-Encoding': 'gzip',
+    } });
     if (!response.ok) throw await responseError(response);
     if (!response.body) throw new Error(`Google Cloud Storage object ${key} returned no body.`);
-    const metadata: Record<string, string> = {};
-    response.headers.forEach((value, header) => {
-      if (header.startsWith('x-goog-meta-')) metadata[header.slice('x-goog-meta-'.length)] = value;
-    });
+    if (response.headers.get('x-goog-generation') !== object.generation
+      || response.headers.get('x-goog-metageneration') !== object.metageneration
+      || Number(response.headers.get('content-length')) !== Number(object.size)) {
+      await response.body.cancel(); throw new Error('GCS media response does not match the reviewed stored representation.');
+    }
     return {
       body: response.body,
-      size: Number(response.headers.get('content-length') ?? 0),
-      contentType: response.headers.get('content-type') ?? undefined,
-      contentEncoding: response.headers.get('content-encoding') ?? undefined,
-      cacheControl: response.headers.get('cache-control') ?? undefined,
-      contentDisposition: response.headers.get('content-disposition') ?? undefined,
-      metadata,
+      size: Number(object.size), revision: { generation: object.generation, metageneration: object.metageneration },
+      contentType: object.contentType, contentEncoding: object.contentEncoding,
+      cacheControl: object.cacheControl, contentDisposition: object.contentDisposition, metadata: object.metadata,
     };
   }
 
-  async put(key: string, payload: StorageObjectPayload): Promise<void> {
+  async put(key: string, payload: StorageObjectPayload, options?: { ifAbsent?: boolean }): Promise<void> {
     const params = new URLSearchParams({ uploadType: 'media', name: key });
+    if (options?.ifAbsent) params.set('ifGenerationMatch', '0');
     const headers: Record<string, string> = {};
     if (payload.contentType) headers['content-type'] = payload.contentType;
     const response = await this.authorized(
@@ -178,6 +217,8 @@ class GcsObjectClient implements StorageObjectClient {
       { method: 'POST', body: requestBody(payload), headers, duplex: 'half' } as RequestInit
     );
     if (!response.ok) throw await responseError(response);
+    const uploaded = await response.json() as GcsObject;
+    if (options?.ifAbsent && !uploaded.generation) throw new Error('GCS did not acknowledge the exact new object generation.');
     if (
       payload.contentType
       || payload.contentEncoding
@@ -186,7 +227,8 @@ class GcsObjectClient implements StorageObjectClient {
       || Object.keys(payload.metadata ?? {}).length > 0
     ) {
       const metadataResponse = await this.authorized(
-        `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}`,
+        `${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}${uploaded.generation
+          ? `?ifGenerationMatch=${encodeURIComponent(uploaded.generation)}${uploaded.metageneration ? `&ifMetagenerationMatch=${encodeURIComponent(uploaded.metageneration)}` : ''}` : ''}`,
         {
           method: 'PATCH',
           headers: { 'content-type': 'application/json' },
@@ -203,6 +245,15 @@ class GcsObjectClient implements StorageObjectClient {
     }
   }
 
+  async remove(key: string, revision?: StorageObjectRevision): Promise<void> {
+    if (revision?.etag || revision?.versionId || revision?.lastModified) throw new Error('GCS deletion requires a native generation.');
+    const conditions = new URLSearchParams();
+    if (revision?.generation) conditions.set('ifGenerationMatch', revision.generation);
+    if (revision?.metageneration) conditions.set('ifMetagenerationMatch', revision.metageneration);
+    const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(this.bucket)}/o/${encodeURIComponent(key)}?${conditions}`, { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) throw await responseError(response);
+  }
+
   destroy(): void {}
 
   private async authorized(url: string, init: RequestInit = {}): Promise<Response> {
@@ -214,7 +265,7 @@ class GcsObjectClient implements StorageObjectClient {
   }
 }
 
-export class GcsStorageAdapter implements IStorageAdapter {
+export class GcsStorageAdapter implements IStorageOperations {
   readonly name = 'gcs';
   readonly capabilities = {
     kind: 'object' as const,
@@ -222,6 +273,7 @@ export class GcsStorageAdapter implements IStorageAdapter {
     privateOnly: true,
     supportsUsageObservation: true,
     supportsObjectTransfer: true,
+    usesWorkloadIdentity: true,
   };
 
   private credentials: GcsStorageCredentials | null = null;
@@ -230,11 +282,13 @@ export class GcsStorageAdapter implements IStorageAdapter {
   private token: string | null = null;
   private tokenExpiresAt = 0;
   private readonly request: typeof fetch;
+  private readonly mediaRequest: typeof fetch;
   private readonly tokenProvider: TokenProvider;
   private readonly defaultProjectProvider: () => Promise<string>;
 
   constructor(options: GcsStorageAdapterOptions = {}) {
     this.request = options.fetch ?? fetch;
+    this.mediaRequest = options.mediaFetch ?? options.fetch ?? rawGcsMediaFetch;
     this.tokenProvider = options.tokenProvider ?? defaultTokenProvider;
     this.defaultProjectProvider = options.defaultProjectProvider ?? (() => new GoogleAuth().getProjectId());
   }
@@ -260,6 +314,11 @@ export class GcsStorageAdapter implements IStorageAdapter {
       throw new Error('GCP service account credentials must be valid JSON.');
     }
     this.serviceAccount = ServiceAccountSchema.parse(parsed);
+    const runtimePrincipal = this.credentials.runtimeServiceAccountEmail;
+    if (runtimePrincipal && (runtimePrincipal === this.serviceAccount.client_email
+      || !runtimePrincipal.endsWith(`@${this.serviceAccount.project_id}.iam.gserviceaccount.com`))) {
+      throw new Error('GCS runtime identity must be distinct from the management identity and belong to the connected GCP project.');
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -325,17 +384,31 @@ export class GcsStorageAdapter implements IStorageAdapter {
     }
   }
 
-  async observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]> {
+  async observe(environment: Environment, context: StorageContext, target?: StorageObservationTarget): Promise<ObservedStorage[]> {
     await this.assertContext(context);
+    if (target && !target.externalId) throw new Error('Exact GCS observation requires a bucket identity.');
     const observed: ObservedStorage[] = [];
+    const seenPageTokens = new Set<string>();
     let pageToken: string | undefined;
     do {
       const params = new URLSearchParams({ project: context.projectId });
+      if (target) { params.set('prefix', target.externalId); params.set('maxResults', '100'); }
       if (pageToken) params.set('pageToken', pageToken);
       const response = await this.authorized(`${STORAGE_API}/storage/v1/b?${params}`);
       if (!response.ok) throw await responseError(response);
       const body = await response.json() as { items?: GcsBucket[]; nextPageToken?: string };
       for (const bucket of body.items ?? []) {
+        if (target) {
+          // The project-scoped list proves native ownership; a direct bucket
+          // GET could succeed for a bucket shared from a different project.
+          if (bucket.name !== target.externalId) continue;
+          if ([context.region, context.location].some(region => region && region.toLowerCase() !== bucket.location?.toLowerCase())) {
+            throw new Error('The bound GCS bucket location differs from its provider scope.');
+          }
+          observed.push({ provider: this.name, kind: 'object', externalId: bucket.name,
+            instanceScope: { ...context }, name: bucket.name, region: bucket.location?.toLowerCase(), status: 'ready' });
+          continue;
+        }
         if (!bucket.name || bucket.labels?.[ENVIRONMENT_LABEL] !== environment.id) continue;
         const name = bucket.labels[STORAGE_NAME_LABEL];
         if (!name) continue;
@@ -352,6 +425,10 @@ export class GcsStorageAdapter implements IStorageAdapter {
         });
       }
       pageToken = body.nextPageToken;
+      if (target && pageToken) {
+        if (seenPageTokens.has(pageToken) || seenPageTokens.size >= 100) throw new Error('Exact GCS observation pagination is incomplete.');
+        seenPageTokens.add(pageToken);
+      }
     } while (pageToken);
     return observed.sort((left, right) => left.name.localeCompare(right.name));
   }
@@ -403,89 +480,41 @@ export class GcsStorageAdapter implements IStorageAdapter {
     };
   }
 
-  async ensureBucket(
-    environment: Environment,
-    context: StorageContext,
-    name: string,
-    region: string
-  ): Promise<StorageEnsureResult> {
-    try {
-      await this.assertContext(context);
-      const externalId = bucketName(context, environment, name);
-      const existing = await this.getBucket(externalId);
-      if (existing) {
-        if (existing.labels?.[ENVIRONMENT_LABEL] !== environment.id || existing.labels?.[STORAGE_NAME_LABEL] !== name) {
-          throw new Error(`Google Cloud Storage bucket ${externalId} exists but is not owned by this Hypervibe storage binding.`);
-        }
-        if (existing.location?.toLowerCase() !== region.toLowerCase()) {
-          throw new Error(`Google Cloud Storage bucket ${externalId} exists in immutable location ${existing.location}, not ${region}.`);
-        }
-        return {
-          receipt: { success: true, message: `Using existing Google Cloud Storage bucket "${externalId}"`, data: { created: false } },
-          externalId,
-          context,
-        };
-      }
-
-      const response = await this.authorized(
-        `${STORAGE_API}/storage/v1/b?project=${encodeURIComponent(context.projectId)}`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            name: externalId,
-            location: region,
-            labels: {
-              [ENVIRONMENT_LABEL]: environment.id,
-              [STORAGE_NAME_LABEL]: name,
-              [PROJECT_LABEL]: slug(context.projectName ?? environment.projectId).slice(0, 63),
-            },
-            iamConfiguration: {
-              uniformBucketLevelAccess: { enabled: true },
-              publicAccessPrevention: 'enforced',
-            },
-          }),
-        }
-      );
-      if (!response.ok) throw await responseError(response);
-      const created = await this.getBucket(externalId);
-      if (!created) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} did not become observable after creation.`);
-      }
-      if (
-        created.labels?.[ENVIRONMENT_LABEL] !== environment.id
-        || created.labels?.[STORAGE_NAME_LABEL] !== name
-        || created.location?.toLowerCase() !== region.toLowerCase()
-      ) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} did not converge to the reviewed labels and location.`);
-      }
-      return {
-        receipt: { success: true, message: `Created private Google Cloud Storage bucket "${externalId}"`, data: { created: true } },
-        externalId,
-        context,
-      };
-    } catch (error) {
-      return { receipt: { success: false, message: `Failed to ensure Google Cloud Storage bucket "${name}"`, error: errorMessage(error) } };
-    }
-  }
-
   async getRuntimeEnv(
     _environment: Environment,
     context: StorageContext,
     externalId: string,
-    _name: string
+    _name: string,
+    target?: StorageRuntimeTarget
   ): Promise<Record<string, string>> {
     await this.assertContext(context);
+    const runtimeEnv = {
+      OBJECT_STORAGE_PROVIDER: 'gcs', OBJECT_STORAGE_BUCKET: externalId,
+      GOOGLE_CLOUD_PROJECT: context.projectId, GOOGLE_CLOUD_STORAGE_BUCKET: externalId,
+    };
+    if (target?.hostingProvider === 'cloudrun') {
+      const identity = target.identity;
+      const configuredPrincipal = this.connectedCredentials().runtimeServiceAccountEmail;
+      if (identity?.provider !== 'gcp' || identity.scope.projectId !== context.projectId
+        || !identity.principal.endsWith(`@${context.projectId}.iam.gserviceaccount.com`)
+        || identity.principal === this.serviceAccount?.client_email
+        || (configuredPrincipal && configuredPrincipal !== identity.principal)) {
+        throw new Error('GCS runtime access requires the exact distinct Cloud Run workload identity and GCP project scope.');
+      }
+      // Empty the legacy slot on reviewed runtime synchronization. Leaving an
+      // old key installed would override workload ADC in existing consumers.
+      return { ...runtimeEnv, GOOGLE_CLOUD_CREDENTIALS_JSON: '' };
+    }
     if (!this.serviceAccount) {
       throw new Error(
         'Google Application Default Credentials can manage and migrate storage, but Hypervibe will not copy a local gcloud user session into a deployed service. Reuse the verified Cloud Run connection/workload identity or connect a service-account JSON for cross-cloud runtime access.'
       );
     }
+    if (target?.connectionProvider !== 'gcs') {
+      throw new Error('GCS runtime access on this host requires an explicitly selected standalone GCS connection; a reused deployment identity cannot be installed in application runtime.');
+    }
     return {
-      OBJECT_STORAGE_PROVIDER: 'gcs',
-      OBJECT_STORAGE_BUCKET: externalId,
-      GOOGLE_CLOUD_PROJECT: context.projectId,
-      GOOGLE_CLOUD_STORAGE_BUCKET: externalId,
+      ...runtimeEnv,
       GOOGLE_CLOUD_CREDENTIALS_JSON: this.connectedCredentials().credentials!,
     };
   }
@@ -496,36 +525,7 @@ export class GcsStorageAdapter implements IStorageAdapter {
     externalId: string
   ): Promise<StorageObjectClient> {
     await this.assertContext(context);
-    return new GcsObjectClient(externalId, this.request, () => this.accessToken());
-  }
-
-  async destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt> {
-    try {
-      await this.assertContext(context);
-      const bucket = await this.getBucket(externalId);
-      if (!bucket) return { success: true, message: `Google Cloud Storage bucket "${externalId}" is already absent` };
-      if (bucket.labels?.[ENVIRONMENT_LABEL] !== environment.id) {
-        throw new Error(`Google Cloud Storage bucket ${externalId} is not owned by this Hypervibe environment.`);
-      }
-      const transfer = await this.openObjectTransfer(environment, context, externalId);
-      try {
-        for (const object of await transfer.list()) {
-          const response = await this.authorized(
-            `${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}/o/${encodeURIComponent(object.key)}`,
-            { method: 'DELETE' }
-          );
-          if (!response.ok && response.status !== 404) throw await responseError(response);
-        }
-      } finally {
-        transfer.destroy();
-      }
-      const response = await this.authorized(`${STORAGE_API}/storage/v1/b/${encodeURIComponent(externalId)}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 404) throw await responseError(response);
-      if (await this.getBucket(externalId)) throw new Error(`Google Cloud Storage bucket ${externalId} deletion is not yet observable.`);
-      return { success: true, message: `Deleted Google Cloud Storage bucket "${externalId}" and all objects` };
-    } catch (error) {
-      return { success: false, message: `Failed to delete Google Cloud Storage bucket "${externalId}"`, error: errorMessage(error) };
-    }
+    return new GcsObjectClient(externalId, this.request, () => this.accessToken(), this.mediaRequest);
   }
 
   private connectedCredentials(): GcsStorageCredentials {
@@ -597,6 +597,8 @@ providerRegistry.register({
     credentialsSchema: GcsStorageCredentialsSchema,
     setupHelpUrl: 'https://cloud.google.com/iam/docs/keys-create-delete',
     credentials: {
+      agentManagedKeys: ['runtimeServiceAccountEmail'],
+      automationSecretKeys: { GCP_SERVICE_ACCOUNT_JSON: 'credentials' },
       defaultScalarKey: 'credentials',
       supportsNativeCliAuth: true,
       environmentVariableAliases: [
@@ -604,9 +606,13 @@ providerRegistry.register({
       ],
     },
     connectionAliases: ['cloudrun'],
+    storageRuntimeContract: 'gcs-native-adc-v1',
     maturity: {
       lifecycle: {
-        storage: { status: 'ready-for-live' },
+        storage: {
+          status: 'planned',
+          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+        },
       },
     },
   },

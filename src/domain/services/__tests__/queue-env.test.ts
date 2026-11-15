@@ -9,7 +9,7 @@ function environmentSpec(overrides: Record<string, unknown> = {}) {
   });
 }
 
-const boundEnvironment = { platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' } };
+const boundEnvironment = { name: 'production', platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' } };
 
 describe('queueEnvVarSuffix', () => {
   it.each([
@@ -22,18 +22,25 @@ describe('queueEnvVarSuffix', () => {
 });
 
 describe('pubsubQueueResourceIds', () => {
-  it('derives deterministic ids from the bindings projectId', () => {
-    expect(pubsubQueueResourceIds(boundEnvironment, 'email-jobs')).toEqual({
-      topicId: 'gcp-project-email-jobs',
-      subscriptionId: 'gcp-project-email-jobs-sub',
-    });
+  it('keeps same-name queues isolated across environments inside one provider project', () => {
+    const production = pubsubQueueResourceIds(boundEnvironment, 'email-jobs');
+    const staging = pubsubQueueResourceIds({ ...boundEnvironment, name: 'staging' }, 'email-jobs');
+    expect(production.topicId).toMatch(/^email-jobs-[a-f0-9]{10}$/);
+    expect(staging.topicId).not.toBe(production.topicId);
+    expect(production.subscriptionId).toBe(production.topicId);
   });
 
-  it('falls back to the hypervibe prefix without an environment binding', () => {
-    expect(pubsubQueueResourceIds(null, 'email-jobs')).toEqual({
-      topicId: 'hypervibe-email-jobs',
-      subscriptionId: 'hypervibe-email-jobs-sub',
-    });
+  it('requires an environment scope instead of guessing one', () => {
+    expect(() => pubsubQueueResourceIds(null, 'email-jobs')).toThrow(/scope/i);
+  });
+
+  it('preserves exact legacy topic/subscription names and rejects partial bindings', () => {
+    const queue = { backend: 'pubsub', topicName: 'projects/gcp-project/topics/old-topic',
+      subscriptionName: 'projects/gcp-project/subscriptions/old-sub', providerScope: { projectId: 'gcp-project' } };
+    const env = { ...boundEnvironment, platformBindings: { ...boundEnvironment.platformBindings, queues: { 'email-jobs': queue } } };
+    expect(pubsubQueueResourceIds(env, 'email-jobs')).toEqual({ topicId: 'old-topic', subscriptionId: 'old-sub' });
+    expect(() => pubsubQueueResourceIds({ ...env, platformBindings: { ...env.platformBindings,
+      queues: { 'email-jobs': { ...queue, subscriptionName: undefined } } } }, 'email-jobs')).toThrow(/binding/i);
   });
 });
 
@@ -48,10 +55,10 @@ describe('buildQueueEnvVars', () => {
     expect(vars).toEqual({
       QUEUE_BACKEND: 'pubsub',
       QUEUE_NAMES: 'alerts,email-jobs',
-      QUEUE_TOPIC_ALERTS: 'projects/gcp-project/topics/gcp-project-alerts',
-      QUEUE_SUBSCRIPTION_ALERTS: 'projects/gcp-project/subscriptions/gcp-project-alerts-sub',
-      QUEUE_TOPIC_EMAIL_JOBS: 'projects/gcp-project/topics/gcp-project-email-jobs',
-      QUEUE_SUBSCRIPTION_EMAIL_JOBS: 'projects/gcp-project/subscriptions/gcp-project-email-jobs-sub',
+      QUEUE_TOPIC_ALERTS: expect.stringMatching(/^projects\/gcp-project\/topics\/alerts-[a-f0-9]{10}$/),
+      QUEUE_SUBSCRIPTION_ALERTS: expect.stringMatching(/^projects\/gcp-project\/subscriptions\/alerts-[a-f0-9]{10}$/),
+      QUEUE_TOPIC_EMAIL_JOBS: expect.stringMatching(/^projects\/gcp-project\/topics\/email-jobs-[a-f0-9]{10}$/),
+      QUEUE_SUBSCRIPTION_EMAIL_JOBS: expect.stringMatching(/^projects\/gcp-project\/subscriptions\/email-jobs-[a-f0-9]{10}$/),
     });
   });
 

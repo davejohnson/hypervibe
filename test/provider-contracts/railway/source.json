@@ -1,0 +1,11 @@
+{
+  "provider": "railway",
+  "apiVersion": "graphql/v2",
+  "sourceUrl": "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json",
+  "sourceRevision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+  "sourceSha256": "7fa2a58556676103cd6c64f68e0388d6d4561bf770b87d314a4df6d8f5289213",
+  "schemaFile": "schema.graphql",
+  "schemaSha256": "b92b23bc007616d49d3141dd26a1ffc74630dc6fd1e8edace13a43de2afaf76a",
+  "transformation": "Full official schema rendered as lexicographically sorted SDL with descriptions omitted; fields, arguments, types, defaults and deprecations retained.",
+  "serverRevisionPinned": false
+}

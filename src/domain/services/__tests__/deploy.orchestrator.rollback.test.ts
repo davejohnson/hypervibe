@@ -1,3 +1,5 @@
+import '../../../application/providers.js';
+import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
@@ -11,6 +13,26 @@ import type { IHostingAdapter } from '../../ports/hosting.port.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { ...fixtureHostingMetadata.orchestration, ci: {
+      ...fixtureHostingMetadata.orchestration!.ci!,
+      requiredSecrets: ['FIXTURE_CREDENTIALS', 'FIXTURE_PROJECT'],
+      secretCredentialKeys: { FIXTURE_CREDENTIALS: 'credentials', FIXTURE_PROJECT: 'projectId' },
+    } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
+
 describe('DeployOrchestrator local rollback', () => {
   let tempDir: string;
 
@@ -23,6 +45,25 @@ describe('DeployOrchestrator local rollback', () => {
   afterEach(() => {
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('retains an untriggered scheduled Job binding when a later workload fails', async () => {
+    const project = new ProjectRepository().create({ name: 'pending-cron', defaultPlatform: "fixture-hosting" });
+    const envRepo = new EnvironmentRepository();
+    const environment = envRepo.create({ projectId: project.id, name: 'staging', platformBindings: { provider: "fixture-hosting", projectId: 'gcp-project' } });
+    const serviceRepo = new ServiceRepository();
+    const cron = serviceRepo.create({ projectId: project.id, name: 'cron', buildConfig: { builder: 'dockerfile', workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 8 * * *' } });
+    const web = serviceRepo.create({ projectId: project.id, name: 'web', buildConfig: { builder: 'dockerfile' } });
+    const scheduleActivation = { version: 1, state: 'pending', jobName: 'cron-job', jobUid: 'owned-uid', holdingImage: `repo/holding@sha256:${'a'.repeat(64)}` };
+    const adapter = {
+      name: "fixture-hosting", capabilities: { supportsDeferredCronActivation: true },
+      deploy: vi.fn(async (service) => service.name === 'cron' ? {
+        serviceId: cron.id, externalId: 'cron-job', status: 'configured', receipt: { success: true, message: 'Prepared', data: { jobName: 'cron-job', resourceType: 'scheduledJob', resourceUid: 'owned-uid', scheduleActivation } },
+      } : { serviceId: web.id, status: 'failed', receipt: { success: false, message: 'Failure', error: 'later failure' } }),
+    } as unknown as IHostingAdapter;
+    const result = await new DeployOrchestrator().execute({ project, environment, services: [cron, web], adapter, ensureProject: false, deferProviderDeployment: true });
+    expect(result.success).toBe(false);
+    expect(envRepo.findById(environment.id)?.platformBindings).toMatchObject({ services: { cron: { serviceId: 'cron-job', jobName: 'cron-job', resourceUid: 'owned-uid', scheduleActivation } } });
   });
 
   it.each([
@@ -39,7 +80,7 @@ describe('DeployOrchestrator local rollback', () => {
       expectedRecoveryScope: undefined,
     },
     {
-      provider: 'cloudrun',
+      provider: "fixture-hosting",
       projectId: 'gcp-new-project',
       environmentId: 'us-central1',
       expectedScope: { scope: 'project' as const, projectId: 'gcp-new-project' },
@@ -230,7 +271,7 @@ describe('DeployOrchestrator local rollback', () => {
     const envRepo = new EnvironmentRepository();
     const serviceRepo = new ServiceRepository();
 
-    const project = projectRepo.create({ name: 'cloud-project', defaultPlatform: 'cloudrun' });
+    const project = projectRepo.create({ name: 'cloud-project', defaultPlatform: "fixture-hosting" });
     const environment = envRepo.create({
       projectId: project.id,
       name: 'production',
@@ -247,7 +288,7 @@ describe('DeployOrchestrator local rollback', () => {
     });
 
     const adapter: IHostingAdapter = {
-      name: 'cloudrun',
+      name: "fixture-hosting",
       capabilities: {
         supportedBuilders: ['dockerfile'],
         supportsAutoWiring: false,
@@ -313,7 +354,7 @@ describe('DeployOrchestrator local rollback', () => {
     expect(result.primaryUrl).toBe('https://web.example.run.app');
     const updated = envRepo.findById(environment.id);
     expect(updated?.platformBindings).toEqual({
-      provider: 'cloudrun',
+      provider: "fixture-hosting",
       projectId: 'gcp-project',
       environmentId: 'us-central1',
       providerScope: { projectId: 'real-gcp-project', region: 'us-central1' },
@@ -342,19 +383,19 @@ describe('DeployOrchestrator local rollback', () => {
     },
     {
       reason: 'canonical provider scope changes',
-      currentProvider: 'cloudrun',
+      currentProvider: "fixture-hosting",
       currentScope: { projectId: 'real-project', region: 'us-east1' },
       nextScope: { projectId: 'real-project', region: 'us-central1' },
     },
     {
       reason: 'canonical provider project changes',
-      currentProvider: 'cloudrun',
+      currentProvider: "fixture-hosting",
       currentScope: { projectId: 'old-project', region: 'us-central1' },
       nextScope: { projectId: 'new-project', region: 'us-central1' },
     },
     {
       reason: 'provider omits the previously bound scope',
-      currentProvider: 'cloudrun',
+      currentProvider: "fixture-hosting",
       currentScope: { projectId: 'real-project', region: 'us-central1' },
       nextScope: undefined,
     },
@@ -366,7 +407,7 @@ describe('DeployOrchestrator local rollback', () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
     const serviceRepo = new ServiceRepository();
-    const project = projectRepo.create({ name: 'same-logical-project', defaultPlatform: 'cloudrun' });
+    const project = projectRepo.create({ name: 'same-logical-project', defaultPlatform: "fixture-hosting" });
     const environment = envRepo.create({
       projectId: project.id,
       name: 'production',
@@ -385,7 +426,7 @@ describe('DeployOrchestrator local rollback', () => {
     });
     const deploy = vi.fn(async (_service, refreshedEnvironment: typeof environment) => {
       expect(refreshedEnvironment.platformBindings).toMatchObject({
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         projectId: 'shared-logical-project',
         ...(nextScope ? { providerScope: nextScope } : {}),
         services: {},
@@ -408,7 +449,7 @@ describe('DeployOrchestrator local rollback', () => {
       };
     });
     const adapter: IHostingAdapter = {
-      name: 'cloudrun',
+      name: "fixture-hosting",
       capabilities: {
         supportedBuilders: ['dockerfile'], supportsAutoWiring: false, supportsHealthChecks: true,
         supportsCronSchedule: true, supportsReleaseCommand: true, supportsMultiEnvironment: false,
@@ -436,7 +477,7 @@ describe('DeployOrchestrator local rollback', () => {
     expect(result.success).toBe(true);
     expect(deploy).toHaveBeenCalledOnce();
     expect(envRepo.findById(environment.id)?.platformBindings).toEqual({
-      provider: 'cloudrun',
+      provider: "fixture-hosting",
       projectId: 'shared-logical-project',
       ...(nextScope ? { providerScope: nextScope } : {}),
       services: {
@@ -462,21 +503,21 @@ describe('DeployOrchestrator local rollback', () => {
     const serviceRepo = new ServiceRepository();
     const oldScope = { projectId: 'gcp-project', region: 'us-east1' };
     const recovery = {
-      provider: 'cloudrun', operation: 'create' as const, resourceName: 'worker', providerScope: oldScope,
+      provider: "fixture-hosting", operation: 'create' as const, resourceName: 'worker', providerScope: oldScope,
       state: 'identified' as const, serviceId: 'old-worker', returnedName: 'worker',
     };
-    const project = projectRepo.create({ name: 'direct-recovery-transition', defaultPlatform: 'cloudrun' });
+    const project = projectRepo.create({ name: 'direct-recovery-transition', defaultPlatform: "fixture-hosting" });
     const environment = envRepo.create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun', projectId: 'logical-production', environmentId: 'us-east1',
+        provider: "fixture-hosting", projectId: 'logical-production', environmentId: 'us-east1',
         providerScope: oldScope, services: {}, serviceCreateRecovery: { worker: recovery },
       },
     });
     const service = serviceRepo.create({ projectId: project.id, name: 'web', buildConfig: { builder: 'dockerfile' } });
     const adapter: IHostingAdapter = {
-      name: 'cloudrun',
+      name: "fixture-hosting",
       capabilities: {
         supportedBuilders: ['dockerfile'], supportsAutoWiring: false, supportsHealthChecks: true,
         supportsCronSchedule: true, supportsReleaseCommand: true, supportsMultiEnvironment: false,

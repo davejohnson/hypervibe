@@ -28,6 +28,7 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
       privateOnly: true,
       supportsUsageObservation: true,
       supportsObjectTransfer: true,
+      recoveryCredentialScope: 'bucket',
     },
     runtimeEnvKeys: () => [...S3_STORAGE_RUNTIME_ENV_KEYS],
     connect: (credentials) => railway.connect(credentials),
@@ -58,16 +59,16 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
       const externalId = typeof receipt.data?.externalId === 'string' ? receipt.data.externalId : undefined;
       return { receipt, externalId, context };
     },
-    async observe(environment, context) {
+    async observe(environment, context, target) {
       const observed = await railway.observe(virtualEnvironment(environment, context));
-      return observed.storage ?? [];
+      return (observed.storage ?? []).filter(item => !target || item.externalId === target.externalId);
     },
     async getRuntimeEnv(environment, context, externalId, name) {
       const provider = typeof environment.platformBindings.provider === 'string'
         ? environment.platformBindings.provider
         : undefined;
-      if (provider === 'railway') return railwayStorageRuntimeEnv(name);
       const credentials = await railway.getStorageCredentials(virtualEnvironment(environment, context), externalId);
+      if (provider === 'railway') return railwayStorageRuntimeEnv(name, credentials.urlStyle);
       return s3StorageRuntimeEnv(credentials);
     },
     getCredentials: (environment, context, externalId) => railway.getStorageCredentials(virtualEnvironment(environment, context), externalId),

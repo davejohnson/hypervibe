@@ -9,6 +9,50 @@ afterEach(() => {
 });
 
 describe('Hypervibe cloud pairing client', () => {
+  it('sends the optional setup branch without changing the strict public response or approval URL contract', async () => {
+    // Synthetic response under the owner-approved request-only extension:
+    // existing servers/clients keep the same public create/exchange shapes.
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({
+      deviceCode: 'A'.repeat(43), expiresAt: '2026-10-04T12:10:00.000Z', intervalSeconds: 2,
+      repository: 'northstar/launchpad', userCode: '2345-6789', verificationUrl: 'https://hypervibe.dev/pair?code=2345-6789',
+    }));
+    const result = await createHypervibeCloudPairingClient({ fetchImpl }).start('northstar/launchpad', 'integration/security');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({ repositoryFullName: 'northstar/launchpad', sourceBranch: 'integration/security' });
+    expect(result).not.toHaveProperty('sourceBranch');
+    expect(result.verificationUrl).toBe('https://hypervibe.dev/pair?code=2345-6789');
+  });
+  it.each([
+    `https://hypervibe.dev/pair?code=2345-6789&echo=${'A'.repeat(43)}`,
+    `https://hypervibe.dev/pair?code=2345-6789&code=${'A'.repeat(43)}`,
+    `https://hypervibe.dev/pair?code=2345-6789#${'A'.repeat(43)}`,
+  ])('rejects unexpected approval URL components without exposing the private proof (%#)', async (verificationUrl) => {
+    // Pinned Hypercloud devicePairingService constructs /pair with one public
+    // code parameter. No private device proof belongs in the displayed URL.
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      deviceCode: 'A'.repeat(43), expiresAt: '2026-10-03T12:10:00.000Z',
+      intervalSeconds: 2, repository: 'northstar/launchpad', userCode: '2345-6789',
+      verificationUrl, purpose: 'credential-requests', environment: 'staging',
+    }), { status: 201 }));
+    await expect(createHypervibeCloudPairingClient({ fetchImpl,
+      grant: { purpose: 'credential-requests', environment: 'staging' },
+    }).start('northstar/launchpad')).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR', message: expect.not.stringContaining('A'.repeat(43)),
+    });
+  });
+
+  it('requests separate provider-connection authority without expanding reporting grants', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      deviceCode: 'A'.repeat(43), expiresAt: '2026-09-20T12:10:00.000Z',
+      intervalSeconds: 2, repository: 'northstar/launchpad', userCode: '2345-6789',
+      verificationUrl: 'https://hypervibe.dev/pair?code=2345-6789',
+      purpose: 'provider-connections',
+    }), { status: 201 }));
+    await createHypervibeCloudPairingClient({ fetchImpl, purpose: 'provider-connections' }).start('northstar/launchpad');
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string)).toEqual({
+      repositoryFullName: 'northstar/launchpad', purpose: 'provider-connections',
+    });
+  });
+
   it('uses the exact repository and accepts a bounded same-origin pairing response', async () => {
     const deviceCode = 'A'.repeat(43);
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({

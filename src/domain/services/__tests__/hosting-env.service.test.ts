@@ -23,6 +23,14 @@ import {
 } from '../hosting-env.service.js';
 
 describe('hosting env var tools', () => {
+  it('blocks reserved credentials before resolving a hosting adapter', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
+    const lookup = vi.spyOn(adapterFactory, 'getProviderAdapter');
+    const result = await syncHostingEnvVars({ project, environment, service, vars: { APP_NAME: 'app', HYPERVIBE_CUSTOM_SECRET: 'private-value' } });
+    expect(result.success).toBe(false);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private-value');
+  });
   let tempDir: string;
 
   beforeEach(() => {
@@ -168,7 +176,7 @@ describe('hosting env var tools', () => {
     'user.email.update',
   ];
 
-  it('SendGrid setup syncs the API key through the Cloud Run hosting adapter when setup-ready', async () => {
+  it('writes an explicitly supplied SendGrid environment value through the Cloud Run hosting adapter', async () => {
     const { project, environment, service } = await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
@@ -324,6 +332,23 @@ describe('hosting env var tools', () => {
     expect(payload.canManageDomainAuthentication).toBe(false);
   });
 
+  it.each([false, true])('SendGrid setup diagnostics keep sending permissions separate (webhook required: %s)', async requireWebhook => {
+    const { project } = await setupCloudRunProject();
+    // Twilio documents domain-authentication scopes independently of mail.send.
+    stubSendGridScopes(['whitelabel.read', 'whitelabel.create', 'whitelabel.update']);
+
+    const sg = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in sg) throw new Error(sg.error);
+    const permissions = assessSendGridScopes(await sg.adapter.getScopes());
+    const payload = sendGridPermissionPayload(permissions, requireWebhook);
+
+    expect(payload).toMatchObject({ setupReady: !requireWebhook, hasMailSend: false });
+    expect(payload.missingScopes).toEqual(requireWebhook
+      ? { eventWebhook: ['user.webhooks.event.settings.read', 'user.webhooks.event.settings.update'] }
+      : {});
+    expect(payload.requiredScopes).not.toHaveProperty('mailSend');
+  });
+
   it('syncHostingEnvVars writes vars through the Cloud Run hosting adapter', async () => {
     await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
@@ -391,5 +416,11 @@ describe('hosting env var tools', () => {
       provider: 'cloudrun',
       error: 'The exact service binding is incomplete',
     });
+  });
+  it('retains unresolved provider references as present keys without inventing a value', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
+    const { adapter } = stubCloudRunHostingAdapter();
+    vi.spyOn(adapter, 'readProviderEnvironmentVariables').mockResolvedValue({ success: true, variables: { PUBLIC_VALUE: 'visible' }, unresolvedKeys: ['API_KEY'] });
+    expect(await readHostingEnvVars({ project, environment, service })).toMatchObject({ success: true, variables: { PUBLIC_VALUE: 'visible' }, unresolvedKeys: ['API_KEY'] });
   });
 });

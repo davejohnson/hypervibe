@@ -1,3 +1,4 @@
+import type { DatabaseCheckpointSource } from './database-checkpoint.port.js';
 import { createHash } from 'crypto';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Component } from '../entities/component.entity.js';
@@ -14,6 +15,8 @@ import type { Component } from '../entities/component.entity.js';
 export interface ObservedService {
   name: string;
   externalId: string;
+  /** Provider-observed immutable lifetime identity when the native name can be reused. */
+  resourceUid?: string;
   workloadKind: 'web' | 'worker' | 'cron';
   url?: string;
   customDomains: string[];
@@ -59,8 +62,16 @@ export interface ObservedService {
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */
   envVarHashes: Record<string, string>;
+  /** Whether configured values were fully resolved by the provider. */
+  envVarState?: 'resolved' | 'unknown';
+  /** Recorded write metadata cannot prove the provider's current value. */
+  envVarEvidence?: 'provider-value' | 'recorded-update';
   /** 'empty' = the service exists but has never deployed (no source/code). */
   status: 'running' | 'failed' | 'empty' | 'unknown';
+  /** Provider confirms an owned namespace exists but its workload does not yet exist. */
+  identityOnly?: boolean;
+  /** Exact bound workload and trigger state observed; final activation receipt is still pending. */
+  scheduleActivationPending?: boolean;
   /**
    * Provider-native identity of the deployment or revision currently selected
    * for this service. This is used to prove that runtime configuration changes
@@ -70,6 +81,18 @@ export interface ObservedService {
     id: string;
     status?: string;
     createdAt?: string;
+    /** Exact provider-observed active deployment identities. Omitted means unknown;
+     * a new successful deployment does not prove older instances stopped. */
+    activeDeploymentIds?: string[];
+    /** Traffic coverage does not prove in-flight requests or processes stopped. */
+    activeDeploymentCoverage?: 'traffic' | 'instances';
+    /** Private comparison inputs from this exact deployment snapshot, never from
+     * the service's current configured values. Public projections must omit them. */
+    envVarHashes?: Record<string, string>;
+    /** Unresolved references, omitted reads, and unsupported snapshot semantics stay unknown. */
+    configurationState?: 'resolved' | 'unknown';
+    configurationEvidence?: 'deployment-snapshot' | 'runtime-instances';
+    configurationInstanceIds?: string[];
   };
   /** Provider-confirmed execution state used by environment maintenance. */
   maintenance?: {
@@ -91,6 +114,8 @@ export interface ObservedMaintenanceEdge {
   routeId?: string;
   scriptName?: string;
   contentHash?: string;
+  origin?: string;
+  targetFingerprint?: string;
   reason?: string;
 }
 
@@ -98,6 +123,8 @@ export interface ObservedMaintenanceWorkload {
   state: 'running' | 'suspended' | 'unknown';
   serviceId: string;
   workloadKind: string;
+  /** Prior trigger/scaling state may differ from currently draining execution state. */
+  wasRunning?: boolean;
   deploymentId?: string;
   deploymentStatus?: string;
   numReplicas?: number;
@@ -108,18 +135,49 @@ export interface ObservedMaintenanceWorkload {
 }
 
 export interface ObservedMaintenanceDatabase {
-  state: 'fenced' | 'unfenced' | 'not-applicable' | 'unknown';
+  state: 'fenced' | 'unfenced' | 'not-applicable' | 'unmanaged' | 'unknown';
   componentId?: string;
   externalId?: string;
   reason?: string;
 }
 
 export interface EnvironmentMaintenanceObservation {
+  mode?: 'application' | 'data';
+  page?: 'active' | 'off' | 'unknown';
+  routing?: { state: 'ready' | 'unknown'; target?: { origin: string; targetFingerprint: string }; reason?: string };
   state: 'active' | 'inactive' | 'partial' | 'unknown';
-  stage: 'edge' | 'workloads' | 'database' | 'verified' | 'exit' | 'unknown';
+  stage: 'edge' | 'workloads' | 'database' | 'routing' | 'verified' | 'exit' | 'unknown';
   edge: ObservedMaintenanceEdge;
   workloads: Record<string, ObservedMaintenanceWorkload>;
   database: ObservedMaintenanceDatabase;
+}
+
+export type CredentialAlignmentComparison =
+  | { result: 'match' | 'mismatch' }
+  | { result: 'unknown'; reason: 'missing' | 'malformed' | 'unresolved_reference' | 'read_failed' | 'scope_unverified' | 'unsupported_url_options' };
+
+/** Configuration equality only; neither database authentication nor deployed runtime evidence. */
+export interface DatabaseCredentialAlignment {
+  basis: 'configured-variable-values';
+  authentication: 'unverified';
+  rawReferences: 'unchecked';
+  deployedConfiguration: 'unchecked';
+  applicationOperation: 'unchecked';
+  issuer: {
+    comparisons: Array<{
+      source: string;
+      against: string;
+      comparison: CredentialAlignmentComparison;
+    }>;
+  };
+  consumers: Array<{
+    name: string;
+    externalId: string;
+    source: string;
+    issuerSource: string;
+    credentialComparison: CredentialAlignmentComparison;
+    target: CredentialAlignmentComparison;
+  }>;
 }
 
 export interface ObservedDatabase {
@@ -130,7 +188,26 @@ export interface ObservedDatabase {
   providerScope?: Record<string, string>;
   name?: string;
   status: 'running' | 'stopped' | 'provisioning' | 'error' | 'unknown';
+  /** Provider configuration evidence only; not a restart, database I/O or restore test.
+   * Adapters for service-backed databases must distinguish a data volume from
+   * a healthy process. Native managed databases may rely on their separately
+   * reviewed persistent-storage contract instead of inventing volume evidence. */
+  persistence?: {
+    state: 'configured' | 'missing' | 'unknown';
+    reason?: string;
+    /** Value-free fingerprint of the exact storage/configuration observed. */
+    configurationFingerprint?: string;
+  };
+  /** A missing local issuer-key selection requires reviewed metadata repair. */
+  runtimeReferenceBinding?: {
+    state: 'configured' | 'missing' | 'unknown';
+    evidenceFingerprint?: string;
+    reason?: string;
+  };
+  /** Value-free comparisons; never raw credentials, connection URLs or credential hashes. */
+  credentialAlignment?: DatabaseCredentialAlignment;
   resilience?: {
+    checkpointSource?: DatabaseCheckpointSource;
     availability?: 'zonal' | 'regional' | 'unknown';
     backupPolicy?: {
       enabled: boolean;
@@ -182,6 +259,7 @@ export interface ObservedStorage {
 }
 
 export interface ObservedState {
+  serviceVolumes?: Record<string, import('./service-volume.port.js').ObservedServiceVolume>;
   provider: string;
   observedAt: string;
   projectExists: boolean;
@@ -196,6 +274,8 @@ export interface ObservedState {
     project?: 'complete' | 'unknown';
     environment?: 'complete' | 'unknown';
     services?: 'complete' | 'unknown';
+    /** Exact workload identities can be complete while write-only values remain unknown. */
+    serviceIdentities?: 'complete' | 'unknown';
     databases?: 'complete' | 'unknown';
     caches?: 'complete' | 'unknown';
     storage?: 'complete' | 'unknown';
@@ -215,7 +295,14 @@ export interface ObservedState {
 }
 
 export interface IObservableHosting {
-  observe(environment: Environment): Promise<ObservedState>;
+  observe(environment: Environment, context?: HostingObservationContext): Promise<ObservedState>;
+}
+
+/** Value-free declared consumer names; these do not prove live configuration. */
+export interface HostingObservationContext {
+  databaseEnvAliases?: Record<string, Record<string, 'DATABASE_URL' | 'DIRECT_URL'>>;
+  /** Names only, extracted from retained encrypted rollout expectations. */
+  runtimeConfigurationKeys?: Record<string, string[]>;
 }
 
 export interface IObservableDatabase {

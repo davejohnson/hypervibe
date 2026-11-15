@@ -1,0 +1,272 @@
+# GCP engine implementation notes
+
+Google Cloud uses OpenTofu as its only infrastructure engine. Cloud Run selects
+it automatically; `hosting.engine` is not a user choice. Default planning routes
+to the engine and unsupported work blocks without a legacy fallback.
+
+This page records engine ownership, implementation decisions and dated evidence.
+Product scope and future priorities belong to the
+[common user journey](development/user-journey.md). It is not a complete support
+claim or a separate roadmap.
+
+The dated live evidence below describes earlier revisions. It does not establish
+that the current cutover has been deployed live. Verification for a later change
+belongs in that change's pull request; the historical results remain bounded to
+the runs described here.
+
+## Existing-zone DNS engine
+
+DNS records now use the same saved-plan boundary with pinned Cloudflare, Google
+Cloud DNS, Route 53 and Azure DNS backends. `environment.dns` selects the provider
+and exact existing zone independently of hosting. Hypervibe retains read-only
+scope/ownership checks, explicit adoption, consumer ordering and certificate
+readiness; OpenTofu owns record changes and encrypted native state. Domain,
+Pages and email workflows do not invoke the historical direct record writers.
+
+The [DNS setup examples](domain-security-readiness.md#explicit-dns-intent) include
+a Pages-only canonical environment without a hosting domain. Zone creation,
+DNSSEC/registrar changes and automatic CAA security policy mutations remain
+unavailable. All four pinned provider configurations and local boundaries are
+checked in ordinary CI, but their installed live lifecycle is unverified. The
+dated domain evidence below predates this DNS engine and does not validate it.
+
+## Decision
+
+OpenTofu and the pinned Google provider own GCP infrastructure lifecycle, while Hypervibe keeps the product:
+deciding what to build, the spec, approvals, secret ownership, redaction,
+builds/releases, data operations and operation history. Users keep using
+`hv_spec` → `hv_plan` → `hv_apply` → verification and never see OpenTofu.
+
+The engine is shared and cloud-neutral. Each cloud supplies a backend with its own
+configuration, authentication, resource identities and deployment behavior.
+
+## Ownership map
+
+| Responsibility | Owner |
+| --- | --- |
+| Understand the app, choose infrastructure, desired spec | Hypervibe |
+| Explain changes and collect approval | Hypervibe |
+| Calculate resource changes for migrated GCP resources | OpenTofu + Google provider |
+| Execute those reviewed changes (the exact saved plan) | OpenTofu |
+| Provider resource state | OpenTofu (encrypted, Hypervibe-held key) |
+| Secret ownership, generation, rotation, redaction | Hypervibe |
+| Builds, releases, logs, DB queries, migrations, recovery, health | Hypervibe (retained adapters) |
+| Project identity, bindings, approval records, history | Hypervibe |
+
+## Implementation
+
+The evidence column records the original engine work; it is not a fresh run of
+every listed component on the current revision.
+
+| Piece | File | Evidence |
+| --- | --- | --- |
+| Cloud-neutral engine contract | `src/domain/ports/infrastructure-engine.port.ts` | Type-checked; nothing Google-specific |
+| Process runner (no inherited env, timeout, SIGINT cancel, exact-value + pattern redaction, version pin check) | `src/adapters/engine/opentofu/runner.ts` | Live tests |
+| Private durable state, per-state key in Hypervibe's secret store, enforced state **and** plan encryption, generated lock file, pre-apply backups, refusal to mint a new key for existing state | `src/adapters/engine/opentofu/workspace.ts` | Live tests |
+| Saved plan → Hypervibe actions; unmapped addresses and `forget` block the plan; replace/delete require confirmation; apply events → per-address outcome | `src/adapters/engine/opentofu/plan-mapping.ts` | Unit + live tests |
+| Plan/apply of the exact reviewed artifact (plan digest, config digest, engine + provider versions, full-approval check) | `src/adapters/engine/opentofu/engine.ts` | Live tests |
+| Executor **engine segment**: one saved plan runs once; each action gets its own receipt; members report real outcomes even after an earlier failure; external prerequisites must complete first | `src/domain/plan/converge.executor.ts` | `engine-segment.executor.test.ts` |
+| GCP backend: Cloud Run v2 service + public invoker, Secret Manager *references*, digest-pinned images, narrow image ownership, pinned Google provider 8.9.0 | `src/adapters/providers/gcp/tofu/gcp-engine.backend.ts` | Validated by the real provider |
+
+Pinned: OpenTofu **1.13.9**, `hashicorp/google` **8.9.0**, with archive checksums
+(darwin/linux × arm64/amd64) and lock hashes recorded in source. `tofu init` runs
+with `-lockfile=readonly`, so an unexpected package fails closed.
+
+### Live evidence (2026-11-05)
+
+`HYPERVIBE_TOFU_BINARY=<tofu 1.13.9> npx vitest run src/adapters/engine` ran the
+real binary (no cloud account needed except the provider download):
+
+- Generated Cloud Run configuration validates against the pinned Google provider.
+- Create → apply → second plan is noop with no engine segment.
+- Re-applying the consumed saved plan is rejected by OpenTofu as stale.
+- A tampered plan file, or approval of only part of a saved plan, is refused before start.
+- With three resources where one fails, receipts are `succeeded`/`failed` per address.
+- A representative secret passed as a sensitive input never appears in the saved
+  plan, the state file or diagnostics; the state file contains no plaintext at all.
+- Removing the key for existing state blocks instead of creating a new key.
+
+Read-only auth probe through the saved `cloudrun` connection for
+`davejohnson/hls-property-care`: OpenTofu authenticated as
+`hypervibe-deploy@hls-property-care.iam.gserviceaccount.com` and read project
+`hls-property-care`. Data sources only; no state written, nothing changed.
+
+At this initial probe, real GCP resource mutations were not yet proven. The later
+live journey below records create, update and delete results from the same date.
+
+## Decisions made while building
+
+- **Encryption config via `TF_ENCRYPTION`** (HCL), never a file, so the passphrase
+  exists only in the engine process environment and is redacted from output.
+  OpenTofu needs static references here; the JSON form with `${...}` is rejected.
+- **Lock hashes must include `h1:`** entries, not only the upstream `zh:` archive
+  checksums, or validation fails after init. The recorded list came from
+  `tofu providers lock` for the four supported platforms.
+- **Partial engine applies are refused.** Approval must cover every address in the
+  saved plan. A smaller change set needs a new reviewable plan.
+- **Only an `apply_complete` event proves success.** Started-but-unfinished work is
+  `unknown` → a `pending` receipt that tells the agent to observe before retrying.
+  There is no automatic fallback to direct API writes.
+- **`deletion_protection = false`** on engine-managed services: Hypervibe's
+  confirmation gate governs deletion; provider-side protection would only break an
+  approved teardown.
+
+## Release ownership with CI (Cloud Run)
+
+The engine ignores only `template[0].containers[0].image` plus the `client` and
+`client_version` markers. Every other template field stays engine-managed, so an
+infrastructure apply keeps whatever image is running instead of rolling it back.
+Google provider ≥ 5 treats `labels`/`annotations` as non-authoritative, so the
+release annotations CI writes are not reverted.
+
+The current engine CI writer is
+[`infrastructure-engine-ci.ts`](../src/application/infrastructure-engine-ci.ts).
+It preserves the read container configuration, changes the image and includes the
+service `etag` in its PATCH; workflow coverage is in
+[`engine-ci-workflow.test.ts`](../src/application/__tests__/engine-ci-workflow.test.ts).
+The release boundary still requires image/release-metadata changes only and an
+`etag` on every write. The November 5–6 live runs below did not exercise CI
+releases, so they do not verify this later implementation or concurrent
+release/apply behavior live.
+
+## Runtime secrets
+
+OpenTofu owns secret containers. Hypervibe keeps credential generation, private
+value storage and version publication inside its operational secret boundary.
+Raw credential values do not belong in public plans or generated configuration.
+Cloud Run receives Secret Manager references.
+
+## Cross-cloud boundaries
+
+Shared: runner, saved-plan handling, encryption, state layout, approvals, engine
+segments and receipts. Per cloud: configuration, authentication, resource mapping.
+
+- AWS and Azure must never need a Google account or GCS bucket for state. Local
+  state is keyed by `provider/project/environment/partition`. A future shared
+  backend is chosen per cloud (S3 for AWS, Blob for Azure, GCS for GCP).
+- Secret Manager references stay inside the GCP backend.
+- The Cloud Run CI image split is a GCP decision, not a model every cloud must use.
+- AWS decisions (access, runtimes, database network): [OpenTofu engine on AWS](opentofu-engine-aws.md).
+- Azure decisions (access, shared testing resources, runtimes, costs, teardown): [OpenTofu engine on Azure](opentofu-engine-azure.md).
+
+## User interaction
+
+The [common user journey](development/user-journey.md) owns the product contract
+for all three clouds. Project creation, API enablement, IAM, deployment identities,
+storage, secrets, deployment and verification belong to Hypervibe. Payment
+verification and organization admin consent may still need a person. The GCP
+implementation notes below do not establish that every step of that contract is
+available or verified.
+
+## GCP ownership
+
+Project bootstrap and preparation use a separate project-shared OpenTofu state
+for project/billing setup, APIs, identities, IAM, private build storage, image
+repositories and keyless CI trust. Billing choice does not approve these changes;
+the saved setup plan has its own confirmation.
+
+Environment resources use environment-owned engine state. Operational helpers
+verify prerequisites and stop if they are absent or unknown. Builds do not
+create repositories; one-off tasks do not create runner infrastructure. Preserve
+sign-in, credential values, image builds/releases, logs, health, SQL and object
+transfer operations. Existing Railway infrastructure continues through its
+retained lifecycle.
+
+## Flow exercised by the early GCP implementation
+
+1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun" }`.
+2. `hv_connections action="bootstrap"`: preview, choose a billing account, confirm.
+   Hypervibe creates the project, deployment and runtime identities and connections.
+3. `hv_plan scope="infrastructure"` → `hv_apply` (with confirmations for billable or
+   destructive actions). Hypervibe generates its secrets into Secret Manager;
+   OpenTofu creates the services from a placeholder image (`cloudrun/container/hello`, pinned).
+4. `hv_deploy` builds from the git remote and releases it: a recorded plan run under
+   the environment lock that changes only the running image (etag-guarded), then
+   checks the health path.
+5. Teardown: remove services and secrets from the spec, plan, apply with confirmations.
+
+The pinned OpenTofu binary is downloaded and checksum-verified on first use into
+`~/.hypervibe/engine/bin`; providers are cached in `~/.hypervibe/engine/plugins`.
+
+## Live journey (2026-11-05)
+
+Fresh repository `davejohnson/hypervibe-engine-pilot`, fresh project
+`hv-hypervibe-engine--eb0c996d`, separate Hypervibe data directory:
+
+| Step | Result |
+| --- | --- |
+| Connect (bootstrap preview → billing choice → confirm) | Project, identities, verified connections |
+| Plan/apply infrastructure | Secret generated + stored; service and public access created (per-address receipts) |
+| Release v1 | Built as the deployment identity; image-only change; `/health` 200 with secret present |
+| Release newer code (b2) | New digest running |
+| Change config (`APP_VERSION` v1→v2) via OpenTofu | In-place template update; **b2 digest still running** |
+| Plan with no changes | 0 actions |
+| Plan → release b3 → apply old plan | **Refused** ("A service changed since this plan"); b3 kept |
+| Unconfirmed teardown | Refused before any change |
+| Confirmed teardown | Service then secret deleted; URL 404; next plan empty |
+
+Not exercised in this November 5 run: CI releases (then blocked for engine
+environments), concurrent multi-machine execution, Cloud SQL or domains. CI is
+now implemented as described above; database and domain evidence follows below.
+
+## Problems found and fixed along the way
+
+- **New-project setup failed at step one.** Resource Manager answers 403 for a project
+  id that does not exist; bootstrap treated that as an error. It now confirms with a
+  project search and treats an invisible id as not yet created (creation is atomic on a
+  globally unique id, so nothing foreign can be adopted).
+- **Billing failures were opaque** ("HTTP 400"). Recognized Google conditions (billing
+  account at its project limit, project quota, missing billing permission) now produce
+  plain-language next steps.
+- **Builds failed in new projects.** New projects build as the Compute Engine default
+  account (Editor). Hypervibe never acts as it: setup now lets the deployment identity
+  act as itself and write build logs, and builds fall back to running as that identity.
+  This also affects the standard (non-engine) Cloud Run path.
+- Pattern redaction could silently corrupt OpenTofu JSON; machine-readable output now
+  uses exact-value redaction only, and every diagnostic gets the full scrub.
+- An environment with no services generated invalid configuration, and deletions of
+  removed services were flagged as unmanaged; both fixed for teardown.
+- A saved plan could have rolled back a release made after it; applies now refuse when a
+  service's generation changed since planning, and releases share the apply lock.
+
+## Database, domain, storage, launch (2026-11-06)
+
+| Capability | Ownership | Live evidence |
+| --- | --- | --- |
+| Cloud SQL Postgres | OpenTofu: instance (backups + PITR), database. Hypervibe: login, generated password, `DATABASE_URL` secret | Created; login set; service wired in round 2; app writes/reads rows; later config apply kept login, data and image |
+| Custom domain | Hypervibe: ownership proof (TXT + Site Verification API), DNS-only records, certificate wait. OpenTofu: Cloud Run domain mapping | `pilot.hypervibe.dev` verified and mapped with no Search Console step; certificate was still issuing when last checked |
+| Cloud Storage | OpenTofu: private bucket, object access for the runtime identity | Validated and planned; not yet created live (see below) |
+| Local-commit builds | Hypervibe: `git archive` of HEAD → private expiring bucket → Cloud Build as the deployment identity | An unpushed local commit was built and released |
+| `hv_launch` | Orchestrates everything above | Stops at the cost/approval step with plain-language changes and estimates; the confirmed run was not executed (DNS for a new hostname needs owner approval) |
+| Browser sign-in | Loopback OAuth + PKCE when no local Google login exists | Unit-tested; needs Hypervibe's registered Google OAuth client to run live |
+
+Design notes:
+
+- The database password never enters OpenTofu, so no engine apply can restore an old
+  one. First deployments take two rounds (database, then wiring once the login exists);
+  `hv_launch` runs both.
+- The Google provider treats a pending certificate as success for domain mappings but
+  fails when ownership is unverified, so verification and DNS precede the mapping.
+- Hypervibe never overwrites DNS records it did not create and removes only the exact
+  Google targets it wrote.
+
+## Evidence boundaries and later implementation
+
+The November 5–6 evidence leaves browser sign-in, a confirmed from-scratch
+`hv_launch` with database, storage and a ready custom domain, and concurrent
+multi-machine execution unverified. The November 6 domain certificate was still
+issuing; storage was planned but not created. Those limits remain part of the
+historical record, not claims about every later revision.
+
+CI releases, scheduled jobs, Memorystore and Pub/Sub are now implemented in
+[`infrastructure-engine-ci.ts`](../src/application/infrastructure-engine-ci.ts) and
+[`gcp-engine.backend.ts`](../src/adapters/providers/gcp/tofu/gcp-engine.backend.ts).
+Their presence in source does not extend the live evidence above. The current DNS
+engine also needs its own installed lifecycle evidence, as noted near the top.
+
+The original follow-ups included Google OAuth client registration, database
+password rotation without downtime, import, shared state across machines, retained
+project/image cleanup and shorter connection guidance. This page does not certify
+their current completion status or set their priority. Use the
+[common user journey](development/user-journey.md) to decide scope, and record new
+implementation and live evidence against the exact affected step.

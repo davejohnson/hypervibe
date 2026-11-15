@@ -1,7 +1,15 @@
 import { z } from 'zod';
+import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { readSendGridEmailLogs, SendGridLogsError, type SendGridEmailLogsInput } from './sendgrid-email-logs.js';
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3';
+
+export interface SendGridSenderIdentityEvidence {
+  status: 'verified-domain' | 'verified-sender' | 'unverified' | 'unknown';
+  automaticSecurity?: boolean;
+  dns?: unknown;
+}
 
 export interface SendGridDomainAuthentication {
   id: number;
@@ -40,6 +48,8 @@ export interface SendGridValidationResult {
 }
 
 export interface SendGridEventWebhookSettings {
+  id?: string;
+  public_key?: string;
   enabled: boolean;
   url: string;
   group_resubscribe: boolean;
@@ -55,11 +65,57 @@ export interface SendGridEventWebhookSettings {
   dropped: boolean;
 }
 
+/** Internal provider evidence; never return public keys through a command result. */
+export interface SendGridInboundParseWebhook {
+  hostname: string;
+  url: string;
+  spam_check: boolean;
+  send_raw: boolean;
+  /** Omission is unknown association evidence, not confirmation of no policy. */
+  security_policy?: string;
+}
+
+export interface SendGridInboundSecurityPolicy {
+  id: string;
+  name: string;
+  publicKey: string;
+  hasOAuth: boolean;
+}
+
+const sendGridPolicyId = z.string().regex(/^[a-zA-Z0-9_-]+$/);
+const sendGridParseHostname = z.string().max(253).regex(/^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/);
+const sendGridParseSettings = z.object({
+  hostname: sendGridParseHostname,
+  url: z.string().url(),
+  spam_check: z.boolean(),
+  send_raw: z.boolean(),
+  security_policy: sendGridPolicyId.optional(),
+});
+
+function readInboundSecurityPolicy(value: unknown): SendGridInboundSecurityPolicy {
+  const data = z.object({
+    id: sendGridPolicyId,
+    name: z.string().min(1),
+    signature: z.object({ public_key: z.string().min(1).max(2048) }),
+    oauth: z.object({ client_id: z.string().min(1), token_url: z.string().url(), scopes: z.array(z.string()).optional() }).optional(),
+  }).parse(value);
+  const publicKey = data.signature.public_key;
+  const bytes = Buffer.from(publicKey, 'base64');
+  if (bytes.toString('base64') !== publicKey) throw new Error();
+  const key = createPublicKey({ key: bytes, format: 'der', type: 'spki' });
+  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+    || !key.export({ format: 'der', type: 'spki' }).equals(bytes)) throw new Error();
+  // OAuth configuration may contain provider echoes. Only the presence bit crosses this boundary.
+  return { id: data.id, name: data.name, publicKey, hasOAuth: data.oauth !== undefined };
+}
+
 export const SENDGRID_SCOPE_REQUIREMENTS = {
   mailSend: ['mail.send'],
   domainAuthentication: ['whitelabel.read', 'whitelabel.create', 'whitelabel.update'],
   senderVerification: ['user.email.read', 'user.email.create', 'user.email.update'],
   eventWebhook: ['user.webhooks.event.settings.read', 'user.webhooks.event.settings.update'],
+  inboundParseRead: ['user.webhooks.parse.settings.read'],
+  inboundParseUpdate: ['user.webhooks.parse.settings.read', 'user.webhooks.parse.settings.update'],
   inboundParse: [
     'user.webhooks.parse.settings.read',
     'user.webhooks.parse.settings.create',
@@ -138,7 +194,7 @@ function hasSendGridScope(scopeSet: Set<string>, requiredScope: string): boolean
   return false;
 }
 
-function missingSendGridScopes(scopes: string[], requiredScopes: readonly string[]): string[] {
+export function missingSendGridScopes(scopes: string[], requiredScopes: readonly string[]): string[] {
   const scopeSet = new Set(scopes);
   return requiredScopes.filter((scope) => !hasSendGridScope(scopeSet, scope));
 }
@@ -150,6 +206,8 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
     senderVerification: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.senderVerification),
     eventWebhook: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.eventWebhook),
     inboundParse: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParse),
+    inboundParseRead: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParseRead),
+    inboundParseUpdate: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParseUpdate),
   };
 
   const hasMailSend = missingScopes.mailSend.length === 0;
@@ -157,7 +215,7 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
   const canManageSenderVerification = missingScopes.senderVerification.length === 0;
   const canConfigureEventWebhook = missingScopes.eventWebhook.length === 0;
   const canConfigureInboundParse = missingScopes.inboundParse.length === 0;
-  const setupReady = hasMailSend && (canManageDomainAuthentication || canManageSenderVerification);
+  const setupReady = canManageDomainAuthentication || canManageSenderVerification;
 
   return {
     scopes,
@@ -170,16 +228,13 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
     missingScopes,
     requiredAuthorizationPaths: ['domainAuthentication', 'senderVerification'],
     recommendation: setupReady
-      ? 'The SendGrid API key can send mail and authorize sender identities through at least one supported setup path.'
-      : 'Create a SendGrid API key with Mail Send plus either Domain Authentication permissions (whitelabel.read, whitelabel.create, whitelabel.update) or Sender Identity permissions (user.email.read, user.email.create, user.email.update). Full Access is acceptable for setup, then rotate to a narrower runtime key after sender/domain authorization is complete.',
+      ? 'The SendGrid management key can authorize sender identities through at least one supported setup path. Supply a separate application sending key as a delegated runtime secret.'
+      : 'Create a separate SendGrid management key with either Domain Authentication permissions (whitelabel.read, whitelabel.create, whitelabel.update) or Sender Identity permissions (user.email.read, user.email.create, user.email.update). Setup does not require mail.send. Keep the application sending-only key separate.',
   };
 }
 
 function missingSetupScopeSummary(permissions: SendGridPermissionAudit): string {
   const missing: Array<[string, string[]]> = [];
-  if (!permissions.hasMailSend) {
-    missing.push(['mailSend', permissions.missingScopes.mailSend]);
-  }
   if (!permissions.canManageDomainAuthentication && !permissions.canManageSenderVerification) {
     missing.push(['domainAuthentication', permissions.missingScopes.domainAuthentication]);
     missing.push(['senderVerification', permissions.missingScopes.senderVerification]);
@@ -197,6 +252,11 @@ export class SendGridAdapter {
 
   connect(credentials: unknown): void {
     this.credentials = credentials as SendGridCredentials;
+  }
+
+  async readEmailLogs(input: SendGridEmailLogsInput) {
+    if (!this.credentials?.apiKey) throw new SendGridLogsError('access_denied');
+    return readSendGridEmailLogs(this.credentials.apiKey, input);
   }
 
   private async request<T>(
@@ -365,6 +425,62 @@ export class SendGridAdapter {
     return result.results;
   }
 
+  /** Read-only authorization evidence for the exact account used to send mail. */
+  async checkSenderIdentities(addresses: string[]): Promise<Array<'verified-domain' | 'verified-sender' | 'unverified' | 'unknown'>> {
+    return (await this.inspectSenderIdentities(addresses)).map(item => item.status);
+  }
+
+  async inspectSenderIdentities(addresses: string[]): Promise<SendGridSenderIdentityEvidence[]> {
+    const domains = async () => {
+      const items: Array<{ domain: string; valid: boolean; automatic_security?: boolean; dns?: unknown }> = [];
+      const ids = new Set<number>();
+      for (let offset = 0; offset <= 3000; offset += 100) {
+        const page = await this.request<unknown>('GET', `/whitelabel/domains?limit=100&offset=${offset}`);
+        if (!Array.isArray(page)) throw new Error('Incomplete domain observation');
+        for (const item of page) {
+          if (!item || !Number.isSafeInteger(item.id) || ids.has(item.id)
+            || typeof item.domain !== 'string' || typeof item.valid !== 'boolean') throw new Error('Incomplete domain observation');
+          ids.add(item.id);
+          items.push(item);
+        }
+        if (page.length < 100) return items;
+      }
+      throw new Error('Domain observation exceeded its read limit');
+    };
+    const senders = async () => {
+      const items: Array<{ from_email: string; verified: boolean }> = [];
+      const ids = new Set<number>();
+      let lastSeen = -1;
+      for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+        const page = await this.request<{ results?: unknown }>('GET', `/verified_senders?limit=100${lastSeen >= 0 ? `&lastSeenID=${lastSeen}` : ''}`);
+        if (!Array.isArray(page?.results)) throw new Error('Incomplete sender observation');
+        for (const item of page.results) {
+          if (!item || !Number.isSafeInteger(item.id) || item.id <= lastSeen || ids.has(item.id)
+            || typeof item.from_email !== 'string' || typeof item.verified !== 'boolean') throw new Error('Incomplete sender observation');
+          ids.add(item.id);
+          items.push(item);
+        }
+        if (page.results.length < 100) return items;
+        lastSeen = Math.max(...page.results.map(item => item.id));
+      }
+      throw new Error('Sender observation exceeded its read limit');
+    };
+    const [domainResult, senderResult] = await Promise.allSettled([domains(), senders()]);
+    return addresses.map(address => {
+      const normalized = address.toLowerCase();
+      const domain = normalized.split('@')[1];
+      const domainMatches = domainResult.status === 'fulfilled'
+        ? domainResult.value.filter(item => item.domain.toLowerCase() === domain) : [];
+      const senderMatches = senderResult.status === 'fulfilled'
+        ? senderResult.value.filter(item => item.from_email.toLowerCase() === normalized) : [];
+      if (domainMatches.length > 1 || senderMatches.length > 1) return { status: 'unknown' };
+      const status = domainMatches[0]?.valid === true ? 'verified-domain'
+        : senderMatches[0]?.verified === true ? 'verified-sender'
+        : domainResult.status === 'fulfilled' && senderResult.status === 'fulfilled' ? 'unverified' : 'unknown';
+      return { status, automaticSecurity: domainMatches[0]?.automatic_security, dns: domainMatches[0]?.dns };
+    });
+  }
+
   async createVerifiedSender(input: CreateSendGridVerifiedSenderInput): Promise<SendGridVerifiedSender> {
     const body: Record<string, unknown> = {
       nickname: input.nickname,
@@ -386,24 +502,113 @@ export class SendGridAdapter {
 
   // Event Webhook Management
 
-  async getEventWebhookSettings(): Promise<SendGridEventWebhookSettings> {
-    return this.request<SendGridEventWebhookSettings>('GET', '/user/webhooks/event/settings');
+  async getEventWebhookSettings(id?: string): Promise<SendGridEventWebhookSettings> {
+    return this.request<SendGridEventWebhookSettings>('GET', `/user/webhooks/event/settings${id ? '/' + encodeURIComponent(id) : ''}`);
+  }
+
+  /** Unbound legacy targets are candidates, never an implicit oldest-webhook selection. */
+  async resolveEventWebhookSigning(url: string, boundId?: string): Promise<Awaited<ReturnType<SendGridAdapter['getEventWebhookSigning']>>> {
+    try {
+      let id = boundId;
+      if (!id) {
+        const response = await this.request<unknown>('GET', '/user/webhooks/event/settings/all');
+        // Optional fields in the provider schema still need evidence before we can select a target.
+        const list = z.object({ webhooks: z.array(z.object({ id: z.string().min(1), url: z.string().url() })) }).parse(response);
+        const matches = list.webhooks.filter(item => item.url === url);
+        if (matches.length !== 1) throw new Error();
+        id = matches[0].id;
+      }
+      const result = await this.getEventWebhookSigning(id);
+      if (result.url !== url) throw new Error();
+      return result;
+    } catch {
+      throw new Error('SendGrid signing target is unavailable or ambiguous. Restore the exact endpoint or resolve duplicate delivery URLs before re-planning.');
+    }
+  }
+
+  /** Exact-ID reads only. Omitted optional public_key means signing is disabled. */
+  async getEventWebhookSigning(id: string): Promise<{ id: string; url: string; enabled: boolean; signing: boolean; publicKey?: string }> {
+    try {
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error();
+      const response = await this.request<unknown>('GET', `/user/webhooks/event/settings/${encodeURIComponent(id)}`);
+      const data = z.object({ id: z.string().optional(), url: z.string().url(), enabled: z.boolean(), public_key: z.string().optional() }).parse(response);
+      if (data.id !== undefined && data.id !== id) throw new Error();
+      if (data.public_key) {
+        const key = createPublicKey({ key: Buffer.from(data.public_key, 'base64'), format: 'der', type: 'spki' });
+        if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error();
+      }
+      return { id, url: data.url, enabled: data.enabled, signing: Boolean(data.public_key), ...(data.public_key ? { publicKey: data.public_key } : {}) };
+    } catch {
+      throw new Error('SendGrid webhook signing observation is unavailable or invalid. Check the exact endpoint and API-key read permissions.');
+    }
+  }
+
+  async setEventWebhookSigning(id: string, enabled: boolean): Promise<void> {
+    try {
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error();
+      await this.request('PATCH', `/user/webhooks/event/settings/signed/${encodeURIComponent(id)}`, { enabled });
+    } catch {
+      // Writes may be acknowledged ambiguously. Re-observe before any retry.
+      throw new Error('SendGrid webhook signing write was not confirmed. Re-plan to observe its state; check API-key signing permissions.');
+    }
   }
 
   async updateEventWebhookSettings(
-    settings: Partial<SendGridEventWebhookSettings>
+    settings: Partial<SendGridEventWebhookSettings>,
+    id?: string
   ): Promise<SendGridEventWebhookSettings> {
     return this.request<SendGridEventWebhookSettings>(
       'PATCH',
-      '/user/webhooks/event/settings',
+      `/user/webhooks/event/settings${id ? '/' + encodeURIComponent(id) : ''}`,
       settings as Record<string, unknown>
     );
   }
 
   // Inbound Parse Webhook (for receiving emails)
 
-  async listInboundParseWebhooks(): Promise<Array<{ hostname: string; url: string; spam_check: boolean; send_raw: boolean }>> {
-    const result = await this.request<{ result: Array<{ hostname: string; url: string; spam_check: boolean; send_raw: boolean }> }>(
+  async getInboundParseWebhook(hostname: string): Promise<SendGridInboundParseWebhook> {
+    try {
+      sendGridParseHostname.parse(hostname);
+      const response = await this.request<unknown>('GET', `/user/webhooks/parse/settings/${encodeURIComponent(hostname)}`);
+      const data = sendGridParseSettings.parse(response);
+      if (data.hostname.toLowerCase() !== hostname.toLowerCase()) throw new Error();
+      return data;
+    } catch {
+      throw new Error('SendGrid Inbound Parse observation is unavailable or invalid. Check the exact hostname and API-key read permissions.');
+    }
+  }
+
+  async getInboundParseSecurityPolicy(id: string): Promise<SendGridInboundSecurityPolicy> {
+    try {
+      sendGridPolicyId.parse(id);
+      const response = await this.request<unknown>('GET', `/user/webhooks/security/policies/${encodeURIComponent(id)}`);
+      const policy = readInboundSecurityPolicy(z.object({ policy: z.unknown() }).parse(response).policy);
+      if (policy.id !== id) throw new Error();
+      return policy;
+    } catch {
+      throw new Error('SendGrid Inbound Parse security-policy observation is unavailable or invalid. Check the exact policy and API-key read permissions.');
+    }
+  }
+
+  async attachInboundParseSecurityPolicy(
+    hostname: string,
+    policyId: string,
+    current: Pick<SendGridInboundParseWebhook, 'url' | 'spam_check' | 'send_raw'>,
+  ): Promise<void> {
+    try {
+      sendGridParseHostname.parse(hostname);
+      sendGridPolicyId.parse(policyId);
+      const route = sendGridParseSettings.omit({ hostname: true, security_policy: true }).parse(current);
+      // The official guide supplies the complete route settings when associating a
+      // policy. Null/empty detach and omitted-field preservation are undocumented.
+      await this.request('PATCH', `/user/webhooks/parse/settings/${encodeURIComponent(hostname)}`, { ...route, security_policy: policyId });
+    } catch {
+      throw new Error('SendGrid Inbound Parse security-policy association write was not confirmed. Re-plan to observe the exact hostname before retrying.');
+    }
+  }
+
+  async listInboundParseWebhooks(): Promise<SendGridInboundParseWebhook[]> {
+    const result = await this.request<{ result: SendGridInboundParseWebhook[] }>(
       'GET',
       '/user/webhooks/parse/settings'
     );

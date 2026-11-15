@@ -1,0 +1,272 @@
+{
+  "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+  "url": "https://github.com/davejohnson/hypercloud/pull/85",
+  "evidence": "Pinned official merged server source from PRs #84 and #85; response fixtures are reconstructed synthetic data, not live recordings or proof of deployed compatibility.",
+  "sources": [
+    {
+      "path": "services/credentialRequestForm.js",
+      "snapshot": "services_credentialRequestForm.js.txt",
+      "sha256": "74cb45c021f7ee2434c7a16f653bbe4fc54780d62e07ff6d7efd39020cd47ff2",
+      "sourceContentSha256": "74cb45c021f7ee2434c7a16f653bbe4fc54780d62e07ff6d7efd39020cd47ff2",
+      "extraction": "Full source file",
+      "revision": "8272cd5284aaae010b88d7c09b46feca74334be1",
+      "url": "https://github.com/davejohnson/hypercloud/blob/8272cd5284aaae010b88d7c09b46feca74334be1/services/credentialRequestForm.js"
+    },
+    {
+      "path": "lib/codeHosts/sourceBranch.js",
+      "snapshot": "lib_codeHosts_sourceBranch.js.txt",
+      "sha256": "45815e25dd77eadcfc2042da5dff35cd24333088a72bfc30772e0b9a73a7bc3d",
+      "sourceContentSha256": "45815e25dd77eadcfc2042da5dff35cd24333088a72bfc30772e0b9a73a7bc3d",
+      "extraction": "Full source file",
+      "revision": "8272cd5284aaae010b88d7c09b46feca74334be1",
+      "url": "https://github.com/davejohnson/hypercloud/blob/8272cd5284aaae010b88d7c09b46feca74334be1/lib/codeHosts/sourceBranch.js"
+    },
+    {
+      "path": "controllers/shared/credentialRequestController.js",
+      "snapshot": "controllers_shared_credentialRequestController.js.txt",
+      "sha256": "5968489c8229ce80a101f0d03ea51db0579409e40248c5bdf597e124f9d8468d",
+      "sourceContentSha256": "0c9f90cb5740f64e650967c35fd45fb029cb361b72ad6f939f49cf888680c9ba",
+      "extraction": "Verbatim line ranges with preserved legacy comments; comment end lines omit each closing brace, so the corrected manifest ranges are authoritative",
+      "lineRanges": [
+        [
+          75,
+          83
+        ],
+        [
+          94,
+          96
+        ],
+        [
+          103,
+          128
+        ]
+      ],
+      "revision": "8272cd5284aaae010b88d7c09b46feca74334be1",
+      "url": "https://github.com/davejohnson/hypercloud/blob/8272cd5284aaae010b88d7c09b46feca74334be1/controllers/shared/credentialRequestController.js"
+    },
+    {
+      "path": "services/credentialRequestService.js",
+      "snapshot": "services_credentialRequestService.js.txt",
+      "sha256": "e340e8b1275ed4a32dabcf108bbecb8e177fc84284961d55f5c087c7c9e245f6",
+      "sourceContentSha256": "5400ae4a124b3b7ab793e434769cb3815de8875a9c978727a6b7bcc1a5b2c984",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          44,
+          76
+        ],
+        [
+          330,
+          359
+        ],
+        [
+          390,
+          488
+        ],
+        [
+          625,
+          625
+        ]
+      ],
+      "revision": "8272cd5284aaae010b88d7c09b46feca74334be1",
+      "url": "https://github.com/davejohnson/hypercloud/blob/8272cd5284aaae010b88d7c09b46feca74334be1/services/credentialRequestService.js"
+    },
+    {
+      "path": "routes/api.js",
+      "snapshot": "routes_api.js.txt",
+      "sha256": "27a387a8bb4da6a9c85a12102eab62702d6f09a2a342c42aa686139966c68263",
+      "sourceContentSha256": "09902d83d1ab5ead2e63557598eb48038c2f532e94da57ce82aeeecf6b86241e",
+      "extraction": "Verbatim line ranges with preserved legacy comment; its end line omits the DELETE route, so the corrected manifest range is authoritative",
+      "lineRanges": [
+        [
+          171,
+          177
+        ]
+      ],
+      "revision": "8272cd5284aaae010b88d7c09b46feca74334be1",
+      "url": "https://github.com/davejohnson/hypercloud/blob/8272cd5284aaae010b88d7c09b46feca74334be1/routes/api.js"
+    },
+    {
+      "path": "services/credentialRequestDeliveryService.js",
+      "snapshot": "services_credentialRequestDeliveryService.js.txt",
+      "sha256": "e24aebcc75c40e2ffb5af575aed292d0ffbe62f24a36995e6401d12f8a5950a4",
+      "sourceContentSha256": "e24aebcc75c40e2ffb5af575aed292d0ffbe62f24a36995e6401d12f8a5950a4",
+      "extraction": "Full source file",
+      "revision": "8272cd5284aaae010b88d7c09b46feca74334be1",
+      "url": "https://github.com/davejohnson/hypercloud/blob/8272cd5284aaae010b88d7c09b46feca74334be1/services/credentialRequestDeliveryService.js"
+    },
+    {
+      "path": "services/devicePairingService.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/services/devicePairingService.js",
+      "snapshot": "pr85_services_devicePairingService.js.txt",
+      "sha256": "1abe898580fcef53998f91db97cc0e7fdb58d76738ebb7ed8c9f1110fb33eab4",
+      "sourceContentSha256": "04a3c44516fd40d45068b665fcbd08734ec097b6d7d17a1f6f52a7cb5793fbf7",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          7,
+          10
+        ],
+        [
+          54,
+          60
+        ],
+        [
+          77,
+          87
+        ],
+        [
+          142,
+          147
+        ],
+        [
+          164,
+          167
+        ],
+        [
+          189,
+          210
+        ],
+        [
+          220,
+          267
+        ]
+      ]
+    },
+    {
+      "path": "services/credentialAuthService.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/services/credentialAuthService.js",
+      "snapshot": "pr85_services_credentialAuthService.js.txt",
+      "sha256": "c382a94b8912f37b4c19f297df4026021c12a3c62db3e861425b459e1cd0a737",
+      "sourceContentSha256": "2e6fdb4c84ee0ee2cb80fb077f4bff109eb5e420ed18faf1915817d3f6a909ec",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          35,
+          43
+        ],
+        [
+          54,
+          68
+        ]
+      ]
+    },
+    {
+      "path": "middleware/authentication.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/middleware/authentication.js",
+      "snapshot": "pr85_middleware_authentication.js.txt",
+      "sha256": "946dc9a914044e6fa53436083766ba9217a22aa5fcace799f4ead76892f8ec97",
+      "sourceContentSha256": "539997f87f83397c024d23f8ed70bdd4e6d857ed09e2be541cb2b90107c6687e",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          62,
+          79
+        ]
+      ]
+    },
+    {
+      "path": "controllers/api/devicePairingController.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/controllers/api/devicePairingController.js",
+      "snapshot": "pr85_controllers_api_devicePairingController.js.txt",
+      "sha256": "2bbd4d4ff451fdc179c9948bf2c19abdb08e3f75626ea4e5efcd35b9fc361c28",
+      "sourceContentSha256": "51a29d28d3d69fc6aa96779dd2a9655b86780b9c1c79d32b13a99cfd33655624",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          4,
+          25
+        ]
+      ]
+    },
+    {
+      "path": "controllers/shared/credentialRequestController.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/controllers/shared/credentialRequestController.js",
+      "snapshot": "pr85_controllers_shared_credentialRequestController.js.txt",
+      "sha256": "47c978360212052b9cb418a8226cb44442fcae1775509ff4bb4210b738f307cd",
+      "sourceContentSha256": "edc0f59ef222dc3496ac788328e6abf5445d891cfecfea1fec1a319e48f00746",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          103,
+          117
+        ]
+      ]
+    },
+    {
+      "path": "routes/api.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/routes/api.js",
+      "snapshot": "pr85_routes_api.js.txt",
+      "sha256": "5511e5e942766ce0b8f41873556576a3e6078f26ede592bedbab3b1584eda68a",
+      "sourceContentSha256": "fe37e7f6122f27df3cb6fb119088e6168ec4af3845e84b53384bf2ca6c5d0473",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          172,
+          181
+        ]
+      ]
+    },
+    {
+      "path": "services/credentialRequestService.js",
+      "revision": "18aabb8ad82d4d9cd235d79ac33c490c7717ef25",
+      "url": "https://github.com/davejohnson/hypercloud/blob/18aabb8ad82d4d9cd235d79ac33c490c7717ef25/services/credentialRequestService.js",
+      "snapshot": "pr85_services_credentialRequestService.js.txt",
+      "sha256": "dee26f3a0cb1737110049f86e1d9dc51f6c14dee5c03d21d42077b0c480cad0e",
+      "sourceContentSha256": "13653053d70982960c9bde16296d36b0b829ae628c2d3b01eb815c354f474ce2",
+      "extraction": "Verbatim line ranges with source-line comments",
+      "lineRanges": [
+        [
+          27,
+          27
+        ],
+        [
+          63,
+          75
+        ],
+        [
+          101,
+          121
+        ],
+        [
+          332,
+          364
+        ],
+        [
+          382,
+          388
+        ],
+        [
+          395,
+          408
+        ],
+        [
+          416,
+          432
+        ],
+        [
+          435,
+          468
+        ],
+        [
+          471,
+          499
+        ],
+        [
+          532,
+          538
+        ],
+        [
+          735,
+          755
+        ]
+      ]
+    }
+  ]
+}

@@ -19,8 +19,12 @@ import { executePlanApply } from '../../../application/apply-plan.js';
 import { parseDelegatedSecretBindings } from '../../services/delegated-secret.service.js';
 import { hashEnvValue } from '../../ports/observe.port.js';
 import { PlanService } from '../plan.service.js';
+import { dailyBackupEvidence } from '../../../test/backup-fixtures.js';
 
 const FRIEND_KEY = 'sk-ant-api03-plan-secret';
+const databaseRecoverySource = { provider: 'railway', primaryExternalId: 'rail-postgres',
+  providerScope: { projectId: 'rail-project', environmentId: 'rail-environment' },
+  resourceIdentity: { volumeId: 'postgres-volume', volumeInstanceId: 'postgres-volume-instance' } };
 
 function observed(serviceOverrides: Partial<ObservedState['services'][number]> = {}): ObservedState {
   return {
@@ -45,6 +49,7 @@ function observed(serviceOverrides: Partial<ObservedState['services'][number]> =
       provider: 'railway',
       engine: 'postgres',
       externalId: 'rail-postgres',
+      providerScope: { ...databaseRecoverySource.providerScope },
       name: 'Postgres',
       status: 'running',
     }],
@@ -112,6 +117,8 @@ describe('PlanService delegated secret inputs', () => {
         projectId: 'rail-project',
         environmentId: 'rail-environment',
         services: { web: { serviceId: 'rail-service' } },
+        // Created databases record their committed primary identity.
+        databaseTopology: { primary: { provider: 'railway', externalId: 'rail-postgres' }, replicas: {} },
       },
     });
     new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
@@ -120,7 +127,8 @@ describe('PlanService delegated secret inputs', () => {
       environmentId: environment.id,
       type: 'postgres',
       externalId: 'rail-postgres',
-      bindings: { provider: 'railway', pluginName: 'Postgres', serviceId: 'rail-postgres' },
+      bindings: { provider: 'railway', pluginName: 'Postgres', serviceId: 'rail-postgres',
+        providerScope: { ...databaseRecoverySource.providerScope } },
     });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
@@ -130,6 +138,11 @@ describe('PlanService delegated secret inputs', () => {
         observe: vi.fn().mockResolvedValue(observed()),
       } as never,
     });
+    // Secret reconciliation scenarios start with an existing protected database.
+    // Supply provider-port evidence while exercising the real backup gates.
+    vi.spyOn(adapterFactory, 'getDatabaseOperations').mockImplementation((...args) => adapterFactory.getDatabaseAdapter(...args));
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true,
+      adapter: { name: 'railway', dailyBackups: dailyBackupEvidence(databaseRecoverySource) } as never });
   });
 
   afterEach(() => {
@@ -138,6 +151,71 @@ describe('PlanService delegated secret inputs', () => {
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
+
+  it.each(['missing', 'provided'] as const)(
+    'defers %s delegated input during scope repair and resumes it in the next full plan', async input => {
+      const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+      const components = new ComponentRepository();
+      const component = components.findByEnvironmentAndType(environment.id, 'postgres')!;
+      const { providerScope: _scope, ...legacyBindings } = component.bindings;
+      components.update(component.id, { bindings: { ...legacyBindings, projectId: 'rail-project' } });
+      const connection = new ConnectionRepository().create({
+        provider: 'railway',
+        credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-account-token' }),
+      });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+      process.env.FRIEND_ANTHROPIC_API_KEY = FRIEND_KEY;
+      const options = { includeEnvFile: false,
+        ...(input === 'provided' ? { secretRefs: { ANTHROPIC_API_KEY: 'env:FRIEND_ANTHROPIC_API_KEY' } } : {}) };
+      const planner = new PlanService();
+
+      // Synthetic provider-port evidence exercises the real plan/apply boundary;
+      // native source verification is covered by the transport contract suite.
+      const repair = await planner.plan(project, 'production', options);
+      expect(repair).not.toHaveProperty('error');
+      if ('error' in repair) throw new Error(repair.error);
+      expect(repair.scope).toBe('database-bindings');
+      expect(repair.actions).toHaveLength(1);
+      expect(repair.actions[0]).toMatchObject({ requiresConfirm: true,
+        metadata: { operation: 'databaseScopeBind', componentId: component.id } });
+      expect(repair.inputRequired).toEqual([]);
+      const repairDocument = new RunRepository().findById(repair.planRunId)!.plan;
+      expect(repairDocument).not.toHaveProperty('inputRequired');
+      expect(repairDocument).not.toHaveProperty('overrides');
+      expect(JSON.stringify(repairDocument)).not.toContain(FRIEND_KEY);
+      const currentSpec = new SpecStore().get(project)!;
+      expect(await executePlanApply(createToolContext(), {
+        project, spec: currentSpec.spec, specRevision: currentSpec.revision,
+        planId: repair.planRunId, confirmActions: [repair.actions[0].id],
+      })).toMatchObject({ kind: 'executed', result: { success: true, receipts: [
+        { data: { applied: 1, skipped: 0, providerMutations: 0 } },
+      ] } });
+      expect(components.findById(component.id)?.bindings.providerScope)
+        .toEqual(databaseRecoverySource.providerScope);
+
+      const resumed = await planner.plan(project, 'production', options);
+      expect(resumed).not.toHaveProperty('error');
+      if ('error' in resumed) throw new Error(resumed.error);
+      expect(resumed.scope).toBe('full');
+      expect(resumed.actions.some(action => action.metadata?.operation === 'databaseScopeBind')).toBe(false);
+      const resumedDocument = new RunRepository().findById(resumed.planRunId)!.plan as Record<string, unknown>;
+      if (input === 'missing') {
+        expect(resumed.inputRequired).toEqual([
+          expect.objectContaining({ key: 'ANTHROPIC_API_KEY', principal: 'github:alice' }),
+        ]);
+        expect(resumedDocument.inputRequired).toEqual(resumed.inputRequired);
+        expect(resumedDocument.overrides).toBeUndefined();
+      } else {
+        expect(resumed.inputRequired).toEqual([]);
+        expect(resumed.actions.find(action => action.id === 'secret:ANTHROPIC_API_KEY'))
+          .toMatchObject({ type: 'update', metadata: { inputProvided: true, services: ['web'] } });
+        const overrides = resumedDocument.overrides as Record<string, unknown>;
+        expect(getSecretStore().decryptObject(overrides.delegatedSecretVarsEncrypted as string))
+          .toEqual({ ANTHROPIC_API_KEY: FRIEND_KEY });
+        expect(JSON.stringify(resumedDocument)).not.toContain(FRIEND_KEY);
+      }
+    }
+  );
 
   it('persists an inspectable but non-executable plan when required input is absent', async () => {
     const envFile = path.join(tempDir, '.env');
@@ -241,9 +319,9 @@ describe('PlanService delegated secret inputs', () => {
     vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({ success: true, adapter } as never);
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as never);
     const provision = vi.fn();
-    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+    vi.mocked(adapterFactory.getDatabaseAdapter).mockResolvedValue({
       success: true,
-      adapter: { provision },
+      adapter: { name: 'railway', provision, dailyBackups: dailyBackupEvidence(databaseRecoverySource) },
     } as never);
 
     const planned = await new PlanService().plan(project, 'production', {
@@ -449,7 +527,7 @@ describe('PlanService delegated secret inputs', () => {
     expect(new RunRepository().findByEnvironmentId(environment.id)).toHaveLength(runsBefore);
   });
 
-  it('plans generated secrets after creating services in a provider-confirmed absent environment', async () => {
+  it('defers generated secrets through namespace creation and plans them after service creation on fresh observation', async () => {
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
@@ -472,29 +550,47 @@ describe('PlanService delegated secret inputs', () => {
         },
       },
     });
+    const observe = vi.fn().mockResolvedValue({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rail-project',
+      services: [],
+      databases: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'unknown',
+        databases: 'unknown',
+      },
+      partial: true,
+      warnings: ['Could not resolve Railway environment for "staging"'],
+    });
     vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',
         capabilities: { supportsObserve: true },
-        observe: vi.fn().mockResolvedValue({
-          provider: 'railway',
-          observedAt: new Date().toISOString(),
-          projectExists: true,
-          projectId: 'rail-project',
-          services: [],
-          databases: [],
-          completeness: {
-            project: 'complete',
-            environment: 'complete',
-            services: 'unknown',
-            databases: 'unknown',
-          },
-          partial: true,
-          warnings: ['Could not resolve Railway environment for "staging"'],
-        }),
+        observe,
       } as never,
     });
+    const ensureEnvironment = vi.fn(async () => ({
+      success: true,
+      message: 'Created staging',
+      data: { projectId: 'rail-project', environmentId: 'rail-staging', created: true },
+    }));
+    const setEnvVars = vi.fn();
+    const deploy = vi.fn();
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: { name: 'railway', capabilities: { supportsObserve: true }, observe,
+        ensureEnvironment, setEnvVars, deploy } as never,
+    });
+    const connection = new ConnectionRepository().create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-account-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
 
     const result = await new PlanService().plan(project, 'staging', {
       includeEnvFile: false,
@@ -502,27 +598,59 @@ describe('PlanService delegated secret inputs', () => {
 
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.scope).toBe('hosting-bindings');
+    expect(plan.actions.map(action => action.id)).toEqual(['environment:staging']);
     expect(plan.inputRequired).toEqual([]);
     expect(plan.actions.find((action) => action.id === 'environment:staging')).toMatchObject({
       type: 'create',
       metadata: { operation: 'hostingEnvironmentEnsure' },
     });
-    expect(plan.actions.find((action) => action.id === 'service:web')).toMatchObject({
-      dependsOn: expect.arrayContaining(['environment:staging']),
+    expect(new RunRepository().findById(plan.planRunId)!.plan).not.toHaveProperty('overrides');
+    const currentSpec = new SpecStore().get(project)!;
+    expect(await executePlanApply(createToolContext(), {
+      project, spec: currentSpec.spec, specRevision: currentSpec.revision,
+      planId: plan.planRunId, confirmActions: [], alwaysRunBootstrap: true,
+    })).toMatchObject({
+      kind: 'executed', result: { success: false, receipts: [
+        expect.objectContaining({ actionId: 'environment:staging', status: 'pending' }),
+      ] },
     });
-    expect(plan.actions.find((action) => action.id === 'service:web')?.type).not.toBe('noop');
-    expect(plan.actions.find((action) => action.id === 'secret:SESSION_SECRET')).toMatchObject({
+    expect(ensureEnvironment).toHaveBeenCalledOnce();
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    const staging = new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!;
+    expect(staging.platformBindings).toMatchObject({ projectId: 'rail-project', environmentId: 'rail-staging' });
+    expect(parseDelegatedSecretBindings(staging)).toEqual([]);
+
+    // Fresh provider evidence now confirms the exact namespace and absent services.
+    observe.mockResolvedValue({
+      provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+      projectId: 'rail-project', environmentId: 'rail-staging', services: [], databases: [],
+      completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
+      partial: false, warnings: [],
+    });
+    const resumed = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+    if ('error' in resumed) throw new Error(resumed.error);
+    expect(observe).toHaveBeenLastCalledWith(expect.objectContaining({
+      platformBindings: expect.objectContaining({ environmentId: 'rail-staging' }),
+    }), expect.any(Object));
+    expect(resumed.scope).toBe('full');
+    expect(resumed.inputRequired).toEqual([]);
+    expect(resumed.actions.find(action => action.id === 'environment:staging')).toBeUndefined();
+    expect(resumed.actions.find(action => action.id === 'service:web')).toMatchObject({ type: 'create' });
+    expect(resumed.actions.find((action) => action.id === 'secret:SESSION_SECRET')).toMatchObject({
       type: 'update',
       verified: true,
       dependsOn: expect.arrayContaining(['service:web']),
     });
 
-    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    const document = new RunRepository().findById(resumed.planRunId)!.plan as Record<string, unknown>;
     const overrides = document.overrides as Record<string, unknown>;
     expect(overrides.delegatedSecretKeys).toEqual(['SESSION_SECRET']);
     const encrypted = overrides.delegatedSecretVarsEncrypted as string;
     const generatedValue = getSecretStore().decryptObject<Record<string, string>>(encrypted).SESSION_SECRET;
     expect(generatedValue).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(JSON.stringify(document)).not.toContain(generatedValue);
+    expect(setEnvVars).not.toHaveBeenCalled();
   });
 });

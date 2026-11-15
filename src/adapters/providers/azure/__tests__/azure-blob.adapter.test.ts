@@ -35,18 +35,11 @@ function account(overrides: Partial<AzureStorageAccount> = {}): AzureStorageAcco
 function controlPlane(overrides: Partial<AzureStorageControlPlane> = {}): AzureStorageControlPlane {
   return {
     verifySubscription: vi.fn(async () => {}),
-    ensureScope: vi.fn(async () => ({ created: false })),
     listAccounts: vi.fn(async () => []),
     listContainers: vi.fn(async () => []),
     getAccount: vi.fn(async () => null),
-    createAccount: vi.fn(async (_name, _location, tags) => account({ tags })),
     getContainer: vi.fn(async () => null),
-    createContainer: vi.fn(async (storageAccount, container) => ({
-      id: `${storageAccount.id}/blobServices/default/containers/${container}`,
-      name: container,
-    })),
     listKeys: vi.fn(async () => 'account-key'),
-    deleteAccount: vi.fn(async () => true),
     ...overrides,
   };
 }
@@ -63,6 +56,35 @@ function dataPlane(overrides: Partial<AzureBlobDataPlane> = {}): AzureBlobDataPl
 }
 
 describe('AzureBlobStorageAdapter', () => {
+
+  it.each([404, 403, 200])('handles legacy resource-group evidence (%s) through the real ARM HTTP client', async (status) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'login.microsoftonline.com') return Response.json({ access_token: 'token' });
+      expect(init?.method ?? 'GET').toBe('GET');
+      if (url.pathname.includes('/resourceGroups/hv-')) {
+        if (url.pathname.endsWith('/storageAccounts')) return Response.json({ value: [account()] });
+        return status === 200 ? Response.json({ id: url.pathname }) : new Response(null, { status });
+      }
+      if (url.pathname === `/subscriptions/${credentials.subscriptionId}`) {
+        return Response.json({ subscriptionId: credentials.subscriptionId, state: 'Enabled' });
+      }
+      throw new Error(`Unexpected ARM read ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const adapter = new AzureBlobStorageAdapter();
+      await adapter.connect(credentials);
+      const resolved = await adapter.resolveObservationContext('friend-app', environment(), 'westus2');
+      expect(resolved.receipt.success).toBe(status === 404);
+      if (status !== 404) expect(resolved.receipt.error).toMatch(status === 403 ? /403/ : /Legacy.*import/);
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('management.azure.com'))
+        .every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -122,61 +144,17 @@ describe('AzureBlobStorageAdapter', () => {
     expect(defaultCredentialProvider).toHaveBeenCalledOnce();
     expect(controlPlaneFactory).toHaveBeenCalledWith(
       { authMode: 'default', subscriptionId: credentials.subscriptionId },
-      expect.stringMatching(/^hv-friend-app-production-/)
+      expect.stringMatching(/^production-[a-f0-9]{10}$/)
     );
-  });
-
-  it('resolves first-use observation scope without creating provider resources', async () => {
-    const control = controlPlane();
-    const adapter = new AzureBlobStorageAdapter({
-      controlPlaneFactory: () => control,
-      dataPlaneFactory: () => dataPlane(),
-    });
-    await adapter.connect(credentials);
-
-    await expect(adapter.resolveObservationContext(
-      'friend-app', environment(), 'westus2'
-    )).resolves.toMatchObject({
-      receipt: { success: true },
-      context: { subscriptionId: credentials.subscriptionId, location: 'westus2' },
-    });
-    expect(control.verifySubscription).toHaveBeenCalledOnce();
-    expect(control.ensureScope).not.toHaveBeenCalled();
-    expect(control.createAccount).not.toHaveBeenCalled();
-  });
-
-  it('creates a private account and container and returns composite Azure scope', async () => {
-    const control = controlPlane();
-    const adapter = new AzureBlobStorageAdapter({
-      controlPlaneFactory: () => control,
-      dataPlaneFactory: () => dataPlane(),
-    });
-    await adapter.connect(credentials);
-
-    const contextResult = await adapter.ensureContext('friend-app', environment(), {}, 'westus2');
-    const result = await adapter.ensureBucket(environment(), contextResult.context!, 'documents', 'westus2');
-
-    expect(contextResult.context).toMatchObject({
-      subscriptionId: credentials.subscriptionId,
-      resourceGroup: expect.stringMatching(/^hv-friend-app-production-[0-9a-f]{8}$/),
-      location: 'westus2',
-    });
-    expect(result.receipt.success).toBe(true);
-    expect(result.externalId).toMatch(/\/blobServices\/default\/containers\/documents$/);
-    expect(control.createAccount).toHaveBeenCalledWith(expect.stringMatching(/^hv[a-z0-9]{10,22}$/), 'westus2', expect.objectContaining({
-      'hypervibe-environment-id': 'environment-1',
-      'hypervibe-storage-name': 'documents',
-    }));
-    expect(control.createContainer).toHaveBeenCalledWith(expect.anything(), 'documents');
   });
 
   it('observes only tagged environment accounts and includes usage', async () => {
     const managed = account();
     const control = controlPlane({
       listAccounts: vi.fn(async () => [managed, account({ name: 'unmanaged', tags: {} })]),
-      getContainer: vi.fn(async (storageAccount, container) => storageAccount.name === managed.name
-        ? { id: `${storageAccount.id}/blobServices/default/containers/${container}`, name: container }
-        : null),
+      listContainers: vi.fn(async (storageAccount) => storageAccount.name === managed.name
+        ? [{ id: `${storageAccount.id}/blobServices/default/containers/documents`, name: 'documents' }]
+        : []),
     });
     const plane = dataPlane({ list: vi.fn(async () => [{ key: 'a.pdf', size: 42 }]) });
     const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => plane });
@@ -191,25 +169,9 @@ describe('AzureBlobStorageAdapter', () => {
     })]);
   });
 
-  it('refuses to adopt an existing deterministic account without ownership tags', async () => {
-    const control = controlPlane({ getAccount: vi.fn(async () => account({ tags: {} })) });
-    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => dataPlane() });
-    await adapter.connect(credentials);
-    const context = (await adapter.ensureContext(
-      'friend-app', environment(), { resourceGroup: 'friend-app-production' }, 'westus2'
-    )).context!;
-
-    const result = await adapter.ensureBucket(environment(), context, 'documents', 'westus2');
-
-    expect(result.receipt.success).toBe(false);
-    expect(result.receipt.error).toContain('not owned');
-    expect(control.createAccount).not.toHaveBeenCalled();
-  });
-
-  it('provides Azure-native runtime and object transfer contracts', async () => {
+  it('provides Azure-native runtime environment variables', async () => {
     const control = controlPlane({ getAccount: vi.fn(async () => account()) });
-    const plane = dataPlane({ list: vi.fn(async () => [{ key: 'a.pdf', size: 3 }]) });
-    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => plane });
+    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control });
     await adapter.connect(credentials);
     const context = { subscriptionId: credentials.subscriptionId, resourceGroup: 'friend-app-production' };
     const externalId = `${account().id}/blobServices/default/containers/documents`;
@@ -222,58 +184,5 @@ describe('AzureBlobStorageAdapter', () => {
       OBJECT_STORAGE_PROVIDER: 'azureblob', AZURE_STORAGE_CONTAINER_NAME: 'documents',
       AZURE_STORAGE_ACCOUNT_NAME: account().name,
     });
-    const transfer = await adapter.openObjectTransfer(environment(), context, externalId);
-    await expect(transfer.list()).resolves.toEqual([{ key: 'a.pdf', size: 3 }]);
-  });
-
-  it('empties the owned container before deleting its dedicated account', async () => {
-    vi.stubEnv('HYPERVIBE_AZURE_BLOB_DELETE_ATTEMPTS', '3');
-    vi.stubEnv('HYPERVIBE_AZURE_BLOB_POLL_INTERVAL_MS', '0');
-    const managed = account();
-    const control = controlPlane({
-      getAccount: vi.fn()
-        .mockResolvedValueOnce(managed)
-        .mockResolvedValueOnce(managed)
-        .mockResolvedValueOnce(null),
-    });
-    const plane = dataPlane();
-    const adapter = new AzureBlobStorageAdapter({ controlPlaneFactory: () => control, dataPlaneFactory: () => plane });
-    await adapter.connect(credentials);
-    const context = { subscriptionId: credentials.subscriptionId, resourceGroup: 'friend-app-production' };
-
-    await expect(adapter.destroyBucket(
-      environment(), context, `${managed.id}/blobServices/default/containers/documents`
-    )).resolves.toMatchObject({ success: true });
-    expect(plane.deleteAll).toHaveBeenCalledOnce();
-    expect(control.deleteAccount).toHaveBeenCalledWith(managed);
-    expect(control.getAccount).toHaveBeenCalledTimes(3);
-  });
-
-  it('does not report deletion success while the storage account remains observable', async () => {
-    vi.stubEnv('HYPERVIBE_AZURE_BLOB_DELETE_ATTEMPTS', '2');
-    vi.stubEnv('HYPERVIBE_AZURE_BLOB_POLL_INTERVAL_MS', '0');
-    const managed = account();
-    const control = controlPlane({ getAccount: vi.fn(async () => managed) });
-    const plane = dataPlane();
-    const adapter = new AzureBlobStorageAdapter({
-      controlPlaneFactory: () => control,
-      dataPlaneFactory: () => plane,
-    });
-    await adapter.connect(credentials);
-    const context = {
-      subscriptionId: credentials.subscriptionId,
-      resourceGroup: 'friend-app-production',
-    };
-
-    const result = await adapter.destroyBucket(
-      environment(),
-      context,
-      `${managed.id}/blobServices/default/containers/documents`
-    );
-
-    expect(result).toMatchObject({ success: false });
-    expect(result.error).toContain('remained observable after 2 deletion checks');
-    expect(control.deleteAccount).toHaveBeenCalledWith(managed);
-    expect(control.getAccount).toHaveBeenCalledTimes(3);
   });
 });

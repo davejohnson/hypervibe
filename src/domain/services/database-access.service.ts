@@ -301,7 +301,7 @@ export async function acquireDatabaseComponentAccess(
   component: Component,
   provider: string
 ): Promise<DatabaseAccessAcquireResult> {
-  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
+  const adapterResult = await adapterFactory.getDatabaseOperations(provider, project);
   const adapter = adapterResult.adapter;
   if (!adapterResult.success || !adapter) {
     return {
@@ -321,6 +321,16 @@ export async function acquireDatabaseComponentAccess(
   } catch {
     // A private-only URL is normal for managed databases. Prefer the bounded
     // provider access path below without copying provider errors into output.
+  }
+
+  if (!existing && adapter.getExistingExternalConnectionUrl) {
+    try {
+      const candidate = await adapter.getExistingExternalConnectionUrl(environment, component);
+      existing = isExternallyUsableDatabaseUrl(candidate) ? candidate : null;
+    } catch {
+      return { ok: false, code: 'provider_error', error: 'Existing database access could not be verified.',
+        provider, resourceCreated: false, cleanup: 'not_needed', hint: adapter.capabilities.databaseAccessHint };
+    }
   }
 
   const supportsTemporaryAccess = Boolean(
@@ -359,6 +369,7 @@ export async function acquireDatabaseComponentAccess(
     ok: false,
     code: 'no_external_access',
     error: `${provider} cannot provide externally usable access for the migration target.`,
+    hint: adapter.capabilities.databaseAccessHint,
     provider,
     resourceCreated: false,
     cleanup: 'not_needed',
@@ -399,7 +410,7 @@ export async function acquireManagedDatabaseAccess(
   }
 
   const existing = await resolveExternalDatabaseUrl(project, environment, serviceName);
-  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
+  const adapterResult = await adapterFactory.getDatabaseOperations(provider, project);
   const adapter = adapterResult.adapter;
   const supportsTemporaryAccess = Boolean(
     adapterResult.success
@@ -448,7 +459,8 @@ export async function acquireManagedDatabaseAccess(
       connectionUnavailable: !adapterResult.success,
       resourceCreated: false,
       cleanup: 'not_needed',
-      hint: 'Use a verified database connection or a provider that supports private or ephemeral diagnostic access.',
+      hint: adapter?.capabilities.databaseAccessHint
+        ?? 'Use a verified database connection or a provider that supports private or ephemeral diagnostic access.',
     };
   }
 

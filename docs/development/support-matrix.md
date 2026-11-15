@@ -1,0 +1,61 @@
+# What Hypervibe supports today
+
+This is the one statement of scope. It records what the planner admits for each
+destination, taken from the engine admission checks in
+`src/domain/services/infrastructure-engine-selection.ts`,
+`src/application/infrastructure-engine-aws.ts` and
+`src/application/infrastructure-engine-azure.ts`. Admission is not live proof:
+recorded live evidence is in the [GCP](../opentofu-engine.md),
+[AWS](../opentofu-engine-aws.md) and [Azure](../opentofu-engine-azure.md) engine
+notes. The [user journey](user-journey.md) is the target; this page is the present.
+
+Update this page in the same change that adds, removes or newly blocks a capability.
+
+## Product scope
+
+Hypervibe takes an app from prompt to a running website and mobile app on Google
+Cloud, AWS or Azure through the managed OpenTofu engine, and then operates it:
+secrets and their rotation, backups and tested restores, CI, promotion and
+rollback, domains, and the common outside services an app needs (Stripe,
+SendGrid, Cloudflare, GitHub, App Store Connect).
+
+Railway is frozen. It keeps working for existing apps and receives no new
+capabilities. Nothing new may depend on it, and it is not listed below.
+
+Out of scope and removed: GitHub Pages, the Cloudflare load balancer. Filesystem
+volumes exist only on Railway and are not offered on the cloud engines.
+
+## Capabilities by destination
+
+`yes` means the planner admits it. `blocked` means the planner refuses it with an
+explicit message. `unchecked` means the engine planner neither builds nor refuses
+it, which is a defect tracked in #633.
+
+| Capability | GCP | AWS | Azure |
+| --- | --- | --- | --- |
+| Web services | yes | yes | yes |
+| Background workers, on-demand workers | yes | yes | yes |
+| Scheduled jobs | yes | yes | yes, UTC schedules only |
+| PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
+| Production-shaped environments | yes | blocked (#625) | blocked (#625) |
+| File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
+| Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
+| Queues | yes | blocked (#628) | blocked (#628) |
+| Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
+| Buying a domain | blocked (#627) | unchecked | unchecked |
+| Generated and outside secrets | yes | yes | yes |
+| Migrations as a release step | yes (`releaseCommand` mode) | blocked at release | blocked at release |
+| Daily backups, restore drills | blocked (#253) | unchecked | unchecked |
+| Promotion and promotion tests | blocked (#252) | unchecked | unchecked |
+| Email, webhooks, iOS releases | blocked (#626) | unchecked | unchecked |
+| Database resilience, seed command, credential aliases | blocked | unchecked | unchecked |
+| Spend alerts | not built (#629) | not built (#629) | not built (#629) |
+
+## Rules for changing this page
+
+- A capability moves to `yes` only with its admission check, a boundary
+  regression and, for a support claim to users, recorded live evidence.
+- Unsupported desired state must be refused before any effect. `unchecked` is
+  never an acceptable resting state for a new capability.
+- Build a capability once behind a cloud-neutral interface; each destination
+  implements it or is listed here as `blocked`.

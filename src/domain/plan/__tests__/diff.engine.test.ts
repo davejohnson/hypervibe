@@ -7,7 +7,9 @@ import type { LocalSnapshot } from '../plan.types.js';
 import type { Service } from '../../entities/service.entity.js';
 import type { Component } from '../../entities/component.entity.js';
 import { bindingIdentityFingerprint } from '../../services/binding-identity.js';
+import { fingerprintObservedState, isManagedCiBindingRoot } from '../converge.executor.js';
 
+// Synthetic database IDs below exercise planning invariants, not provider API contracts.
 function spec(overrides: Record<string, unknown> = {}): EnvironmentSpec {
   return environmentSpecSchema.parse({
     hosting: { provider: 'railway' },
@@ -129,6 +131,14 @@ function localWithDomain(params: {
 }
 
 describe('diffEnvironment — in sync', () => {
+  it('distinguishes a bound namespace from its not-yet-created workload', () => {
+    const live = observed({ services: [observedWeb({ status: 'empty', identityOnly: true } as Partial<ObservedService>)] });
+    const result = diffEnvironment({ spec: spec(), envName: 'staging', observed: live, local: local() });
+    const action = result.actions.find(a => a.id === 'service:web')!;
+    expect(action).toMatchObject({ type: 'update', requiresConfirm: true, billable: true, metadata: { workloadCreateRequired: true } });
+    expect(isManagedCiBindingRoot(action)).toBe(true);
+    expect(fingerprintObservedState(live)).not.toBe(fingerprintObservedState(observed({ services: [observedWeb({ status: 'empty' })] })));
+  });
   it('returns noops when everything matches', () => {
     const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
     expect(result.actions.every((a) => a.type === 'noop')).toBe(true);
@@ -182,38 +192,38 @@ describe('diffEnvironment — incomplete database provisioning', () => {
 
   it('blocks another billable create while a provider-assigned database identity remains unresolved', () => {
     const unresolved = localComponent({
-      provider: 'neon',
-      providerScope: { organizationId: 'neon-org' },
+      provider: 'fixture-unresolved-db',
+      providerScope: { organizationId: 'fixture-unresolved-db-org' },
       provisioningIncomplete: true,
       unresolvedMutation: {
         resourceKind: 'database',
         operation: 'create',
         resourceName: 'invoice-perfect-production-postgres',
-        providerScope: { organizationId: 'neon-org' },
+        providerScope: { organizationId: 'fixture-unresolved-db-org' },
       },
     });
     unresolved.externalId = null;
     const result = diffEnvironment({
-      spec: spec({ database: { provider: 'neon' } }),
+      spec: spec({ database: { provider: 'fixture-unresolved-db' } }),
       envName: 'production',
       observed: observed({ databases: [] }),
       local: local({ components: [unresolved] }),
     });
 
-    expect(result.actions.find((action) => action.id === 'database:neon')).toMatchObject({
+    expect(result.actions.find((action) => action.id === 'database:fixture-unresolved-db')).toMatchObject({
       type: 'update',
       verified: false,
       metadata: {
         blockedReason: 'database_unresolved_create_unknown',
         resourceName: 'invoice-perfect-production-postgres',
-        providerScope: { organizationId: 'neon-org' },
+        providerScope: { organizationId: 'fixture-unresolved-db-org' },
       },
     });
     expect(result.actions.some((action) => (
       action.resource.kind === 'database' && action.type === 'create'
     ))).toBe(false);
     expect(result.actions.find((action) => action.id === 'service:web')?.dependsOn)
-      .toContain('database:neon');
+      .toContain('database:fixture-unresolved-db');
     expect(result.warnings).toContainEqual(expect.stringContaining(
       'hv_import mode="retained-database-cleanup"'
     ));
@@ -774,16 +784,16 @@ describe('diffEnvironment — provider switches', () => {
 
   it('emits confirm-gated destroy for the previous database after cutover is recorded', () => {
     const result = diffEnvironment({
-      spec: spec({ database: { provider: 'supabase' } }),
+      spec: spec({ database: { provider: 'fixture-current-db' } }),
       envName: 'production',
       observed: observed({
-        databases: [{ provider: 'supabase', engine: 'postgres', externalId: 'supabase-1', status: 'running' }],
+        databases: [{ provider: 'fixture-current-db', engine: 'postgres', externalId: 'fixture-current-db-1', status: 'running' }],
       }),
       local: local({
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
           bindings: {
-            provider: 'supabase',
+            provider: 'fixture-current-db',
             previousProvider: 'cloudsql',
             previousExternalId: 'cloudsql-legacy-1',
             previousBindings: {
@@ -792,12 +802,12 @@ describe('diffEnvironment — provider switches', () => {
               providerScope: { projectId: 'gcp-project', region: 'us-west1' },
             },
           },
-          externalId: 'supabase-1',
+          externalId: 'fixture-current-db-1',
           createdAt: new Date(), updatedAt: new Date(),
         }],
       }),
     });
-    const create = result.actions.find((a) => a.id === 'database:supabase')!;
+    const create = result.actions.find((a) => a.id === 'database:fixture-current-db')!;
     const destroy = result.actions.find((a) => a.id === 'database:cloudsql:destroy')!;
     expect(create.type).toBe('noop');
     expect(destroy.type).toBe('destroy');
@@ -819,16 +829,16 @@ describe('diffEnvironment — provider switches', () => {
 
   it('blocks retained database cleanup when its provider scope is missing', () => {
     const result = diffEnvironment({
-      spec: spec({ database: { provider: 'supabase' } }),
+      spec: spec({ database: { provider: 'fixture-current-db' } }),
       envName: 'production',
       observed: observed({
-        databases: [{ provider: 'supabase', engine: 'postgres', externalId: 'supabase-1', status: 'running' }],
+        databases: [{ provider: 'fixture-current-db', engine: 'postgres', externalId: 'fixture-current-db-1', status: 'running' }],
       }),
       local: local({
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
           bindings: {
-            provider: 'supabase',
+            provider: 'fixture-current-db',
             previousProvider: 'cloudsql',
             previousExternalId: 'cloudsql-legacy-1',
             previousBindings: {
@@ -836,7 +846,7 @@ describe('diffEnvironment — provider switches', () => {
               instanceId: 'cloudsql-legacy-1',
             },
           },
-          externalId: 'supabase-1',
+          externalId: 'fixture-current-db-1',
           createdAt: new Date(), updatedAt: new Date(),
         }],
       }),
@@ -940,10 +950,10 @@ describe('diffEnvironment — provider switches', () => {
       providerScope: { projectId: 'gcp-project', region: 'us-west1' },
     };
     const currentBindings = {
-      provider: 'supabase',
-      instanceId: 'supabase-current-1',
+      provider: 'fixture-current-db',
+      instanceId: 'fixture-current-db-current-1',
       resourceKind: 'postgres',
-      providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+      providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
       previousProvider: 'cloudsql',
       previousExternalId: 'cloudsql-legacy-1',
       previousBindings,
@@ -953,10 +963,10 @@ describe('diffEnvironment — provider switches', () => {
       envName: 'production',
       observed: observed({
         databases: [{
-          provider: 'supabase',
+          provider: 'fixture-current-db',
           engine: 'postgres',
-          externalId: 'supabase-current-1',
-          providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+          externalId: 'fixture-current-db-current-1',
+          providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
           status: 'running',
         }],
       }),
@@ -964,14 +974,14 @@ describe('diffEnvironment — provider switches', () => {
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
           bindings: currentBindings,
-          externalId: 'supabase-current-1',
+          externalId: 'fixture-current-db-current-1',
           createdAt: new Date(), updatedAt: new Date(),
         }],
       }),
     });
 
     const previousDestroy = result.actions.find((action) => action.id === 'database:cloudsql:destroy')!;
-    const currentDestroy = result.actions.find((action) => action.id === 'database:supabase:destroy')!;
+    const currentDestroy = result.actions.find((action) => action.id === 'database:fixture-current-db:destroy')!;
     expect(previousDestroy).toMatchObject({
       type: 'destroy',
       verified: false,
@@ -985,18 +995,18 @@ describe('diffEnvironment — provider switches', () => {
     });
     expect(currentDestroy.dependsOn).toContain(previousDestroy.id);
     expect(currentDestroy.metadata).toEqual({
-      externalId: 'supabase-current-1',
-      providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+      externalId: 'fixture-current-db-current-1',
+      providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
       bindingsFingerprint: bindingIdentityFingerprint({
-        provider: 'supabase',
-        instanceId: 'supabase-current-1',
+        provider: 'fixture-current-db',
+        instanceId: 'fixture-current-db-current-1',
         resourceKind: 'postgres',
-        providerScope: { organizationId: 'supabase-org', projectRef: 'supabase-project' },
+        providerScope: { organizationId: 'fixture-current-db-org', projectRef: 'fixture-current-db-project' },
       }),
     });
     expect(confirmGatedActionIds(result.actions)).toEqual([
       'database:cloudsql:destroy',
-      'database:supabase:destroy',
+      'database:fixture-current-db:destroy',
     ]);
   });
 
@@ -1855,28 +1865,6 @@ describe('diffEnvironment — reconciliation safety', () => {
 });
 
 describe('diffEnvironment — domain and workload', () => {
-  it('does not plan the single-service domain action when a load balancer owns the hostname', () => {
-    const withLoadBalancer = spec({
-      domain: 'myapp.dev',
-      services: {
-        web: { startCommand: 'npm start', healthCheckPath: '/health', public: true },
-        'web-secondary': { startCommand: 'npm start', healthCheckPath: '/health', public: true },
-      },
-      loadBalancer: {
-        provider: 'cloudflare',
-        services: ['web', 'web-secondary'],
-        healthCheckPath: '/health',
-      },
-    });
-    const result = diffEnvironment({
-      spec: withLoadBalancer,
-      envName: 'production',
-      observed: observed(),
-      local: local(),
-    });
-    expect(result.actions.some((candidate) => candidate.resource.kind === 'domain')).toBe(false);
-  });
-
   it('updates when the domain is not attached and noops when it is', () => {
     const withDomain = spec({ domain: 'myapp.dev' });
     const detached = diffEnvironment({ spec: withDomain, envName: 'production', observed: observed(), local: local(), customDomainManagement: 'managed' });
@@ -2082,13 +2070,13 @@ describe('diffEnvironment — domain and workload', () => {
   it('blocks before DNS mutation when the hosting provider does not manage custom domains', () => {
     const result = diffEnvironment({
       spec: spec({
-        hosting: { provider: 'vercel' },
+        hosting: { provider: 'fixture-unsupported-hosting' },
         database: undefined,
         domain: 'myapp.dev',
       }),
       envName: 'production',
       observed: observed({
-        provider: 'vercel',
+        provider: 'fixture-unsupported-hosting',
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: { 'myapp.dev': { dnsConfigured: true } },
@@ -2783,6 +2771,39 @@ describe('diffEnvironment — release-command migrations', () => {
 });
 
 describe('diffEnvironment — database seed command', () => {
+  it.each([false, true])('requires seed completion for the current database generation (current receipt: %s)', currentReceipt => {
+    // A newly initialized volume contains none of the old seed's rows, even
+    // when service identity and the desired seed command remain unchanged.
+    // Synthetic durable local evidence; this is not a live storage assertion.
+    const command = 'npm run db:seed';
+    const target = { provider: 'railway', externalId: 'db-1', providerScope: {
+      projectId: 'rail-proj-1', environmentId: 'rail-env-1',
+    } };
+    const completed = { intentId: 'new-generation', target, storageId: 'new-volume',
+      storageInstanceId: 'new-volume-instance', deploymentId: 'initialized-deployment',
+      configurationFingerprint: 'a'.repeat(64), verifiedAt: '2026-10-26T00:00:00.000Z' };
+    const result = diffEnvironment({
+      spec: spec({ database: { provider: 'railway', seedCommand: command } }),
+      envName: 'production', observed: observed({ databases: [{ provider: 'railway', engine: 'postgres',
+        externalId: 'db-1', providerScope: target.providerScope, status: 'running' }] }), local: local({ components: [localComponent({
+        provider: 'railway', providerScope: target.providerScope,
+        volumeId: completed.storageId, volumeInstanceId: completed.storageInstanceId,
+        seed: { commandHash: sha256(command), seededAt: '2026-07-05T12:00:00.000Z',
+          ...(currentReceipt ? { databaseGeneration: bindingIdentityFingerprint(completed) } : {}) },
+        freshInitialization: { metadata: { operation: 'databaseFreshInitialize', componentId: 'local-postgres',
+          intentId: completed.intentId, target, configurationFingerprint: completed.configurationFingerprint,
+          bindingsFingerprint: 'b'.repeat(64), environmentFingerprint: 'c'.repeat(64) },
+          inspectionEncrypted: 'opaque-encrypted-inspection', startedAt: '2026-10-25T23:59:00.000Z',
+          progress: { phase: 'complete', storageId: completed.storageId,
+            storageInstanceId: completed.storageInstanceId, deploymentId: completed.deploymentId },
+          storageBindings: { volumeId: completed.storageId, volumeInstanceId: completed.storageInstanceId }, completed },
+      })] }),
+    });
+    const seed = result.actions.find(action => action.id === 'database:railway:seed');
+    expect(seed?.type).toBe(currentReceipt ? 'noop' : 'update');
+    expect(seed?.metadata?.databaseGeneration).toBe(bindingIdentityFingerprint(completed));
+  });
+
   it('plans a one-shot database seed action when seedCommand has not completed', () => {
     const result = diffEnvironment({
       spec: spec({ database: { provider: 'railway', seedCommand: 'npm run db:seed' } }),

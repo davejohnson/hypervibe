@@ -1,0 +1,115 @@
+{
+  "evidenceKind": "official-source-excerpts",
+  "description": "Exact excerpts retrieved using the GitHub connector. Creation and polling sources use the same immutable Railway CLI revision as the existing GraphQL schema pin; the newer IaC excerpt independently establishes that non-null templateServiceId identifies template provenance. These do not constitute a live create or prove that templateServiceId equals a serialized configuration slot key.",
+  "sources": [
+    {
+      "path": "src/commands/add.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/add.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "2060fbf8f5c8524dd0a6f32a3509d99e4dbecb7b",
+      "excerpts": [
+        {
+          "startLine": 140,
+          "endLine": 165,
+          "text": "    }\n    match type_of_create {\n        CreateKind::Database(databases) => {\n            let is_single_db = databases.len() == 1;\n            for db in databases {\n                if verbose {\n                    eprintln!(\"iterating through databases to add: {:?}\", db)\n                }\n                deploy::fetch_and_create(\n                    &client,\n                    &mut configs,\n                    db.to_slug().to_string(),\n                    &linked_project,\n                    &HashMap::new(),\n                    verbose,\n                    args.json,\n                    deploy::FetchAndCreateOptions {\n                        should_link: is_single_db,\n                    },\n                )\n                .await?;\n                if verbose {\n                    eprintln!(\"successfully created {:?}\", db)\n                }\n            }\n        }"
+        }
+      ]
+    },
+    {
+      "path": "src/commands/deploy.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/deploy.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "f4db35f58112876457bcedf9497ab4a6ec08160a",
+      "excerpts": [
+        {
+          "startLine": 96,
+          "endLine": 246,
+          "text": "/// fetch database details via `TemplateDetail`\n/// create database via `TemplateDeploy`\n/// optionally wait for completion and link the new service\n#[allow(clippy::too_many_arguments)]\npub async fn fetch_and_create(\n    client: &reqwest::Client,\n    configs: &mut Configs,\n    template: String,\n    linked_project: &LinkedProject,\n    vars: &HashMap<String, String>,\n    verbose: bool,\n    json: bool,\n    options: FetchAndCreateOptions,\n) -> Result<(), anyhow::Error> {\n    if verbose {\n        eprintln!(\"fetching details for template\")\n    }\n    let public_client = GQLClient::new_public()?;\n    let details = crate::client::post_graphql_public::<queries::TemplateDetail, _>(\n        &public_client,\n        configs.get_backboard(),\n        queries::template_detail::Variables {\n            code: template.clone(),\n        },\n    )\n    .await?;\n\n    let template_name = details.template.name.clone();\n\n    // Work on the raw JSON value: the config is passed through to the\n    // deploy mutation verbatim (only variable values are filled in below).\n    // Round-tripping it through typed structs silently dropped every field\n    // the structs didn't declare — clusterRole, parentServiceId, exposure,\n    // numReplicas, backup schedules, variable generators/sealing, … — so\n    // templates deployed via the CLI lost their cluster metadata and\n    // replica/volume configuration.\n    let mut config = details.template.serialized_config.unwrap_or_default();\n\n    ensure_project_and_environment_exist(client, configs, linked_project).await?;\n    if verbose {\n        eprintln!(\"Project and environment in config exist\");\n    }\n\n    // Get current services before the mutation\n    let old_service_ids: HashSet<String> = {\n        let project = get_project(client, configs, linked_project.project.clone()).await?;\n        project\n            .services\n            .edges\n            .iter()\n            .map(|s| s.node.id.clone())\n            .collect()\n    };\n\n    let services = config\n        .get_mut(\"services\")\n        .and_then(|s| s.as_object_mut())\n        .map(|s| s.values_mut().collect::<Vec<_>>())\n        .unwrap_or_default();\n    for service in services {\n        let service_name = service\n            .get(\"name\")\n            .and_then(|n| n.as_str())\n            .unwrap_or_default()\n            .to_string();\n        let Some(variables) = service.get_mut(\"variables\").and_then(|v| v.as_object_mut()) else {\n            continue;\n        };\n        for (key, variable) in variables.iter_mut() {\n            if variable.is_null() {\n                continue;\n            }\n            let default_value = variable\n                .get(\"defaultValue\")\n                .and_then(|v| v.as_str())\n                .filter(|v| !v.is_empty());\n            let is_optional = variable\n                .get(\"isOptional\")\n                .and_then(|v| v.as_bool())\n                .unwrap_or_default();\n\n            let value = if let Some(value) = vars.get(&format!(\"{service_name}.{key}\")) {\n                value.clone()\n            } else if let Some(value) = vars.get(key) {\n                value.clone()\n            } else if let Some(value) = default_value {\n                value.to_string()\n            } else if !is_optional {\n                let description = variable\n                    .get(\"description\")\n                    .and_then(|d| d.as_str())\n                    .map(|d| format!(\"   *{d}*\\n\"))\n                    .unwrap_or_default();\n                prompt_text(&format!(\n                    \"Environment Variable {key} for service {service_name} is required, please set a value:\\n{description}\",\n                ))?\n            } else {\n                continue;\n            };\n\n            if let Some(variable) = variable.as_object_mut() {\n                variable.insert(\"value\".to_string(), serde_json::Value::String(value));\n            }\n        }\n    }\n\n    let spinner = create_spinner_if(!json, format!(\"Adding {template_name}...\"));\n\n    let mutation_vars = mutations::template_deploy::Variables {\n        project_id: linked_project.project.clone(),\n        environment_id: linked_project.environment_id()?.to_string(),\n        template_id: details.template.id.clone(),\n        serialized_config: config,\n    };\n    if verbose {\n        eprintln!(\"deploying template\");\n    }\n    let response = post_graphql::<mutations::TemplateDeploy, _>(\n        client,\n        configs.get_backboard(),\n        mutation_vars,\n    )\n    .await?;\n\n    // Wait for workflow to complete\n    if let Some(workflow_id) = response.template_deploy_v2.workflow_id {\n        if verbose {\n            eprintln!(\"waiting for workflow {workflow_id} to complete\");\n        }\n        wait_for_workflow(client, configs, workflow_id)\n            .await\n            .map_err(|e| match e {\n                WorkflowError::Failed(msg) => {\n                    anyhow::anyhow!(\"Failed to add {template_name}: {msg}\")\n                }\n                WorkflowError::NotFound => anyhow::anyhow!(\"Failed to add {template_name}\"),\n                WorkflowError::Timeout => {\n                    anyhow::anyhow!(\"Timed out waiting for {template_name} to finish deploying\")\n                }\n            })?;\n    }\n\n    // Find the newly created service\n    let updated_project = get_project(client, configs, linked_project.project.clone()).await?;\n    let new_service = updated_project\n        .services\n        .edges\n        .iter()\n        .find(|s| !old_service_ids.contains(&s.node.id));\n\n    // Auto-link if should_link is true and no service is currently linked"
+        }
+      ]
+    },
+    {
+      "path": "src/controllers/database.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/database.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "03d87e0fbb7d8b6a93d4cd83d287c5cab6e79843",
+      "excerpts": [
+        {
+          "startLine": 1,
+          "endLine": 32,
+          "text": "use clap::ValueEnum;\nuse strum::{Display, EnumIter};\n\n#[derive(Debug, Clone, EnumIter, Display)]\npub enum DatabaseType {\n    PostgreSQL,\n    MySQL,\n    Redis,\n    MongoDB,\n}\n\nimpl DatabaseType {\n    pub fn to_slug(&self) -> &'static str {\n        match self {\n            DatabaseType::PostgreSQL => \"postgres\",\n            DatabaseType::MySQL => \"mysql\",\n            DatabaseType::Redis => \"redis\",\n            DatabaseType::MongoDB => \"mongo\",\n        }\n    }\n}\n\nimpl ValueEnum for DatabaseType {\n    fn value_variants<'a>() -> &'a [Self] {\n        &[Self::PostgreSQL, Self::MySQL, Self::Redis, Self::MongoDB]\n    }\n\n    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {\n        Some(clap::builder::PossibleValue::new(self.to_slug()))\n    }\n}\n"
+        }
+      ]
+    },
+    {
+      "path": "src/controllers/workflow.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/workflow.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "74c7d48faa85dfeedee7b9d49b20c8ca20c6e15f",
+      "excerpts": [
+        {
+          "startLine": 28,
+          "endLine": 130,
+          "text": "/// Waits for a workflow to complete by polling workflowStatus.\n///\n/// `Running` (and unknown statuses) keep polling, and so does `NotFound` --\n/// tolerating read-after-write lag right after the workflow was created.\n/// `Error` is terminal: a workflow that has already failed never un-fails,\n/// so it surfaces immediately instead of burning the full ~2-minute retry\n/// budget re-polling a lost cause.\npub async fn wait_for_workflow(\n    client: &reqwest::Client,\n    configs: &Configs,\n    workflow_id: String,\n) -> Result<(), WorkflowError> {\n    wait_for_workflow_up_to(client, configs, workflow_id, 120).await\n}\n\n/// [`wait_for_workflow`] with a caller-chosen attempt budget (1s per attempt)\n/// for operations whose server-side duration is data-dependent -- e.g. a\n/// backup restore replicating a whole volume.\npub async fn wait_for_workflow_up_to(\n    client: &reqwest::Client,\n    configs: &Configs,\n    workflow_id: String,\n    max_attempts: u32,\n) -> Result<(), WorkflowError> {\n    let backboard = configs.get_backboard();\n\n    let result = retry_with_backoff(\n        RetryConfig {\n            max_attempts, // ~1s per attempt\n            initial_delay_ms: 1000,\n            max_delay_ms: 2000,\n            backoff_multiplier: 1.0,\n            on_retry: None,\n        },\n        || {\n            let client = client.clone();\n            let backboard = backboard.clone();\n            let workflow_id = workflow_id.clone();\n            async move {\n                let result = match post_graphql::<queries::WorkflowStatus, _>(\n                    &client,\n                    backboard,\n                    queries::workflow_status::Variables { workflow_id },\n                )\n                .await\n                {\n                    Ok(result) => result,\n                    // An auth refusal is deterministic -- retrying can't heal\n                    // it (e.g. a workflow type that doesn't register the\n                    // queries `workflowStatus` authorizes against). Fail fast\n                    // instead of silently polling out the whole budget.\n                    Err(\n                        err @ (crate::errors::RailwayError::Unauthorized\n                        | crate::errors::RailwayError::UnauthorizedToken(_)\n                        | crate::errors::RailwayError::UnauthorizedLogin),\n                    ) => {\n                        return Ok(TerminalPoll::Failed(format!(\n                            \"the workflow's status can't be polled ({err}); it keeps running server-side\"\n                        )));\n                    }\n                    Err(err) => return Err(err.into()),\n                };\n\n                use queries::workflow_status::WorkflowStatus;\n                match result.workflow_status.status {\n                    WorkflowStatus::Complete => Ok(TerminalPoll::Complete),\n                    WorkflowStatus::Error => {\n                        let error_msg = result\n                            .workflow_status\n                            .error\n                            .filter(|e| !e.is_empty())\n                            .unwrap_or_else(|| \"Unknown error\".to_string());\n                        Ok(TerminalPoll::Failed(error_msg))\n                    }\n                    WorkflowStatus::NotFound => Err(WorkflowError::NotFound.into()),\n                    WorkflowStatus::Running | WorkflowStatus::Other(_) => {\n                        Err(WorkflowError::Timeout.into())\n                    }\n                }\n            }\n        },\n    )\n    .await;\n\n    match result {\n        Ok(TerminalPoll::Complete) => Ok(()),\n        Ok(TerminalPoll::Failed(message)) => Err(WorkflowError::Failed(message)),\n        Err(e) => Err(e\n            .downcast::<WorkflowError>()\n            .unwrap_or_else(|e| WorkflowError::Failed(e.to_string()))),\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use crate::testkit::MockBackboard;\n    use serde_json::json;\n\n    fn status(value: &str, error: Option<&str>) -> serde_json::Value {\n        json!({ \"workflowStatus\": { \"status\": value, \"error\": error } })\n    }\n"
+        }
+      ]
+    },
+    {
+      "path": "src/gql/queries/strings/TemplateDetail.graphql",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/queries/strings/TemplateDetail.graphql",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "e18974ad6cc12ed4bbc7b946d14a7fec630c472d",
+      "excerpts": [
+        {
+          "startLine": 1,
+          "endLine": 8,
+          "text": "query TemplateDetail($code: String!) {\n  template(code: $code) {\n    id\n    name\n    serializedConfig\n  }\n}\n"
+        }
+      ]
+    },
+    {
+      "path": "src/gql/mutations/strings/TemplateDeploy.graphql",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/mutations/strings/TemplateDeploy.graphql",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "ac1a34691ce29156ad781191252e7ac77ae30694",
+      "excerpts": [
+        {
+          "startLine": 1,
+          "endLine": 20,
+          "text": "mutation TemplateDeploy(\n  $projectId: String!\n  $environmentId: String!\n  $templateId: String!\n  $serializedConfig: SerializedTemplateConfig!\n) {\n  templateDeployV2(\n    input: {\n      projectId: $projectId\n      environmentId: $environmentId\n      templateId: $templateId\n      serializedConfig: $serializedConfig\n    }\n  ) {\n    projectId\n    workflowId\n  }\n}\n"
+        }
+      ]
+    },
+    {
+      "path": "src/gql/queries/strings/WorkflowStatus.graphql",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/queries/strings/WorkflowStatus.graphql",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "3c5493b18cbb500cc87c9dd996aaef033cdb64a5",
+      "excerpts": [
+        {
+          "startLine": 1,
+          "endLine": 6,
+          "text": "query WorkflowStatus($workflowId: String!) {\n  workflowStatus(workflowId: $workflowId) {\n    status\n    error\n  }\n}"
+        }
+      ]
+    },
+    {
+      "path": "src/iac/compiler.rs",
+      "url": "https://github.com/railwayapp/cli/blob/b62467ef1b5303e3e340283ed96425dcf9612993/src/iac/compiler.rs",
+      "revision": "b62467ef1b5303e3e340283ed96425dcf9612993",
+      "gitBlobSha": "c7df70caf825eef5d66e21c297db1263cd66e208",
+      "excerpts": [
+        {
+          "startLine": 76,
+          "endLine": 80,
+          "text": "    /// Railway-managed databases are deployed from the official database\n    /// templates, so a service carries a `templateServiceId` iff it came from a\n    /// template. This is the only provenance the API exposes; without it a\n    /// `redis:7` image is just a service.\n    pub template_service_ids_by_id: Map<String, Value>,"
+        },
+        {
+          "startLine": 825,
+          "endLine": 835,
+          "text": "            let image_name = service\n                .get(\"source\")\n                .and_then(|source| field_str(source, \"image\"));\n            let from_template = options\n                .template_service_ids_by_id\n                .get(service_id)\n                .is_some_and(|id| !id.is_null());\n            let database = image_name\n                .filter(|_| from_template)\n                .and_then(|image| database_engine_from_image(image).map(|engine| (image, engine)));\n            if let Some((image, engine)) = database {"
+        }
+      ]
+    }
+  ]
+}

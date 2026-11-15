@@ -74,8 +74,6 @@ struct ProjectDashboardView: View {
 
     private func githubCard(_ github: GitHubInfrastructureSummary?) -> some View {
         let githubConnected = connections.contains { $0.provider == "github" && $0.status == .verified }
-        let openAIConnected = connections.contains { $0.provider == "openai" && $0.status == .verified }
-        let needsOpenAI = github?.automations.contains { $0.enabled && $0.requiresOpenAI } ?? false
 
         return VStack(alignment: .leading, spacing: 8) {
             DisclosureGroup(isExpanded: $githubExpanded) {
@@ -127,12 +125,6 @@ struct ProjectDashboardView: View {
                         connectionPrompt(
                             "GitHub access is not connected on this Mac. Use credentials you control, or ask chat for an owner handoff.",
                             provider: "github"
-                        )
-                    }
-                    if needsOpenAI && !openAIConnected {
-                        connectionPrompt(
-                            "OpenAI access is not connected on this Mac. Use credentials you control, or ask chat for an owner handoff.",
-                            provider: "openai"
                         )
                     }
                 }

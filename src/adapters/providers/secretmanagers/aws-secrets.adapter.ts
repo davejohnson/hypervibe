@@ -191,6 +191,22 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
     }
   }
 
+  /** Internal credential lifecycle boundary. Values remain inside encrypted lifecycle operations. */
+  async readCredentialJson(secretArn: string): Promise<Record<string, unknown>> {
+    const result = await this.request<AwsSecretValue>('GetSecretValue', { SecretId: secretArn });
+    if (result.ARN !== secretArn || typeof result.SecretString !== 'string' || !result.VersionId) throw new Error('AWS credential secret identity or value is unverified.');
+    const value: unknown = JSON.parse(result.SecretString);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AWS repository credential must remain a JSON object.');
+    return value as Record<string, unknown>;
+  }
+
+  async updateCredentialJson(secretArn: string, value: Record<string, unknown>, operationId: string): Promise<void> {
+    if (!/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[^\s]+$/.test(secretArn)
+      || secretArn.split(':')[3] !== this.credentials?.region || !/^[a-zA-Z0-9-]{32,64}$/.test(operationId)) throw new Error('AWS credential update requires the exact existing regional ARN and stable operation identity.');
+    const result = await this.request<{ ARN?: string; VersionId?: string }>('PutSecretValue', { SecretId: secretArn, SecretString: JSON.stringify(value), ClientRequestToken: operationId });
+    if (result.ARN !== secretArn || !result.VersionId) throw new Error('AWS credential update acknowledgement is unverified.');
+  }
+
   async getSecret(path: string, key?: string, version?: string): Promise<ResolvedSecret> {
     const params: Record<string, unknown> = { SecretId: path };
     if (version) {
@@ -292,6 +308,7 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
 
     const response = await fetch(url.toString(), {
       method: 'POST',
+      redirect: 'error',
       headers,
       body,
       signal: AbortSignal.timeout(15_000),

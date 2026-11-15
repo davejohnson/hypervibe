@@ -1,3 +1,5 @@
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { execFileSync } from 'node:child_process';
@@ -5,13 +7,139 @@ import os from 'os';
 import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { Project } from '../../entities/project.entity.js';
+import type { ServiceVolumeBinding, ServiceVolumeComponentBinding, ServiceVolumeTarget } from '../../ports/service-volume.port.js';
+import { parseHostingBindings } from '../../ports/hosting.port.js';
 import {
   mergeRepoPlatformBindings,
   readRepoBindingsFile,
   writeRepoBindingsForEnvironment,
 } from '../repo-bindings-file.js';
 
+describe('staged service-volume binding merge', () => {
+  const target = { projectId: 'project', environmentId: 'staging', serviceId: 'web', mountPath: '/data', instanceScope: { region: 'west' } };
+  const staged = (components: Record<string, ServiceVolumeComponentBinding>): ServiceVolumeBinding => ({ provider: 'test-host', target, state: 'staged', components });
+  const merge = (local: ServiceVolumeBinding, incoming: ServiceVolumeBinding) => mergeRepoPlatformBindings(
+    { serviceVolumes: { web: local } }, { serviceVolumes: { web: incoming } }
+  );
+
+  it('preserves omitted local components and never downgrades acknowledged recovery', () => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'fs-1' }, attachment: { state: 'identified', externalId: 'attachment-1' }, network: { state: 'creating' } });
+    const stale = staged({ filesystem: { state: 'creating' }, attachment: { state: 'creating' } });
+    expect(merge(local, stale)).toEqual({ serviceVolumes: { web: local } });
+    expect(mergeRepoPlatformBindings({ serviceVolumes: { web: local } }, { serviceVolumes: {} })).toEqual({ serviceVolumes: { web: local } });
+  });
+
+  it('advances individual components without dropping unrelated local recovery', () => {
+    const local = staged({ filesystem: { state: 'identified', externalId: 'fs-1' }, network: { state: 'creating' } });
+    const incoming = staged({ filesystem: { state: 'bound', externalId: 'fs-1' }, attachment: { state: 'identified', externalId: 'attachment-1' } });
+    expect(merge(local, incoming)).toEqual({ serviceVolumes: { web: staged({
+      filesystem: { state: 'bound', externalId: 'fs-1' }, network: { state: 'creating' }, attachment: { state: 'identified', externalId: 'attachment-1' },
+    }) } });
+  });
+
+  it('rejects conflicting acknowledged component IDs even when the incoming state is older', () => {
+    expect(() => merge(staged({ filesystem: { state: 'bound', externalId: 'fs-1' } }), staged({ filesystem: { state: 'identified', externalId: 'fs-2' } }))).toThrow(/identity conflicts/);
+  });
+
+  it.each([
+    { projectId: 'other' }, { environmentId: 'production' }, { serviceId: 'other' }, { mountPath: '/other' },
+    { instanceScope: { region: 'east' } }, { instanceScope: undefined }, { instanceScope: { region: 'west', accountId: 'account' } },
+  ] as Partial<ServiceVolumeTarget>[])('rejects target changes including scope additions and omissions: %j', (change) => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'fs-1' } });
+    expect(() => merge(local, { ...local, target: { ...target, ...change } })).toThrow(/identity conflicts/);
+  });
+
+  it('compares scope coordinates independent of object insertion order', () => {
+    const local = { ...staged({ filesystem: { state: 'bound', externalId: 'fs-1' } }), target: { ...target, instanceScope: { region: 'west', accountId: 'account' } } };
+    expect(merge(local, { ...local, target: { ...target, instanceScope: { accountId: 'account', region: 'west' } } })).toEqual({ serviceVolumes: { web: local } });
+  });
+
+  it('preserves native identity reused by distinct component resource kinds', () => {
+    const filesystem = { state: 'bound' as const, externalId: 'same-id' };
+    const policy = { state: 'identified' as const, externalId: 'same-id' };
+    expect(merge(staged({ filesystem }), staged({ policy }))).toEqual({ serviceVolumes: { web: staged({ filesystem, policy }) } });
+  });
+
+  it('rejects duplicate same-kind ownership introduced by merging separate service roots', () => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'same-id' } });
+    const incoming = { ...local, target: { ...target, serviceId: 'api' } };
+    expect(() => mergeRepoPlatformBindings({ serviceVolumes: { web: local } }, { serviceVolumes: { api: incoming } })).toThrow(/duplicate merged/);
+  });
+
+  it('preserves monotonic whole-volume recovery after adding staged merge support', () => {
+    const local: ServiceVolumeBinding = { provider: 'test-host', target, state: 'bound', externalId: 'fs-1' };
+    expect(merge(local, { provider: 'test-host', target, state: 'creating' })).toEqual({ serviceVolumes: { web: local } });
+    expect(() => merge(local, { ...local, state: 'identified', externalId: 'fs-2' })).toThrow(/identity conflicts/);
+  });
+
+  it('rejects provider changes and both directions of staged/whole-volume reinterpretation', () => {
+    const local = staged({ filesystem: { state: 'bound', externalId: 'fs-1' } });
+    const legacy: ServiceVolumeBinding = { provider: 'test-host', target, state: 'bound', externalId: 'fs-1' };
+    expect(() => merge(local, { ...local, provider: 'another-host' })).toThrow(/identity conflicts/);
+    expect(() => merge(local, legacy)).toThrow(/identity conflicts/);
+    expect(() => merge(legacy, local)).toThrow(/identity conflicts/);
+  });
+});
+
 describe('repo bindings delegated metadata', () => {
+  it('roundtrips the exact pending schedule and permanent provider UID through export and import', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cron-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'cloudrun', policies: {}, createdAt: now, updatedAt: now };
+    const scheduleActivation = { version: 1, state: 'pending', jobName: 'cron-job', jobUid: 'stable-uid', holdingImage: `registry.example/holding@sha256:${'a'.repeat(64)}` };
+    const cron = { serviceId: 'cron-job', jobName: 'cron-job', resourceUid: 'stable-uid', resourceType: 'scheduledJob', workloadKind: 'cron', scheduleActivation };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', services: { cron }, apiToken: 'must-not-export' }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(readFileSync(file, 'utf8')).not.toContain('must-not-export');
+      const imported = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      const hydrated = parseHostingBindings({ platformBindings: mergeRepoPlatformBindings({}, imported) });
+      expect(hydrated.services?.cron).toEqual(cron);
+      expect(() => parseHostingBindings({ platformBindings: { ...imported, services: { cron: { ...cron, scheduleActivation: { ...scheduleActivation, rawProviderResponse: 'unexpected' } } } } })).toThrow();
+      const { scheduleActivation: _pending, ...active } = cron;
+      writeRepoBindingsForEnvironment(project, { ...environment, platformBindings: { ...environment.platformBindings, services: { cron: active } } }, root);
+      const activatedImport = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      const activated = parseHostingBindings({ platformBindings: mergeRepoPlatformBindings(imported, activatedImport) });
+      expect(activated.services?.cron).toEqual(active);
+      expect(activated.services?.cron).not.toHaveProperty('scheduleActivation');
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['whole-volume', 'staged'])('roundtrips exact value-free %s recovery even for a secret-shaped service name', (kind) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-volume-bindings-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/owner/app.git']);
+    const now = new Date();
+    const project: Project = { id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git', defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now };
+    const target = { projectId: 'rp', environmentId: 'staging', serviceId: 'service', mountPath: '/data', instanceScope: { region: 'west' } };
+    const serviceVolumes = { 'token-api': kind === 'staged'
+      ? { provider: 'test-host', target, state: 'staged', components: { filesystem: { state: 'bound', externalId: 'fs-1' }, attachment: { state: 'identified', externalId: 'attachment-1' }, network: { state: 'creating' } } }
+      : { provider: 'railway', state: 'creating', target } };
+    const environment: Environment = { id: 'env', projectId: project.id, name: 'staging', platformBindings: { serviceVolumes, apiToken: 'must-not-export' }, createdAt: now, updatedAt: now };
+    const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(file).toBeTruthy();
+      const raw = readFileSync(file, 'utf8');
+      expect(raw).not.toContain('must-not-export');
+      expect(readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings.serviceVolumes).toEqual(serviceVolumes);
+      const imported = readRepoBindingsFile(project.name, root)!.document.environments.staging.platformBindings;
+      expect(mergeRepoPlatformBindings({}, imported).serviceVolumes).toEqual(serviceVolumes);
+    } finally {
+      if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it.each([
     ['unrelated remote', 'https://github.com/other/app.git', undefined, false],
     ['missing remote', undefined, undefined, false],
@@ -277,6 +405,8 @@ describe('repo bindings delegated metadata', () => {
           requiredAt: now.toISOString(),
           applyRunId: 'apply-1',
           actionIds: ['secret:OWNER_MANAGED_SECRET'],
+          operationId: 'database-rotation',
+          configurationExpectationEncrypted: 'private-encrypted-runtime-expectation',
         }],
       },
       createdAt: now,
@@ -308,14 +438,11 @@ describe('repo bindings delegated metadata', () => {
         instanceScope: { projectId: 'railway-project', environmentId: 'railway-production' },
       });
       expect(document.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
-      expect(document.environments.production.platformBindings.runtimeRollouts).toEqual([
-        expect.objectContaining({
-          service: 'worker',
-          provider: 'railway',
-          baselineDeployment: { state: 'present', id: 'deployment-before-config' },
-          actionIds: ['secret:OWNER_MANAGED_SECRET'],
-        }),
-      ]);
+      expect(document.environments.production.platformBindings.runtimeRollouts).toBeUndefined();
+      expect(serialized).not.toContain('private-encrypted-runtime-expectation');
+      const imported = document.environments.production.platformBindings;
+      expect(mergeRepoPlatformBindings(environment.platformBindings, imported).runtimeRollouts).toEqual(environment.platformBindings.runtimeRollouts);
+      expect(() => mergeRepoPlatformBindings(environment.platformBindings, { ...imported, runtimeRollouts: [] })).toThrow(/local|private/i);
     } finally {
       if (oldDisable === undefined) {
         delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -420,5 +547,47 @@ describe('repo bindings delegated metadata', () => {
       }
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('service instance intent export merge', () => {
+  const intent = { version:1, provider:'railway', target:{projectId:'p',environmentId:'target',sourceEnvironmentId:'source',serviceId:'web'},
+    sourceEnvironmentLocalId:'source-local',sourceBindingSha256:'a'.repeat(64),nativeFingerprint:'b'.repeat(64) };
+  it('never suppresses a same-shaped new recovery using historical evidence alone', () => {
+    const marker={provider:'railway',operation:'create',resourceName:'web',providerScope:{projectId:'p',environmentId:'target'},state:'unresolved'};
+    const digest=canonicalJsonSha256(marker);
+    const history=[{id:'history',digest,recordEncrypted:getSecretStore().encryptObject({marker,target:intent.target,serviceName:'web',disposition:'unresolved-not-retried'})}];
+    expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
+    expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history,serviceCreateRecovery:{web:marker},
+      serviceInstanceCreates:{web:{...intent,priorCreateRecoverySha256:digest}}},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
+  });
+  it('rejects an approval introduced by an untrusted repository even when intent identity matches',()=>{
+    const approval={archiveId:'original',activeMarkerSha256:'d'.repeat(64),planId:'plan',actionId:'service:web',intentSha256:'e'.repeat(64)};
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:intent}},
+      {serviceInstanceCreates:{web:{...intent,recoveryApproval:approval}}})).toThrow(/cannot introduce or change/);
+    expect(()=>mergeRepoPlatformBindings({},
+      {serviceInstanceCreates:{web:{...intent,recoveryApproval:approval}}})).toThrow(/cannot introduce or change/);
+  });
+  it('requires independent private proof even when local and incoming approval fields match',()=>{
+    const approved={...intent,completed:true,recoveryApproval:{archiveId:'original',activeMarkerSha256:'d'.repeat(64),planId:'plan',actionId:'service:web',intentSha256:'e'.repeat(64)}};
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:approved},services:{web:{serviceId:'web'}}},
+      {serviceInstanceCreates:{web:approved}})).toThrow(/approval could not be verified/);
+  });
+  it('preserves acknowledged progress when a repository still has the pre-dispatch intent', () => {
+    expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
+      {serviceInstanceCreates:{web:intent}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});
+  });
+  it('accepts an acknowledged export of the exact same pending attempt', () => {
+    expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:intent}},
+      {serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});
+  });
+  it.each([
+    {...intent,workflowId:'different'},
+    {...intent,workflowId:'workflow',target:{...intent.target,serviceId:'other'}},
+    {...intent,workflowId:'workflow',nativeFingerprint:'c'.repeat(64)},
+    {...intent,workflowId:'workflow',completed:true},
+  ])('rejects conflicting identity or untrusted completion: %j', incoming => {
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
+      {serviceInstanceCreates:{web:incoming}})).toThrow(/Conflicting service instance recovery/);
   });
 });

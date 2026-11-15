@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
@@ -17,17 +18,82 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.js';
-import { MemorystoreAdapter } from '../../adapters/providers/gcp/memorystore.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
-import { NeonAdapter } from '../../adapters/providers/neon/neon.adapter.js';
 import { AzurePostgresAdapter } from '../../adapters/providers/azure/azure-postgres.adapter.js';
 import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
 import { createToolContext } from '../../application/context.js';
+import { CommandRegistry } from '../../application/commands.js';
+import { runCli } from '../../interfaces/cli/run.js';
+import { databaseBootstrapRecoverySchema } from '../../domain/plan/database-bootstrap.contract.js';
+import { databaseInitializationAttemptSchema } from '../../domain/plan/database-initialization.contract.js';
+import { DATABASE_INITIALIZATION_AUTH_COMMAND_HASH } from '../../domain/services/database-initialization-program.js';
 import '../../application/providers.js';
+
+// A synthetic lifecycle owner keeps generic import/cleanup safety independent of clouds.
+const fixtureDatabaseProvider = providerRegistry.get('cloudsql')!;
+providerRegistry.register({
+  ...fixtureDatabaseProvider,
+  metadata: {
+    ...fixtureDatabaseProvider.metadata, name: 'fixture-database', displayName: 'Fixture database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+  retainedCleanup: {
+    resources: ['backup'],
+    destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+  },
+});
+
+// Synthetic hosting supports only the generic lifecycle contracts under test.
+const fixtureHostingProvider = providerRegistry.get('cloudrun')!;
+for (const [name, workloadKinds] of [['fixture-hosting', ['web', 'worker', 'cron']], ['fixture-web-hosting', ['web']]] as const) {
+  providerRegistry.register({
+    ...fixtureHostingProvider,
+    metadata: {
+      ...fixtureHostingProvider.metadata, name, displayName: name,
+      lifecycle: { hosting: { workloadKinds, customDomains: 'unsupported', teardownBoundary: 'services' } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+  });
+}
+
+
+const fixtureAzureDatabaseProvider = providerRegistry.get('azure-postgres')!;
+providerRegistry.register({
+  ...fixtureAzureDatabaseProvider,
+  metadata: {
+    ...fixtureAzureDatabaseProvider.metadata, name: 'fixture-azure-database', displayName: 'Fixture scoped database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['azure-container-apps'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+});
+
+// Synthetic provider: these tests exercise generic inspection and ownership rules,
+// independently of the retired cloud cache implementation.
+class FixtureCacheAdapter {
+  async connect(_credentials: unknown): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async inspectCacheResources(_request: unknown): Promise<Record<string, unknown>> { return {}; }
+}
+providerRegistry.register({
+  metadata: {
+    name: 'fixture-cache', displayName: 'Fixture cache', category: 'cache',
+    credentialsSchema: z.object({ projectId: z.string(), credentials: z.string() }),
+    connectionAliases: ['cloudrun'],
+    lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: ['railway'] } },
+    maturity: { lifecycle: { cache: { status: 'ready-for-live', reason: 'Synthetic test provider.' } } },
+  },
+  factory: async credentials => { const adapter = new FixtureCacheAdapter(); await adapter.connect(credentials); return adapter; },
+  inspection: {
+    resources: ['cache'], defaultResource: 'cache',
+    selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'region', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId', 'region'] } },
+    inspect: (adapter, request) => (adapter as FixtureCacheAdapter).inspectCacheResources(request),
+  },
+});
 
 let tempDir: string;
 
@@ -79,7 +145,157 @@ async function makeFullClient() {
   };
 }
 
+function databaseRecoveryBinding(kind: 'bootstrap' | 'initialization', complete: boolean) {
+  const scope = { projectId: 'native-project', environmentId: 'native-production' };
+  const target = { provider: 'railway', externalId: 'database-1', providerScope: scope };
+  const fingerprint = 'a'.repeat(64), at = '2026-10-27T01:00:00.000Z';
+  if (kind === 'initialization') return { freshInitialization: databaseInitializationAttemptSchema.parse({
+    metadata: { operation: 'databaseFreshInitialize', componentId: 'database-component', intentId: 'fresh-once', target,
+      configurationFingerprint: fingerprint, bindingsFingerprint: fingerprint, environmentFingerprint: fingerprint },
+    inspectionEncrypted: 'synthetic-encrypted-review', startedAt: at,
+    progress: complete ? { phase: 'complete', storageId: 'new-volume', storageInstanceId: 'new-instance', deploymentId: 'db-deployment' }
+      : { phase: 'storage-attempted' },
+    ...(complete ? { storageBindings: { volumeId: 'new-volume', volumeInstanceId: 'new-instance' }, completed: {
+      intentId: 'fresh-once', target, storageId: 'new-volume', storageInstanceId: 'new-instance', deploymentId: 'db-deployment',
+      configurationFingerprint: fingerprint, verifiedAt: at,
+    } } : {}),
+  }) };
+  const executionIds = { authenticate: '11111111-1111-4111-8111-111111111111', migrate: '22222222-2222-4222-8222-222222222222' };
+  const checkpoint = (mode: 'authenticate' | 'migrate') => ({ version: 1, authorityHash: fingerprint,
+    phase: complete ? 'complete' : 'deployed', taskServiceId: `task-${mode}`, taskInstanceId: `instance-${mode}`, deploymentId: `deployment-${mode}`,
+    ...(complete ? { terminal: { status: 'succeeded', exitCode: 0, result: { version: 1, executionId: executionIds[mode], mode,
+      commandHash: mode === 'authenticate' ? DATABASE_INITIALIZATION_AUTH_COMMAND_HASH : fingerprint,
+      authentication: 'authenticated', migration: mode === 'authenticate' ? 'unchecked' : 'completed',
+      ...(mode === 'migrate' ? { exitCode: 0 } : {}),
+    } } } : {}),
+  });
+  return { databaseBootstrap: databaseBootstrapRecoverySchema.parse({ version: 1,
+    base: { componentId: 'database-component', generationHash: fingerprint, intentId: 'fresh-once', hostingProvider: 'railway',
+      service: 'web', image: `ghcr.io/example/app@sha256:${fingerprint}`, migrationCommandHash: fingerprint,
+      source: { provider: 'railway', primaryExternalId: target.externalId, providerScope: scope,
+        resourceIdentity: { volumeId: 'new-volume', volumeInstanceId: 'new-instance' } },
+      databaseDeploymentId: 'db-deployment', sourceServiceId: 'web-1', sourceInstanceId: 'web-instance', environmentFingerprint: fingerprint,
+      variableReferences: [{ sourceServiceId: target.externalId, variableName: 'DATABASE_URL', targetName: 'DATABASE_URL' }], approvedVariables: {},
+    }, inspectionEncrypted: 'synthetic-encrypted-review', authenticationExecutionId: executionIds.authenticate,
+    migrationExecutionId: executionIds.migrate, authentication: checkpoint('authenticate'),
+    ...(complete ? { migration: checkpoint('migrate'), authenticationVerifiedAt: at, consumedAt: at } : {}),
+  }) };
+}
+
+function makeCliLifecycleClient() {
+  const registry = new CommandRegistry();
+  registerLifecycleTools(registry, createToolContext());
+  return {
+    async call(_name: string, args: Record<string, unknown>) {
+      let stdout = '';
+      await runCli(['destroy', '--input', '-', '--json'], { registry, initialize: false, io: {
+        writeOut: value => { stdout += value; }, writeErr: () => {}, readStdin: async () => JSON.stringify(args),
+        confirm: async () => false, stdinIsTTY: false,
+      } });
+      return JSON.parse(stdout) as Record<string, any>;
+    },
+    async close() {},
+  };
+}
+
 describe('hv_destroy', () => {
+  describe.each(['mcp', 'cli'] as const)('%s database recovery preservation', transport => {
+    it.each(['bootstrap', 'initialization'] as const)('preserves pending and malformed %s records across every local deletion scope', async kind => {
+      const client = transport === 'mcp' ? await makeClient() : makeCliLifecycleClient();
+      try {
+        for (const malformed of [false, true]) {
+          const project = new ProjectRepository().create({ name: `database-recovery-${kind}-${malformed}` });
+          const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+            services: { web: { serviceId: 'web-1' } },
+          } });
+          const service = new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+          const bindings = malformed ? kind === 'bootstrap' ? { databaseBootstrap: { consumedAt: '2026-10-27T01:00:00.000Z' } }
+            : { freshInitialization: { progress: { phase: 'complete' } } } : databaseRecoveryBinding(kind, false);
+          const component = new ComponentRepository().create({ environmentId: environment.id, type: 'postgres', externalId: 'database-1', bindings });
+          for (const selector of [{ scope: 'service', name: 'web' }, { scope: 'environment', env: 'production' }, { scope: 'project' }]) {
+            const result = await client.call('hv_destroy', { project: project.name, ...selector, confirm: true });
+            expect(result.ok).toBe(false);
+            expect(result.error.code).toBe('VALIDATION');
+            expect(result.error.message).toMatch(/recovery/i);
+          }
+          expect(new ServiceRepository().findById(service.id)).not.toBeNull();
+          expect(new EnvironmentRepository().findById(environment.id)?.platformBindings).toEqual(environment.platformBindings);
+          expect(new ComponentRepository().findById(component.id)?.bindings).toEqual(bindings);
+          expect(new ProjectRepository().findById(project.id)).not.toBeNull();
+        }
+      } finally { await client.close(); }
+    });
+
+    it.each(['bootstrap', 'initialization'] as const)('keeps ordinary confirmed deletion after valid completed %s recovery', async kind => {
+      const project = new ProjectRepository().create({ name: `completed-${kind}` });
+      const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: { services: { web: { serviceId: 'web-1' } } } });
+      new ComponentRepository().create({ environmentId: environment.id, type: 'postgres', externalId: 'database-1', bindings: databaseRecoveryBinding(kind, true) });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+      const client = transport === 'mcp' ? await makeClient() : makeCliLifecycleClient();
+      try {
+        for (const selector of [{ scope: 'service', name: 'web' }, { scope: 'environment', env: 'production' }, { scope: 'project' }]) {
+          const preview = await client.call('hv_destroy', { project: project.name, ...selector });
+          expect(preview.error.code).toBe('CONFIRM_REQUIRED');
+          expect((await client.call('hv_destroy', { project: project.name, ...selector, confirm: true })).ok).toBe(true);
+        }
+      } finally { await client.close(); }
+    });
+  });
+
+  it.each(['database', 'aliases', 'credential', 'rollout'])('preserves %s credential recovery during local project, environment and service deletion', async kind => {
+    const project = new ProjectRepository().create({ name: `credential-delete-${kind}` });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+      services: { web: { serviceId: 'web-1' } },
+      ...(kind === 'credential' ? { credentialUpdates: { database: { state: 'pending', planId: 'reviewed-plan' } } } : {}),
+      ...(kind === 'rollout' ? { runtimeRollouts: [{ service: 'web', operationId: 'reviewed-plan' }] } : {}),
+    } });
+    if (kind === 'database' || kind === 'aliases') new ComponentRepository().create({ environmentId: environment.id, type: 'postgres', externalId: 'database-1', bindings: kind === 'database'
+      ? { credentialRotation: { phase: 'database-attempted', planId: 'reviewed-plan' } } : { credentialAliasRepair: { phase: 'attempted' } } });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+    const client = await makeClient();
+    try {
+      for (const selector of [{ scope: 'service', name: 'web' }, { scope: 'environment', env: 'production' }, { scope: 'project' }]) {
+        const result = await client.call('hv_destroy', { project: project.name, ...selector, confirm: true });
+        expect(result.ok).toBe(false);
+        expect(result.error.message).toMatch(/credential|activation/i);
+      }
+      expect(new EnvironmentRepository().findById(environment.id)).not.toBeNull();
+      expect(new ProjectRepository().findById(project.id)).not.toBeNull();
+    } finally { await client.close(); }
+  });
+
+  it('reports retained volume drift in status even after volume intent is omitted', async () => {
+    const { SpecStore } = await import('../../domain/spec/spec.store.js');
+    const project = new ProjectRepository().create({ name: 'volume-status', defaultPlatform: 'railway' });
+    new SpecStore().replace(project, { version: 1, project: project.name, environments: { staging: { hosting: { provider: 'railway' }, services: { web: {} } } } });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'railway', projectId: 'p', environmentId: 'e', services: { web: { serviceId: 's' } },
+      serviceVolumes: { web: { provider: 'railway', state: 'creating', target: { projectId: 'p', environmentId: 'e', serviceId: 's', mountPath: '/data' } } },
+    } });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'synthetic connection unavailable' });
+    const client = await makeFullClient();
+    try {
+      const result = await client.call('hv_status', { project: project.name, env: 'staging' });
+      expect(result.ok).toBe(true);
+      expect(result.data.inSync).toBe(false);
+      expect(result.data.drift).toContainEqual(expect.objectContaining({ id: 'volume:web', resource: expect.objectContaining({ kind: 'volume' }) }));
+    } finally { await client.close(); }
+  });
+  it('preserves retained volume recovery during project, environment and service deletion', async () => {
+    const project = new ProjectRepository().create({ name: 'retained-volume' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: { serviceVolumes: { web: { state: 'creating' } } } });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {} });
+    const client = await makeClient();
+    try {
+      for (const selector of [{ scope: 'project' }, { scope: 'environment', env: 'staging' }, { scope: 'service', name: 'web' }]) {
+        const result = await client.call('hv_destroy', { project: project.name, ...selector, confirm: true });
+        expect(result.ok).toBe(false);
+        expect(result.error.message).toContain('volume');
+      }
+      expect(new EnvironmentRepository().findById(environment.id)?.platformBindings.serviceVolumes).toEqual({ web: { state: 'creating' } });
+      expect(new ProjectRepository().findById(project.id)).not.toBeNull();
+    } finally { await client.close(); }
+  });
   it('rejects selectors for another destroy scope before confirmation or deletion', async () => {
     new ProjectRepository().create({ name: 'scope-safe-app' });
     const t = await makeClient();
@@ -212,7 +428,7 @@ describe('hv_inspect / hv_import', () => {
         node: {
           id: 'svc-web',
           name: 'web',
-          repoTriggers: { edges: [{ node: { repository: 'acme/demo-app', branch: 'main' } }] },
+          repoTriggers: { pageInfo: { hasNextPage: false }, edges: [{ node: { id: 'trigger-prod', projectId: 'rp-1', serviceId: 'svc-web', environmentId: 'env-prod', repository: 'acme/demo-app', branch: 'main' } }] },
           serviceInstances: {
             edges: [{
               node: {
@@ -380,10 +596,9 @@ describe('hv_inspect / hv_import', () => {
     expect(result.data.providers.map((provider: { provider: string }) => provider.provider).sort())
       .toEqual(providerRegistry.names().sort());
     expect(result.data.providers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref', 'pages']) }),
+      expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref']) }),
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
-      expect.objectContaining({ provider: 'fly', resources: expect.arrayContaining(['environment', 'database']) }),
       expect.objectContaining({
         provider: 'cloudsql',
         resources: expect.arrayContaining(['connection', 'database']),
@@ -396,7 +611,6 @@ describe('hv_inspect / hv_import', () => {
         provider: 'cloudrun',
         inspectionModes: expect.arrayContaining([
           expect.objectContaining({ resource: 'environment', mode: 'environment-forensics', acceptsLimit: true }),
-          expect.objectContaining({ resource: 'environment', mode: 'environment', acceptsLimit: false }),
         ]),
       }),
     ]));
@@ -418,7 +632,7 @@ describe('hv_inspect / hv_import', () => {
           queue: { backend: 'postgres', resources: 'application-managed' },
         }),
       });
-    expect(result.data.providers.find((entry: { provider: string }) => entry.provider === 'memorystore'))
+    expect(result.data.providers.find((entry: { provider: string }) => entry.provider === 'fixture-cache'))
       .toMatchObject({
         maturity: {
           lifecycle: {
@@ -426,10 +640,6 @@ describe('hv_inspect / hv_import', () => {
           },
         },
       });
-    const vercel = result.data.providers.find((entry: { provider: string }) => entry.provider === 'vercel');
-    expect(vercel.inspectionModes
-      .filter((mode: { resource: string }) => mode.resource === 'environment')
-      .every((mode: { optional: string[] }) => !mode.optional.includes('region'))).toBe(true);
     expect(providerRegistry.namesFor('storage').sort()).toEqual(['azureblob', 'gcs', 'railway', 's3']);
     for (const provider of providerRegistry.namesFor('hosting')) {
       expect(providerRegistry.get(provider)?.inspection?.resources, provider)
@@ -540,16 +750,16 @@ describe('hv_inspect / hv_import', () => {
   it('hv_inspect accepts region when the provider-owned resource contract advertises it', async () => {
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         credentials: '{}',
       }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    const inspect = vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'present',
       resource: 'cache',
       caches: [{
@@ -564,7 +774,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       resource: 'cache',
       region: 'europe-west1',
       limit: 5,
@@ -579,7 +789,7 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
-  it('hv_inspect reuses a verified Cloud Run connection for Memorystore inventory', async () => {
+  it('hv_inspect reuses a verified Cloud Run connection for an aliased cache inventory', async () => {
     const connections = new ConnectionRepository();
     const connection = connections.create({
       provider: 'cloudrun',
@@ -594,9 +804,9 @@ describe('hv_inspect / hv_import', () => {
       }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    const inspect = vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'absent',
       resource: 'cache',
       caches: [],
@@ -606,13 +816,13 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       resource: 'cache',
     });
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       observation: 'absent',
       resource: 'cache',
       caches: [],
@@ -641,50 +851,50 @@ describe('hv_inspect / hv_import', () => {
     const first = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'database-first',
-      platformBindings: { provider: 'digitalocean', projectId: 'app-1' },
+      platformBindings: { provider: 'railway', projectId: 'app-1' },
     });
     const second = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'cache-first',
-      platformBindings: { provider: 'digitalocean', projectId: 'app-2' },
+      platformBindings: { provider: 'railway', projectId: 'app-2' },
     });
     const components = new ComponentRepository();
     const firstDatabase = components.create({
       environmentId: first.id,
       type: 'postgres',
       externalId: 'db-first',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const firstCache = components.create({
       environmentId: first.id,
       type: 'redis',
       externalId: 'cache-second',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const secondCache = components.create({
       environmentId: second.id,
       type: 'redis',
       externalId: 'cache-first',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const secondDatabase = components.create({
       environmentId: second.id,
       type: 'postgres',
       externalId: 'db-second',
-      bindings: { provider: 'digitalocean' },
+      bindings: { provider: 'railway' },
     });
     const observeDatabase = vi.fn(async (_environment, component) => ({
-      provider: 'digitalocean', engine: 'postgres', externalId: component.externalId,
-      providerScope: { accountUuid: 'account-1' }, status: 'running',
+      provider: 'railway', engine: 'postgres', externalId: component.externalId,
+      providerScope: { projectId: 'project-1' }, status: 'running',
     }));
     const observeCache = vi.fn(async (_environment, component) => ({
-      provider: 'digitalocean', engine: 'redis', externalId: component.externalId,
-      providerScope: { accountUuid: 'account-1' }, status: 'running',
+      provider: 'railway', engine: 'redis', externalId: component.externalId,
+      providerScope: { projectId: 'project-1' }, status: 'running',
     }));
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'digitalocean',
+        name: 'railway',
         observeDatabase,
         observeCache,
         disconnect: async () => {},
@@ -693,10 +903,10 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     await t.call('hv_inspect', {
-      provider: 'digitalocean', project: project.name, env: first.name, resource: 'cache',
+      provider: 'railway', project: project.name, env: first.name, resource: 'cache',
     });
     await t.call('hv_inspect', {
-      provider: 'digitalocean', project: project.name, env: second.name, resource: 'database',
+      provider: 'railway', project: project.name, env: second.name, resource: 'database',
     });
 
     expect(observeCache).toHaveBeenCalledWith(first, expect.objectContaining({ id: firstCache.id }), expect.anything());
@@ -775,7 +985,7 @@ describe('hv_inspect / hv_import', () => {
         completeness: 'complete',
       },
     });
-    expect(observe).toHaveBeenCalledWith(environment);
+    expect(observe).toHaveBeenCalledWith(environment, { databaseEnvAliases: {} });
     await t.close();
   });
 
@@ -791,7 +1001,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'postgres',
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -804,7 +1014,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -825,7 +1035,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       mode: 'retained-database-cleanup',
       project: project.name,
       env: environment.name,
@@ -840,7 +1050,7 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousDatabase).toEqual({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       externalId: 'legacy-production-db',
       engine: 'postgres',
       name: 'legacy-production-db',
@@ -985,7 +1195,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'postgres',
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope: { projectId: 'gcp-project', region: 'us-central1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -998,7 +1208,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -1020,7 +1230,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       mode: 'retained-database-cleanup',
       project: project.name,
       env: environment.name,
@@ -1048,7 +1258,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -1061,13 +1271,13 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'present',
       resource: 'cache',
       caches: [{
@@ -1081,7 +1291,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       mode: 'retained-cache-cleanup',
       project: project.name,
       env: environment.name,
@@ -1096,7 +1306,7 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousCache).toEqual({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       externalId: 'legacy-production-cache-id',
       engine: 'redis',
       providerEngine: 'redis',
@@ -1122,7 +1332,7 @@ describe('hv_inspect / hv_import', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         providerScope: { projectId: 'gcp-project', region: 'us-central1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -1135,13 +1345,13 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
-    vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+    vi.spyOn(FixtureCacheAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(FixtureCacheAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
       observation: 'present',
       resource: 'cache',
       caches: [{
@@ -1156,7 +1366,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      provider: 'memorystore',
+      provider: 'fixture-cache',
       mode: 'retained-cache-cleanup',
       project: project.name,
       env: environment.name,
@@ -1179,7 +1389,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -1199,7 +1409,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       mode: 'retained-resource-cleanup',
       resource: 'backup',
       project: project.name,
@@ -1215,7 +1425,7 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousResource).toEqual({
-      provider: 'cloudsql',
+      provider: 'fixture-database',
       resource: 'backup',
       externalId: 'projects/gcp-project/backups/backup-123',
       name: 'backup-123',
@@ -1272,7 +1482,7 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
-  it('hv_inspect passes only a sanitized compatible hosting scope to Azure database inventory', async () => {
+  it('hv_inspect passes only a sanitized compatible hosting scope to a compatible database inventory', async () => {
     const subscriptionId = '22222222-2222-4222-8222-222222222222';
     const resourceGroupId = `/subscriptions/${subscriptionId}/resourceGroups/hv-inspect-production`;
     const environmentId = `${resourceGroupId}/providers/Microsoft.App/managedEnvironments/hv-inspect`;
@@ -1324,7 +1534,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'azure-postgres',
+      provider: 'fixture-azure-database',
       project: project.name,
       env: 'production',
       resource: 'database',
@@ -1333,7 +1543,7 @@ describe('hv_inspect / hv_import', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
-      provider: 'azure-postgres',
+      provider: 'fixture-azure-database',
       mode: 'database',
       binding: 'missing',
       inventory: { databases: [{ name: 'selected-db' }] },
@@ -1352,7 +1562,7 @@ describe('hv_inspect / hv_import', () => {
     expect(forwardedRequest.binding).not.toHaveProperty('services');
 
     const defaultResult = await t.call('hv_inspect', {
-      provider: 'azure-postgres',
+      provider: 'fixture-azure-database',
       project: project.name,
       env: 'production',
     });
@@ -1364,50 +1574,6 @@ describe('hv_inspect / hv_import', () => {
         projectId: resourceGroupId,
         environmentId,
       },
-    }));
-    await t.close();
-  });
-
-  it('hv_inspect does not pass an incompatible hosting binding to a datastore provider', async () => {
-    const project = new ProjectRepository().create({ name: 'incompatible-database-inventory-app' });
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'azure-container-apps',
-        projectId: '/subscriptions/sub/resourceGroups/unrelated',
-        environmentId: '/subscriptions/sub/resourceGroups/unrelated/providers/Microsoft.App/managedEnvironments/app',
-        services: { web: { serviceId: 'azure-web-id' } },
-      },
-    });
-    const connections = new ConnectionRepository();
-    const connection = connections.create({
-      provider: 'neon',
-      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'neon-token' }),
-    });
-    connections.updateStatus(connection.id, 'verified');
-    vi.spyOn(NeonAdapter.prototype, 'connect').mockResolvedValue();
-    vi.spyOn(NeonAdapter.prototype, 'disconnect').mockResolvedValue();
-    const inspect = vi.spyOn(NeonAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
-      observation: 'absent',
-      resource: 'database',
-      databases: [],
-      truncated: false,
-      partial: false,
-    });
-    const t = await makeClient();
-
-    const result = await t.call('hv_inspect', {
-      provider: 'neon',
-      project: project.name,
-      env: 'production',
-      resource: 'database',
-      name: 'selected-db',
-    });
-
-    expect(result.ok).toBe(true);
-    expect(inspect).toHaveBeenCalledWith(expect.not.objectContaining({
-      binding: expect.anything(),
     }));
     await t.close();
   });
@@ -1426,7 +1592,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         credentials: '{}',
@@ -1452,7 +1618,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       project: project.name,
       env: 'production',
       region: 'europe-west1',
@@ -1460,7 +1626,7 @@ describe('hv_inspect / hv_import', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       mode: 'environment-forensics',
       project: project.name,
       environment: 'production',
@@ -1489,7 +1655,7 @@ describe('hv_inspect / hv_import', () => {
       platformBindings: { provider: 'railway' },
     });
     const connection = new ConnectionRepository().create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         credentials: '{}',
@@ -1509,7 +1675,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_inspect', {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       project: project.name,
       env: 'production',
       limit: 1,
@@ -1538,7 +1704,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
     });
     connections.updateStatus(connection.id, 'verified');
@@ -1562,7 +1728,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const t = await makeClient();
     const input = {
-      provider: 'cloudrun',
+      provider: 'fixture-hosting',
       mode: 'retained-cleanup',
       project: project.name,
       env: environment.name,
@@ -1578,11 +1744,11 @@ describe('hv_inspect / hv_import', () => {
     const retained = await t.call('hv_import', { ...input, confirm: true });
     expect(retained.ok).toBe(true);
     expect(retained.data).toMatchObject({
-      retainedCleanup: { provider: 'cloudrun', project: project.name, environment: 'production' },
+      retainedCleanup: { provider: 'fixture-hosting', project: project.name, environment: 'production' },
     });
     expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as Record<string, unknown>)
       .previousHosting).toMatchObject({
-        provider: 'cloudrun',
+        provider: 'fixture-hosting',
         projectId: 'gcp-project',
         environmentId: 'us-central1',
         services: {
@@ -1727,58 +1893,6 @@ describe('hv_inspect / hv_import', () => {
     expect(connectionWithEnv.error.code).toBe('VALIDATION');
     expect(connectionWithEnv.error.details.invalid).toEqual(['env']);
 
-    const connectionWithLimit = await t.call('hv_inspect', {
-      provider: 'openai',
-      limit: 5,
-    });
-    expect(connectionWithLimit.ok).toBe(false);
-    expect(connectionWithLimit.error.code).toBe('VALIDATION');
-    expect(connectionWithLimit.error.details.suggestedCall).toEqual({
-      command: 'hv_inspect',
-      input: { provider: 'openai' },
-    });
-    expect(connectionWithLimit.agentInstruction).toMatchObject({ action: 'continue' });
-
-    const neonConnection = new ConnectionRepository().create({
-      provider: 'neon',
-      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'neon-token' }),
-    });
-    new ConnectionRepository().updateStatus(neonConnection.id, 'verified');
-    vi.spyOn(NeonAdapter.prototype, 'connect').mockResolvedValue();
-    const inspectDatabase = vi.spyOn(NeonAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
-      observation: 'present',
-      resource: 'database',
-      databases: [{
-        id: 'neon-project-1',
-        engine: 'postgres',
-        name: 'selected-db',
-        status: 'ready',
-        providerScope: { projectId: 'neon-project-1', organizationId: 'org-1' },
-      }],
-      truncated: false,
-      partial: false,
-    });
-    const selectedDatabase = await t.call('hv_inspect', {
-      provider: 'neon',
-      project: project.name,
-      env: 'staging',
-      resource: 'database',
-      name: 'selected-db',
-    });
-    expect(selectedDatabase.ok).toBe(true);
-    expect(selectedDatabase.data).toMatchObject({
-      provider: 'neon',
-      mode: 'database',
-      project: project.name,
-      environment: 'staging',
-      observed: null,
-      binding: 'missing',
-      inventory: { databases: [{ id: 'neon-project-1', name: 'selected-db' }] },
-    });
-    expect(inspectDatabase).toHaveBeenCalledWith(expect.objectContaining({
-      resource: 'database',
-      name: 'selected-db',
-    }));
     await t.close();
   });
 
@@ -2143,6 +2257,9 @@ describe('hv_inspect / hv_import', () => {
         pluginName: 'Postgres',
       },
     });
+    // The confirmed mapping is committed as the primary database for hosted inspection.
+    expect(new EnvironmentRepository().findById(environment.id)?.platformBindings.databaseTopology)
+      .toEqual({ primary: { provider: 'railway', externalId: 'svc-postgres' }, replicas: {} });
     await t.close();
   });
 
@@ -2361,7 +2478,7 @@ describe('hv_inspect / hv_import', () => {
           provider: 'railway',
           engine: 'postgres',
           externalId: 'svc-postgres',
-          providerScope: { projectId: 'rp-service-backed' },
+          providerScope: { projectId: 'rp-service-backed', environmentId: 'env-prod' },
           name: 'Postgres',
           status: 'running',
         }],
@@ -2446,7 +2563,16 @@ describe('hv_inspect / hv_import', () => {
       action.type === 'create' || action.type === 'destroy'
     )).toEqual([]);
     expect(status.data.drift).toEqual([]);
-    expect(status.data.inSync).toBe(true);
+    // Import does not opt resources into managed backups or certify recovery.
+    // Remaining deployment convergence is independent of that optional policy.
+    expect(status.data.inSync).toBe(false);
+    expect(status.data.backupCoverage).toMatchObject({ policy: { mode: 'disabled', source: 'default' }, complete: true,
+      backupObserved: 'not-applicable', restoreTested: 'not-applicable' });
+    expect(status.data.backupReadiness).toMatchObject({ ready: true, resources: [] });
+    expect(status.data.backupCoverage.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: expect.objectContaining({ kind: 'database', provider: 'railway' }), state: 'disabled' }),
+      expect.objectContaining({ resource: expect.objectContaining({ kind: 'storage', name: 'uploads' }), state: 'disabled' }),
+    ]));
 
     observe.mockResolvedValue({ ...observed, caches: [] });
     const missingCacheStatus = await t.call('hv_status', {

@@ -6,10 +6,51 @@ import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
 import { createCommandRegistry } from '../commands.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
-import { providerRegistry } from '../../domain/registry/provider.registry.js';
+import { providerRegistry, standardDatabaseRuntimeProjection } from '../../domain/registry/provider.registry.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { executePlanApply } from '../apply-plan.js';
+import { z } from 'zod';
+
+// Synthetic lifecycle owners exercise shared safety without restoring cloud CRUD.
+for (const [name, teardownBoundary] of [['fixture-hosting', 'services']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'deployment', credentialsSchema: z.object({}),
+      lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['environment'], defaultResource: 'environment',
+      selectors: { environment: { mode: 'environment-forensics', optional: ['project', 'env', 'limit'], list: true } },
+      inspect: async () => { throw new Error('Synthetic inventory requires explicit observations.'); },
+    },
+    factory: () => { throw new Error('Synthetic hosting requires an explicit test adapter.'); },
+  });
+}
+for (const [name, hosting] of [['fixture-database', 'fixture-hosting']] as const) {
+  providerRegistry.register({
+    metadata: {
+      name, displayName: `Synthetic ${name}`, category: 'database', credentialsSchema: z.object({}),
+      lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: [hosting] } },
+      maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+    },
+    inspection: {
+      resources: ['database', 'backup'], defaultResource: 'database',
+      selectors: {
+        database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'databases' },
+        backup: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'], collectionKey: 'backups' },
+      },
+      inspect: (adapter, request) => (adapter as { inspectBackupResources: (request: unknown) => Promise<Record<string, unknown>> }).inspectBackupResources(request),
+    },
+    databaseRuntime: standardDatabaseRuntimeProjection,
+    retainedCleanup: {
+      resources: ['backup'],
+      destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+    },
+    factory: () => { throw new Error('Synthetic database requires an explicit test adapter.'); },
+  });
+}
 
 let root: string;
 let oldCwd: string;
@@ -113,7 +154,7 @@ describe('canonical command repository-state boundary', () => {
         staging: {
           hosting: { provider: 'railway' },
           services: { web: {} },
-          database: { provider: 'cloudsql' },
+          database: { provider: 'fixture-database' },
         },
       },
     }), 'utf8');
@@ -132,7 +173,7 @@ describe('canonical command repository-state boundary', () => {
         ok: false,
         error: {
           code: 'VALIDATION',
-          message: expect.stringContaining('cloudsql database cannot serve workloads hosted by "railway"'),
+          message: expect.stringContaining('fixture-database database cannot serve workloads hosted by "railway"'),
           details: {
             path: 'environments.staging.database.provider',
             incompatibleHostingProvider: 'railway',
@@ -143,7 +184,7 @@ describe('canonical command repository-state boundary', () => {
     const project = ctx.resolveProjectOrThrow({ project: 'unsafe-app' });
     const directPlan = await new PlanService().plan(project, 'staging');
     expect(directPlan).toEqual({
-      error: expect.stringContaining('cloudsql database cannot serve workloads hosted by "railway"'),
+      error: expect.stringContaining('fixture-database database cannot serve workloads hosted by "railway"'),
     });
     expect(ctx.repos.environments.findByProjectId(project.id)).toEqual([]);
     expect(observeEnvironment).not.toHaveBeenCalled();
@@ -196,7 +237,7 @@ describe('canonical command repository-state boundary', () => {
       environments: {
         staging: {
           ...validSpec.environments.staging,
-          database: { provider: 'cloudsql' },
+          database: { provider: 'fixture-database' },
         },
       },
     }), 'utf8');
@@ -212,7 +253,7 @@ describe('canonical command repository-state boundary', () => {
       ok: false,
       error: {
         code: 'VALIDATION',
-        message: expect.stringContaining('cloudsql database cannot serve workloads hosted by "railway"'),
+        message: expect.stringContaining('fixture-database database cannot serve workloads hosted by "railway"'),
       },
     });
     expect(ctx.repos.runs.findByProjectId(project.id)).toHaveLength(1);
@@ -271,7 +312,7 @@ describe('canonical command repository-state boundary', () => {
       connectivity!.compatibleHostingProviders.splice(
         0,
         connectivity!.compatibleHostingProviders.length,
-        'cloudrun'
+        'fixture-hosting'
       );
       const result = await createCommandRegistry(ctx).execute('hv_apply', {
         project: project.name,

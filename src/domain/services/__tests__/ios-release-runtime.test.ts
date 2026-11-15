@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { IOS_RELEASE_EVIDENCE_VERSION } from '../ios-release-evidence.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 
 const runtimeUrl = new URL('../../../../templates/ios/hypervibe-ios-release.mjs', import.meta.url);
@@ -37,6 +38,10 @@ const validEnvironment = {
   HYPERVIBE_RELEASE_SHA: 'a'.repeat(40),
   HYPERVIBE_SERVER_EVIDENCE_VERSION: String(MANAGED_CI_RELEASE_EVIDENCE_VERSION),
   GITHUB_REPOSITORY: 'owner/repo',
+  HYPERVIBE_IOS_EVIDENCE_VERSION: String(IOS_RELEASE_EVIDENCE_VERSION),
+  HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT: 'd'.repeat(64),
+  HYPERVIBE_EXPECTED_IPA_SHA256: 'e'.repeat(64),
+  HYPERVIBE_SERVER_RUN_ID: '55',
 };
 
 describe('managed iOS release runtime', () => {
@@ -85,6 +90,7 @@ describe('managed iOS release runtime', () => {
 
   it('builds mobile evidence only from matching server evidence', () => {
     const config = runtime.parseReleaseConfig(validEnvironment, '/repo') as unknown as Record<string, unknown>;
+    config.serverEvidenceSha256 = 'f'.repeat(64);
     const evidence = {
       version: MANAGED_CI_RELEASE_EVIDENCE_VERSION,
       environment: 'production',
@@ -100,8 +106,13 @@ describe('managed iOS release runtime', () => {
       { id: 'build-1' },
       '2026-07-30T00:00:00.000Z'
     );
+    expect(manifest.version).toBe(IOS_RELEASE_EVIDENCE_VERSION);
+    expect(manifest.mobile.buildContractFingerprint).toBe('d'.repeat(64));
+    expect(manifest.app.ipaSha256).toBe('e'.repeat(64));
     expect(manifest.mobile.sha).toBe('a'.repeat(40));
     expect(manifest.server.sha).toBe(manifest.mobile.sha);
+    expect(manifest.server.workflowRunId).toBe('55');
+    expect(manifest.server.evidenceSha256).toBe('f'.repeat(64));
     expect(manifest.app.testflightGroups).toEqual(['Internal', 'External']);
 
     expect(() => runtime.buildReleaseManifest(

@@ -1,20 +1,23 @@
-import { createHash } from 'node:crypto';
+import { azureEnvironmentResourceGroupScope, legacyAzureEnvironmentResourceGroupScope } from './azure-environment-scope.js';
 import { Readable } from 'node:stream';
 import {
   BlobServiceClient,
   StorageSharedKeyCredential,
+  type StoragePipelineOptions,
 } from '@azure/storage-blob';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
-import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import type {
-  IStorageAdapter,
+  IStorageOperations,
   StorageContext,
   StorageEnsureResult,
   StorageObjectClient,
   StorageObjectPayload,
   StorageObjectRecord,
+  StorageObjectRevision,
+  StorageObservationTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
   providerRegistry,
@@ -30,7 +33,6 @@ const ACCOUNT_API_VERSION = '2025-06-01';
 const CONTAINER_API_VERSION = '2025-08-01';
 const ENVIRONMENT_TAG = 'hypervibe-environment-id';
 const STORAGE_NAME_TAG = 'hypervibe-storage-name';
-const PROJECT_TAG = 'hypervibe-project';
 
 const AzureBlobStorageAuthenticationSchema = z.object({
   authMode: z.enum(['default', 'servicePrincipal']).default('servicePrincipal'),
@@ -71,15 +73,11 @@ export interface AzureBlobContainer {
 
 export interface AzureStorageControlPlane {
   verifySubscription(): Promise<void>;
-  ensureScope(location: string, tags: Record<string, string>): Promise<{ created: boolean }>;
   listAccounts(): Promise<AzureStorageAccount[]>;
   listContainers(account: AzureStorageAccount): Promise<AzureBlobContainer[]>;
   getAccount(name: string): Promise<AzureStorageAccount | null>;
-  createAccount(name: string, location: string, tags: Record<string, string>): Promise<AzureStorageAccount>;
   getContainer(account: AzureStorageAccount, container: string): Promise<AzureBlobContainer | null>;
-  createContainer(account: AzureStorageAccount, container: string): Promise<AzureBlobContainer>;
   listKeys(account: AzureStorageAccount): Promise<string>;
-  deleteAccount(account: AzureStorageAccount): Promise<boolean>;
 }
 
 export interface AzureBlobDataPlane extends StorageObjectClient {
@@ -89,6 +87,7 @@ export interface AzureBlobDataPlane extends StorageObjectClient {
 export interface AzureBlobStorageAdapterOptions {
   controlPlaneFactory?: (credentials: ConnectedAzureBlobStorageCredentials, resourceGroup?: string) => AzureStorageControlPlane;
   dataPlaneFactory?: (account: string, key: string, container: string) => AzureBlobDataPlane;
+  storageHttpClient?: StoragePipelineOptions['httpClient'];
   defaultCredentialProvider?: (preferredSubscriptionId?: string) => Promise<{ authMode: 'default'; subscriptionId: string }>;
 }
 
@@ -107,26 +106,12 @@ class ArmStorageControlPlane implements AzureStorageControlPlane {
     await this.arm.verifySubscription();
   }
 
-  async ensureScope(location: string, tags: Record<string, string>): Promise<{ created: boolean }> {
-    const resourceGroup = this.arm.credentials.resourceGroup;
-    if (!resourceGroup) throw new Error('Azure Blob Storage resource-group context is missing.');
-    await this.verifySubscription();
-    await this.ensureStorageProviderRegistration();
-    const path = `/subscriptions/${encodeURIComponent(this.arm.credentials.subscriptionId)}`
-      + `/resourceGroups/${encodeURIComponent(resourceGroup)}`;
-    const existing = await this.arm.getNullable<{ tags?: Record<string, string> }>(path, '2024-11-01');
-    if (existing) {
-      if (existing.tags?.['managed-by'] !== 'hypervibe' || existing.tags?.[ENVIRONMENT_TAG] !== tags[ENVIRONMENT_TAG]) {
-        throw new Error(`Azure resource group ${resourceGroup} exists but is not owned by this Hypervibe environment.`);
-      }
-      return { created: false };
-    }
-    await this.arm.request('PUT', path, '2024-11-01', { location, tags });
-    return { created: true };
-  }
-
   async listAccounts(): Promise<AzureStorageAccount[]> {
     const resourceGroup = this.arm.credentials.resourceGroup;
+    if (resourceGroup && !await this.arm.getNullable(
+      `/subscriptions/${encodeURIComponent(this.arm.credentials.subscriptionId)}/resourceGroups/${encodeURIComponent(resourceGroup)}`,
+      '2024-11-01'
+    )) return [];
     return this.arm.listAll<AzureStorageAccount>(
       resourceGroup
         ? this.arm.resourceGroupProviderPath('Microsoft.Storage', 'storageAccounts')
@@ -149,40 +134,12 @@ class ArmStorageControlPlane implements AzureStorageControlPlane {
     );
   }
 
-  async createAccount(name: string, location: string, tags: Record<string, string>): Promise<AzureStorageAccount> {
-    return this.arm.request<AzureStorageAccount>(
-      'PUT',
-      this.arm.resourcePath('Microsoft.Storage', 'storageAccounts', name),
-      ACCOUNT_API_VERSION,
-      {
-        location,
-        kind: 'StorageV2',
-        sku: { name: 'Standard_LRS' },
-        tags,
-        properties: {
-          supportsHttpsTrafficOnly: true,
-          minimumTlsVersion: 'TLS1_2',
-          allowBlobPublicAccess: false,
-          allowSharedKeyAccess: true,
-        },
-      }
-    );
-  }
-
   async getContainer(account: AzureStorageAccount, container: string): Promise<AzureBlobContainer | null> {
     const result = await this.arm.getNullable<AzureBlobContainer>(
       this.containerPath(account, container),
       CONTAINER_API_VERSION
     );
     if (!result) return null;
-    if (!result.id) throw new Error(`Azure Blob container ${container} returned no ARM resource ID.`);
-    return { id: result.id, name: container };
-  }
-
-  async createContainer(account: AzureStorageAccount, container: string): Promise<AzureBlobContainer> {
-    const result = await this.arm.request<AzureBlobContainer>('PUT', this.containerPath(account, container), CONTAINER_API_VERSION, {
-      properties: { publicAccess: 'None' },
-    });
     if (!result.id) throw new Error(`Azure Blob container ${container} returned no ARM resource ID.`);
     return { id: result.id, name: container };
   }
@@ -195,25 +152,8 @@ class ArmStorageControlPlane implements AzureStorageControlPlane {
     return key;
   }
 
-  async deleteAccount(account: AzureStorageAccount): Promise<boolean> {
-    return this.arm.deleteIfPresent(account.id, ACCOUNT_API_VERSION);
-  }
-
   private containerPath(account: AzureStorageAccount, container: string): string {
     return `${account.id}/blobServices/default/containers/${encodeURIComponent(container)}`;
-  }
-
-  private async ensureStorageProviderRegistration(): Promise<void> {
-    const path = `/subscriptions/${encodeURIComponent(this.arm.credentials.subscriptionId)}/providers/Microsoft.Storage`;
-    const current = await this.arm.getNullable<{ registrationState?: string }>(path, '2021-04-01');
-    if (current?.registrationState === 'Registered') return;
-    await this.arm.request('POST', `${path}/register`, '2021-04-01');
-    for (let attempt = 1; attempt <= 120; attempt += 1) {
-      const observed = await this.arm.getNullable<{ registrationState?: string }>(path, '2021-04-01');
-      if (observed?.registrationState === 'Registered') return;
-      if (attempt < 120) await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-    throw new Error('Azure resource provider Microsoft.Storage did not become registered.');
   }
 }
 
@@ -228,25 +168,43 @@ function readable(payload: StorageObjectPayload): Readable {
 class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
   private readonly service: BlobServiceClient;
 
-  constructor(account: string, key: string, private readonly container: string) {
+  constructor(account: string, key: string, private readonly container: string, httpClient?: StoragePipelineOptions['httpClient']) {
     const credential = new StorageSharedKeyCredential(account, key);
-    this.service = new BlobServiceClient(`https://${account}.blob.core.windows.net`, credential);
+    this.service = new BlobServiceClient(`https://${account}.blob.core.windows.net`, credential, { ...(httpClient ? { httpClient } : {}) });
   }
 
-  async list(): Promise<StorageObjectRecord[]> {
+  async list(options?: { prefix?: string; maxObjects?: number }): Promise<StorageObjectRecord[]> {
     const output: StorageObjectRecord[] = [];
-    for await (const blob of this.containerClient().listBlobsFlat()) {
-      output.push({ key: blob.name, size: blob.properties.contentLength ?? 0 });
+    const tokens = new Set<string>();
+    for await (const page of this.containerClient().listBlobsFlat(options).byPage()) {
+      for (const blob of page.segment.blobItems) {
+        if (typeof blob.name !== 'string' || !blob.name || !Number.isSafeInteger(blob.properties.contentLength)
+          || blob.properties.contentLength! < 0) throw new Error('Azure object listing contains an incomplete object identity or size.');
+        output.push({ key: blob.name, size: blob.properties.contentLength!, revision: {
+          ...(blob.properties.etag ? { etag: blob.properties.etag } : {}),
+          ...(blob.properties.lastModified ? { lastModified: blob.properties.lastModified.toISOString() } : {}),
+        } });
+        if (options?.maxObjects !== undefined && output.length > options.maxObjects) throw new Error('Azure object listing exceeds its count limit.');
+      }
+      if (page.continuationToken) {
+        if (tokens.has(page.continuationToken)) throw new Error('Azure object listing pagination did not advance.');
+        tokens.add(page.continuationToken);
+      }
     }
     return output;
   }
 
-  async get(key: string): Promise<StorageObjectPayload> {
-    const response = await this.containerClient().getBlobClient(key).download();
+  async get(key: string, revision?: StorageObjectRevision): Promise<StorageObjectPayload> {
+    if (revision?.generation || revision?.metageneration) throw new Error('Azure Blob reads require a native ETag or version.');
+    const client = this.containerClient().getBlobClient(key);
+    const response = await (revision?.versionId ? client.withVersion(revision.versionId) : client).download(0, undefined,
+      { ...(revision?.etag ? { conditions: { ifMatch: revision.etag } } : {}) });
     if (!response.readableStreamBody) throw new Error(`Azure Blob object ${key} returned no body.`);
     return {
       body: response.readableStreamBody as Readable,
       size: response.contentLength ?? 0,
+      revision: { ...(response.etag ? { etag: response.etag } : {}), ...(response.versionId ? { versionId: response.versionId } : {}),
+        ...(response.lastModified ? { lastModified: response.lastModified.toISOString() } : {}) },
       contentType: response.contentType,
       contentEncoding: response.contentEncoding,
       cacheControl: response.cacheControl,
@@ -255,11 +213,11 @@ class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
     };
   }
 
-  async put(key: string, payload: StorageObjectPayload): Promise<void> {
+  async put(key: string, payload: StorageObjectPayload, options?: { ifAbsent?: boolean }): Promise<void> {
     await this.containerClient().getBlockBlobClient(key).uploadStream(
       readable(payload),
-      undefined,
-      undefined,
+      4 * 1024 * 1024,
+      2,
       {
         blobHTTPHeaders: {
           blobContentType: payload.contentType,
@@ -268,8 +226,17 @@ class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
           blobContentDisposition: payload.contentDisposition,
         },
         metadata: payload.metadata,
+        ...(options?.ifAbsent ? { conditions: { ifNoneMatch: '*' } } : {}),
       }
     );
+  }
+
+  async remove(key: string, revision?: StorageObjectRevision): Promise<void> {
+    if (revision?.generation || revision?.metageneration) throw new Error('Azure Blob deletion requires a native ETag or version.');
+    const client = this.containerClient().getBlobClient(key);
+    await (revision?.versionId ? client.withVersion(revision.versionId) : client).delete({
+      ...(revision?.etag ? { conditions: { ifMatch: revision.etag } } : {}),
+    });
   }
 
   async deleteAll(): Promise<void> {
@@ -285,38 +252,7 @@ class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
   }
 }
 
-function accountName(context: StorageContext, environment: Environment, name: string): string {
-  const prefix = `hv${String(context.projectName ?? environment.projectId)}${environment.name}${name}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-    .slice(0, 12);
-  const suffix = createHash('sha256')
-    .update(`${context.subscriptionId}\0${context.resourceGroup}\0${environment.id}\0${name}`)
-    .digest('hex')
-    .slice(0, 10);
-  return `${prefix}${suffix}`.slice(0, 24).padEnd(3, '0');
-}
 
-function deterministicResourceGroup(projectName: string, environment: Environment): string {
-  const prefix = `hv-${projectName}-${environment.name}`
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 54) || 'hypervibe';
-  const suffix = createHash('sha256')
-    .update(`${environment.projectId}:${environment.name}`)
-    .digest('hex')
-    .slice(0, 8);
-  return `${prefix}-${suffix}`;
-}
-
-function containerName(name: string): string {
-  const normalized = name.toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return normalized.slice(0, 63).padEnd(3, '0');
-}
 
 function parseExternalId(externalId: string, context: StorageContext): { account: string; container: string } {
   const identity = parseStorageResourceIdentity(externalId);
@@ -361,7 +297,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export class AzureBlobStorageAdapter implements IStorageAdapter {
+export class AzureBlobStorageAdapter implements IStorageOperations {
   readonly name = 'azureblob';
   readonly capabilities = {
     kind: 'object' as const,
@@ -380,7 +316,7 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
 
   constructor(options: AzureBlobStorageAdapterOptions = {}) {
     this.controlPlaneFactory = options.controlPlaneFactory ?? ((credentials, resourceGroup) => new ArmStorageControlPlane(credentials, resourceGroup));
-    this.dataPlaneFactory = options.dataPlaneFactory ?? ((account, key, container) => new AzureSdkBlobDataPlane(account, key, container));
+    this.dataPlaneFactory = options.dataPlaneFactory ?? ((account, key, container) => new AzureSdkBlobDataPlane(account, key, container, options.storageHttpClient));
     this.defaultCredentialProvider = options.defaultCredentialProvider ?? resolveAzureDefaultSubscription;
   }
 
@@ -440,7 +376,14 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
       if (context.subscriptionId && context.subscriptionId.toLowerCase() !== credentials.subscriptionId.toLowerCase()) {
         throw new Error(`Bound Azure subscription ${context.subscriptionId} does not match the connected subscription.`);
       }
-      const resourceGroup = context.resourceGroup ?? deterministicResourceGroup(projectName, environment);
+      const scope = { subscriptionId: credentials.subscriptionId, projectName,
+        environmentId: environment.projectId, environmentName: environment.name };
+      const resourceGroup = context.resourceGroup ?? azureEnvironmentResourceGroupScope(scope).resourceGroup;
+      if (!context.resourceGroup) {
+        const legacyGroup = legacyAzureEnvironmentResourceGroupScope(scope).resourceGroup;
+        const accounts = await this.controlPlaneFactory(credentials, legacyGroup).listAccounts();
+        if (accounts.length > 0) throw new Error(`Legacy Azure storage in ${legacyGroup} requires explicit scoped import before creating new storage.`);
+      }
       const location = context.location ?? desiredRegion;
       if (!location) throw new Error('A desired Azure location is required in the storage spec.');
       this.control = this.controlPlaneFactory(credentials, resourceGroup);
@@ -461,14 +404,33 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
     }
   }
 
-  async observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]> {
+  async observe(environment: Environment, context: StorageContext, target?: StorageObservationTarget): Promise<ObservedStorage[]> {
     await this.assertContext(context);
+    if (target) {
+      const identity = parseExternalId(target.externalId, context);
+      const account = await this.controlPlane().getAccount(identity.account);
+      if (!account) return [];
+      const expectedAccount = `/subscriptions/${context.subscriptionId}/resourceGroups/${context.resourceGroup}/providers/Microsoft.Storage/storageAccounts/${identity.account}`;
+      if (account.id.toLowerCase() !== expectedAccount.toLowerCase() || account.name !== identity.account
+        || [context.location, context.region].some(region => region && region.toLowerCase() !== account.location?.toLowerCase())) {
+        throw new Error('The bound Azure Storage account differs from its provider scope.');
+      }
+      const container = await this.controlPlane().getContainer(account, identity.container);
+      if (!container) return [];
+      if (container.id.toLowerCase() !== target.externalId.toLowerCase()) throw new Error('The bound Azure Blob container identity differs.');
+      return [{ provider: this.name, kind: 'object', externalId: target.externalId,
+        instanceScope: { ...context }, name: identity.container, region: account.location, status: 'ready' }];
+    }
     const observed: ObservedStorage[] = [];
     for (const account of await this.controlPlane().listAccounts()) {
       if (account.tags?.[ENVIRONMENT_TAG] !== environment.id) continue;
       const name = account.tags[STORAGE_NAME_TAG];
       if (!name) continue;
-      const container = await this.controlPlane().getContainer(account, containerName(name));
+      // Each managed account owns one logical bucket. Observe its native
+      // container identity; never regenerate a retained name from new defaults.
+      const containers = await this.controlPlane().listContainers(account);
+      if (containers.length > 1) throw new Error(`Multiple containers in managed Azure account ${account.name} require explicit identity selection.`);
+      const container = containers[0];
       if (!container) continue;
       const key = await this.controlPlane().listKeys(account);
       const plane = this.dataPlaneFactory(account.name, key, container.name);
@@ -538,66 +500,6 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
     };
   }
 
-  async ensureBucket(
-    environment: Environment,
-    context: StorageContext,
-    name: string,
-    region: string
-  ): Promise<StorageEnsureResult> {
-    let createdAccount: AzureStorageAccount | null = null;
-    try {
-      await this.assertContext(context);
-      const scope = await this.controlPlane().ensureScope(context.location ?? region, {
-        'managed-by': 'hypervibe',
-        [ENVIRONMENT_TAG]: environment.id,
-        [PROJECT_TAG]: context.projectName ?? environment.projectId,
-      });
-      const desiredAccountName = accountName(context, environment, name);
-      let account = await this.controlPlane().getAccount(desiredAccountName);
-      if (account) {
-        if (account.tags?.[ENVIRONMENT_TAG] !== environment.id || account.tags?.[STORAGE_NAME_TAG] !== name) {
-          throw new Error(`Azure Storage account ${desiredAccountName} exists but is not owned by this Hypervibe storage binding.`);
-        }
-        if (account.location.toLowerCase() !== region.toLowerCase()) {
-          throw new Error(`Azure Storage account ${desiredAccountName} exists in immutable location ${account.location}, not ${region}.`);
-        }
-      } else {
-        account = await this.controlPlane().createAccount(desiredAccountName, region, {
-          [ENVIRONMENT_TAG]: environment.id,
-          [STORAGE_NAME_TAG]: name,
-          [PROJECT_TAG]: context.projectName ?? environment.projectId,
-        });
-        createdAccount = account;
-      }
-      const desiredContainer = containerName(name);
-      const existing = await this.controlPlane().getContainer(account, desiredContainer);
-      const container = existing ?? await this.controlPlane().createContainer(account, desiredContainer);
-      return {
-        receipt: {
-          success: true,
-          message: `${createdAccount ? 'Created' : 'Using'} private Azure Blob container "${container.name}" in account "${account.name}"`,
-          data: {
-            created: Boolean(createdAccount),
-            resourceGroupCreated: scope.created,
-            accountCreated: Boolean(createdAccount),
-            containerCreated: !existing,
-          },
-        },
-        externalId: container.id,
-        context,
-      };
-    } catch (error) {
-      if (createdAccount) {
-        try {
-          await this.controlPlane().deleteAccount(createdAccount);
-        } catch {
-          // The deterministic tagged account remains visible for operator cleanup.
-        }
-      }
-      return { receipt: { success: false, message: `Failed to ensure Azure Blob storage "${name}"`, error: errorMessage(error) } };
-    }
-  }
-
   async getRuntimeEnv(
     _environment: Environment,
     context: StorageContext,
@@ -626,30 +528,6 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
     const identity = parseExternalId(externalId, context);
     const account = await this.requiredAccount(identity.account);
     return this.dataPlaneFactory(account.name, await this.controlPlane().listKeys(account), identity.container);
-  }
-
-  async destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt> {
-    try {
-      await this.assertContext(context);
-      const identity = parseExternalId(externalId, context);
-      const account = await this.controlPlane().getAccount(identity.account);
-      if (!account) return { success: true, message: `Azure Blob storage account "${identity.account}" is already absent` };
-      if (account.tags?.[ENVIRONMENT_TAG] !== environment.id) {
-        throw new Error(`Azure Storage account ${account.name} is not owned by this Hypervibe environment.`);
-      }
-      const key = await this.controlPlane().listKeys(account);
-      const plane = this.dataPlaneFactory(account.name, key, identity.container);
-      try {
-        await plane.deleteAll();
-      } finally {
-        plane.destroy();
-      }
-      await this.controlPlane().deleteAccount(account);
-      await this.waitForAccountAbsence(identity.account);
-      return { success: true, message: `Deleted Azure Blob storage account "${account.name}" and all objects` };
-    } catch (error) {
-      return { success: false, message: `Failed to delete Azure Blob storage "${externalId}"`, error: errorMessage(error) };
-    }
   }
 
   private async connectedCredentials(): Promise<ConnectedAzureBlobStorageCredentials> {
@@ -688,40 +566,6 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
     if (!account) throw new Error(`Azure Storage account ${name} was not found.`);
     return account;
   }
-
-  private async waitForAccountAbsence(name: string): Promise<void> {
-    const attempts = this.positiveIntegerEnv(
-      'HYPERVIBE_AZURE_BLOB_DELETE_ATTEMPTS',
-      180
-    );
-    const interval = this.nonNegativeIntegerEnv(
-      'HYPERVIBE_AZURE_BLOB_POLL_INTERVAL_MS',
-      5000
-    );
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      if (!(await this.controlPlane().getAccount(name))) return;
-      if (attempt < attempts) await this.delay(interval);
-    }
-    throw new Error(
-      `Azure Storage account ${name} remained observable after ${attempts} deletion checks.`
-    );
-  }
-
-  private positiveIntegerEnv(name: string, fallback: number): number {
-    const value = Number(process.env[name] ?? fallback);
-    return Number.isInteger(value) && value > 0 ? value : fallback;
-  }
-
-  private nonNegativeIntegerEnv(name: string, fallback: number): number {
-    const value = Number(process.env[name] ?? fallback);
-    return Number.isInteger(value) && value >= 0 ? value : fallback;
-  }
-
-  private async delay(ms: number): Promise<void> {
-    if (ms > 0) {
-      await new Promise((resolve) => setTimeout(resolve, ms));
-    }
-  }
 }
 
 providerRegistry.register({
@@ -732,6 +576,8 @@ providerRegistry.register({
     credentialsSchema: AzureBlobStorageCredentialsSchema,
     setupHelpUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     credentials: {
+      automationSecretKeys: { AZURE_TENANT_ID: 'tenantId', AZURE_SUBSCRIPTION_ID: 'subscriptionId',
+        AZURE_CLIENT_ID: 'clientId', AZURE_CLIENT_SECRET: 'clientSecret' },
       supportsNativeCliAuth: true,
       environmentVariableAliases: [
         ['AZURE_TENANT_ID', 'HYPERVIBE_AZURE_TENANT_ID'],
@@ -743,7 +589,7 @@ providerRegistry.register({
     connectionAliases: ['azure-container-apps'],
     maturity: {
       lifecycle: {
-        storage: { status: 'ready-for-live' },
+        storage: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
       },
     },
   },

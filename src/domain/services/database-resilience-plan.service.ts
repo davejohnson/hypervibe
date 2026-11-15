@@ -1,3 +1,4 @@
+import { checkpointBackupAvailable, checkpointIdentityMatches, databaseCheckpointBindings, databaseCheckpointSourceSchema } from './database-checkpoint.js';
 import type { LocalSnapshot, PlanAction } from '../plan/plan.types.js';
 import type { ObservedDatabase, ObservedState } from '../ports/observe.port.js';
 import type { DatabaseReplicaBinding } from '../ports/database-resilience.port.js';
@@ -7,6 +8,7 @@ import { HOSTING_ENV_REMOVE_OPERATION } from './hosting-env.service.js';
 
 export const DATABASE_RESILIENCE_OPERATIONS = {
   availabilityConfigure: 'databaseAvailabilityConfigure',
+  checkpointCreate: 'databaseCheckpointCreate',
   backupPolicyConfigure: 'databaseBackupPolicyConfigure',
   replicaProvision: 'databaseReplicaProvision',
   replicaDestroy: 'databaseReplicaDestroy',
@@ -16,6 +18,7 @@ export const DATABASE_RESILIENCE_OPERATIONS = {
 const DATABASE_RESILIENCE_OPERATION_SET = new Set<string>(Object.values(DATABASE_RESILIENCE_OPERATIONS));
 
 export interface DatabaseResilienceCapabilities {
+  checkpoints?: boolean;
   availabilityModes?: Array<'zonal' | 'regional'>;
   backups?: { maxRetainedBackups: number; maxPitrRetentionDays: number };
   readReplicas?: boolean;
@@ -124,6 +127,12 @@ export function planDatabaseResilience(params: {
   const serviceDependencies: string[] = [];
 
   if (!component || componentProvider !== provider || !primaryExternalId) {
+    if (desired.checkpoint) actions.push(blocked({
+      id: `database:${provider}:checkpoint:${desired.checkpoint.id}`, provider, name: desiredDatabase.engine,
+      operation: DATABASE_RESILIENCE_OPERATIONS.checkpointCreate,
+      reason: 'A snapshot requires an already-bound primary database; no infrastructure changes are authorized.',
+      blockedReason: 'database_checkpoint_primary_unbound', metadata: { checkpointId: desired.checkpoint.id },
+    }));
     warnings.push('Database resilience will be planned after the desired primary database is durably bound.');
     return { actions, warnings, unmanaged, serviceDependencies };
   }
@@ -138,10 +147,10 @@ export function planDatabaseResilience(params: {
 
   if (!observationKnown || !observedPrimary) {
     actions.push(blocked({
-      id: `database:${provider}:resilience`,
+      id: desired.checkpoint ? `database:${provider}:checkpoint:${desired.checkpoint.id}` : `database:${provider}:resilience`,
       provider,
       name: desiredDatabase.engine,
-      operation: DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure,
+      operation: desired.checkpoint ? DATABASE_RESILIENCE_OPERATIONS.checkpointCreate : DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure,
       reason: !observationKnown
         ? 'Database resilience cannot be reconciled because live database observation is unknown'
         : `The bound primary database ${primaryExternalId} was not observed`,
@@ -164,6 +173,45 @@ export function planDatabaseResilience(params: {
       metadata: { ...commonMetadata, feature },
     }));
   };
+
+  if (desired.checkpoint) {
+    const checkpointId = desired.checkpoint.id;
+    const checkpointAction = {
+      id: `database:${provider}:checkpoint:${checkpointId}`, provider, name: desiredDatabase.engine,
+      operation: DATABASE_RESILIENCE_OPERATIONS.checkpointCreate,
+    };
+    const sourceResult = databaseCheckpointSourceSchema.safeParse(live?.checkpointSource);
+    let recovery;
+    let invalidRecovery = false;
+    let priorPending = false;
+    try {
+      const bindings = databaseCheckpointBindings(component.bindings, params.local.bindings ?? {});
+      recovery = Object.hasOwn(bindings, checkpointId) ? bindings[checkpointId] : undefined;
+      priorPending = Object.entries(bindings).some(([id, binding]) => id !== checkpointId && ['attempting', 'running', 'unknown'].includes(binding.state));
+    } catch { invalidRecovery = true; }
+    const source = sourceResult.success ? sourceResult.data : undefined;
+    const metadata = { ...commonMetadata, checkpointId, ...(source ? { source: { provider: source.provider, primaryExternalId: source.primaryExternalId, providerScope: source.providerScope, resourceIdentity: source.resourceIdentity } } : {}) };
+    let blockedReason: string | undefined;
+    if (!capabilities?.checkpoints) blockedReason = 'database_checkpoint_unsupported';
+    else if (invalidRecovery) blockedReason = 'database_checkpoint_recovery_invalid';
+    else if (priorPending) blockedReason = 'database_checkpoint_previous_request_pending';
+    else if (!source || source.provider !== provider || source.primaryExternalId !== primaryExternalId) blockedReason = 'database_checkpoint_observation_unknown';
+    else if (recovery && !checkpointIdentityMatches(recovery.source, source)) blockedReason = 'database_checkpoint_source_changed';
+    else if (recovery && recovery.acknowledged !== true) blockedReason = 'database_checkpoint_write_uncertain';
+    else if (recovery?.state === 'error') blockedReason = 'database_checkpoint_failed';
+    else if (recovery?.state === 'complete' && !checkpointBackupAvailable(recovery, source.backups)) blockedReason = 'database_checkpoint_backup_unavailable';
+    if (blockedReason) {
+      actions.push(blocked({ ...checkpointAction, reason: 'The requested snapshot cannot safely proceed; inspect its exact source and retained recovery evidence.', blockedReason, metadata }));
+    } else {
+      const complete = recovery?.state === 'complete';
+      actions.push(action({ ...checkpointAction, type: complete ? 'noop' : recovery ? 'update' : 'create', verified: true,
+        reason: complete ? 'The named snapshot is provider-confirmed and still available; restore has not been tested.'
+          : recovery ? 'Observe the previously requested snapshot; never repeat its create.' : 'Create the requested one-use database snapshot; provider storage charges may apply.',
+        billable: !complete, dataBearing: !complete, requiresConfirm: !complete,
+        metadata: { ...metadata, ...(recovery?.operationId ? { operationId: recovery.operationId } : {}) },
+      }));
+    }
+  }
 
   if (desired.availability) {
     if (!capabilities?.availabilityModes?.includes(desired.availability)) {

@@ -1,4 +1,6 @@
+import { observeInboundSigning, inboundSigningBinding, inboundSigningFingerprint, inboundSigningTargetBlock, planInboundSigning, type InboundSigningState } from './email-inbound-signing.service.js';
 import { createHash } from 'crypto';
+import { eventSigningUrl, planEventSigning, signingBinding, type EventSigningState, type EventSigningReadiness } from './email-signing.service.js';
 import type {
   SendGridDomainAuthentication,
   SendGridEventWebhookSettings,
@@ -16,19 +18,20 @@ import type { ObservedState } from '../ports/observe.port.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import {
   EMAIL_MANAGED_ENV_KEYS,
-  type EmailInboundSpec,
   type EnvironmentSpec,
 } from '../spec/spec.schema.js';
 import { findCloudflareZone, getCloudflareAdapterFromHints } from './cloudflare-ops.service.js';
 import { cloudflareScopeHintsForDomain, normalizeDomainName } from './domain-scope.js';
 import { getProjectScopeHints } from './project-scope.js';
-import { getSendGridAdapter, getSendGridApiKeyHash } from './sendgrid-ops.service.js';
+import { getSendGridAdapter } from './sendgrid-ops.service.js';
 import {
   forwardedTo,
   resolveCloudflareEmailContext,
   routingRuleForAddress,
 } from './email-routing.service.js';
 import { serviceBindingFor } from './spec.service.js';
+import { resolveInboundCallback } from './email-inbound-url.service.js';
+import { inspectEmailSenderReadiness, type EmailSenderReadiness } from './email-sender-readiness.service.js';
 
 export const EMAIL_OPERATIONS = {
   runtimeSync: 'emailRuntimeSync',
@@ -63,10 +66,13 @@ export interface SendGridInboundParseRoute {
   url: string;
   spam_check: boolean;
   send_raw: boolean;
+  security_policy?: string;
 }
 
 export interface EmailIntegrationState {
-  runtimeKey: { status: 'known'; hash: string } | UnknownObservation;
+  inboundSigning?: InboundSigningState;
+  eventSigning?: EventSigningState;
+  senderReadiness?: EmailSenderReadiness;
   domainAuthentications: EmailObservation<SendGridDomainAuthentication>;
   verifiedSenders: EmailObservation<SendGridVerifiedSender>;
   inboundRoutes: EmailObservation<SendGridInboundParseRoute>;
@@ -80,6 +86,9 @@ export interface EmailIntegrationState {
 }
 
 export interface EmailPlanResult {
+  inboundSigningReadiness?: EventSigningReadiness;
+  eventSigningReadiness?: EventSigningReadiness;
+  senderReadiness?: EmailSenderReadiness;
   actions: PlanAction[];
   warnings: string[];
   fingerprint?: string;
@@ -156,7 +165,8 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
       : { status: 'known', items: observation.items.map(mapper) };
 
   return emailConfigHash({
-    runtimeKey: state.runtimeKey,
+    inboundSigning: inboundSigningFingerprint(state.inboundSigning),
+    eventSigning: state.eventSigning?.status === 'known' ? { ...state.eventSigning.value, publicKey: state.eventSigning.value.publicKey ? emailConfigHash(state.eventSigning.value.publicKey) : null } : state.eventSigning,
     domainAuthentications: normalize(state.domainAuthentications, normalizedDomainAuth),
     verifiedSenders: normalize(state.verifiedSenders, (sender) => ({
       id: sender.id ?? null,
@@ -170,6 +180,7 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
       url: route.url,
       spamCheck: route.spam_check,
       sendRaw: route.send_raw,
+      securityPolicy: route.security_policy,
     })),
     dnsRecords: normalize(state.dnsRecords, normalizedDnsRecord),
     deliveryEvents: state.deliveryEvents.status === 'unknown'
@@ -211,7 +222,10 @@ export function emailIntegrationFingerprint(state: EmailIntegrationState): strin
 
 export async function resolveEmailIntegrationState(params: {
   project: Project;
+  environment?: Environment | null;
   environmentSpec: EnvironmentSpec;
+  observed?: ObservedState | null;
+  runtimeValues?: Record<string, string>;
 }): Promise<EmailIntegrationState> {
   const { project, environmentSpec } = params;
   const wantsDomain = Boolean(environmentSpec.domain);
@@ -226,6 +240,8 @@ export async function resolveEmailIntegrationState(params: {
   let verifiedSenders: EmailIntegrationState['verifiedSenders'] = known();
   let inboundRoutes: EmailIntegrationState['inboundRoutes'] = known();
   let dnsRecords: EmailIntegrationState['dnsRecords'] = known();
+  let eventSigning: EventSigningState | undefined;
+  let inboundSigning: InboundSigningState | undefined;
   let deliveryEvents: EmailIntegrationState['deliveryEvents'] = unknown('Delivery-event observation was not requested');
   let forwardingSettings: EmailIntegrationState['forwardingSettings'] = unknown('Email-forwarding observation was not requested');
   let forwardingDestinations: EmailIntegrationState['forwardingDestinations'] = known();
@@ -235,11 +251,6 @@ export async function resolveEmailIntegrationState(params: {
     ...(environmentSpec.domain ? [environmentSpec.domain] : []),
     ...getProjectScopeHints(project),
   ];
-  const runtimeKeyResult = getSendGridApiKeyHash(scopeHints);
-  const runtimeKey: EmailIntegrationState['runtimeKey'] = 'error' in runtimeKeyResult
-    ? unknown(runtimeKeyResult.error)
-    : { status: 'known', hash: runtimeKeyResult.hash };
-
   const sendgrid = getSendGridAdapter(scopeHints);
   if ('error' in sendgrid) {
     if (wantsDomain) domainAuthentications = unknown(sendgrid.error);
@@ -264,13 +275,28 @@ export async function resolveEmailIntegrationState(params: {
     if (wantsInbound) {
       try {
         inboundRoutes = known(await sendgrid.adapter.listInboundParseWebhooks());
+        if (environmentSpec.email.inbound?.signatureVerification !== undefined || Object.keys(inboundSigningBinding(params.environment ?? null)).length) {
+          inboundSigning = await observeInboundSigning(sendgrid.adapter, environmentSpec.email.inbound!.hostname.toLowerCase());
+          if (inboundSigning.status === 'known') {
+            const exact = inboundSigning.route;
+            inboundRoutes.items = inboundRoutes.items.map(route => route.hostname.toLowerCase() === exact.hostname.toLowerCase() ? exact : route);
+          }
+        }
       } catch (error) {
         inboundRoutes = unknown(error instanceof Error ? error.message : String(error));
       }
     }
     if (wantsDeliveryEvents) {
       try {
-        deliveryEvents = knownValue(await sendgrid.adapter.getEventWebhookSettings());
+        const recordedId = signingBinding(params.environment ?? null).endpointId ?? asRecord(emailBindings(params.environment ?? null).deliveryEvents)?.endpointId;
+        deliveryEvents = knownValue(await sendgrid.adapter.getEventWebhookSettings(typeof recordedId === 'string' ? recordedId : undefined));
+        if (environmentSpec.email.deliveryEvents?.signatureVerification !== undefined || Object.keys(signingBinding(params.environment ?? null)).length) {
+          eventSigning = { status: 'unknown' };
+          const url = eventSigningUrl(params.environment ?? null, environmentSpec);
+          if (url) {
+            try { eventSigning = { status: 'known', value: await sendgrid.adapter.resolveEventWebhookSigning(url, typeof recordedId === 'string' ? recordedId : undefined) }; } catch { /* unknown remains unknown */ }
+          }
+        }
       } catch (error) {
         deliveryEvents = unknown(error instanceof Error ? error.message : String(error));
       }
@@ -339,7 +365,6 @@ export async function resolveEmailIntegrationState(params: {
   }
 
   for (const [name, observation] of Object.entries({
-    runtimeKey,
     domainAuthentication: domainAuthentications,
     senderVerification: verifiedSenders,
     inboundParse: inboundRoutes,
@@ -358,7 +383,9 @@ export async function resolveEmailIntegrationState(params: {
   }
 
   return {
-    runtimeKey,
+    senderReadiness: await inspectEmailSenderReadiness({ ...params, observed: params.observed ?? null }),
+    ...(eventSigning ? { eventSigning } : {}),
+    ...(inboundSigning ? { inboundSigning } : {}),
     domainAuthentications,
     verifiedSenders,
     inboundRoutes,
@@ -389,14 +416,8 @@ function serviceUrl(environment: Environment | null, serviceName: string): strin
   }
 }
 
-export function inboundParseUrl(environment: Environment | null, inbound: EmailInboundSpec): string | undefined {
-  const base = serviceUrl(environment, inbound.service);
-  if (!base) return undefined;
-  return new URL(inbound.path, base).toString();
-}
-
 export function emailRuntimeKeysForService(environmentSpec: EnvironmentSpec, serviceName: string): string[] {
-  const keys = ['SENDGRID_API_KEY'];
+  const keys: string[] = [];
   if (environmentSpec.email.sender) {
     keys.push('SENDGRID_FROM_EMAIL');
     if (environmentSpec.email.sender.name) keys.push('SENDGRID_FROM_NAME');
@@ -825,9 +846,9 @@ function planForwarding(params: {
   return actions;
 }
 
-function desiredDnsRecords(
+export function desiredEmailDnsRecords(
   environmentSpec: EnvironmentSpec,
-  state: EmailIntegrationState
+  state: Pick<EmailIntegrationState, 'domainAuthentications'>
 ): Array<{ type: string; name: string; content: string; priority?: number }> | undefined {
   if (!environmentSpec.domain || state.domainAuthentications.status === 'unknown') return undefined;
   const domain = normalizeDomainName(environmentSpec.domain);
@@ -836,6 +857,9 @@ function desiredDnsRecords(
   );
   if (matches.length > 1) return undefined;
   if (matches.length !== 1) return undefined;
+  // This workflow supports automated-security domain authentication. A partial
+  // response or a legacy record layout cannot become a smaller desired DNS set.
+  if (matches[0].legacy !== false || !matches[0].dns?.dkim1 || !matches[0].dns?.dkim2 || !matches[0].dns?.mail_cname) return undefined;
   const records: Array<{ type: string; name: string; content: string; priority?: number }> = [
     matches[0].dns.dkim1,
     matches[0].dns.dkim2,
@@ -845,7 +869,7 @@ function desiredDnsRecords(
       .map((record) => ({
         type: record.type.toUpperCase(),
         name: record.host.toLowerCase().replace(/\.$/, ''),
-        content: record.data.toLowerCase().replace(/\.$/, ''),
+        content: record.type.toUpperCase() === 'TXT' ? record.data : record.data.toLowerCase().replace(/\.$/, ''),
       }));
   if (environmentSpec.email.inbound) {
     records.push({
@@ -894,55 +918,58 @@ export async function planEmail(params: {
   domainDependencies?: string[];
   /** Provider observation already resolved by the caller; primarily useful for deterministic contract tests. */
   integrationState?: EmailIntegrationState;
+  /** Resolved private deploy inputs, used only for read-only sender checks. */
+  runtimeValues?: Record<string, string>;
 }): Promise<EmailPlanResult> {
-  const { project, environmentName, environmentSpec, environment, observed } = params;
-  if (!environmentSpec.email.enabled) return { actions: [], warnings: [] };
-
-  const state = params.integrationState
-    ?? await resolveEmailIntegrationState({ project, environmentSpec });
+  const { environmentName, environmentSpec, environment, observed } = params;
+  const state = environmentSpec.email.enabled
+    ? params.integrationState ?? await resolveEmailIntegrationState(params)
+    : undefined;
+  const senderReadiness = state ? state.senderReadiness : await inspectEmailSenderReadiness(params);
+  const senderWarnings = senderReadiness?.guidance ? [senderReadiness.guidance] : [];
+  if (!state) {
+    const signing = planEventSigning({ spec: environmentSpec, environment, observed, deliveryReady: false });
+    const inbound = planInboundSigning({ spec: environmentSpec, environment, observed, routeReady: false });
+    return { actions: [...signing.actions, ...inbound.actions], ...(inbound.readiness ? { inboundSigningReadiness: inbound.readiness } : {}), warnings: senderWarnings, ...(signing.readiness ? { eventSigningReadiness: signing.readiness } : {}), ...(senderReadiness ? { senderReadiness } : {}) };
+  }
   const actions: PlanAction[] = [];
   const bindings = emailBindings(environment);
   const serviceNames = Object.keys(environmentSpec.services).sort();
 
   const runtimeBinding = asRecord(bindings.runtime);
   const runtimeConfigHash = emailRuntimeConfigHash(environmentSpec);
+  const previousRuntimeKeys = Object.values(asRecord(runtimeBinding?.perServiceKeys) ?? {})
+    .flatMap(keys => Array.isArray(keys) ? keys.filter(key => typeof key === 'string' && key !== 'SENDGRID_API_KEY') : []);
+  const runtimeNotRequired = previousRuntimeKeys.length === 0
+    && serviceNames.every(service => emailRuntimeKeysForService(environmentSpec, service).length === 0);
   const servicesKnown = observed !== null && observed.completeness?.services !== 'unknown';
-  const desiredRuntimeKeyHash = state.runtimeKey.status === 'known' ? state.runtimeKey.hash : undefined;
-  const boundRuntimeKeyHash = stringValue(runtimeBinding, 'credentialHash');
-  const runtimeCredentialMatches = desiredRuntimeKeyHash
-    ? boundRuntimeKeyHash === desiredRuntimeKeyHash
-    : Boolean(boundRuntimeKeyHash);
   const runtimeKeysPresent = servicesKnown && serviceNames.every((serviceName) => {
     const desiredKeys = emailRuntimeKeysForService(environmentSpec, serviceName);
     const observedService = observed?.services.find((service) => service.name === serviceName);
-    return desiredKeys.every((key) => {
-      if (!observedService?.envVarKeys.includes(key)) return false;
-      if (key !== 'SENDGRID_API_KEY' || !desiredRuntimeKeyHash) return true;
-      const liveHash = observedService.envVarHashes.SENDGRID_API_KEY;
-      return liveHash ? liveHash === desiredRuntimeKeyHash : runtimeCredentialMatches;
-    });
+    return desiredKeys.every((key) => observedService?.envVarKeys.includes(key));
   });
-  const runtimeBindingMatches = stringValue(runtimeBinding, 'configHash') === runtimeConfigHash
-    && runtimeCredentialMatches;
-  const runtimePreserved = (!servicesKnown || state.runtimeKey.status === 'unknown') && runtimeBindingMatches;
+  const runtimeBindingMatches = stringValue(runtimeBinding, 'configHash') === runtimeConfigHash;
+  const runtimePreserved = !servicesKnown && runtimeBindingMatches;
+  const runtimeVerified = runtimeNotRequired || runtimeKeysPresent && runtimeBindingMatches;
   actions.push({
     id: 'email:runtime',
-    type: runtimeKeysPresent && runtimeBindingMatches || runtimePreserved ? 'noop' : 'update',
+    type: runtimeVerified || runtimePreserved ? 'noop' : 'update',
     resource: { kind: 'email', name: environmentName, provider: environmentSpec.hosting.provider },
-    verified: runtimeKeysPresent && runtimeBindingMatches,
-    reason: runtimeKeysPresent && runtimeBindingMatches
-      ? 'SendGrid runtime configuration is present on every declared service'
+    verified: runtimeVerified,
+    reason: runtimeNotRequired
+      ? 'No email runtime metadata is declared'
+      : runtimeKeysPresent && runtimeBindingMatches
+      ? 'Email sender and inbound settings are present on every declared service'
       : runtimePreserved
-        ? 'Preserving recorded SendGrid runtime configuration because service observation is unknown'
-        : 'Sync SendGrid runtime configuration to declared services',
+        ? 'Preserving recorded email settings because service observation is unknown'
+        : 'Sync email sender and inbound settings to declared services',
     ...(params.serviceDependencies?.length ? { dependsOn: [...new Set(params.serviceDependencies)] } : {}),
     metadata: {
       operation: EMAIL_OPERATIONS.runtimeSync,
       services: serviceNames,
       configHash: runtimeConfigHash,
-      ...(desiredRuntimeKeyHash ? { credentialHash: desiredRuntimeKeyHash } : {}),
       managedKeys: [...EMAIL_MANAGED_ENV_KEYS],
-      ...((!servicesKnown || state.runtimeKey.status === 'unknown') && !runtimeBindingMatches
+      ...(!runtimeNotRequired && !servicesKnown && !runtimeBindingMatches
         ? blockedMetadata('email_runtime_observation_unknown')
         : {}),
     },
@@ -1087,7 +1114,7 @@ export async function planEmail(params: {
     const domain = normalizeDomainName(environmentSpec.domain);
     const dnsBinding = asRecord(bindings.dns);
     const configHash = emailDnsConfigHash(environmentSpec)!;
-    const desired = desiredDnsRecords(environmentSpec, state);
+    const desired = desiredEmailDnsRecords(environmentSpec, state);
     let type: PlanAction['type'] = 'update';
     let operation: string = EMAIL_OPERATIONS.dnsSync;
     let verified = false;
@@ -1129,6 +1156,10 @@ export async function planEmail(params: {
         operation,
         domain,
         configHash,
+        ...(desired && state.domainAuthentications.status === 'known' ? {
+          desiredRecords: desired,
+          authorizationId: String(state.domainAuthentications.items.find(auth => normalizeDomainName(auth.domain) === domain)!.id),
+        } : {}),
         ...(environmentSpec.email.inbound
           ? { inboundHostname: environmentSpec.email.inbound.hostname.toLowerCase() }
           : {}),
@@ -1142,7 +1173,8 @@ export async function planEmail(params: {
   if (environmentSpec.email.inbound) {
     const inbound = environmentSpec.email.inbound;
     const hostname = inbound.hostname.toLowerCase();
-    const expectedUrl = inboundParseUrl(environment, inbound);
+    const callback = resolveInboundCallback({ environment, spec: environmentSpec, observed });
+    const expectedUrl = callback.url;
     const inboundBinding = asRecord(bindings.inbound);
     const configHash = emailInboundConfigHash(environmentSpec)!;
     let type: PlanAction['type'] = 'update';
@@ -1176,21 +1208,25 @@ export async function planEmail(params: {
           type = 'noop';
           verified = true;
           reason = `SendGrid inbound parse is in sync for ${hostname}`;
-        } else if (routeMatches && !stringValue(inboundBinding, 'hostname')) {
+        } else if (routeMatches) {
           operation = EMAIL_OPERATIONS.inboundAdopt;
           reason = `Adopt the existing SendGrid inbound parse route for ${hostname}`;
         } else if (expectedUrl) {
           type = 'replace';
           operation = EMAIL_OPERATIONS.inboundReplace;
           requiresConfirm = true;
-          reason = `Replace the SendGrid inbound parse route for ${hostname}`;
+          reason = `Update the SendGrid inbound parse settings for ${hostname} while preserving its security policy`;
+          if (!matches[0].security_policy) blockedReason = 'Inbound policy association is unknown; route replacement could strip verification. Preserve the existing route until its exact policy can be observed.';
         }
       } else {
         type = 'create';
         reason = `Create SendGrid inbound parse for ${hostname}`;
+        if (inbound.signatureVerification !== undefined) blockedReason = 'An existing signed Inbound Parse route is required. Automatic security-policy setup is not supported; preserve the requested verification intent.';
       }
     }
 
+    blockedReason = inboundSigningTargetBlock(environment, environmentSpec) ?? callback.blockedReason ?? blockedReason;
+    const policyId = state.inboundRoutes.status === 'known' ? state.inboundRoutes.items.find(route => route.hostname.toLowerCase() === hostname)?.security_policy : undefined;
     inboundAction = {
       id: `email:sendgrid:inbound:${hostname}`,
       type,
@@ -1210,6 +1246,7 @@ export async function planEmail(params: {
         aliases: [...inbound.aliases].map((alias) => alias.toLowerCase()).sort(),
         spamCheck: inbound.spamCheck,
         sendRaw: inbound.sendRaw,
+        ...(policyId ? { expectedPolicyId: policyId } : {}),
         configHash,
         ...(expectedUrl ? { expectedUrl } : {}),
         ...(blockedReason ? blockedMetadata(blockedReason) : {}),
@@ -1218,13 +1255,15 @@ export async function planEmail(params: {
     actions.push(inboundAction);
   }
 
-  actions.push(...planDeliveryEvents({
-    environmentSpec,
-    environment,
-    state,
-    bindings,
-    serviceDependencies: params.serviceDependencies,
-  }));
+  const deliveryActions = planDeliveryEvents({ environmentSpec, environment, state, bindings, serviceDependencies: params.serviceDependencies });
+  actions.push(...deliveryActions);
+  const eventSigning = planEventSigning({ spec: environmentSpec, environment, observed, state: state.eventSigning,
+    deliveryReady: deliveryActions.length === 1 && deliveryActions[0].type === 'noop' && deliveryActions[0].verified === true });
+  // Endpoint configuration is its own plan stage; its new identity must be observed before signing is authorized.
+  if (!deliveryActions.some(action => action.type !== 'noop' && !action.metadata?.blockedReason)) actions.push(...eventSigning.actions);
+  const inboundSigning = planInboundSigning({spec: environmentSpec, environment, observed, state: state.inboundSigning,
+    routeReady: inboundAction?.type === 'noop' && inboundAction.verified === true});
+  if (!inboundAction || inboundAction.type === 'noop' || inboundAction.metadata?.blockedReason) actions.push(...inboundSigning.actions);
   actions.push(...planForwarding({ environmentSpec, state, bindings }));
 
   if (environmentSpec.domain) {
@@ -1262,12 +1301,15 @@ export async function planEmail(params: {
   }
 
   if (!environmentSpec.domain && !environmentSpec.email.sender) {
-    state.warnings.push('Email is enabled without environment.domain or email.sender; Hypervibe will sync the runtime key but cannot verify a sender identity.');
+    state.warnings.push('Email is enabled without environment.domain or email.sender; Hypervibe cannot verify a sender identity. Configure the application sending key separately as a delegated SENDGRID_API_KEY secret.');
   }
 
   return {
     actions,
-    warnings: state.warnings,
+    warnings: [...state.warnings, ...senderWarnings],
+    ...(senderReadiness ? { senderReadiness } : {}),
+    ...(eventSigning.readiness ? { eventSigningReadiness: eventSigning.readiness } : {}),
+    ...(inboundSigning.readiness ? { inboundSigningReadiness: inboundSigning.readiness } : {}),
     fingerprint: emailIntegrationFingerprint(state),
   };
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter } from '../railway.adapter.js';
+import { serviceInstanceInventory } from './service-instance-inventory.fixture.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 
@@ -74,7 +75,10 @@ describe('RailwayAdapter service instance updates', () => {
   });
 
   it('connects a service to a GitHub repo and branch via serviceConnect', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstanceInventory('project-prod', 'svc-web', ['env-prod']))
+      .mockResolvedValueOnce({ project: { id: 'project-prod', environments: { edges: [{ node: { id: 'env-prod' } }], pageInfo: { hasNextPage: false } } } })
+      .mockResolvedValueOnce({
       serviceConnect: {
         id: 'svc-web',
       },
@@ -85,13 +89,15 @@ describe('RailwayAdapter service instance updates', () => {
 
     const receipt = await adapter.connectServiceToRepo({
       serviceId: 'svc-web',
+      projectId: 'project-prod',
+      environmentId: 'env-prod',
       repo: 'davejohnson/billforge',
       branch: 'main',
     });
 
     expect(receipt.success).toBe(true);
-    expect(request).toHaveBeenCalledTimes(1);
-    expect(request.mock.calls[0]?.[1]).toEqual({
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[2]?.[1]).toEqual({
       id: 'svc-web',
       input: {
         repo: 'davejohnson/billforge',
@@ -101,7 +107,10 @@ describe('RailwayAdapter service instance updates', () => {
   });
 
   it('disconnects a provider-native repo source via serviceDisconnect', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstanceInventory('project-prod', 'svc-web', ['env-prod']))
+      .mockResolvedValueOnce({ project: { id: 'project-prod', environments: { edges: [{ node: { id: 'env-prod' } }], pageInfo: { hasNextPage: false } } } })
+      .mockResolvedValueOnce({
       serviceDisconnect: {
         id: 'svc-web',
       },
@@ -112,15 +121,17 @@ describe('RailwayAdapter service instance updates', () => {
 
     const receipt = await adapter.disconnectDeploySource({
       serviceId: 'svc-web',
+      projectId: 'project-prod',
+      environmentId: 'env-prod',
     });
 
     expect(receipt).toMatchObject({
       success: true,
       data: { serviceId: 'svc-web' },
     });
-    expect(request).toHaveBeenCalledTimes(1);
-    expect(String(request.mock.calls[0]?.[0])).toContain('serviceDisconnect(id: $id)');
-    expect(request.mock.calls[0]?.[1]).toEqual({
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(String(request.mock.calls[2]?.[0])).toContain('serviceDisconnect(id: $id)');
+    expect(request.mock.calls[2]?.[1]).toEqual({
       id: 'svc-web',
     });
   });
@@ -715,7 +726,7 @@ describe('RailwayAdapter service instance updates', () => {
           },
         },
       })
-      // ensureServiceInstanceForEnvironment
+      // Exact target instance verification
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-web', 'env-prod'))
       // redeploy
       .mockResolvedValueOnce({
@@ -749,7 +760,7 @@ describe('RailwayAdapter service instance updates', () => {
       platformBindings: {
         projectId: 'rail-project-1',
         environmentId: 'env-prod',
-        services: {},
+        services: { web: { serviceId: 'svc-web' } },
       },
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -809,7 +820,7 @@ describe('RailwayAdapter service instance updates', () => {
       platformBindings: {
         projectId: 'rail-project-1',
         environmentId: 'env-prod',
-        services: {},
+        services: { worker: { serviceId: 'svc-worker' } },
       },
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -1080,7 +1091,7 @@ describe('RailwayAdapter service instance updates', () => {
           serviceCreateRecovery: {
             provider: 'railway',
             operation: 'create',
-            resourceName: 'web-staging',
+            resourceName: 'web',
             providerScope: { projectId: 'rail-project', environmentId: 'env-staging' },
             state: 'mismatched',
             serviceId: 'svc-wrong',
@@ -1103,10 +1114,11 @@ describe('RailwayAdapter service instance updates', () => {
         },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'web-staging' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'web' } })
       .mockResolvedValueOnce({
-        project: { services: { edges: [{ node: { id: 'svc-recovered', name: 'web-staging' } }] } },
+        project: { services: { edges: [{ node: { id: 'svc-recovered', name: 'web' } }] } },
       })
+      .mockResolvedValueOnce(serviceInstanceInventory('rail-project', 'svc-recovered', ['env-staging']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('svc-recovered', 'env-staging'));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
@@ -1132,12 +1144,12 @@ describe('RailwayAdapter service instance updates', () => {
           serviceCreateRecovery: {
             state: 'identified',
             serviceId: 'svc-recovered',
-            returnedName: 'web-staging',
+            returnedName: 'web',
           },
         },
       },
     });
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(6);
     expect(request.mock.calls.some(([query]) => /serviceInstance(?:Update|Redeploy)|variableCollectionUpsert|serviceDomainCreate/.test(String(query)))).toBe(false);
   });
 
@@ -1176,7 +1188,7 @@ describe('RailwayAdapter service instance updates', () => {
         mutationAttempted: true,
         serviceCreateRecovery: {
           state: 'unresolved',
-          resourceName: 'web-staging',
+          resourceName: 'web',
           providerScope: { projectId: 'rail-project', environmentId: 'env-staging' },
         },
       },

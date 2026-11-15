@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
+import { apiReleaseArtifactPrefix } from '../../domain/services/api-release-workflow.js';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -17,6 +20,13 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvAppstoreTools } from '../hv-appstore.tools.js';
+import '../../adapters/providers/railway/railway.adapter.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { resolveManagedWorkflowContract, workflowFiles } from '../../domain/services/ci-deploy.service.js';
+import { iosBuildContractFingerprint } from '../../domain/services/ios-release-evidence.js';
+import { environmentDeploymentContractHash } from '../../domain/services/deployment-contract.service.js';
+import { MANAGED_CI_RELEASE_EVIDENCE_VERSION, managedCiReleaseArtifactPrefix } from '../../domain/services/managed-ci-evidence.js';
+import { extractGitHubScript, installReleaseEvidenceValidator, releaseEvidenceValidatorRequire } from '../../domain/services/__tests__/managed-ci-workflow.test-utils.js';
 
 let tempDir: string;
 
@@ -32,7 +42,7 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-function seedConnection() {
+function seedConnection(options: { promotion?: boolean; api?: boolean; newerServer?: boolean; expectedInfoPlist?: Record<string, string>; reorderPromotionExpectations?: boolean } = {}) {
   const appStore = new ConnectionRepository().create({
     provider: 'appstoreconnect',
     credentialsEncrypted: getSecretStore().encryptObject({
@@ -74,54 +84,128 @@ function seedConnection() {
       },
     },
   } as never);
-  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+  const configured = new SpecStore().get(project)!.spec;
+  if (options.expectedInfoPlist) {
+    configured.environments.production.ios!.release!.build.expectedInfoPlist = options.expectedInfoPlist;
+  }
+  if (options.api) {
+    configured.runtime = { kind: 'node', version: '24' };
+    configured.environments.production.api = {
+      service: 'web', versions: { v1: { path: '/v1', contract: 'api/v1.json', status: 'supported' } }, consumers: {},
+      compatibility: { command: 'npm run test:api-compatibility', workingDirectory: '.' },
+    };
+    configured.environments.production.ios!.release!.apiVersion = 'v1';
+  }
+  if (options.promotion) {
+    configured.environments.staging = structuredClone(configured.environments.production);
+    configured.environments.staging.ios!.release!.trigger = 'after-server-deploy';
+    configured.environments.production.ios!.release!.promoteFrom = 'staging';
+    configured.environments.production.ios!.release!.trigger = 'manual';
+    if (options.reorderPromotionExpectations && options.expectedInfoPlist) {
+      configured.environments.production.ios!.release!.build.expectedInfoPlist = Object.fromEntries(Object.entries(options.expectedInfoPlist).reverse());
+    }
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
+      provider: 'railway', projectId: 'rail-project', environmentId: 'rail-stage', services: { web: { serviceId: 'stage-web' } },
+    } });
+  }
+  new SpecStore().replace(project, configured);
+  new EnvironmentRepository().create({
+    projectId: project.id, name: 'production',
+    platformBindings: { provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env', services: { web: { serviceId: 'rail-web' } } },
+  });
+  const spec = new SpecStore().get(project)!.spec;
+  const contract = resolveManagedWorkflowContract({ project, environmentName: 'production', environmentSpec: spec.environments.production });
+  if (!contract.ok) throw new Error(contract.error);
+  const sourceEnvironment = options.promotion ? 'staging' : 'production';
+  const sourceContract = resolveManagedWorkflowContract({ project, environmentName: sourceEnvironment, environmentSpec: spec.environments[sourceEnvironment] });
+  if (!sourceContract.ok) throw new Error(sourceContract.error);
+  const workflows = new Map([...workflowFiles(contract.workflow), ...workflowFiles(sourceContract.workflow)].map((file) => [file.path, file.content]));
+  const releaseSha = 'a'.repeat(40);
+  const run = (id: number) => ({
+    id, name: 'release', status: 'completed', conclusion: 'success',
+    path: id === 101 ? contract.workflow.path : id === 103 ? sourceContract.workflow.path : `.github/workflows/hypervibe-ios-release-${sourceEnvironment}.yml`,
+    created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:10:00Z', run_started_at: '2026-07-01T00:00:00Z',
+    // The dispatched program is newer than its deliberately selected release.
+    head_sha: 'b'.repeat(40), head_branch: 'main', event: 'workflow_dispatch', run_attempt: 1,
+    repository: { full_name: 'davejohnson/example' }, head_repository: { full_name: 'davejohnson/example' },
+    html_url: `https://github.com/davejohnson/example/actions/runs/${id}`,
+  });
+  const mobile = {
+    version: 2, environment: sourceEnvironment,
+    mobile: { repository: 'davejohnson/example', sha: releaseSha, buildContractFingerprint: iosBuildContractFingerprint(spec.environments.production.ios!, spec.runtime) },
+    server: { repository: 'davejohnson/example', sha: releaseSha, workflowRunId: options.promotion ? '103' : '101', evidenceSha256: '' }, services: ['web'],
+    app: { appId: 'app-1', bundleId: 'com.example.app', buildId: 'build-1', buildNumber: '42', marketingVersion: '1.2.0', ipaSha256: 'c'.repeat(64), testflightGroups: ['beta'], submittedForBetaReview: false },
+    releasedAt: '2026-07-01T00:10:00Z',
+  };
+  const server = {
+    version: MANAGED_CI_RELEASE_EVIDENCE_VERSION, provider: 'railway', environment: 'production', source: { repository: 'davejohnson/example', sha: options.newerServer ? 'e'.repeat(40) : releaseSha },
+    programFingerprint: contract.target.programFingerprint,
+    deploymentContractFingerprint: environmentDeploymentContractHash(spec, 'production'),
+    target: { ...contract.target.releaseTarget!, resources: contract.target.releaseTarget!.resources.map((resource) => ({ ...resource, imageUri: 'ghcr.io/davejohnson/example@sha256:' + 'd'.repeat(64) })) },
+    verifiedAt: '2026-07-01T00:05:00Z',
+  };
+  const sourceServer = options.promotion ? {
+    ...server, environment: sourceEnvironment, source: { repository: 'davejohnson/example', sha: releaseSha },
+    programFingerprint: sourceContract.target.programFingerprint,
+    deploymentContractFingerprint: environmentDeploymentContractHash(spec, sourceEnvironment),
+    target: { ...sourceContract.target.releaseTarget!, resources: sourceContract.target.releaseTarget!.resources.map((resource) => ({ ...resource, imageUri: 'ghcr.io/davejohnson/example@sha256:' + 'd'.repeat(64) })) },
+  } : server;
+  const encode = (value: unknown) => JSON.stringify(value, null, 2) + '\n';
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+  mobile.server.evidenceSha256 = digest(encode(sourceServer));
+  const snapshot = '{"openapi":"3.1.0"}\n';
+  const apiProof = (environment: string, id: number, body: typeof server) => {
+    const policy = spec.environments[environment].api!;
+    return {
+      version: 1, repository: 'davejohnson/example', environment, sha: body.source.sha, runId: id, workflow: run(id).path,
+      service: 'web', versions: { v1: { ...policy.versions.v1, snapshot: 'contracts/v1.json', contractHash: digest(snapshot) } }, consumers: {},
+      policyHash: canonicalJsonSha256(policy), baseline: null,
+      compatibility: { status: 'passed', claim: 'project-command', commandHash: canonicalJsonSha256(policy.compatibility) },
+      serverEvidenceSha256: digest(encode(body)),
+    };
+  };
+  const targetApi = options.api ? apiProof('production', 101, server) : undefined;
+  const sourceApi = options.api ? apiProof(sourceEnvironment, options.promotion ? 103 : 101, sourceServer) : undefined;
+  const artifact = (id: number) => ({
+    id: id + 100,
+    name: id === 102 ? `hypervibe-ios-release-${sourceEnvironment}-` + releaseSha : managedCiReleaseArtifactPrefix(id === 101 ? 'production' : sourceEnvironment) + (id === 101 ? server.source.sha : releaseSha),
+    expired: false, created_at: '2026-07-01T00:05:00Z', updated_at: '2026-07-01T00:05:00Z',
+    workflow_run: { id, repository_id: 1, head_repository_id: 1, head_branch: 'main', head_sha: 'b'.repeat(40) },
+  });
+  // Reconstructed GitHub attempt-job response; only this new lookup uses HTTP.
+  // Endpoint scope establishes the attempt when optional job.run_attempt is absent.
+  const jobs = new Map([101, 102, 103].map(id => [id, {
     total_count: 1,
-    workflow_runs: [{
-      id: 101,
-      name: 'release',
-      status: 'completed',
-      conclusion: 'success',
-      created_at: '2026-07-01T00:00:00Z',
-      updated_at: '2026-07-01T00:10:00Z',
-      head_sha: 'a'.repeat(40),
-      head_branch: 'main',
-      event: 'workflow_run',
-      html_url: 'https://github.com/davejohnson/example/actions/runs/101',
-    }],
+    jobs: [{ id: id + 1000, run_id: id, head_sha: 'b'.repeat(40),
+      name: id === 102 ? 'release' : 'deploy', status: 'completed', conclusion: 'success',
+      started_at: '2026-07-01T00:01:00Z', completed_at: '2026-07-01T00:09:00Z' }],
+  }]));
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+    const url = new URL(String(input));
+    const match = url.pathname.match(/^\/repos\/davejohnson\/example\/actions\/runs\/([1-9][0-9]*)\/attempts\/([1-9][0-9]*)\/jobs$/);
+    if (url.origin !== 'https://api.github.com' || !match || url.search !== '?per_page=100') {
+      throw new Error('Unexpected GitHub attempt request');
+    }
+    return new Response(JSON.stringify(jobs.get(Number(match[1]))), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
   });
-  vi.spyOn(GitHubAdapter.prototype, 'listArtifacts').mockResolvedValue({
-    total_count: 2,
-    artifacts: [
-      {
-        id: 201,
-        name: `hypervibe-server-release-v4-production-${'a'.repeat(40)}`,
-        expired: false,
-        created_at: '2026-07-01T00:05:00Z',
-        updated_at: '2026-07-01T00:05:00Z',
-        workflow_run: {
-          id: 101,
-          repository_id: 1,
-          head_repository_id: 1,
-          head_branch: 'main',
-          head_sha: 'b'.repeat(40),
-        },
-      },
-      {
-        id: 202,
-        name: `hypervibe-ios-release-production-${'a'.repeat(40)}`,
-        expired: false,
-        created_at: '2026-07-01T00:10:00Z',
-        updated_at: '2026-07-01T00:10:00Z',
-        workflow_run: {
-          id: 101,
-          repository_id: 1,
-          head_repository_id: 1,
-          head_branch: 'main',
-          head_sha: 'c'.repeat(40),
-        },
-      },
-    ],
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockImplementation(async (_owner, _repo, workflow) => ({ total_count: 1, workflow_runs: [run(String(workflow).includes('ios-release') ? 102 : 101)] }));
+  vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async (_owner, _repo, id) => run(id));
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, id) => {
+    const artifacts = [artifact(Number(id))];
+    if (options.api && Number(id) !== 102) artifacts.push({
+      ...artifact(Number(id)), id: Number(id) + 200,
+      name: apiReleaseArtifactPrefix(Number(id) === 101 ? 'production' : sourceEnvironment) + (Number(id) === 101 ? server.source.sha : releaseSha),
+    });
+    return { total_count: artifacts.length, artifacts };
   });
+  vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, file) => file === '.hypervibe/spec.json' ? JSON.stringify(spec) : file === 'api/v1.json' ? snapshot : workflows.get(file) ?? null);
+  vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockImplementation(async (_owner, _repo, id) => id >= 300 ? {
+    'hypervibe-api-release.json': encode(id === 301 ? targetApi : sourceApi), 'contracts/v1.json': snapshot,
+  } : { [id === 202 ? 'hypervibe-ios-release.json' : 'hypervibe-server-release.json']: encode(id === 202 ? mobile : id === 201 ? server : sourceServer) });
+  return { project, spec, contract, mobile, server, sourceServer, sourceApi, targetApi, snapshot, run, artifact, workflows, jobs };
+
 }
 
 async function makeClient() {
@@ -264,6 +348,42 @@ const SUBMIT_INPUT = {
   appIdentifier: 'com.example.app',
 };
 
+async function emitSubmissionServerEvidence(fixture: ReturnType<typeof seedConnection>, role: 'target' | 'original', activation: 'empty' | 'nonempty') {
+  const server = role === 'target' ? fixture.server : fixture.sourceServer;
+  const workflow = fixture.workflows.get(fixture.run(role === 'target' ? 101 : 103).path)!;
+  const validator = installReleaseEvidenceValidator(workflow, tempDir);
+  const resources = server.target.resources.map(({ imageUri: _image, ...resource }) => resource);
+  const serviceId = role === 'target' ? 'rail-web' : 'stage-web';
+  let output = '';
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  await new AsyncFunction('require', 'process', 'core', extractGitHubScript(workflow, 'Write server release evidence'))(
+    releaseEvidenceValidatorRequire(validator, { writeFileSync: (_file, content) => { output = String(content); } }),
+    { env: {
+      HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath, HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+      HYPERVIBE_RELEASE_SHA: server.source.sha, GITHUB_REPOSITORY: 'davejohnson/example',
+      HYPERVIBE_RELEASE_PROVIDER: 'railway', HYPERVIBE_RELEASE_ENVIRONMENT: server.environment,
+      HYPERVIBE_RELEASE_SERVICES: '["web"]', HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(server.target.scope),
+      HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(resources), HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: server.target.bindingsFingerprint,
+      HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: server.programFingerprint,
+      HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: server.deploymentContractFingerprint,
+      HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true', HYPERVIBE_RELEASE_IMAGE_URI: server.target.resources[0].imageUri,
+      // Real generated push defaults are strings, including the empty object.
+      HYPERVIBE_CREDENTIAL_OPERATIONS: activation === 'empty' ? '{}' : JSON.stringify({ web: { serviceId, operationId: 'reviewed-operation', configurationVersion: 42 } }),
+      HYPERVIBE_CREDENTIAL_DEPLOYMENTS: activation === 'empty' ? '[]' : JSON.stringify([{ serviceId, deploymentIds: ['deployment-new'], configurationVersion: 42 }]),
+    } }, {},
+  );
+  Object.assign(server, JSON.parse(output));
+  refreshSubmissionServerDigests(fixture);
+  return server as typeof server & { credentialActivation: unknown };
+}
+
+function refreshSubmissionServerDigests(fixture: ReturnType<typeof seedConnection>) {
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value, null, 2) + '\n').digest('hex');
+  fixture.mobile.server.evidenceSha256 = digest(fixture.sourceServer);
+  if (fixture.targetApi) fixture.targetApi.serverEvidenceSha256 = digest(fixture.server);
+  if (fixture.sourceApi) fixture.sourceApi.serverEvidenceSha256 = digest(fixture.sourceServer);
+}
+
 describe('hv_appstore_submit', () => {
   function stubSubmittableVersion() {
     vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(APP);
@@ -271,6 +391,426 @@ describe('hv_appstore_submit', () => {
     vi.spyOn(AppStoreConnectAdapter.prototype, 'getAppStoreVersionBuild').mockResolvedValue({ id: 'build-1', version: '42' });
     return getEditableVersion;
   }
+
+  it.each([
+    ['target', 'empty'], ['target', 'nonempty'], ['original', 'empty'], ['original', 'nonempty'],
+  ] as const)('accepts the emitted %s server artifact with %s credential activation', async (role, activation) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    await emitSubmissionServerEvidence(fixture, role, activation);
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+    expect(submit).not.toHaveBeenCalled();
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(1);
+    await t.close();
+  });
+
+  it.each([
+    ['target', 'malformed'], ['target', 'wrong resource'], ['target', 'unknown field'],
+    ['original', 'malformed'], ['original', 'wrong resource'], ['original', 'unknown field'],
+  ] as const)('rejects %s server activation with %s before Apple access', async (role, invalid) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    const server = await emitSubmissionServerEvidence(fixture, role, 'nonempty');
+    if (invalid === 'malformed') server.credentialActivation = null;
+    else if (invalid === 'wrong resource') server.credentialActivation = {
+      version: 1, operations: [{ service: 'web', serviceId: role === 'target' ? 'stage-web' : 'rail-web', operationId: 'reviewed-operation', deploymentIds: ['deployment-new'] }],
+    };
+    else Object.assign(server, { unexpectedReleaseField: true });
+    refreshSubmissionServerDigests(fixture);
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(AppStoreConnectAdapter.prototype.findAppByBundleId).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('requires a reviewed exact-build confirmation before submitting', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('CONFIRM_REQUIRED');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([
+    ['target server', 101], ['beta release', 102], ['original beta server', 103],
+  ] as const)('rejects a previous-attempt artifact for the %s', async (_role, id) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    stubSubmittableVersion();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, selected) => ({
+      ...fixture.run(selected), ...(selected === id ? { run_attempt: 2, run_started_at: '2026-07-01T00:06:00Z' } : {}),
+    }));
+    fixture.jobs.get(id)!.jobs[0].started_at = '2026-07-01T00:06:00Z';
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([['target server', 101], ['beta release', 102]] as const)(
+    'rejects a successful run with a skipped %s job', async (_role, id) => {
+      const fixture = seedConnection();
+      stubSubmittableVersion();
+      fixture.jobs.get(id)!.jobs[0].conclusion = 'skipped';
+      const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+      const t = await makeClient();
+      const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(result.error?.code).toBe('VALIDATION');
+      expect(submit).not.toHaveBeenCalled();
+      await t.close();
+    }
+  );
+
+  it('allows a successful current rerun with fresh artifacts and omitted optional job attempt', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), run_attempt: 2, run_started_at: '2026-07-01T00:00:30Z',
+    }));
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('CONFIRM_REQUIRED');
+    await t.close();
+  });
+
+  it.each([['target server', 101], ['beta release', 102], ['original beta server', 103]] as const)(
+    'rechecks the %s job immediately before Apple mutation', async (_role, id) => {
+      const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+      stubSubmittableVersion();
+      const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+        reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+      });
+      const t = await makeClient();
+      const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+      vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockImplementation(async () => {
+        fixture.jobs.get(id)!.jobs[0].conclusion = 'skipped';
+        return { id: 'build-1', version: '42' };
+      });
+      const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+      expect(result.error?.code).toBe('VALIDATION');
+      expect(submit).not.toHaveBeenCalled();
+      await t.close();
+    }
+  );
+
+  it('rechecks exact artifact identity immediately before Apple mutation', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockImplementation(async () => {
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => ({
+        total_count: 1, artifacts: [{ ...fixture.artifact(Number(id)), id: Number(id) + 1000 }],
+      }));
+      return { id: 'build-1', version: '42' };
+    });
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('does not use a matching artifact name as proof for a different attached Apple build', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockResolvedValue({ id: 'unproven-build', version: '99' });
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.ok).toBe(false);
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  // Synthetic release manifests exercise command validation, not live Apple or
+  // GitHub compatibility. IPA metadata itself is checked by the emitted-validator tests.
+  it.each(['manifest backend', 'immutable source backend', 'missing immutable source expectations'] as const)(
+    'rechecks %s before confirmed submission of the same Apple identity', async changed => {
+      const fixture = seedConnection({expectedInfoPlist: {
+        AppEnvironment: 'production', APIBaseURL: 'https://invoiceperfect.com',
+      }});
+      const getEditableVersion = stubSubmittableVersion();
+      const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+      const t = await makeClient();
+      const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+      getEditableVersion.mockClear();
+
+      const historical = structuredClone(fixture.spec);
+      const build = historical.environments.production.ios!.release!.build;
+      if (changed === 'missing immutable source expectations') delete build.expectedInfoPlist;
+      else build.expectedInfoPlist!.APIBaseURL = 'https://staging.invoiceperfect.com';
+      if (changed === 'manifest backend') {
+        fixture.mobile.mobile.buildContractFingerprint = iosBuildContractFingerprint(historical.environments.production.ios!, historical.runtime);
+      } else {
+        vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, file) =>
+          file === '.hypervibe/spec.json' ? JSON.stringify(historical) : fixture.workflows.get(file) ?? null);
+      }
+      const result = await t.call('hv_appstore_submit', {...SUBMIT_INPUT, ...preview.confirmation.retryInput});
+      expect(result.error?.code, JSON.stringify(result)).toBe('VALIDATION');
+      expect(result.error?.message).toContain('immutable source contract');
+      expect(getEditableVersion).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+      await t.close();
+    }
+  );
+
+  it('blocks an older pinned server release after a newer target run starts', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, workflow) => ({
+      total_count: 1, workflow_runs: [String(workflow).includes('ios-release') ? fixture.run(102) : {
+        ...fixture.run(101), id: 103, status: 'in_progress', conclusion: null, created_at: '2026-07-02T00:00:00Z',
+      }],
+    }));
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok).toBe(false);
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('rejects an attempt that changes while its release manifest is downloaded', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const read = vi.mocked(GitHubAdapter.prototype.readArtifactFiles).getMockImplementation()!;
+    vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockImplementation(async (...args) => {
+      const files = await read(...args);
+      if (args[2] === 201) {
+        vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+          ...fixture.run(id), ...(id === 101 ? { run_attempt: 2 } : {}),
+        }));
+      }
+      return files;
+    });
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    await t.close();
+  });
+
+  it('accepts an unchanged beta workflow when only the server workflow changed afterward', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), head_sha: (id === 101 ? 'c' : 'b').repeat(40),
+    }));
+    fixture.jobs.get(101)!.jobs[0].head_sha = 'c'.repeat(40);
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => ({
+      total_count: 1, artifacts: [{ ...fixture.artifact(Number(id)),
+        workflow_run: { ...fixture.artifact(Number(id)).workflow_run, head_sha: (Number(id) === 101 ? 'c' : 'b').repeat(40) } }],
+    }));
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (_owner, _repo, file, ref) => {
+      if (file === '.hypervibe/spec.json') return JSON.stringify(fixture.spec);
+      const content = fixture.workflows.get(file) ?? null;
+      return file === fixture.contract.workflow.path && ref === 'b'.repeat(40) ? content + '\n# previous server program\n' : content;
+    });
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('CONFIRM_REQUIRED');
+    await t.close();
+  });
+
+  it('promotes the same staging Apple build against a newer server with equal supported API snapshots', async () => {
+    seedConnection({ promotion: true, api: true, newerServer: true });
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+    expect(preview.error.details).toMatchObject({ sourceEnvironment: 'staging', mobileSha: 'a'.repeat(40), serverSha: 'e'.repeat(40), buildId: 'build-1' });
+    expect(preview.confirmation.message).toContain('retains staging build configuration');
+    expect(submit).not.toHaveBeenCalled();
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(result.data.build.id).toBe('build-1');
+    expect(submit).toHaveBeenCalledTimes(1);
+    await t.close();
+  });
+
+  it('promotes identical embedded production settings despite declaration key order', async () => {
+    seedConnection({promotion: true, reorderPromotionExpectations: true, expectedInfoPlist: {
+      AppEnvironment: 'production', APIBaseURL: 'https://invoiceperfect.com', CFBundleDisplayName: 'Invoice Perfect',
+    }});
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: {id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS'}, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+    const result = await t.call('hv_appstore_submit', {...SUBMIT_INPUT, ...preview.confirmation.retryInput});
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(result.data.build.id).toBe('build-1');
+    expect(submit).toHaveBeenCalledTimes(1);
+    await t.close();
+  });
+
+  it.each([
+    ['different API bytes', (fixture: ReturnType<typeof seedConnection>) => { fixture.targetApi!.versions.v1.contractHash = 'f'.repeat(64); }],
+    ['API receipt for other raw server bytes', (fixture: ReturnType<typeof seedConnection>) => { fixture.targetApi!.serverEvidenceSha256 = 'f'.repeat(64); }],
+    ['wrong API service despite a claimed policy hash', (fixture: ReturnType<typeof seedConnection>) => { fixture.targetApi!.service = 'unreviewed-api'; }],
+    ['retired target API', (fixture: ReturnType<typeof seedConnection>) => { Object.assign(fixture.targetApi!.versions.v1, { status: 'retired', retirement: { id: 'retired-v1', reason: 'No remaining clients' } }); }],
+    ['wrong source beta run', (fixture: ReturnType<typeof seedConnection>) => { fixture.mobile.server.workflowRunId = '104'; }],
+  ] as const)('blocks cross-SHA promotion with %s', async (_label, corrupt) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    corrupt(fixture);
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('requires a new preview if the original beta server proof changes attempt and artifact', async () => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), ...(id === 103 ? { run_attempt: 2, run_started_at: '2026-07-01T00:00:30Z' } : {}),
+    }));
+    const list = vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).getMockImplementation()!;
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (...args) => {
+      const result = await list(...args);
+      return { ...result, artifacts: result.artifacts.map(artifact => artifact.id === 203 ? { ...artifact, id: 204 } : artifact) };
+    });
+    // Provider artifact id 204 carries the same independently checked server bytes.
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.message).toContain('selection changed');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([['successful release with deleted artifact', false, false], ['proven relevance skip', true, false], ['skip attempt changes during observation', true, true]] as const)(
+    'handles latest beta run with no artifact: %s', async (_label, relevanceSkip, race) => {
+      const fixture = seedConnection();
+      stubSubmittableVersion();
+      const latestRun = { ...fixture.run(104), created_at: '2026-07-02T00:00:00Z', updated_at: '2026-07-02T00:10:00Z',
+        run_started_at: '2026-07-02T00:00:00Z' };
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, workflow) => (
+        String(workflow).includes('ios-release')
+          ? { total_count: 2, workflow_runs: [latestRun, fixture.run(102)] }
+          : { total_count: 1, workflow_runs: [fixture.run(101)] }
+      ));
+      let latestReads = 0;
+      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => id === 104
+        ? { ...latestRun, run_attempt: race && ++latestReads > 1 ? 2 : 1 } : fixture.run(id));
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => (
+        Number(id) === 104 ? { total_count: 0, artifacts: [] } : { total_count: 1, artifacts: [fixture.artifact(Number(id))] }
+      ));
+      fixture.jobs.set(104, { total_count: 4, jobs: ['eligibility', 'prepare', 'build', 'release'].map((name, index) => ({
+        id: 1104 + index, run_id: 104, head_sha: 'b'.repeat(40), name, status: 'completed',
+        conclusion: relevanceSkip && name !== 'eligibility' ? 'skipped' : 'success',
+        started_at: '2026-07-02T00:01:00Z', completed_at: '2026-07-02T00:09:00Z',
+      })) });
+      const t = await makeClient();
+      const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+      expect(result.error?.code).toBe(relevanceSkip && !race ? 'CONFIRM_REQUIRED' : 'VALIDATION');
+      await t.close();
+    },
+  );
+
+  it('requires a new preview if an artifact is replaced after confirmation was prepared', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    fixture.mobile.releasedAt = '2026-07-02T00:00:00Z';
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.message).toContain('selection changed');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('rechecks the attached build immediately before mutation', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild)
+      .mockResolvedValueOnce({ id: 'build-1', version: '42' })
+      .mockResolvedValueOnce({ id: 'different-build', version: '43' });
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.message).toContain('changed before submission');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('does not return artifact body or download credential errors', async () => {
+    seedConnection();
+    vi.mocked(GitHubAdapter.prototype.readArtifactFiles).mockRejectedValue(new Error('private-github-value signed-download-secret'));
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('PROVIDER_ERROR');
+    expect(JSON.stringify(result)).not.toMatch(/private-github-value|signed-download-secret/);
+    await t.close();
+  });
+
+  it('does not return upstream credential echoes from submission failures', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockRejectedValue(new Error('provider-echo-private-material'));
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('provider-echo-private-material');
+    await t.close();
+  });
+
+  it('blocks a retry of an older run that deployed after the selected server release', async () => {
+    const fixture = seedConnection();
+    stubSubmittableVersion();
+    const t = await makeClient();
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, workflow) => ({
+      total_count: 2, workflow_runs: String(workflow).includes('ios-release') ? [fixture.run(102)] : [fixture.run(101), {
+        ...fixture.run(101), id: 99, created_at: '2026-06-01T00:00:00Z', updated_at: '2026-07-02T00:00:00Z',
+      }],
+    }));
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, iosRunId: '102', serverRunId: '101' });
+    expect(result.error?.message).toContain('newer');
+    await t.close();
+  });
 
   it('returns project-scoped GitHub setup when release evidence cannot be read', async () => {
     seedConnection();
@@ -317,7 +857,9 @@ describe('hv_appstore_submit', () => {
       .mockResolvedValue({ id: 'rs-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' });
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    const res = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
     expect(res.ok).toBe(true);
     expect(getEditableVersion).toHaveBeenCalledWith('app-1', 'IOS');
     expect(create).toHaveBeenCalledWith('app-1', 'IOS');
@@ -343,7 +885,9 @@ describe('hv_appstore_submit', () => {
       .mockResolvedValue({ id: 'rs-9', state: 'WAITING_FOR_REVIEW', platform: 'IOS' });
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    const res = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
     expect(res.ok).toBe(true);
     expect(create).not.toHaveBeenCalled();
     expect(addItem).toHaveBeenCalledWith('rs-9', 'ver-1');
@@ -359,15 +903,16 @@ describe('hv_appstore_submit', () => {
     const addItem = vi.spyOn(AppStoreConnectAdapter.prototype, 'addReviewSubmissionItem');
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    const res = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
     expect(res.ok).toBe(false);
-    expect(res.error.message).toContain('already WAITING_FOR_REVIEW');
-    expect(res.error.message).toContain('rs-9');
+    expect(res.error.message).toContain('submission could not be verified');
     expect(addItem).not.toHaveBeenCalled();
     await t.close();
   });
 
-  it('surfaces the provider error detail when adding the version item fails', async () => {
+  it('reports an unverified submission without upstream prose when adding the version item fails', async () => {
     seedConnection();
     stubSubmittableVersion();
     vi.spyOn(AppStoreConnectAdapter.prototype, 'listReviewSubmissions')
@@ -377,10 +922,12 @@ describe('hv_appstore_submit', () => {
     const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitReviewSubmission');
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    const res = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
     expect(res.ok).toBe(false);
-    expect(res.error.message).toContain('Could not add version ver-1 to review submission rs-9');
-    expect(res.error.message).toContain('already added to another submission');
+    expect(res.error.message).toContain('submission could not be verified');
+    expect(res.error.message).not.toContain('already added to another submission');
     expect(submit).not.toHaveBeenCalled();
     await t.close();
   });
@@ -397,7 +944,7 @@ describe('hv_appstore_submit', () => {
     expect(res.ok).toBe(false);
     expect(res.error.code).toBe('VALIDATION');
     expect(res.error.message).toContain('No version ready for submission');
-    expect(res.error.details.currentVersions).toEqual([{ version: '1.1.0', state: 'READY_FOR_SALE', platform: 'IOS' }]);
+    expect(res.error.message).toContain('attach the tested build');
     await t.close();
   });
 });

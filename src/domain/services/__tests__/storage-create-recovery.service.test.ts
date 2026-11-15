@@ -15,6 +15,8 @@ import {
   planStorage,
   STORAGE_OPERATIONS,
 } from '../storage-plan.service.js';
+import { railwayHttpFixture, projectId as railwayProjectId, stagingId, productionId } from '../../../adapters/providers/railway/__tests__/railway-http.fixture.js';
+import { createRailwayStorageAdapter } from '../../../adapters/providers/railway/railway-storage.factory.js';
 
 const environmentSpec = environmentSpecSchema.parse({
   hosting: { provider: 'railway' },
@@ -343,8 +345,55 @@ describe('storage create-recovery apply boundary', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it.each([0, 25_000, 120_000])('reconciles a second-environment bucket through the pinned transport with %i ms delay', async (delay) => {
+    vi.useFakeTimers();
+    const fixture = await railwayHttpFixture({ bucketDelayMs: delay, omitBucketFlags: true });
+    const production = structuredClone(fixture.environments.get(productionId));
+    const repository = new EnvironmentRepository();
+    repository.update(environment.id, { platformBindings: {
+      provider: 'railway', projectId: railwayProjectId, environmentId: stagingId,
+    } });
+    const spec = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: {},
+      storage: { documents: { provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] } } });
+    const adapter = createRailwayStorageAdapter(fixture.adapter);
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({ success: true, adapter });
+    const plan = async () => planStorage({ environmentSpec: spec,
+      environment: repository.findById(environment.id), observed: await fixture.adapter.observe(fixture.environment) });
+    const action = (await plan()).actions[0];
+    expect(action).toMatchObject({ type: 'create', billable: true });
+    const applying = applyStorageAction({ project, envName: 'staging', environmentSpec: spec, action });
+    await vi.runAllTimersAsync();
+    const result = await applying;
+    if (delay === 120_000) {
+      expect(result).toMatchObject({ success: false, status: 'pending' });
+      expect(repository.findById(environment.id)?.platformBindings.storage).toBeUndefined();
+      expect(repository.findById(environment.id)?.platformBindings.storageCreateRecovery).toMatchObject({
+        documents: { state: 'identified', externalId: 'bucket-documents' },
+      });
+      await vi.advanceTimersByTimeAsync(delay);
+      const finalize = (await plan()).actions[0];
+      expect(finalize).toMatchObject({ type: 'update', metadata: { operation: STORAGE_OPERATIONS.finalizeCreateRecovery } });
+      expect(finalize.billable).not.toBe(true);
+      expect(finalize.requiresConfirm).not.toBe(true);
+      expect(await applyStorageAction({ project, envName: 'staging', environmentSpec: spec, action: finalize }))
+        .toMatchObject({ success: true, data: { recovered: true } });
+    } else {
+      expect(result).toMatchObject({ success: true });
+    }
+    expect(repository.findById(environment.id)?.platformBindings.storage).toMatchObject({
+      documents: { externalId: 'bucket-documents', instanceScope: { projectId: railwayProjectId, environmentId: stagingId } },
+    });
+    expect(repository.findById(environment.id)?.platformBindings.storageCreateRecovery).toBeUndefined();
+    expect((await plan()).actions.every((entry) => entry.type === 'noop')).toBe(true);
+    expect(fixture.mutations.map(({ field }) => field)).toEqual(['environmentPatchCommit']);
+    expect(fixture.environments.get(productionId)).toEqual(production);
+    expect(fixture.contractErrors).toEqual([]);
   });
 
   function fakeStorageAdapter(
@@ -571,7 +620,7 @@ describe('storage create-recovery apply boundary', () => {
         success: false,
         message: 'bucket inventory could not be read',
         error: 'provider response was malformed',
-        data: { phase: 'bucketCreate', mutationAttempted: false },
+        data: { phase: 'bucketCreate', mutationAttempted: false, pending: true },
       },
       context: { projectId: 'rp', environmentId: 're' },
     });
@@ -586,6 +635,7 @@ describe('storage create-recovery apply boundary', () => {
     const persisted = new EnvironmentRepository().findById(environment.id);
 
     expect(result).toMatchObject({ success: false });
+    expect(result.status).not.toBe('pending');
     expect(result.data).not.toHaveProperty('storageCreateRecovery');
     expect(persisted?.platformBindings.storageCreateRecovery).toBeUndefined();
   });
@@ -596,7 +646,7 @@ describe('storage create-recovery apply boundary', () => {
         success: false,
         message: 'bad recovery payload',
         data: {
-          phase: 'bucketCreate', mutationAttempted: true,
+          phase: 'bucketCreate', mutationAttempted: true, pending: true,
           storageCreateRecovery: { provider: 'other', state: 'identified' },
         },
       },
@@ -613,6 +663,7 @@ describe('storage create-recovery apply boundary', () => {
     const persisted = new EnvironmentRepository().findById(environment.id);
 
     expect(result.error).toContain('malformed or inconsistent');
+    expect(result.status).not.toBe('pending');
     expect(persisted?.platformBindings).toMatchObject({
       storageCreateRecovery: { uploads: recovery },
     });

@@ -1,8 +1,44 @@
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+
+function releaseJobs() {
+  return parse(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8')).jobs;
+}
 
 describe('public release configuration', () => {
+  it.each([0, 29])('requires the high-severity dependency audit before release checks; audit exit=%s', (auditExit) => {
+    const directory = mkdtempSync(join(tmpdir(), 'hypervibe-release-audit-'));
+    try {
+      const npm = join(directory, 'npm');
+      const calls = join(directory, 'calls');
+      writeFileSync(npm, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RELEASE_TEST_CALLS"\nif [ "$1" = "audit" ]; then exit "$RELEASE_TEST_AUDIT_EXIT"; fi\n');
+      chmodSync(npm, 0o755);
+      const metadata = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+      const result = spawnSync('/bin/sh', ['-c', metadata.scripts['release:check']], {
+        encoding: 'utf8',
+        env: {
+          PATH: directory,
+          RELEASE_TEST_CALLS: calls,
+          RELEASE_TEST_AUDIT_EXIT: String(auditExit),
+        },
+      });
+
+      expect(result.status).toBe(auditExit);
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual(auditExit === 0
+        ? ['audit --audit-level=high', 'test', 'run typecheck', 'run build', 'run prepublish-check']
+        : ['audit --audit-level=high']);
+      expect(releaseJobs()['validate-package'].steps).toContainEqual(expect.objectContaining({
+        run: 'npm run release:check',
+      }));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('publishes the scoped package publicly through the npm registry', () => {
     const packageMetadata = JSON.parse(
       readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
@@ -51,7 +87,6 @@ describe('public release configuration', () => {
     expect(workflow).toContain('scope: "@hypervibe"');
     expect(workflow).toContain('id-token: write');
     expect(workflow).toContain('actions/checkout@v7');
-    expect(workflow).toContain('actions/setup-node@v6');
     expect(workflow).toContain('npm install --global npm@11.19.0');
     expect(workflow).toContain('npm publish --access public --provenance');
     expect(workflow).not.toContain('NODE_AUTH_TOKEN');
@@ -84,15 +119,53 @@ describe('public release configuration', () => {
     );
   });
 
+  it('requires a verified backup helper in both release modes and retains its digest receipt', () => {
+    const jobs = releaseJobs();
+    const helper = jobs['publish-backup-helper'];
+    expect(helper).toBeDefined();
+    expect(helper.needs).toContain('validate-package');
+    expect(helper.if).toBeUndefined();
+    expect(helper.permissions).toEqual({ contents: 'read', packages: 'write' });
+    expect(helper.steps).toContainEqual(expect.objectContaining({
+      id: 'backup', run: 'node scripts/release-backup-runner.mjs',
+    }));
+    const artifact = helper.steps.find((step: { uses?: string }) => step.uses?.startsWith('actions/upload-artifact@'));
+    expect(artifact.with).toMatchObject({ name: 'Hypervibe-backup-runner', path: 'build/backup-runner-release.json', 'if-no-files-found': 'error' });
+    expect(helper.outputs.image).toBe('${{ steps.backup.outputs.image }}');
+    expect(jobs['publish-package'].needs).toContain('publish-backup-helper');
+    const download = jobs.release.steps.find((step: { uses?: string }) => step.uses?.startsWith('actions/download-artifact@'));
+    expect(download.with.pattern).toBe('Hypervibe-*');
+    expect(jobs.release.steps.find((step: { name: string }) => step.name === 'Verify release assets').run)
+      .toContain('release-assets/backup-runner-release.json');
+  });
+
+  it.each([false, true])('blocks npm publication on missing or failed helper evidence; npm-only=%s', npmOnly => {
+    const job = releaseJobs()['publish-package'];
+    // Execute this workflow's boolean GitHub expression against both release
+    // modes. The expression uses only needs, always(), &&, || and equality.
+    const expression = job.if.trim().replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
+    const admission = new Function('needs', 'always', `return (${expression});`);
+    const needs = {
+      'release-mode': { result: 'success', outputs: { npm_only: String(npmOnly) } },
+      'validate-package': { result: 'success' },
+      'build-macos': { result: npmOnly ? 'skipped' : 'success' },
+      'publish-backup-helper': { result: 'success' },
+    };
+    expect(admission(needs, () => true)).toBe(true);
+    for (const result of ['failure', 'cancelled', 'skipped', undefined]) {
+      expect(admission({ ...needs, 'publish-backup-helper': { result } }, () => true), String(result)).toBe(false);
+    }
+    expect(admission({ ...needs, 'validate-package': { result: 'failure' } }, () => true)).toBe(false);
+    if (!npmOnly) expect(admission({ ...needs, 'build-macos': { result: 'skipped' } }, () => true)).toBe(false);
+  });
+
   it('does not declare or bind a long-lived npm publishing token', () => {
     const spec = JSON.parse(
       readFileSync(new URL('../../.hypervibe/spec.json', import.meta.url), 'utf8')
     ) as {
       secrets?: Record<string, unknown>;
     };
-    const bindings = JSON.parse(
-      readFileSync(new URL('../../.hypervibe/bindings.json', import.meta.url), 'utf8')
-    ) as {
+    let bindings: {
       environments?: {
         repository?: {
           platformBindings?: {
@@ -102,7 +175,15 @@ describe('public release configuration', () => {
           };
         };
       };
-    };
+    } = {};
+    try {
+      bindings = JSON.parse(
+        readFileSync(new URL('../../.hypervibe/bindings.json', import.meta.url), 'utf8')
+      );
+    } catch (error) {
+      // Hypervibe removes this optional export when no public bindings remain.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
 
     expect(spec.secrets?.NPM_TOKEN).toBeUndefined();
     expect(

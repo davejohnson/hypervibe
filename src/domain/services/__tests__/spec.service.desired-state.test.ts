@@ -8,7 +8,7 @@ describe('spec.service desired state resolution', () => {
       environmentName: 'staging',
       services: ['web'],
       serviceName: 'web',
-      databaseProvider: 'supabase',
+      databaseProvider: 'railway',
       setupEmail: true,
       serviceConfig: undefined,
       envVars: undefined,
@@ -25,7 +25,7 @@ describe('spec.service desired state resolution', () => {
         services: ['api', 'worker'],
         serviceName: 'api',
         domain: 'example.com',
-        databaseProvider: 'supabase',
+        databaseProvider: 'azure-postgres',
         setupEmail: false,
         serviceConfig: {
           api: {
@@ -69,7 +69,7 @@ describe('spec.service desired state resolution', () => {
   it('accepts railway as a desired database provider override', () => {
     const desired = resolveDesiredState(
       {
-        databaseProvider: 'supabase',
+        databaseProvider: 'cloudsql',
       },
       {
         databaseProvider: 'railway',
@@ -81,7 +81,7 @@ describe('spec.service desired state resolution', () => {
 
   it('accepts Amazon RDS as a desired database provider override', () => {
     const desired = resolveDesiredState(
-      { databaseProvider: 'supabase' },
+      { databaseProvider: 'cloudsql' },
       { databaseProvider: 'rds' }
     );
 

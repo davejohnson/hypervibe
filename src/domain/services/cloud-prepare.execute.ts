@@ -1,21 +1,32 @@
+import { reviewGcpPreparationAdoption } from './gcp-preparation-adoption.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
+import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
 import { GoogleAuth } from 'google-auth-library';
+import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { getGcpProjectSetupContribution, runGcpProjectSetup } from './gcp-project-setup.service.js';
 import type { Project } from '../entities/project.entity.js';
 import { getProjectScopeHints } from './project-scope.js';
 import {
   GCS_PREPARE_ADDONS,
   CLOUD_RUN_RUNTIME_BASE_ROLES,
   CLOUD_RUN_RUNTIME_QUEUE_ROLES,
+  CLOUD_RUN_RUNTIME_STORAGE_ROLES,
   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES,
+  CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES,
+  CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES,
   getCloudPrepareProfile,
   getCloudPreparation,
   MEMORYSTORE_PREPARE_ADDONS,
   withCloudPreparationRecord,
   QUEUE_PREPARE_ADDON,
+  WORKER_WAKE_PREPARE_ADDON,
+  CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES,
+  CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES,
+  type WorkerPrepareAccess,
   type GcsPrepareAccess,
   type MemorystorePrepareAccess,
   type QueuePrepareAccess,
@@ -70,6 +81,7 @@ interface CloudPreparePlan {
   provider: string;
   version: string;
   gcpProjectId: string;
+  region?: string;
   deployServiceAccountEmail: string;
   runtimeServiceAccountEmail?: string;
   enableApis: string[];
@@ -78,11 +90,19 @@ interface CloudPreparePlan {
   member: string;
   runtimeMember?: string;
   runtimeGrantRoles: string[];
+  runtimeGrantScope?: 'project';
   runtimeRevokeRoles: string[];
   runtimeServiceAccountGrantRoles: string[];
+  /** Roles granted to the runtime identity on itself only. */
+  runtimeSelfGrantRoles?: string[];
+  /** Deployment identity may act as itself so Cloud Build never needs the Editor default account. */
+  buildIdentityGrantRoles?: string[];
+  /** Private bucket that holds local-repository build archives. */
+  buildSourceBucket?: { name: string; role: string; expiresAfterDays: number };
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
+  workerAccess?: WorkerPrepareAccess;
 }
 
 /**
@@ -95,6 +115,7 @@ export async function runCloudPrepare(params: {
   project: Project;
   provider: string;
   gcpProjectId?: string;
+  region?: string;
   deployServiceAccountEmail?: string;
   runtimeServiceAccountEmail?: string;
   adminCredentialsJson?: string;
@@ -104,6 +125,7 @@ export async function runCloudPrepare(params: {
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
+  workerAccess?: WorkerPrepareAccess;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
@@ -120,6 +142,7 @@ export async function runCloudPrepare(params: {
     gcsAccess,
     memorystoreAccess,
     queueAccess,
+    workerAccess,
     confirm = false,
   } = params;
 
@@ -148,7 +171,8 @@ export async function runCloudPrepare(params: {
     : undefined;
   const queueAddon = queueAccess === 'lifecycle' ? QUEUE_PREPARE_ADDON : undefined;
   const removalOnly = queueAccess === 'remove';
-  const basePreparation = !gcsAccess && !memorystoreAccess && !queueAccess;
+  const workerAddon = workerAccess === 'lifecycle' ? WORKER_WAKE_PREPARE_ADDON : undefined;
+  const basePreparation = !gcsAccess && !memorystoreAccess && !queueAccess && !workerAccess;
   // Every add-on is explicit and independently reviewable. A GCS or
   // Memorystore preparation must never broaden queue permissions, and vice
   // versa.
@@ -157,6 +181,7 @@ export async function runCloudPrepare(params: {
     ...(queueAddon?.requiredApis ?? []),
     ...(gcsAddon?.requiredApis ?? []),
     ...(memorystoreAddon?.requiredApis ?? []),
+    ...(workerAddon?.requiredApis ?? []),
   ]));
   const runtimeBaseRoles = new Set<string>(CLOUD_RUN_RUNTIME_BASE_ROLES);
   const runtimeServiceAccountAccessRoles = new Set<string>(
@@ -170,9 +195,11 @@ export async function runCloudPrepare(params: {
           ))
         : profile.requiredRoles
       : []),
+    ...(basePreparation ? CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES : []),
     ...(queueAddon?.requiredRoles ?? []),
     ...(gcsAddon?.requiredRoles ?? []),
     ...(memorystoreAddon?.requiredRoles ?? []),
+    ...(workerAddon?.requiredRoles ?? []),
   ]));
   const revokeRoles: string[] = Array.from(new Set<string>([
     ...(queueAccess === 'remove' ? QUEUE_PREPARE_ADDON.requiredRoles : []),
@@ -184,6 +211,8 @@ export async function runCloudPrepare(params: {
     ? Array.from(new Set([
       ...(basePreparation ? CLOUD_RUN_RUNTIME_BASE_ROLES : []),
       ...(queueAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_QUEUE_ROLES : []),
+      ...(gcsAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_STORAGE_ROLES : []),
+      ...(workerAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_WORKER_WAKE_ROLES : []),
     ]))
     : [];
   const runtimeRevokeRoles: string[] = resolved.runtimeServiceAccountEmail && queueAccess === 'remove'
@@ -193,11 +222,14 @@ export async function runCloudPrepare(params: {
     && resolved.runtimeServiceAccountEmail
     ? [...CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES]
     : [];
+  const runtimeSelfGrantRoles: string[] = workerAccess === 'lifecycle' && resolved.runtimeServiceAccountEmail
+    ? [...CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES]
+    : [];
   const requiredAdminPermissions = Array.from(new Set([
     ...(removalOnly
       ? REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable')
       : REQUIRED_ADMIN_PERMISSIONS),
-    ...(runtimeServiceAccountGrantRoles.length > 0
+    ...(runtimeServiceAccountGrantRoles.length > 0 || runtimeSelfGrantRoles.length > 0 || basePreparation
       ? REQUIRED_SERVICE_ACCOUNT_POLICY_PERMISSIONS
       : []),
   ]));
@@ -205,7 +237,7 @@ export async function runCloudPrepare(params: {
     ...(removalOnly
       ? REQUIRED_ADMIN_ROLES.filter((role) => role !== 'roles/serviceusage.serviceUsageAdmin')
       : REQUIRED_ADMIN_ROLES),
-    ...(runtimeServiceAccountGrantRoles.length > 0
+    ...(runtimeServiceAccountGrantRoles.length > 0 || runtimeSelfGrantRoles.length > 0 || basePreparation
       ? REQUIRED_SERVICE_ACCOUNT_POLICY_ROLES
       : []),
   ]));
@@ -214,6 +246,7 @@ export async function runCloudPrepare(params: {
     provider: profile.provider,
     version: profile.version,
     gcpProjectId: resolved.gcpProjectId,
+    region: params.region ?? 'us-central1',
     deployServiceAccountEmail: resolved.deployServiceAccountEmail,
     ...(resolved.runtimeServiceAccountEmail
       ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
@@ -224,23 +257,21 @@ export async function runCloudPrepare(params: {
     member,
     ...(runtimeMember ? { runtimeMember } : {}),
     runtimeGrantRoles,
+    ...(runtimeGrantRoles.length > 0 ? { runtimeGrantScope: 'project' as const } : {}),
     runtimeRevokeRoles,
     runtimeServiceAccountGrantRoles,
+    ...(runtimeSelfGrantRoles.length ? { runtimeSelfGrantRoles } : {}),
+    ...(basePreparation ? {
+      buildIdentityGrantRoles: [...CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES],
+      buildSourceBucket: { name: buildSourceBucketName(resolved.gcpProjectId), role: 'roles/storage.objectAdmin', expiresAfterDays: 14 },
+    } : {}),
     ...(gcsAccess ? { gcsAccess } : {}),
     ...(memorystoreAccess ? { memorystoreAccess } : {}),
     ...(queueAccess ? { queueAccess } : {}),
+    ...(workerAccess ? { workerAccess } : {}),
   };
 
-  if (!confirm) {
-    return {
-      success: true,
-      mode: 'preview',
-      plan,
-      message: 'Recommended: re-run with confirm=true and adminAuth="default" to use existing Google Application Default Credentials. Explicit adminCredentialsJsonRef or adminAccessTokenRef remain available when a separate one-time admin identity is intentional.',
-    };
-  }
-
-  if (!adminCredentialsJson && !adminAccessToken && adminAuth !== 'default') {
+  if (confirm && !adminCredentialsJson && !adminAccessToken && adminAuth !== 'default') {
     return {
       success: false,
       error: 'confirm=true requires adminAuth="default", adminCredentialsJsonRef/adminCredentialsJson, or adminAccessTokenRef/adminAccessToken. The deploy service account cannot grant itself project IAM.',
@@ -253,41 +284,31 @@ export async function runCloudPrepare(params: {
 
   try {
     const token = adminAccessToken
-      ?? (adminAuth === 'default'
+      ?? (adminAuth === 'default' || (!confirm && !adminCredentialsJson)
         ? await (params.defaultAdminAccessTokenProvider ?? getDefaultAdminAccessToken)()
         : await getAccessTokenFromServiceAccount(parseAdminCredentials(adminCredentialsJson)));
-    const enabledApis = await enableRequiredApis({
-      token,
-      projectId: resolved.gcpProjectId,
-      services: requiredApis,
-    });
-    const runtimeServiceAccountIamResult = resolved.runtimeServiceAccountEmail
-      && runtimeServiceAccountGrantRoles.length > 0
-      ? await reconcileServiceAccountIamRoles({
-          token,
-          projectId: resolved.gcpProjectId,
-          serviceAccountEmail: resolved.runtimeServiceAccountEmail,
-          member,
-          grantRoles: runtimeServiceAccountGrantRoles,
-        })
-      : undefined;
-    const iamResult = await reconcileProjectIamRoles({
-      token,
-      projectId: resolved.gcpProjectId,
-      member,
-      grantRoles: requiredRoles,
-      revokeRoles,
-    });
-    const runtimeIamResult = runtimeMember
-      ? await reconcileProjectIamRoles({
-        token,
-        projectId: resolved.gcpProjectId,
-        member: runtimeMember,
-        grantRoles: runtimeGrantRoles,
-        revokeRoles: runtimeRevokeRoles,
-      })
-      : undefined;
-    const previous = getCloudPreparation(project, profile.provider);
+    if (removalOnly && !getGcpProjectSetupContribution(project.id, resolved.gcpProjectId, 'prepare-queues')) return { success: false, error: 'These queue grants are not owned by the project setup state. Preview an explicit adoption before removing them; no infrastructure was changed.', plan };
+    let configuration = buildGcpPreparationConfiguration(removalOnly ? { ...plan, enableApis: [...QUEUE_PREPARE_ADDON.requiredApis] } : plan);
+    const contributionId = gcsAccess ? `prepare-gcs-${gcsAccess}` : memorystoreAccess ? `prepare-memorystore-${memorystoreAccess}`
+      : queueAccess ? 'prepare-queues' : workerAccess ? 'prepare-workers' : `prepare-base-${plan.region ?? 'us-central1'}`;
+    const adoption = basePreparation ? await reviewGcpPreparationAdoption({ project: projectRepo.findById(project.id) ?? project,
+      target: plan, token, contributionId, configuration }) : undefined;
+    if (adoption) configuration = adoption.configuration;
+    const setup = await runGcpProjectSetup({ projectId: project.id, gcpProjectId: resolved.gcpProjectId,
+      auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: token, GOOGLE_PROJECT: resolved.gcpProjectId }, redact: [token] },
+      contribution: { id: contributionId, configuration }, confirm,
+      ...(adoption ? { allowImportAddresses: adoption.allowImportAddresses, existingResourceAddresses: adoption.existingResourceAddresses } : {}),
+      ...(removalOnly ? { allowDestroyAddresses: [
+        ...revokeRoles.map((role) => projectIamAddress(member, role)),
+        ...(runtimeMember ? runtimeRevokeRoles.map((role) => projectIamAddress(runtimeMember, role)) : []),
+      ] } : {}) });
+    if (!setup.success) return { ...setup, plan };
+    if (!confirm) return { ...setup, plan, requiresConfirmation: true,
+      message: 'Review these exact Google Cloud setup actions, then confirm the saved preview.' };
+    const observed = await verifyPreparedInfrastructure(token, plan);
+    const { enabledApis, runtimeServiceAccountIamResult, runtimeSelfIamResult, iamResult, runtimeIamResult } = observed;
+    const currentProject = projectRepo.findById(project.id) ?? project;
+    const previous = getCloudPreparation(currentProject, profile.provider);
     const preservesPrevious = previous?.version === profile.version
       && previous.gcpProjectId === resolved.gcpProjectId
       && previous.deployServiceAccountEmail === resolved.deployServiceAccountEmail;
@@ -318,7 +339,7 @@ export async function runCloudPrepare(params: {
     const updatedProject = removalOnly && !preservesPrevious
       ? project
       : projectRepo.update(project.id, {
-        policies: withCloudPreparationRecord(project.policies, profile.provider, {
+        policies: withCloudPreparationRecord(currentProject.policies, profile.provider, {
           provider: profile.provider,
           version: profile.version,
           preparedAt: new Date().toISOString(),
@@ -327,6 +348,7 @@ export async function runCloudPrepare(params: {
           ...(resolved.runtimeServiceAccountEmail
             ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
             : {}),
+          artifactRepositoryRegions: [...new Set([...(preservesPrevious ? previous.artifactRepositoryRegions ?? [] : []), ...(basePreparation ? [plan.region ?? 'us-central1'] : [])])],
           requiredApis: recordedApis,
           requiredRoles: recordedRoles,
           ...(resolved.runtimeServiceAccountEmail
@@ -336,6 +358,11 @@ export async function runCloudPrepare(params: {
                   ? { runtimeServiceAccountUniqueId }
                   : {}),
                 runtimeServiceAccountAccessRoles: recordedRuntimeServiceAccountAccessRoles,
+                runtimeSelfRoles: Array.from(new Set([
+                  ...(preservesRuntime ? previous?.runtimeSelfRoles ?? [] : []),
+                  ...(runtimeSelfIamResult?.updatedRoles ?? []),
+                  ...(runtimeSelfIamResult?.existingRoles ?? []),
+                ])),
               }
             : {}),
         }),
@@ -422,6 +449,7 @@ export async function runCloudPrepare(params: {
         gcsAccess,
         memorystoreAccess,
         queueAccess,
+        workerAccess,
         requiredAdminPermissions,
         requiredAdminRoles,
         runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail,
@@ -430,13 +458,26 @@ export async function runCloudPrepare(params: {
   }
 }
 
+/**
+ * One-time admin access for GCP setup. Uses an existing local Google login
+ * (Application Default Credentials) silently when present; otherwise opens a
+ * browser sign-in, so users never need gcloud or terminal commands.
+ */
 export async function getDefaultAdminAccessToken(): Promise<string> {
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const client = await auth.getClient();
-  const result = await client.getAccessToken();
-  const token = typeof result === 'string' ? result : result.token;
-  if (!token) throw new Error('Google Application Default Credentials did not return an access token.');
-  return token;
+  try {
+    const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+    const client = await auth.getClient();
+    const result = await client.getAccessToken();
+    const token = typeof result === 'string' ? result : result.token;
+    if (token) return token;
+  } catch {
+    // No local Google login; fall through to browser sign-in.
+  }
+  const oauthClient = configuredGoogleOAuthClient();
+  if (!oauthClient) {
+    throw new Error('Google sign-in is not available: no local Google login was found and this Hypervibe build has no Google sign-in client configured.');
+  }
+  return signInWithGoogle({ client: oauthClient });
 }
 
 function resolveGcpBootstrapTarget(params: {
@@ -567,6 +608,7 @@ function cloudPrepareAuditDetails(params: {
     ...(params.plan.gcsAccess ? { gcsAccess: params.plan.gcsAccess } : {}),
     ...(params.plan.memorystoreAccess ? { memorystoreAccess: params.plan.memorystoreAccess } : {}),
     ...(params.plan.queueAccess ? { queueAccess: params.plan.queueAccess } : {}),
+    ...(params.plan.workerAccess ? { workerAccess: params.plan.workerAccess } : {}),
     authenticationSource: params.authenticationSource,
     ...(params.failureCategory ? { failureCategory: params.failureCategory } : {}),
   };
@@ -579,6 +621,7 @@ function cloudPrepareAdminCredentialSetup(params: {
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
+  workerAccess?: WorkerPrepareAccess;
   requiredAdminPermissions: string[];
   requiredAdminRoles: string[];
   runtimeServiceAccountEmail?: string;
@@ -590,6 +633,7 @@ function cloudPrepareAdminCredentialSetup(params: {
     ...(params.gcsAccess ? { gcsAccess: params.gcsAccess } : {}),
     ...(params.memorystoreAccess ? { memorystoreAccess: params.memorystoreAccess } : {}),
     ...(params.queueAccess ? { queueAccess: params.queueAccess } : {}),
+    ...(params.workerAccess ? { workerAccess: params.workerAccess } : {}),
     adminAuth: 'default',
     confirm: true,
   };
@@ -601,6 +645,7 @@ function cloudPrepareAdminCredentialSetup(params: {
     ...(params.gcsAccess ? [`gcsAccess="${params.gcsAccess}"`] : []),
     ...(params.memorystoreAccess ? [`memorystoreAccess="${params.memorystoreAccess}"`] : []),
     ...(params.queueAccess ? [`queueAccess="${params.queueAccess}"`] : []),
+    ...(params.workerAccess ? [`workerAccess="${params.workerAccess}"`] : []),
     'adminAuth="default"',
     'confirm=true',
   ].join(' ');
@@ -673,246 +718,99 @@ function parseAdminCredentials(adminCredentialsJson?: string): ServiceAccountCre
   return creds;
 }
 
-async function enableRequiredApis(params: {
-  token: string;
-  projectId: string;
-  services: string[];
-}): Promise<Array<{ service: string; status: 'enabled' | 'already_enabled' }>> {
-  const client = new GcpBootstrapClient({
-    accessToken: params.token,
-    fetch,
-    sleep: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
-    maxAttempts: 60,
-    delayMs: 2_000,
-  });
-  const results: Array<{ service: string; status: 'enabled' | 'already_enabled' }> = [];
-  for (const service of params.services) {
-    results.push({ service, status: await client.enableService(params.projectId, service) });
-  }
-  return results;
+/** Private bucket for local-repository build archives; never public, uploads expire. */
+export function buildSourceBucketName(gcpProjectId: string): string {
+  return `${gcpProjectId}-hv-build-source`;
 }
 
-async function reconcileServiceAccountIamRoles(params: {
-  token: string;
-  projectId: string;
-  serviceAccountEmail: string;
-  member: string;
-  grantRoles: string[];
-}): Promise<{
-  serviceAccountUniqueId: string;
-  updatedRoles: string[];
-  existingRoles: string[];
-}> {
-  const suffix = `@${params.projectId}.iam.gserviceaccount.com`;
-  const accountId = params.serviceAccountEmail.endsWith(suffix)
-    ? params.serviceAccountEmail.slice(0, -suffix.length)
-    : '';
-  if (!accountId) {
-    throw new Error('GCP runtime service account IAM policy target is not an exact project identity.');
-  }
-  const client = new GcpBootstrapClient({
-    accessToken: params.token,
-    fetch,
-    sleep: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
-    maxAttempts: 5,
-    delayMs: 500,
-  });
-  const account = await client.getServiceAccount(params.projectId, accountId);
-  if (account === null
-    || account.email !== params.serviceAccountEmail
-    || account.disabled === true) {
-    throw new Error('GCP runtime service account IAM policy target could not be verified as active.');
-  }
+/** Bootstrap already applied this entire base configuration in its saved plan. */
+export async function verifyAndRecordBootstrapPreparation(project: Project, token: string, projectId: string, deployEmail: string, runtimeEmail: string, region = 'us-central1'): Promise<void> {
+  const input = defaultGcpPreparationInput(projectId, deployEmail, runtimeEmail);
+  const profile = getCloudPrepareProfile('cloudrun')!;
+  const plan: CloudPreparePlan = { ...input, region, projectName: project.name, provider: 'cloudrun', version: profile.version,
+    member: `serviceAccount:${deployEmail}`, runtimeMember: `serviceAccount:${runtimeEmail}`, revokeRoles: [], runtimeRevokeRoles: [] };
+  const observed = await verifyPreparedInfrastructure(token, plan);
+  const currentProject = projectRepo.findById(project.id) ?? project;
+  const previous = getCloudPreparation(currentProject, 'cloudrun');
+  const sameTarget = previous?.gcpProjectId === projectId && previous.deployServiceAccountEmail === deployEmail && previous.runtimeServiceAccountEmail === runtimeEmail;
+  projectRepo.update(project.id, { policies: withCloudPreparationRecord(currentProject.policies, 'cloudrun', {
+    provider: 'cloudrun', version: profile.version, preparedAt: new Date().toISOString(), gcpProjectId: projectId,
+    deployServiceAccountEmail: deployEmail, runtimeServiceAccountEmail: runtimeEmail,
+    runtimeServiceAccountUniqueId: observed.runtimeServiceAccountIamResult?.serviceAccountUniqueId,
+    requiredApis: [...new Set([...(sameTarget ? previous.requiredApis : []), ...input.enableApis])],
+    requiredRoles: [...new Set([...(sameTarget ? previous.requiredRoles : []), ...input.grantRoles])],
+    runtimeRequiredRoles: [...new Set([...(sameTarget ? previous.runtimeRequiredRoles ?? [] : []), ...input.runtimeGrantRoles])],
+    artifactRepositoryRegions: [...new Set([...(sameTarget ? previous.artifactRepositoryRegions ?? [] : []), region])],
+    runtimeServiceAccountAccessRoles: input.runtimeServiceAccountGrantRoles,
+    ...(sameTarget ? { runtimeSelfRoles: previous.runtimeSelfRoles } : {}),
+  }) });
+}
 
-  const policy = await client.getServiceAccountIamPolicy(
-    params.projectId,
-    account.uniqueId
-  );
-  const bindings = policy.bindings.map((binding) => ({
-    ...binding,
-    members: [...binding.members],
-  }));
-  const updatedRoles: string[] = [];
-  const existingRoles: string[] = [];
-  for (const role of params.grantRoles) {
-    const matchingBindings = bindings.filter((binding) => (
-      binding.role === role && !binding.condition
-    ));
-    if (matchingBindings.length > 1) {
-      throw new Error('GCP runtime service account IAM policy has ambiguous role bindings.');
-    }
-    const existing = matchingBindings[0];
-    if (existing?.members.includes(params.member)) {
-      existingRoles.push(role);
-      continue;
-    }
-    if (existing) {
-      existing.members = Array.from(new Set([...existing.members, params.member]));
-    } else {
-      bindings.push({ role, members: [params.member] });
-    }
-    updatedRoles.push(role);
+/** Read-only confirmation of the exact policy and identities after engine apply. */
+async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePlan) {
+  const client = new GcpBootstrapClient({ accessToken: token, fetch,
+    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) });
+  const enabledApis = [];
+  for (const service of plan.enableApis) {
+    if (await client.getServiceState(plan.gcpProjectId, service) !== 'ENABLED') throw new Error(`Google API ${service} did not converge after OpenTofu apply.`);
+    enabledApis.push({ service, status: 'enabled' });
   }
-
-  if (updatedRoles.length > 0) {
-    await client.setServiceAccountIamPolicy(params.projectId, account.uniqueId, {
-      ...policy,
-      bindings,
-    });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const observed = await client.getServiceAccountIamPolicy(
-        params.projectId,
-        account.uniqueId
-      );
-      if (params.grantRoles.every((role) => observed.bindings.some((binding) => (
-        binding.role === role
-        && !binding.condition
-        && binding.members.includes(params.member)
-      )))) {
-        return {
-          serviceAccountUniqueId: account.uniqueId,
-          updatedRoles,
-          existingRoles,
-        };
-      }
-      if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 500));
+  const policy = await getProjectIamPolicy(token, plan.gcpProjectId);
+  const verifyRoles = (member: string, roles: string[]) => {
+    for (const role of roles) if (!(policy.bindings ?? []).some((binding) => binding.role === role && !binding.condition && binding.members?.includes(member))) {
+      throw new Error(`Google project access ${role} did not converge after OpenTofu apply.`);
     }
-    throw new Error(
-      'GCP runtime service account IAM policy update was acknowledged but did not converge.'
-    );
-  }
-
-  return {
-    serviceAccountUniqueId: account.uniqueId,
-    updatedRoles,
-    existingRoles,
+    return { updatedRoles: roles, existingRoles: [] as string[], removedRoles: [] as string[], absentRoles: [] as string[] };
   };
-}
-
-async function reconcileProjectIamRoles(params: {
-  token: string;
-  projectId: string;
-  member: string;
-  grantRoles: string[];
-  revokeRoles: string[];
-}): Promise<{
-  updatedRoles: string[];
-  existingRoles: string[];
-  removedRoles: string[];
-  absentRoles: string[];
-}> {
-  const policy = await getProjectIamPolicy(params.token, params.projectId);
-  const bindings = (policy.bindings ?? []).map((binding) => ({
-    ...binding,
-    members: [...(binding.members ?? [])],
-  }));
-  const updatedRoles: string[] = [];
-  const existingRoles: string[] = [];
-  const removedRoles: string[] = [];
-  const absentRoles: string[] = [];
-
-  for (const role of params.grantRoles) {
-    const existing = bindings.find((binding) => binding.role === role && !binding.condition);
-    if (existing?.members?.includes(params.member)) {
-      existingRoles.push(role);
-      continue;
-    }
-    if (existing) {
-      existing.members = Array.from(new Set([...(existing.members ?? []), params.member]));
-    } else {
-      bindings.push({ role, members: [params.member] });
-    }
-    updatedRoles.push(role);
-  }
-
-  for (const role of params.revokeRoles) {
-    const matchingBindings = bindings.filter((binding) =>
-      binding.role === role && binding.members?.includes(params.member)
-    );
-    if (matchingBindings.length === 0) {
-      absentRoles.push(role);
-      continue;
-    }
-    for (const binding of matchingBindings) {
-      binding.members = binding.members?.filter((member) => member !== params.member);
-    }
-    removedRoles.push(role);
-  }
-
-  if (updatedRoles.length > 0 || removedRoles.length > 0) {
-    await setProjectIamPolicy(params.token, params.projectId, {
-      ...policy,
-      bindings: bindings.filter((binding) => (binding.members?.length ?? 0) > 0),
-    });
-    await verifyProjectIamRoles(params);
-  }
-
-  return { updatedRoles, existingRoles, removedRoles, absentRoles };
-}
-
-async function verifyProjectIamRoles(params: {
-  token: string;
-  projectId: string;
-  member: string;
-  grantRoles: string[];
-  revokeRoles: string[];
-}): Promise<void> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const policy = await getProjectIamPolicy(params.token, params.projectId);
-    const bindings = policy.bindings ?? [];
-    const missingGrants = params.grantRoles.filter((role) => !bindings.some((binding) =>
-      binding.role === role
-      && !binding.condition
-      && binding.members?.includes(params.member)
-    ));
-    const remainingRevocations = params.revokeRoles.filter((role) => bindings.some((binding) =>
-      binding.role === role && binding.members?.includes(params.member)
-    ));
-    if (missingGrants.length === 0 && remainingRevocations.length === 0) {
-      return;
-    }
-    if (attempt < 4) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+  const iamResult = verifyRoles(plan.member, plan.grantRoles);
+  const runtimeIamResult = plan.runtimeMember ? verifyRoles(plan.runtimeMember, plan.runtimeGrantRoles) : undefined;
+  for (const [member, roles] of [[plan.member, plan.revokeRoles], [plan.runtimeMember, plan.runtimeRevokeRoles]] as const) {
+    for (const role of roles) if (member && (policy.bindings ?? []).some((binding) => binding.role === role && !binding.condition && binding.members?.includes(member))) {
+      throw new Error(`Google project access ${role} remains present; preparation has not converged.`);
     }
   }
-  throw new Error('GCP project IAM policy update was acknowledged but the reviewed role changes did not converge.');
+  const verifyAccount = async (email: string, member: string, roles: string[]) => {
+    const account = await client.getServiceAccount(plan.gcpProjectId, email.split('@')[0]!);
+    if (!account || account.email !== email || account.disabled) throw new Error('Google service account identity could not be verified after OpenTofu apply.');
+    const iam = await client.getServiceAccountIamPolicy(plan.gcpProjectId, account.uniqueId);
+    for (const role of roles) if (!iam.bindings.some((binding) => binding.role === role && !binding.condition && binding.members.includes(member))) {
+      throw new Error(`Google service account access ${role} did not converge after OpenTofu apply.`);
+    }
+    return { serviceAccountUniqueId: account.uniqueId, updatedRoles: roles, existingRoles: [] as string[] };
+  };
+  const runtimeServiceAccountIamResult = plan.runtimeServiceAccountEmail && plan.runtimeServiceAccountGrantRoles.length
+    ? await verifyAccount(plan.runtimeServiceAccountEmail, plan.member, plan.runtimeServiceAccountGrantRoles) : undefined;
+  const runtimeSelfIamResult = plan.runtimeServiceAccountEmail && plan.runtimeMember && plan.runtimeSelfGrantRoles?.length
+    ? await verifyAccount(plan.runtimeServiceAccountEmail, plan.runtimeMember, plan.runtimeSelfGrantRoles) : undefined;
+  if (plan.buildIdentityGrantRoles?.length) await verifyAccount(plan.deployServiceAccountEmail, plan.member, plan.buildIdentityGrantRoles);
+  if (plan.buildSourceBucket) {
+    const headers = { Authorization: `Bearer ${token}` };
+    const project = await client.getProject(plan.gcpProjectId);
+    if (!project) throw new Error('Google project identity is unavailable while verifying build resources.');
+    const bucketName = plan.buildSourceBucket.name;
+    const bucketResponse = await fetch(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucketName)}`, { headers });
+    if (!bucketResponse.ok) throw new Error(`Build source bucket verification failed (HTTP ${bucketResponse.status}).`);
+    const bucket = await bucketResponse.json() as { name?: string; projectNumber?: string; iamConfiguration?: { uniformBucketLevelAccess?: { enabled?: boolean }; publicAccessPrevention?: string } };
+    if (bucket.name !== bucketName || String(bucket.projectNumber) !== project.name.replace('projects/', '')
+      || bucket.iamConfiguration?.uniformBucketLevelAccess?.enabled !== true || bucket.iamConfiguration.publicAccessPrevention !== 'enforced') {
+      throw new Error('The build source bucket identity or private access configuration did not converge.');
+    }
+    const repository = `projects/${plan.gcpProjectId}/locations/${plan.region ?? 'us-central1'}/repositories/hypervibe`;
+    const registryResponse = await fetch(`https://artifactregistry.googleapis.com/v1/${repository}`, { headers });
+    if (!registryResponse.ok) throw new Error(`Image repository verification failed (HTTP ${registryResponse.status}).`);
+    const registry = await registryResponse.json() as { name?: string; format?: string };
+    if (registry.name !== repository || registry.format !== 'DOCKER') throw new Error('The image repository identity or format did not converge.');
+  }
+  return { enabledApis, iamResult, runtimeIamResult, runtimeServiceAccountIamResult, runtimeSelfIamResult };
 }
 
 async function getProjectIamPolicy(token: string, projectId: string): Promise<IamPolicy> {
   const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}:getIamPolicy`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
   });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GCP project IAM policy lookup failed: ${response.status} ${text}`);
-  }
+  if (!response.ok) throw new Error(`Google project IAM lookup failed (HTTP ${response.status}).`);
   return await response.json() as IamPolicy;
-}
-
-async function setProjectIamPolicy(token: string, projectId: string, policy: IamPolicy): Promise<void> {
-  if (!policy.etag?.trim()) {
-    throw new Error('GCP project IAM policy has no etag; refusing a concurrent-unsafe update.');
-  }
-  if ((policy.bindings ?? []).some((binding) => binding.condition) && policy.version !== 3) {
-    throw new Error('GCP project IAM policy contains conditions without version 3; refusing to rewrite it.');
-  }
-  const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}:setIamPolicy`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ policy, updateMask: 'bindings,etag' }),
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GCP project IAM policy update failed: ${response.status} ${text}`);
-  }
 }
 
 async function getAccessTokenFromServiceAccount(credentials: ServiceAccountCredentials): Promise<string> {

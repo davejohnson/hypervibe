@@ -8,6 +8,7 @@ import {
   yamlSingleQuoted,
 } from '../../../domain/services/github-actions-workflow.js';
 import { HYPERVIBE_MANAGED_NPM_PACKAGES } from '../../../domain/services/managed-runtime.js';
+import { buildEcsExpressTaskDefinitionRuntime } from './ecs-express-ci.recipe.js';
 
 export const ECS_EXPRESS_CI_REQUIRED_SECRETS = [
   'AWS_ACCESS_KEY_ID',
@@ -114,6 +115,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
       - name: Install pinned ECS SDK
         run: npm install --no-save --ignore-scripts ${HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcs}
       - name: Release exact digest to bound ECS Express services
+        id: runtime_deploy
         uses: actions/github-script@v9
         env:
           AWS_ECS_CLUSTER_ARN: ${clusterArn}
@@ -122,11 +124,13 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            const credentialDeployments = [];
             const {
               DescribeExpressGatewayServiceCommand,
               ECSClient,
               UpdateExpressGatewayServiceCommand,
             } = require('@aws-sdk/client-ecs');
+${buildEcsExpressTaskDefinitionRuntime().split('\n').filter(Boolean).map(line => '            ' + line).join('\n')}
             const clusterArn = (process.env.AWS_ECS_CLUSTER_ARN || '').trim();
             const cluster = clusterArn.split('/').at(-1);
             const region = clusterArn.split(':')[3];
@@ -159,13 +163,7 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
             }
             const client = new ECSClient({ region });
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            const currentConfig = (service) => {
-              const configs = service?.activeConfigurations || [];
-              return configs.find((item) => item.serviceRevisionArn === service.currentDeployment)
-                || configs.toSorted((a, b) =>
-                  new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-                )[0];
-            };
+            const currentConfig = ecsCurrentConfiguration;
             for (const serviceArn of serviceArns) {
               const before = (await client.send(
                 new DescribeExpressGatewayServiceCommand({ serviceArn })
@@ -174,51 +172,32 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
                 throw new Error('Bound ECS Express service identity could not be verified: ' + serviceArn);
               }
               const config = currentConfig(before);
-              if (!config?.primaryContainer) {
-                throw new Error('ECS Express returned no active primary container for ' + serviceArn);
-              }
-              if (!Array.isArray(config.networkConfiguration?.subnets)
+              if (!Array.isArray(config?.networkConfiguration?.subnets)
                 || config.networkConfiguration.subnets.length < 2
                 || !Array.isArray(config.networkConfiguration?.securityGroups)
                 || config.networkConfiguration.securityGroups.length !== 1) {
                 throw new Error('ECS Express workload-network configuration is missing or malformed for ' + serviceArn);
               }
-              const environment = [...(config.primaryContainer.environment || [])]
-                .filter((item) => !['HYPERVIBE_DEPLOY_SHA', 'HYPERVIBE_IMAGE_DIGEST'].includes(item.name));
-              const marker = (name) => environment.find((item) => item.name === name)?.value;
-              environment.push(
-                { name: 'HYPERVIBE_DEPLOY_SHA', value: sha },
-                { name: 'HYPERVIBE_IMAGE_DIGEST', value: digest }
-              );
-              const startCommand = marker('HYPERVIBE_START_COMMAND');
-              const healthPath = marker('HYPERVIBE_HEALTH_CHECK_PATH') || '/';
-              await client.send(new UpdateExpressGatewayServiceCommand({
-                serviceArn,
-                executionRoleArn: config.executionRoleArn,
-                cpu: config.cpu,
-                memory: config.memory,
-                healthCheckPath: healthPath,
-                primaryContainer: {
-                  ...config.primaryContainer,
-                  image: exactImage,
-                  environment,
-                  command: startCommand ? ['sh', '-lc', startCommand] : undefined,
-                },
-                networkConfiguration: config.networkConfiguration,
-                scalingTarget: config.scalingTarget,
-              }));
+              const release = await ecsPrepareRelease(client, config, serviceArn, exactImage, sha, digest);
+              const healthPath = release.healthPath;
+              await client.send(new UpdateExpressGatewayServiceCommand(release.update));
               let endpoint;
+              let deployedRevision;
               for (let attempt = 1; attempt <= 120; attempt += 1) {
                 const observed = (await client.send(
                   new DescribeExpressGatewayServiceCommand({ serviceArn })
                 )).service;
                 const active = currentConfig(observed);
-                const activeEnv = active?.primaryContainer?.environment || [];
+                const deployed = await ecsReleaseContainer(client, active, serviceArn);
+                if (deployed.taskRoleArn !== release.taskRoleArn) throw new Error('ECS deployed task role changed from the reviewed runtime identity');
+                const activeEnv = deployed.container.environment || [];
                 const markerValue = (name) => activeEnv.find((item) => item.name === name)?.value;
-                if (observed?.status?.statusCode === 'ACTIVE'
-                  && active?.primaryContainer?.image === exactImage
+                if (observed?.serviceArn === serviceArn && observed.cluster === clusterArn && observed.status?.statusCode === 'ACTIVE'
+                  && (!release.taskDefinitionArn || active?.taskDefinitionArn === release.taskDefinitionArn)
+                  && deployed.container.image === exactImage
                   && markerValue('HYPERVIBE_DEPLOY_SHA') === sha
                   && markerValue('HYPERVIBE_IMAGE_DIGEST') === digest) {
+                  deployedRevision = observed.currentDeployment;
                   endpoint = active.ingressPaths?.find((item) => item.accessType === 'PUBLIC')?.endpoint
                     || active.ingressPaths?.[0]?.endpoint;
                   break;
@@ -228,12 +207,14 @@ ${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-
               if (!endpoint) {
                 throw new Error('ECS Express did not verify the exact digest for ' + serviceArn);
               }
+              if (deployedRevision) credentialDeployments.push({ serviceId: serviceArn, deploymentIds: [deployedRevision] });
               const url = new URL(healthPath, endpoint.startsWith('http') ? endpoint : 'https://' + endpoint);
               const response = await fetch(url, { redirect: 'follow' });
               if (!response.ok) {
                 throw new Error('ECS Express health check failed with HTTP ' + response.status);
               }
             }
+            core.setOutput('credential_deployments', JSON.stringify(credentialDeployments));
 `,
   };
 }

@@ -17,12 +17,13 @@ import {
   workloadKindForServiceName,
 } from './spec.service.js';
 import { buildDeploySourceEnvVars, resolveGitDeploySource } from './deploy-source.js';
+import { reservedRuntimeEnvError } from './runtime-env-policy.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 
 type SourceConfigurableHostingAdapter = {
-  connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
+  connectServiceToRepo?: (params: { serviceId: string; projectId?: string; environmentId?: string; repo: string; branch: string }) => Promise<Receipt>;
   isGitHubRepoAccessible?: (fullRepoName: string) => Promise<boolean | null>;
 };
 
@@ -82,8 +83,17 @@ export async function executeBootstrap(params: {
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
   ensureHostingProject?: boolean;
+  /** Internal reviewed hosting-identity stage: configure an empty service, never deploy code. */
+  provisionOnly?: boolean;
+  /** Backup admission permits creation only; providers must reject an existing workload. */
+  requireNewWorkload?: boolean;
   runtime?: ProjectRuntime;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
+  if (params.requireNewWorkload && params.provisionOnly !== true) {
+    return { success: false, summary: { blocked: true, error: 'Creation-only admission requires provision-only execution.' } };
+  }
+  const reservedError = reservedRuntimeEnvError(params.envVars, params.queueEnvVars, ...Object.values(params.envVarsByService ?? {}));
+  if (reservedError) return { success: false, summary: { blocked: true, error: reservedError } };
   const tx = new InfraTransaction();
   const project = resolveProject({ projectName: params.projectName });
   if (!project) {
@@ -260,6 +270,14 @@ export async function executeBootstrap(params: {
     };
   }
 
+  if (params.requireNewWorkload && (hostingAdapter.capabilities.supportsCreateOnlyDeploy !== true
+    || hostingAdapter.capabilities.supportsDeferredDeploy !== true)) {
+    const cleanup = await tx.rollback();
+    return { success: false, summary: { blocked: true,
+      error: `Provider ${targetPlatform} does not support creation-only deferred workload provisioning.`,
+      rollback: cleanup, transaction: { created: tx.listResources() } } };
+  }
+
   try {
     await hostingAdapter.configureTarget?.({ region: params.hostingRegion });
   } catch (error) {
@@ -292,9 +310,12 @@ export async function executeBootstrap(params: {
   const orchestrator = new DeployOrchestrator();
   const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
   const deployTrigger = params.deploy?.trigger ?? 'ci';
-  const deferProviderDeployment = params.deploy?.strategy === 'branch'
+  if (params.provisionOnly && hostingAdapter.capabilities.supportsDeferredDeploy !== true) {
+    return { success: false, summary: { error: 'Hosting adapter cannot provision identities without deploying code.' } };
+  }
+  const deferProviderDeployment = params.provisionOnly === true || (params.deploy?.strategy === 'branch'
     && deployTrigger === 'ci'
-    && hostingAdapter.capabilities.supportsDeferredDeploy === true;
+    && hostingAdapter.capabilities.supportsDeferredDeploy === true);
   const sourceEnvVars = buildDeploySourceEnvVars(
     project,
     hostingAdapter,
@@ -316,6 +337,10 @@ export async function executeBootstrap(params: {
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ...(params.requireNewWorkload ? { requireNewWorkload: true } : {}),
+    ...(params.provisionOnly && hostingAdapter.serviceVolumes?.staged?.runtimeMount
+      && workloads.every(service => !(environment.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[service.name]?.serviceId)
+      ? { deferWorkload: true } : {}),
     ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
@@ -366,6 +391,10 @@ export async function executeBootstrap(params: {
     },
   };
 
+  if (params.provisionOnly && deploy.success) {
+    return { success: true, summary: { ...summary, deploymentMode: 'provision', appDeploymentPending: true,
+      appDeployment: { status: 'pending_volume', reason: 'Service identity configured without code deployment. Re-plan to create and verify its retained volume before deploying.' } } };
+  }
   if (!deploy.success) {
     const cleanup = await tx.rollback();
     summary.rollback = cleanup;
@@ -418,6 +447,8 @@ export async function executeBootstrap(params: {
 
       const receipt = await sourceAdapter.connectServiceToRepo({
         serviceId,
+        projectId: parseHostingBindings(latestEnvironment).projectId,
+        environmentId: parseHostingBindings(latestEnvironment).environmentId,
         repo: deploySource.source.repo,
         branch: deploySource.source.branch,
       });

@@ -393,8 +393,11 @@ describe('generated secret plan/apply integration', () => {
     });
 
     const deployedServices = new Set<string>();
+    const events: string[] = [];
+    const serviceIds = { web: 'rail-staging-web', worker: 'rail-staging-worker' } as Record<string, string>;
     const observe = vi.fn(async (environment: Environment) => {
       const environmentId = (environment.platformBindings as { environmentId?: string }).environmentId;
+      events.push(`observe:${environmentId ?? 'missing'}`);
       if (!environmentId) {
         return {
           provider: 'railway',
@@ -417,33 +420,46 @@ describe('generated secret plan/apply integration', () => {
         ...observed(liveHashes, liveConflictHashes),
         environmentId,
       };
-      live.services = live.services.filter((service) => deployedServices.has(service.name));
+      live.services = live.services.filter((service) => deployedServices.has(service.name))
+        .map(service => ({ ...service, externalId: serviceIds[service.name] }));
       return live;
     });
     const setEnvVars = vi.fn(async (
-      _environment: Environment,
+      environment: Environment,
       service: Service,
       vars: Record<string, string>
     ) => {
       const value = vars[SECRET_KEY];
-      if (value) liveHashes.set(service.name, hashEnvValue(value));
+      if (value) {
+        expect([...deployedServices].sort()).toEqual(SERVICE_NAMES);
+        expect(environment.platformBindings).toMatchObject({ environmentId: 'rail-staging',
+          services: { [service.name]: { serviceId: serviceIds[service.name] } } });
+        events.push(`secret:${service.name}`);
+        liveHashes.set(service.name, hashEnvValue(value));
+      }
       return { success: true, message: `Synced ${service.name}` };
     });
-    const ensureEnvironment = vi.fn(async () => ({
-      success: true,
-      message: 'Created staging',
-      data: {
-        projectId: 'rail-project',
-        environmentId: 'rail-staging',
-        environmentName: 'staging',
-        created: true,
-      },
-    }));
-    const deploy = vi.fn(async (service: Service) => {
+    const ensureEnvironment = vi.fn(async () => {
+      events.push('create:environment');
+      return {
+        success: true,
+        message: 'Created staging',
+        data: {
+          projectId: 'rail-project',
+          environmentId: 'rail-staging',
+          environmentName: 'staging',
+          created: true,
+        },
+      };
+    });
+    const deploy = vi.fn(async (service: Service, environment: Environment, vars: Record<string, string>) => {
+      expect(environment.platformBindings.environmentId).toBe('rail-staging');
+      expect(vars).not.toHaveProperty(SECRET_KEY);
+      events.push(`create:${service.name}`);
       deployedServices.add(service.name);
       return {
         serviceId: service.id,
-        externalId: `rail-staging-${service.name}`,
+        externalId: serviceIds[service.name],
         status: 'deployed' as const,
         receipt: { success: true, message: `Deployed ${service.name}` },
       };
@@ -487,8 +503,14 @@ describe('generated secret plan/apply integration', () => {
       includeEnvFile: false,
     });
     if ('error' in planResult) throw new Error(planResult.error);
-    expect(planResult.actions.find((action) => action.id === `secret:${SECRET_KEY}`)?.dependsOn)
-      .toEqual(expect.arrayContaining(SERVICE_NAMES.map((name) => `service:${name}`)));
+    // Child service/secret authority requires a freshly observed, durable
+    // namespace. The first plan may authorize only that missing identity.
+    expect(planResult.scope).toBe('hosting-bindings');
+    expect(planResult.actions.map(action => action.id)).toEqual(['environment:staging']);
+    const namespacePlan = new RunRepository().findById(planResult.planRunId)!;
+    expect(namespacePlan.plan).not.toHaveProperty('overrides');
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
 
     const currentStagingSpec = new SpecStore().get(project)!;
     const environmentOutcome = await executePlanApply(createToolContext(), {
@@ -508,10 +530,25 @@ describe('generated secret plan/apply integration', () => {
       },
     });
 
+    expect(ensureEnvironment).toHaveBeenCalledOnce();
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    const boundStaging = new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!;
+    expect(boundStaging.platformBindings).toMatchObject({ projectId: 'rail-project', environmentId: 'rail-staging' });
+    expect(parseDelegatedSecretBindings(boundStaging)).toEqual([]);
+    const observationsBeforeReplan = observe.mock.calls.length;
+
     const servicePlanResult = await new PlanService().plan(project, 'staging', {
       includeEnvFile: false,
     });
     if ('error' in servicePlanResult) throw new Error(servicePlanResult.error);
+    expect(observe.mock.calls.slice(observationsBeforeReplan).some(([environment]) => environment.platformBindings.environmentId === 'rail-staging')).toBe(true);
+    expect(servicePlanResult.scope).toBe('full');
+    const servicePlan = new RunRepository().findById(servicePlanResult.planRunId)!;
+    const overrides = (servicePlan.plan as { overrides: { delegatedSecretKeys: string[]; delegatedSecretVarsEncrypted: string } }).overrides;
+    expect(overrides).toMatchObject({ delegatedSecretKeys: [SECRET_KEY], delegatedSecretVarsEncrypted: expect.any(String) });
+    const generatedValue = getSecretStore().decryptObject<Record<string, string>>(overrides.delegatedSecretVarsEncrypted)[SECRET_KEY];
+    expect(generatedValue).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(servicePlanResult.actions.find((action) => action.id === `secret:${SECRET_KEY}`)?.dependsOn)
       .toEqual(expect.arrayContaining(SERVICE_NAMES.map((name) => `service:${name}`)));
     const outcome = await executePlanApply(createToolContext(), {
@@ -526,6 +563,15 @@ describe('generated secret plan/apply integration', () => {
     expect(ensureEnvironment).toHaveBeenCalledOnce();
     expect(deploy).toHaveBeenCalledTimes(2);
     expect(generatedSecretCalls(setEnvVars)).toHaveLength(2);
+    for (const [, , vars] of generatedSecretCalls(setEnvVars)) expect(vars[SECRET_KEY]).toBe(generatedValue);
+    expect(events.indexOf('create:environment')).toBeLessThan(events.indexOf('observe:rail-staging'));
+    for (const name of SERVICE_NAMES) {
+      expect(events.indexOf('observe:rail-staging')).toBeLessThan(events.indexOf(`create:${name}`));
+      for (const recipient of SERVICE_NAMES) expect(events.indexOf(`create:${name}`)).toBeLessThan(events.indexOf(`secret:${recipient}`));
+    }
+    for (const surface of [planResult, namespacePlan, environmentOutcome, servicePlanResult, servicePlan, outcome]) {
+      expect(JSON.stringify(surface)).not.toContain(generatedValue);
+    }
     expect(observe.mock.calls.some(([environment]) => (
       environment.platformBindings as { environmentId?: string }
     ).environmentId === 'rail-staging')).toBe(true);

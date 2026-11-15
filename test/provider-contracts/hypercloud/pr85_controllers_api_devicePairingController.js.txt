@@ -1,0 +1,23 @@
+// Source lines 4-25
+  async function create(request, response) {
+    const result = await devicePairingService.createPairing({
+      input: { repositoryFullName: request.body.repositoryFullName, purpose: request.body.purpose, environment: request.body.environment }
+    });
+    response.set("cache-control", "no-store");
+    response.status(201).json(result);
+  }
+
+  async function exchange(request, response) {
+    const result = await devicePairingService.exchange({
+      deviceCode: request.body.deviceCode
+    });
+    response.set("cache-control", "no-store");
+    response.status(result.status === "pending" ? 202 : 201).json(result);
+  }
+
+  async function revokeRequestAccess(request, response) {
+    const match = (request.get("authorization") || "").match(/^Bearer ([^\s]+)$/);
+    if (!match || request.get("cookie")) throw unauthorized();
+    response.set("cache-control", "no-store");
+    response.json(await credentialAuthService.revokeCredentialRequestAccess(match[1]));
+  }

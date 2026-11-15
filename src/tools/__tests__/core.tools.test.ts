@@ -1,3 +1,7 @@
+import type { IProviderLifecycleAdapter } from '../../domain/ports/provider.port.js';
+import '../../application/providers.js';
+import { z } from 'zod';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
@@ -16,6 +20,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { PublicDnsClient } from '../../adapters/dns/public-dns.client.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { AppStoreConnectAdapter } from '../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
@@ -35,9 +40,54 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { deriveHypervibeSecretValues } from '../../domain/services/hypervibe-secret-value.js';
 
+// A synthetic lifecycle owner keeps generic import/cleanup safety independent of clouds.
+const fixtureDatabaseProvider = providerRegistry.get('cloudsql')!;
+providerRegistry.register({
+  ...fixtureDatabaseProvider,
+  metadata: {
+    ...fixtureDatabaseProvider.metadata, name: 'fixture-database', displayName: 'Fixture database',
+    lifecycle: { databaseEngines: ['postgres'], databaseConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { database: { status: 'ready-for-live' } } },
+  },
+  retainedCleanup: {
+    resources: ['backup'],
+    destroy: (adapter, target) => (adapter as { destroyRetainedBackup: (target: unknown) => Promise<{ success: boolean; message: string }> }).destroyRetainedBackup(target),
+  },
+});
+
+// Synthetic hosting supports only the generic lifecycle contracts under test.
+const fixtureHostingProvider = providerRegistry.get('cloudrun')!;
+for (const [name, workloadKinds] of [['fixture-hosting', ['web', 'worker', 'cron']], ['fixture-web-hosting', ['web']]] as const) {
+  providerRegistry.register({
+    ...fixtureHostingProvider,
+    metadata: {
+      ...fixtureHostingProvider.metadata, name, displayName: name,
+      lifecycle: { hosting: { workloadKinds, customDomains: 'unsupported', teardownBoundary: 'services' } },
+      maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    },
+  });
+}
+
+providerRegistry.register({
+  metadata: {
+    name: 'fixture-cache', displayName: 'Fixture cache', category: 'cache',
+    credentialsSchema: z.object({ projectId: z.string().optional(), credentials: z.string().optional() }),
+    lifecycle: { cacheEngines: ['redis'], cacheConnectivity: { compatibleHostingProviders: ['railway', 'fixture-hosting'] } },
+    maturity: { lifecycle: { cache: { status: 'ready-for-live' } } },
+  },
+  factory: () => ({}),
+  inspection: {
+    resources: ['cache'], defaultResource: 'cache',
+    selectors: { cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] } },
+    inspect: async () => ({ observation: 'absent', resource: 'cache', caches: [], partial: false, truncated: false }),
+  },
+});
+
+
 let tempDir: string;
 
 beforeEach(() => {
+  vi.spyOn(PublicDnsClient.prototype, 'query').mockResolvedValue({ status: 'unknown' });
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-core-tools-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
@@ -166,6 +216,70 @@ describe('bootstrap action receipt mapping', () => {
 });
 
 describe('hv_spec', () => {
+  it.each(['railway', 'fixture-hosting'])(
+    'warns about resource differences on spec write/read without copying them for %s', async (provider) => {
+      const t = await makeClient();
+      try {
+        const written = await t.call('hv_spec', {
+          project: 'resource-parity-app',
+          spec: { project: 'resource-parity-app', environments: {
+            production: { hosting: { provider }, services: {
+              web: { startCommand: 'npm start' },
+              reports: { startCommand: 'npm run reports' },
+            } },
+            staging: { hosting: { provider }, services: { web: { startCommand: 'npm start' } } },
+          } },
+        });
+        expect(written.ok).toBe(true);
+        expect(written.warnings).toContainEqual(expect.stringContaining('service:reports'));
+        expect(written.warnings).toContainEqual(expect.stringContaining('may behave differently'));
+        expect(written.data.spec.environments.staging.services.reports).toBeUndefined();
+        const read = await t.call('hv_spec', { project: 'resource-parity-app' });
+        expect(read.ok).toBe(true);
+        expect(read.warnings).toContainEqual(expect.stringContaining('service:reports'));
+        expect(read.data.revision).toBe(written.data.revision);
+        expect(read.data.spec).toEqual(written.data.spec);
+      } finally {
+        await t.close();
+      }
+    }
+  );
+
+  it('keeps resource notes visible in an early managed-CI binding plan without adding missing resources', async () => {
+    const t = await makeClient();
+    try {
+      const written = await t.call('hv_spec', {
+        project: 'resource-parity-plan',
+        spec: {
+          project: 'resource-parity-plan',
+          devops: {
+            code: { provider: 'github', scope: 'test-owner/resource-parity-plan', repository: {
+              state: 'present', management: 'external', visibility: 'private', defaultBranch: 'main',
+            } },
+            ci: { provider: 'github-actions', runner: { mode: 'provider-hosted' } },
+            canonicalEnvironment: 'production',
+          },
+          environments: {
+            production: { hosting: { provider: 'railway' }, services: {
+              web: { startCommand: 'npm start' },
+              reminders: { workloadKind: 'cron', startCommand: 'npm run reminders', cronSchedule: '0 * * * *' },
+            } },
+            staging: { hosting: { provider: 'railway' }, services: { web: { startCommand: 'npm start' } },
+              deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
+          },
+        },
+      });
+      expect(written.ok).toBe(true);
+      const planned = await t.call('hv_plan', { project: 'resource-parity-plan', env: 'staging', includeEnvFile: false });
+      expect(planned.ok).toBe(true);
+      expect(planned.data.scope).toBe('managed-ci-bindings');
+      expect(planned.warnings).toContainEqual(expect.stringContaining('service:reminders'));
+      expect(planned.data.actions.some((action: PlanAction) => action.resource.name === 'reminders')).toBe(false);
+    } finally {
+      await t.close();
+    }
+  });
+
   it('bootstraps the read-first MCP workflow in a completely new git repository', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -384,6 +498,9 @@ describe('hv_spec', () => {
     }
   });
 
+  // This exercises local Git, filesystem permission checks, and multiple MCP
+  // requests. Under the full serial suite it can exceed the global 10-second
+  // unit-test budget without a product failure; retain a finite local deadline.
   it('keeps delegated base values out of the environment scaffold while syncing explicit deploy inputs', async () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -483,13 +600,16 @@ describe('hv_spec', () => {
         'PUBLIC_WIDGET_KEY',
         'WEBHOOK_SIGNING_SECRET',
       ]);
+      expect(plan.data.credentialRequest).toEqual({
+        command: 'hv_cloud_requests',
+        input: { env: 'staging', planId: plan.data.planId },
+        requirements: plan.data.inputRequired,
+      });
+      expect(plan.next).toContain('hv_cloud_requests');
       expect(plan.data.localEnv).toMatchObject({
         path: stagingPath,
-        addedKeys: [
-          'OWNER_MANAGED_SECRET',
-          'PUBLIC_WIDGET_KEY',
-          'WEBHOOK_SIGNING_SECRET',
-        ],
+        // Spec writes now scaffold every declared environment before planning.
+        addedKeys: [],
       });
       expect(plan.hint).toContain(`dotenv:${stagingPath}#OWNER_MANAGED_SECRET`);
       expect(plan.hint).toContain(`dotenv:${stagingPath}#PUBLIC_WIDGET_KEY`);
@@ -541,14 +661,29 @@ describe('hv_spec', () => {
         PORTABLE_RUNTIME_VALUE: 'shared-runtime-value',
       });
 
+      // An explicit input is already known to this plan and must not trigger a
+      // second request merely because its delegated declaration still exists.
+      writeFileSync(stagingPath, readFileSync(stagingPath, 'utf8').replace(
+        'OWNER_MANAGED_SECRET=', 'OWNER_MANAGED_SECRET=synthetic-staging-input'
+      ));
+      const partlySuppliedPlan = await t.call('hv_plan', {
+        project: projectName, env: 'staging', includeEnvFile: false,
+        secretRefs: { OWNER_MANAGED_SECRET: `dotenv:${stagingPath}#OWNER_MANAGED_SECRET` },
+      });
+      expect(partlySuppliedPlan.ok).toBe(true);
+      expect(partlySuppliedPlan.data.credentialRequest.requirements.map((entry: { key: string }) => entry.key))
+        .toEqual(['PUBLIC_WIDGET_KEY', 'WEBHOOK_SIGNING_SECRET']);
+      expect(JSON.stringify(partlySuppliedPlan)).not.toContain('synthetic-staging-input');
+
       const reviewPath = path.join(repoDir, '.env.review');
-      expect(existsSync(reviewPath)).toBe(false);
+      expect(existsSync(reviewPath)).toBe(true);
       const reviewPlan = await t.call('hv_plan', {
         project: projectName,
         env: 'review',
         includeEnvFile: false,
       });
       expect(reviewPlan.ok).toBe(true);
+      expect(reviewPlan.data).not.toHaveProperty('credentialRequest');
       expect(reviewPlan.data.localEnv).toMatchObject({ path: reviewPath });
       expect(existsSync(reviewPath)).toBe(true);
       expect(readFileSync(reviewPath, 'utf8')).toBe('');
@@ -565,7 +700,7 @@ describe('hv_spec', () => {
       else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
       rmSync(repoDir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('keeps hv_spec and hv_plan from writing local-project env slots into a checkout with a conflicting repo spec', async () => {
     const oldCwd = process.cwd();
@@ -987,6 +1122,52 @@ describe('hv_spec', () => {
     await t.close();
   });
 
+  it.each(['railway', 'fixture-hosting'])(
+    'allows a staging-only service rename on %s without taking ownership of production configuration', async (provider) => {
+      const t = await makeClient();
+      const project = `rename-coverage-${provider}`;
+      const production = { hosting: { provider }, services: { web: { workloadKind: 'web' } } };
+      const initial = await t.call('hv_spec', { spec: {
+        project,
+        secrets: { APP_SIGNING_KEY: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', environments: ['staging'] } },
+        environments: {
+          production,
+          staging: { hosting: { provider }, services: { preview: { workloadKind: 'web' } }, envVars: { CONTACT_EMAIL: 'owner@example.test' } },
+        },
+      } });
+      expect(initial.ok).toBe(true);
+      const beforeProduction = structuredClone(initial.data.spec.environments.production);
+      const renamed = await t.call('hv_spec', { project, spec: {
+        environments: { staging: { services: { preview: null, web: { workloadKind: 'web' } } } },
+      } });
+      expect(renamed, JSON.stringify(renamed.error)).toMatchObject({ ok: true });
+      expect(renamed.data.spec.environments.production).toEqual(beforeProduction);
+      expect(renamed.data.spec.secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
+      expect(Object.keys(renamed.data.spec.environments.staging.services)).toEqual(['web']);
+      expect(renamed.data.environmentVariableCoverage.issues).toHaveLength(2);
+      expect(renamed.warnings).toContainEqual(expect.stringContaining('declaration'));
+      // A new input is not grandfathered merely because a service was renamed.
+      const newKey = await t.call('hv_spec', { project, spec: {
+        environments: { staging: { envVars: { NEW_REQUIRED_INPUT: 'new-value' } } },
+      } });
+      expect(newKey).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+      await t.close();
+    }
+  );
+
+  it('does not treat adding a matching service as renaming an existing one', async () => {
+    const t = await makeClient();
+    const project = 'added-service-coverage';
+    const initial = await t.call('hv_spec', { spec: { project, environments: {
+      production: { hosting: { provider: 'railway' }, services: { web: {} } },
+      staging: { hosting: { provider: 'railway' }, services: { preview: {} }, envVars: { CONTACT_EMAIL: 'owner@example.test' } },
+    } } });
+    expect(initial.ok).toBe(true);
+    const added = await t.call('hv_spec', { project, spec: { environments: { staging: { services: { web: {} } } } } });
+    expect(added).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    await t.close();
+  });
+
   it('rejects unknown hosting providers with the available list', async () => {
     const t = await makeClient();
     const bad = await t.call('hv_spec', {
@@ -1009,7 +1190,7 @@ describe('hv_spec', () => {
         project: 'unsupported-workload-app',
         environments: {
           staging: {
-            hosting: { provider: 'ecs' },
+            hosting: { provider: 'fixture-web-hosting' },
             services: {
               processor: { workloadKind: 'worker', startCommand: 'npm run worker' },
             },
@@ -1028,8 +1209,8 @@ describe('hv_spec', () => {
         },
       },
     });
-    expect(bad.error.message).toContain('ecs hosting does not support workload kind "worker"');
-    expect(bad.hint).toContain('Supported workload kinds for ecs: web');
+    expect(bad.error.message).toContain('fixture-web-hosting hosting does not support workload kind "worker"');
+    expect(bad.hint).toContain('Supported workload kinds for fixture-web-hosting: web');
     expect(new ProjectRepository().findByName('unsupported-workload-app')).toBeNull();
     await t.close();
   });
@@ -1201,42 +1382,6 @@ describe('hv_spec', () => {
     expect(set.hint).toContain('This task needs provider access that is not connected on this Mac');
     expect(set.hint).toContain('connectionSetup');
     expect(set.next).toEqual(['hv_connections', 'hv_plan']);
-    await t.close();
-  });
-
-  it('treats repository-only Pages as project desired state and defaults planning to repository', async () => {
-    const t = await makeClient();
-    const set = await t.call('hv_spec', {
-      spec: {
-        project: 'pages-only-app',
-        gitRemoteUrl: 'git@github.com:davejohnson/pages-only-app.git',
-        github: {
-          canonicalEnvironment: 'repository',
-          pages: { sourcePath: 'apps/website', customDomain: 'pages-only-app.dev' },
-        },
-        environments: {},
-      },
-    });
-
-    expect(set.ok).toBe(true);
-    expect(set.data.connections.missing).toEqual(expect.arrayContaining([
-      expect.objectContaining({ provider: 'cloudflare', scope: 'pages-only-app.dev', environments: ['repository'] }),
-      expect.objectContaining({ provider: 'github', scope: 'davejohnson/pages-only-app', environments: ['repository'] }),
-    ]));
-
-    const plan = await t.call('hv_plan', { project: 'pages-only-app' });
-    expect(plan.ok).toBe(true);
-    expect(plan.data.environment).toBe('repository');
-    expect(plan.data.actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'repo:github-infrastructure-pr', type: 'update' }),
-    ]));
-
-    const withoutDeployEnvFile = await t.call('hv_plan', {
-      project: 'pages-only-app',
-      includeEnvFile: false,
-    });
-    expect(withoutDeployEnvFile.ok).toBe(true);
-    expect(withoutDeployEnvFile.data.environment).toBe('repository');
     await t.close();
   });
 
@@ -1507,7 +1652,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       normalizedObserved
         ? {
           success: true,
-          adapter: {
+          adapter: ({
             name: 'railway',
             capabilities: {
               supportedBuilders: ['nixpacks'], supportedComponents: ['postgres'],
@@ -1521,7 +1666,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
             deploy: async () => { throw new Error('unused'); },
             setEnvVars: async () => ({ success: true, message: 'ok' }),
             observe: async () => normalizedObserved,
-          },
+          } as IProviderLifecycleAdapter),
         }
         : { success: false, error: 'no adapter' }
     );
@@ -1603,7 +1748,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'vercel' },
+          hosting: { provider: 'fixture-web-hosting' },
           services: {
             scheduled: {
               workloadKind: 'cron',
@@ -3086,6 +3231,34 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('reports webhook readiness through both shared plan and status commands', async () => {
+    const t = await makeClient();
+    try {
+      const saved = await t.call('hv_spec', { spec: { project: 'webhook-readiness-app', environments: { production: {
+        hosting: { provider: 'railway' }, services: { web: {} },
+        envVars: { STRIPE_WEBHOOK_URL: 'http://example.com/private-hook', STRIPE_WEBHOOK_SECRET: 'private-signer' },
+      } } } });
+      expect(saved.ok).toBe(true);
+      verifyRailwayConnection();
+      const project = new ProjectRepository().findByName('webhook-readiness-app')!;
+      new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
+        provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } },
+      } });
+      mockObserved({ provider: 'railway', observedAt: new Date().toISOString(), projectExists: true, projectId: 'rp-1', environmentId: 're-1',
+        services: [{ name: 'web', externalId: 's-1', workloadKind: 'web', customDomains: [], config: {}, envVarKeys: [], envVarHashes: {}, status: 'running' }],
+        databases: [], partial: false, warnings: [],
+      });
+      for (const command of ['hv_plan', 'hv_status']) {
+        const result = await t.call(command, { project: project.name, env: 'production' });
+        expect(result.ok).toBe(true);
+        expect(result.data.webhookReadiness).toMatchObject({ status: 'needs_attention', applicationVerification: 'not_verified' });
+        const report = JSON.stringify(result.data.webhookReadiness);
+        expect(report).not.toContain('private-hook');
+        expect(report).not.toContain('private-signer');
+      }
+    } finally { await t.close(); }
+  });
+
   it('tells agents to connect Cloudflare before planning domain DNS drift', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {
@@ -3135,6 +3308,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
     const status = await t.call('hv_status', { project: 'domain-status-missing-connection-app', env: 'production' });
     expect(status.ok).toBe(true);
+    expect(status.data.domainSecurity).toMatchObject({
+      status: 'unknown', dnssec: 'unknown', caa: { status: 'unknown' },
+    });
     expect(status.data.blocked).toContainEqual(expect.objectContaining({
       provider: 'cloudflare',
       scope: 'hlspropertycare.com',
@@ -3800,154 +3976,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('creates a replacement database without deploying or destroying the old database in the same apply', async () => {
-    const t = await makeClient();
-    await t.call('hv_spec', {
-      spec: {
-        project: 'core-spec-app',
-        environments: {
-          production: {
-            hosting: { provider: 'cloudrun' },
-            services: { web: { startCommand: 'npm start' } },
-            database: { provider: 'supabase' },
-            envVars: { NODE_ENV: 'production' },
-          },
-        },
-      },
-    });
-    verifyConnection('cloudrun');
-    verifyConnection('supabase');
-
-    const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
-    const { ComponentRepository } = await import('../../adapters/db/repositories/component.repository.js');
-    const project = new ProjectRepository().findByName('core-spec-app')!;
-    const now = new Date();
-    const environment = new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: {
-        provider: 'cloudrun',
-        projectId: 'gcp-project',
-        services: { web: { serviceId: 'gcp-project-web' } },
-      },
-    });
-    new ComponentRepository().create({
-      environmentId: environment.id,
-      type: 'postgres',
-      externalId: 'cloudsql-1',
-      bindings: {
-        provider: 'cloudsql',
-        instanceId: 'cloudsql-1',
-        connectionUrl: 'postgres://old-cloudsql',
-        connectionName: 'gcp-project:us-central1:app',
-      },
-    });
-
-    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
-      success: true,
-      adapter: {
-        name: 'cloudrun',
-        capabilities: {
-          supportedBuilders: ['dockerfile'], supportedComponents: [],
-          supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
-          supportsReleaseCommand: false, supportsMultiEnvironment: false, managedTls: true,
-          supportsObserve: true,
-        },
-        connect: async () => {}, verify: async () => ({ success: true }),
-        ensureProject: async () => ({ success: true, message: 'ok' }),
-        ensureComponent: async () => { throw new Error('unused'); },
-        deploy: async () => { throw new Error('hosting deploy should not run'); },
-        observe: async () => ({
-          provider: 'cloudrun',
-          observedAt: new Date().toISOString(),
-          projectExists: true,
-          projectId: 'gcp-project',
-          environmentId: 'production',
-          services: [{
-            name: 'web', externalId: 'gcp-project-web', workloadKind: 'web', customDomains: [],
-            config: { startCommand: 'npm start' },
-            envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('production') },
-            status: 'running',
-          }],
-          databases: [{ provider: 'cloudsql', engine: 'postgres', externalId: 'cloudsql-1', status: 'running' }],
-          partial: false,
-          warnings: [],
-        }),
-      },
-    } as any);
-    const provision = vi.fn(async (_type: string, env: { id: string }) => ({
-      component: {
-        id: 'supabase-component',
-        environmentId: env.id,
-        type: 'postgres',
-        externalId: 'supabase-1',
-        bindings: {
-          provider: 'supabase',
-          instanceId: 'supabase-1',
-          connectionUrl: 'postgres://new-supabase',
-          host: 'db.supabase.co',
-          port: 5432,
-          username: 'postgres',
-          password: 'pw',
-          database: 'postgres',
-        },
-        createdAt: now,
-        updatedAt: now,
-      },
-      receipt: { success: true, message: 'Provisioned Supabase Postgres' },
-      connectionUrl: 'postgres://new-supabase',
-      envVars: { DATABASE_URL: 'postgres://new-supabase', DATABASE_SSL: 'true' },
-    }));
-    const destroy = vi.fn(async () => ({ success: true, message: 'destroyed' }));
-    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
-      success: true,
-      adapter: {
-        name: 'supabase',
-        capabilities: {
-          supportedDatabases: ['postgres'],
-          supportsPooling: true, supportsReadReplicas: false,
-          supportsPointInTimeRecovery: false, serverlessOptimized: true,
-        },
-        connect: async () => {}, verify: async () => ({ success: true }),
-        provision,
-        observeDatabase: async () => null,
-        getConnectionUrl: async () => 'postgres://new-supabase',
-        destroy,
-      },
-    } as any);
-    const hostingSpy = vi.spyOn(adapterFactory, 'getHostingAdapter').mockRejectedValue(new Error('hosting should not run'));
-
-    const plan = await t.call('hv_plan', { project: 'core-spec-app', env: 'production' });
-    expect(plan.ok).toBe(true);
-    expect(plan.data.actions).toContainEqual(expect.objectContaining({ id: 'database:supabase', type: 'create' }));
-    expect(plan.data.actions.find((action: { id: string }) => action.id === 'database:cloudsql:destroy')).toBeUndefined();
-
-    const apply = await t.call('hv_apply', {
-      project: 'core-spec-app',
-      planId: plan.data.planId,
-      confirmActions: ['database:supabase'],
-    });
-    expect(apply.ok).toBe(true);
-    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'database:supabase',
-      status: 'succeeded',
-    }));
-    expect(provision).toHaveBeenCalledTimes(1);
-    expect(destroy).not.toHaveBeenCalled();
-    expect(hostingSpy).not.toHaveBeenCalled();
-
-    const component = new ComponentRepository().findByEnvironmentAndType(environment.id, 'postgres')!;
-    expect(component.bindings.provider).toBe('supabase');
-    expect(component.bindings.previousProvider).toBe('cloudsql');
-    expect(component.bindings.previousExternalId).toBe('cloudsql-1');
-    expect(component.bindings.previousBindings).toMatchObject({
-      provider: 'cloudsql',
-      connectionUrl: 'postgres://old-cloudsql',
-    });
-    await t.close();
-  });
-
-  it('runs a declarative database seedCommand once through hv_apply and records completion', async () => {
+  it('plans a declarative seedCommand without backup setup and records one seed action completion', async () => {
     const t = await makeClient();
     const command = 'true';
     await t.call('hv_spec', {
@@ -3990,9 +4019,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
       bindings: {
         provider: 'railway',
         serviceId: 'db-1',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' },
         connectionString: 'postgres://seed:secret@db.example.com/app',
       },
     });
+    // Created databases record their committed primary identity.
+    new EnvironmentRepository().updatePlatformBindings(environment.id, { databaseTopology: { primary: { provider: 'railway', externalId: 'db-1' }, replicas: {} } });
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),
@@ -4010,14 +4042,19 @@ describe('hv_plan / hv_status / hv_apply', () => {
         envVarHashes: { NODE_ENV: hashEnvValue('production') },
         status: 'running',
       }],
-      databases: [{ provider: 'railway', engine: 'postgres', externalId: 'db-1', status: 'running' }],
+      databases: [{ provider: 'railway', engine: 'postgres', externalId: 'db-1', status: 'running',
+        providerScope: { projectId: 'rp-1', environmentId: 're-1' } }],
       partial: false,
       warnings: [],
     };
     mockObserved(observedState);
 
+    // Explicit seed intent remains actionable without optional backup setup;
+    // omitting backup intent makes no claim that a provider backup was verified.
     const plan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
     expect(plan.ok).toBe(true);
+    expect(plan.data).not.toHaveProperty('backupCoverage');
+    expect(plan.data).not.toHaveProperty('backupReadiness');
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
       id: 'database:railway:seed',
       type: 'update',
@@ -4159,14 +4196,10 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environments: {
           production: {
             hosting: { provider: 'railway' },
-            database: { provider: 'supabase' },
+            database: { provider: 'railway' },
             services: { web: { startCommand: 'npm start' } },
             domain: 'previous-teardown.example.com',
             email: { enabled: true },
-            messaging: {
-              services: ['web'],
-              service: { name: 'Previous teardown messages' },
-            },
             payments: {
               stripe: {
                 catalog: {
@@ -4192,15 +4225,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    const cloudrunConnection = new ConnectionRepository().create({
-      provider: 'cloudrun',
+    const fixtureHostingConnection = new ConnectionRepository().create({
+      provider: 'fixture-hosting',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'gcp-project',
         region: 'us-central1',
         credentials: '{}',
       }),
     });
-    new ConnectionRepository().updateStatus(cloudrunConnection.id, 'verified');
+    new ConnectionRepository().updateStatus(fixtureHostingConnection.id, 'verified');
     const project = new ProjectRepository().findByName('previous-teardown-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4211,7 +4244,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'rail-env-1',
         services: { web: { serviceId: 'svc-1' } },
         previousHosting: {
-          provider: 'cloudrun',
+          provider: 'fixture-hosting',
           projectId: 'gcp-project',
           services: { web: { serviceId: 'gcp-project-web' } },
         },
@@ -4252,8 +4285,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
       observe: async () => observedState,
     };
     const deleteService = vi.fn(async () => ({ success: true }));
-    const cloudrunAdapter = {
-      name: 'cloudrun',
+    const fixtureHostingAdapter = {
+      name: 'fixture-hosting',
       capabilities: {
         supportedBuilders: ['dockerfile'], supportedComponents: [],
         supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
@@ -4265,8 +4298,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
     // The teardown must resolve the PREVIOUS provider's adapter, so dispatch
     // on the provider name instead of returning a single adapter.
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider: string) => (
-      provider === 'cloudrun'
-        ? { success: true, adapter: cloudrunAdapter }
+      provider === 'fixture-hosting'
+        ? { success: true, adapter: fixtureHostingAdapter }
         : { success: true, adapter: railwayAdapter }
     ) as any);
 
@@ -4282,7 +4315,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       id: 'service:web:previous-destroy',
       type: 'destroy',
       requiresConfirm: true,
-      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+      resource: { kind: 'service', name: 'web', provider: 'fixture-hosting' },
     })]);
     const persistedPlan = new RunRepository().findById(plan.data.planId)?.plan;
     expect(persistedPlan).toMatchObject({ scope: 'retained-cleanup' });
@@ -4351,7 +4384,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       } },
     } });
     verifyRailwayConnection();
-    verifyConnection('cloudsql', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-database', { projectId: 'gcp-project', credentials: '{}' });
     const project = new ProjectRepository().findByName('retained-database-apply-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4362,7 +4395,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'railway-environment',
         services: { web: { serviceId: 'railway-web' } },
         previousDatabase: {
-          provider: 'cloudsql',
+          provider: 'fixture-database',
           externalId: 'legacy-production-db',
           engine: 'postgres',
           name: 'legacy-production-db',
@@ -4375,7 +4408,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       type: 'postgres',
       externalId: null,
       bindings: {
-        provider: 'cloudsql',
+        provider: 'fixture-database',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -4428,7 +4461,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'cloudsql',
+        name: 'fixture-database',
         capabilities: {
           supportedDatabases: ['postgres'], supportsPooling: false, supportsReadReplicas: false,
           supportsPointInTimeRecovery: false, serverlessOptimized: false,
@@ -4436,7 +4469,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         connect: async () => {}, verify: async () => ({ success: true }), disconnect: async () => {},
         provision: async () => { throw new Error('unused'); }, getConnectionUrl: async () => null,
         observeDatabase: async () => databasePresent ? ({
-          provider: 'cloudsql', engine: 'postgres', externalId: 'legacy-production-db', status: 'running',
+          provider: 'fixture-database', engine: 'postgres', externalId: 'legacy-production-db', status: 'running',
           providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         }) : null,
         destroy,
@@ -4450,7 +4483,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toEqual([expect.objectContaining({
-      id: 'database:cloudsql:retained-destroy',
+      id: 'database:fixture-database:retained-destroy',
       dataBearing: true,
       requiresConfirm: true,
     })]);
@@ -4458,7 +4491,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
     expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'database:cloudsql:retained-destroy',
+      actionId: 'database:fixture-database:retained-destroy',
       status: 'skipped_requires_confirm',
     }));
     expect(destroy).not.toHaveBeenCalled();
@@ -4471,11 +4504,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const confirmed = await t.call('hv_apply', {
       project: project.name,
       planId: confirmedPlan.data.planId,
-      confirmActions: ['database:cloudsql:retained-destroy'],
+      confirmActions: ['database:fixture-database:retained-destroy'],
     });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'database:cloudsql:retained-destroy',
+      actionId: 'database:fixture-database:retained-destroy',
       status: 'succeeded',
     }));
     expect(destroy).toHaveBeenCalledOnce();
@@ -4494,7 +4527,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       } },
     } });
     verifyRailwayConnection();
-    verifyConnection('memorystore', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-cache', { projectId: 'gcp-project', credentials: '{}' });
     const project = new ProjectRepository().findByName('retained-cache-apply-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4505,7 +4538,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'railway-environment',
         services: { web: { serviceId: 'railway-web' } },
         previousCache: {
-          provider: 'memorystore',
+          provider: 'fixture-cache',
           externalId: 'projects/gcp-project/locations/us-west1/instances/legacy-cache',
           engine: 'redis',
           providerEngine: 'redis',
@@ -4519,7 +4552,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       type: 'redis',
       externalId: null,
       bindings: {
-        provider: 'memorystore',
+        provider: 'fixture-cache',
         providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         provisioningIncomplete: true,
         unresolvedMutation: {
@@ -4573,7 +4606,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     vi.spyOn(adapterFactory, 'getCacheAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'memorystore',
+        name: 'fixture-cache',
         capabilities: {
           supportedCaches: ['redis'], supportsTls: true, supportsHighAvailability: true,
           supportsPersistence: true, serverlessOptimized: false,
@@ -4581,7 +4614,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         connect: async () => {}, verify: async () => ({ success: true }), disconnect: async () => {},
         provision: async () => { throw new Error('unused'); }, getConnectionUrl: async () => null,
         observeCache: async () => cachePresent ? ({
-          provider: 'memorystore', engine: 'redis',
+          provider: 'fixture-cache', engine: 'redis',
           externalId: 'projects/gcp-project/locations/us-west1/instances/legacy-cache',
           name: 'legacy-production-cache', status: 'running',
           providerScope: { projectId: 'gcp-project', region: 'us-west1' },
@@ -4597,7 +4630,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toEqual([expect.objectContaining({
-      id: 'cache:memorystore:retained-destroy',
+      id: 'cache:fixture-cache:retained-destroy',
       dataBearing: true,
       requiresConfirm: true,
     })]);
@@ -4605,7 +4638,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
     expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'cache:memorystore:retained-destroy',
+      actionId: 'cache:fixture-cache:retained-destroy',
       status: 'skipped_requires_confirm',
     }));
     expect(destroy).not.toHaveBeenCalled();
@@ -4618,11 +4651,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const confirmed = await t.call('hv_apply', {
       project: project.name,
       planId: confirmedPlan.data.planId,
-      confirmActions: ['cache:memorystore:retained-destroy'],
+      confirmActions: ['cache:fixture-cache:retained-destroy'],
     });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'cache:memorystore:retained-destroy',
+      actionId: 'cache:fixture-cache:retained-destroy',
       status: 'succeeded',
     }));
     expect(destroy).toHaveBeenCalledOnce();
@@ -4641,7 +4674,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       } },
     } });
     verifyRailwayConnection();
-    verifyConnection('cloudsql', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-database', { projectId: 'gcp-project', credentials: '{}' });
     const project = new ProjectRepository().findByName('retained-backup-apply-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -4652,7 +4685,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         environmentId: 'railway-environment',
         services: { web: { serviceId: 'railway-web' } },
         previousResource: {
-          provider: 'cloudsql',
+          provider: 'fixture-database',
           resource: 'backup',
           externalId: 'projects/gcp-project/backups/backup-123',
           name: 'backup-123',
@@ -4703,7 +4736,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     };
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider) => ({
       success: true,
-      adapter: provider === 'cloudsql' ? cleanupAdapter : hostingAdapter,
+      adapter: provider === 'fixture-database' ? cleanupAdapter : hostingAdapter,
     } as any));
 
     const plan = await t.call('hv_plan', {
@@ -4713,7 +4746,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toEqual([expect.objectContaining({
-      id: 'retained-resource:cloudsql:backup:destroy',
+      id: 'retained-resource:fixture-database:backup:destroy',
       dataBearing: true,
       requiresConfirm: true,
     })]);
@@ -4721,7 +4754,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
     expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'retained-resource:cloudsql:backup:destroy',
+      actionId: 'retained-resource:fixture-database:backup:destroy',
       status: 'skipped_requires_confirm',
     }));
     expect(destroy).not.toHaveBeenCalled();
@@ -4734,11 +4767,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const confirmed = await t.call('hv_apply', {
       project: project.name,
       planId: confirmedPlan.data.planId,
-      confirmActions: ['retained-resource:cloudsql:backup:destroy'],
+      confirmActions: ['retained-resource:fixture-database:backup:destroy'],
     });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'retained-resource:cloudsql:backup:destroy',
+      actionId: 'retained-resource:fixture-database:backup:destroy',
       status: 'succeeded',
     }));
     expect(destroy).toHaveBeenCalledOnce();
@@ -4751,18 +4784,18 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.call('hv_spec', { spec: {
       project: 'previous-railway-environment-app',
       environments: { production: {
-        hosting: { provider: 'cloudrun' },
+        hosting: { provider: 'fixture-hosting' },
         services: { web: { startCommand: 'npm start' } },
       } },
     } });
-    verifyConnection('cloudrun', { projectId: 'gcp-project', credentials: '{}' });
+    verifyConnection('fixture-hosting', { projectId: 'gcp-project', credentials: '{}' });
     verifyRailwayConnection();
     const project = new ProjectRepository().findByName('previous-railway-environment-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-central1',
+        provider: 'fixture-hosting', projectId: 'gcp-project', environmentId: 'us-central1',
         services: { web: { serviceId: 'gcp-web' } },
         previousHosting: {
           provider: 'railway', projectId: 'railway-project', environmentId: 'railway-production',
@@ -4772,7 +4805,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
 
     const observedState: ObservedState = {
-      provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true,
+      provider: 'fixture-hosting', observedAt: new Date().toISOString(), projectExists: true,
       projectId: 'gcp-project', environmentId: 'us-central1', databases: [], partial: false, warnings: [],
       services: [{
         name: 'web', externalId: 'gcp-web', workloadKind: 'web', customDomains: [],
@@ -4786,7 +4819,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       .mockResolvedValueOnce({ success: true });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider: string) => provider === 'railway'
       ? { success: true, adapter: { name: 'railway', deleteEnvironment } } as any
-      : { success: true, adapter: { name: 'cloudrun', capabilities: { supportsObserve: true }, observe: async () => observedState } } as any);
+      : { success: true, adapter: { name: 'fixture-hosting', capabilities: { supportsObserve: true }, observe: async () => observedState } } as any);
 
     const plan = await t.call('hv_plan', { project: project.name, env: 'production' });
     const cleanupId = 'environment:production:railway:previous-destroy';
@@ -4806,7 +4839,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('stashes the abandoned provider bindings as previousHosting when the hosting provider switches', async () => {
+  it.each([false, true])('retains previousHosting through a provider switch and namespace retry=%s', async (retryNamespace) => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -4821,21 +4854,28 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     verifyRailwayConnection();
     const project = new ProjectRepository().findByName('provider-switch-stash-app')!;
+    const previousConnection = new ConnectionRepository().create({
+      provider: 'fixture-hosting',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    new ConnectionRepository().updateStatus(previousConnection.id, 'verified');
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'cloudrun',
+        provider: 'fixture-hosting',
         projectId: 'gcp-project',
         services: { web: { serviceId: 'gcp-project-web' } },
       },
     });
-    // Provider-confirmed target absence lets the plan emit the provider-switch
-    // replace actions without guessing about an existing Railway service.
-    mockObserved({
+    // Confirmed target absence authorizes only the new namespace. Workload
+    // authority requires a fresh observation after its durable IDs are bound.
+    let namespaceExists = false;
+    const observe = vi.fn(async () => ({
       provider: 'railway',
       observedAt: new Date().toISOString(),
-      projectExists: false,
+      projectExists: namespaceExists,
+      ...(namespaceExists ? { projectId: 'rail-project', environmentId: 'rail-env' } : {}),
       services: [],
       databases: [],
       completeness: {
@@ -4847,7 +4887,28 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
       partial: false,
       warnings: [],
+    }));
+    let namespaceAttempts = 0;
+    const ensureProject = vi.fn(async () => {
+      if (retryNamespace && namespaceAttempts++ === 0) {
+        return { success: false, message: 'Namespace creation rejected', error: 'No namespace was created' };
+      }
+      namespaceExists = true;
+      return { success: true, message: 'ok', data: { projectId: 'rail-project', environmentId: 'rail-env' } };
     });
+    const deploy = vi.fn(async (_service: unknown, target: { platformBindings: Record<string, unknown> }) => {
+      expect(target.platformBindings).toMatchObject({
+        provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env', services: {},
+      });
+      return {
+        serviceId: 'web',
+        externalId: 'rail-web',
+        url: 'https://web-production.up.railway.app',
+        status: 'deployed',
+        receipt: { success: true, message: 'deployed' },
+      };
+    });
+    const setEnvVars = vi.fn(async () => ({ success: true, message: 'ok' }));
     const fakeRailway = {
       name: 'railway',
       capabilities: {
@@ -4858,38 +4919,83 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
       connect: async () => {},
       verify: async () => ({ success: true }),
-      ensureProject: async () => ({ success: true, message: 'ok', data: { projectId: 'rail-project', environmentId: 'rail-env' } }),
-      deploy: async () => ({
-        serviceId: 'web',
-        externalId: 'rail-web',
-        url: 'https://web-production.up.railway.app',
-        status: 'deployed',
-        receipt: { success: true, message: 'deployed' },
-      }),
-      setEnvVars: async () => ({ success: true, message: 'ok' }),
+      ensureProject,
+      deploy,
+      setEnvVars,
+      observe,
       getDeployStatus: async () => ({ status: 'deployed', url: 'https://web-production.up.railway.app' }),
     };
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeRailway } as any);
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async provider => {
+      expect(provider).toBe('railway');
+      return { success: true, adapter: fakeRailway } as any;
+    });
 
     const plan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
     expect(plan.ok).toBe(true);
-    expect(plan.data.actions).toContainEqual(expect.objectContaining({
-      id: 'service:web',
-      type: 'replace',
-    }));
+    expect(plan.data.scope).toBe('hosting-bindings');
+    expect(plan.data.actions).toEqual([expect.objectContaining({ id: 'project:railway', type: 'create' })]);
 
-    const apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: plan.data.planId });
+    let apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
-
-    // The stash is written before the converge pass, so it must hold
-    // regardless of how the bootstrap converge itself turned out (here the
-    // bootstrap pass fails on the Cloud Run prepare gate, which is fine —
-    // the contract under test is the pre-converge stash, not the converge).
-    const updated = new EnvironmentRepository().findById(environment.id)!;
-    expect((updated.platformBindings as Record<string, unknown>).previousHosting).toMatchObject({
-      provider: 'cloudrun',
+    const previousHosting = {
+      provider: 'fixture-hosting',
       projectId: 'gcp-project',
       services: { web: { serviceId: 'gcp-project-web' } },
+    };
+    if (retryNamespace) {
+      expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'project:railway', status: 'failed' }));
+      expect(new EnvironmentRepository().findById(environment.id)!.platformBindings).toEqual({
+        provider: 'railway', services: {}, previousHosting,
+      });
+      expect(deploy).not.toHaveBeenCalled();
+      expect(setEnvVars).not.toHaveBeenCalled();
+      const retryPlan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
+      expect(retryPlan.ok).toBe(true);
+      expect(retryPlan.data.scope).toBe('hosting-bindings');
+      expect(retryPlan.data.actions).toEqual([expect.objectContaining({ id: 'project:railway', type: 'create' })]);
+      apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: retryPlan.data.planId });
+      expect(apply.ok).toBe(true);
+    }
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'project:railway', status: 'succeeded' }));
+    expect(ensureProject).toHaveBeenCalledTimes(retryNamespace ? 2 : 1);
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    const updated = new EnvironmentRepository().findById(environment.id)!;
+    expect(updated.platformBindings).toMatchObject({
+      provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env',
+      services: {}, previousHosting,
+    });
+
+    const observationsBeforeReplan = observe.mock.calls.length;
+    const servicePlan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
+    expect(servicePlan.ok).toBe(true);
+    expect(observe.mock.calls.length).toBeGreaterThan(observationsBeforeReplan);
+    expect(servicePlan.data.scope).toBe('full');
+    // The old service remains in its cleanup scope. This is a new Railway
+    // workload, not an attempt to reuse the Cloud Run service ID.
+    expect(servicePlan.data.actions).toContainEqual(expect.objectContaining({ id: 'service:web', type: 'create' }));
+    expect(servicePlan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web:previous-destroy', type: 'destroy', requiresConfirm: true,
+      resource: { kind: 'service', name: 'web', provider: 'fixture-hosting' },
+    }));
+    const persistedServicePlan = new RunRepository().findById(servicePlan.data.planId)!.plan as { actions: PlanAction[] };
+    expect(persistedServicePlan.actions.find(action => action.id === 'service:web:previous-destroy')?.metadata)
+      .toMatchObject({ serviceId: 'gcp-project-web', previousProvider: 'fixture-hosting' });
+    const serviceApply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: servicePlan.data.planId });
+    expect(serviceApply.error).toBeUndefined();
+    expect(serviceApply).toMatchObject({ ok: true });
+    // Whole-plan confirmation still applies: until the separately retained
+    // cleanup is authorized, neither it nor the new workload may mutate.
+    expect(serviceApply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'service:web', status: 'aborted' }));
+    expect(serviceApply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:web:previous-destroy', status: 'skipped_requires_confirm',
+    }));
+    expect(deploy).not.toHaveBeenCalled();
+    expect(setEnvVars).not.toHaveBeenCalled();
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings).toMatchObject({
+      provider: 'railway', projectId: 'rail-project', environmentId: 'rail-env',
+      services: {}, previousHosting,
     });
     await t.close();
   });

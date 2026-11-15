@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+afterEach(() => vi.restoreAllMocks());
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import { isProviderEnvironmentVariablesAdapter } from '../../../domain/ports/provider-env-vars.port.js';
@@ -35,15 +36,31 @@ function environment(provider: string): Environment {
 }
 
 describe('provider environment-variable read port', () => {
-  it('normalizes Cloud Run service-name reads behind the shared request', async () => {
+  it('reads Cloud Run variables through the shared request using the exact native scope and lifetime identity', async () => {
     const adapter = new CloudRunAdapter();
-    const target = environment('cloudrun');
-    const read = vi.spyOn(adapter, 'getServiceVariables').mockResolvedValue({ KEY: 'cloudrun-value' });
+    await adapter.connect({ projectId: 'cloudrun-project', region: 'us-west1', credentials: JSON.stringify({ type: 'service_account', project_id: 'cloudrun-project', private_key: 'synthetic-key', client_email: 'reader@cloudrun-project.iam.gserviceaccount.com' }) });
+    Object.assign(adapter, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60000) });
+    const target: Environment = { ...environment('cloudrun'), platformBindings: { provider: 'cloudrun', projectId: 'cloudrun-project', environmentId: 'us-west1', services: { worker: { serviceId: 'bound-worker', resourceUid: 'accepted-lifetime-uid' } } } };
+    // Official v2 Service GET contract; reconstructed transport observation.
+    // Logical service names alone never establish native resource identity.
+    const native = { name: 'projects/cloudrun-project/locations/us-west1/services/bound-worker', uid: 'accepted-lifetime-uid', template: { containers: [{ image: 'registry/worker:retained', env: [{ name: 'KEY', value: 'cloudrun-value' }] }] } };
+    const read = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json(native));
 
     expect(isProviderEnvironmentVariablesAdapter(adapter)).toBe(true);
     await expect(adapter.readProviderEnvironmentVariables({ environment: target, service }))
       .resolves.toEqual({ success: true, variables: { KEY: 'cloudrun-value' } });
-    expect(read).toHaveBeenCalledWith(target, 'worker');
+    expect(read).toHaveBeenCalledExactlyOnceWith(
+      'https://run.googleapis.com/v2/projects/cloudrun-project/locations/us-west1/services/bound-worker',
+      expect.objectContaining({ headers: { Authorization: 'Bearer synthetic-token' } }),
+    );
+    for (const request of [
+      { environment: target, service: { ...service, name: 'unbound-worker' } },
+      { environment: { ...target, platformBindings: { ...target.platformBindings, environmentId: 'another-region' } }, service },
+    ]) await expect(adapter.readProviderEnvironmentVariables(request)).resolves.toMatchObject({ success: false });
+    expect(read).toHaveBeenCalledTimes(1);
+    native.uid = 'different-lifetime-uid';
+    await expect(adapter.readProviderEnvironmentVariables({ environment: target, service })).resolves.toMatchObject({ success: false });
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('normalizes Railway durable binding reads without broadening service identity', async () => {

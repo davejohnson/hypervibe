@@ -1,4 +1,5 @@
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
+import { isDeepStrictEqual } from 'node:util';
 
 type ActiveDeclaration = 'ordinary' | 'env_file' | 'managed_secret';
 
@@ -99,4 +100,37 @@ export function environmentVariableCoverage(spec: ProjectSpec): EnvironmentVaria
 
 export function environmentVariableCoverageIssueId(issue: EnvironmentVariableCoverageIssue): string {
   return `${issue.reason}:${issue.key}:${issue.environment ?? ''}`;
+}
+
+/** A service rename does not introduce runtime inputs or grant secret ownership. */
+export function introducedEnvironmentVariableCoverageIssues(
+  previous: ProjectSpec | null,
+  next: ProjectSpec
+): EnvironmentVariableCoverageIssue[] {
+  const baseline = previous && {
+    ...previous,
+    environments: Object.fromEntries(Object.entries(previous.environments).map(([name, before]) => {
+      const after = next.environments[name];
+      if (!after || !isDeepStrictEqual(before.hosting, after.hosting)) return [name, before];
+      const removed = Object.keys(before.services).filter((key) => !(key in after.services));
+      const added = Object.keys(after.services).filter((key) => !(key in before.services));
+      const retainedUnchanged = Object.keys(before.services)
+        .filter((key) => key in after.services)
+        .every((key) => isDeepStrictEqual(before.services[key], after.services[key]));
+      if (!removed.length || removed.length !== added.length || !retainedUnchanged) return [name, before];
+      const unmatched = added.map((key) => after.services[key]);
+      for (const key of removed) {
+        const match = unmatched.findIndex((service) => isDeepStrictEqual(before.services[key], service));
+        if (match < 0) return [name, before];
+        unmatched.splice(match, 1);
+      }
+      // Keep all old declarations. New keys/targets or mixed ownership in the
+      // candidate must still fail, including when submitted with the rename.
+      return [name, { ...before, services: after.services }];
+    })),
+  };
+  const existing = new Set(baseline
+    ? environmentVariableCoverage(baseline).issues.map(environmentVariableCoverageIssueId)
+    : []);
+  return environmentVariableCoverage(next).issues.filter((issue) => !existing.has(environmentVariableCoverageIssueId(issue)));
 }

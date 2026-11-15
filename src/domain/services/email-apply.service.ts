@@ -1,10 +1,14 @@
-import { createHash } from 'crypto';
+import { applyInboundSigningKey, inboundSigningTargetBlock, INBOUND_SIGNING_KEY_OPERATION } from './email-inbound-signing.service.js';
+import { applyEventSigning, EMAIL_SIGNING_OPERATIONS, observeHosting } from './email-signing.service.js';
+import { resolveInboundCallback } from './email-inbound-url.service.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import {
   SendGridAdapter,
   assessSendGridScopes,
+  missingSendGridScopes,
+  SENDGRID_SCOPE_REQUIREMENTS,
   type SendGridCredentials,
   type SendGridDomainAuthentication,
 } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
@@ -14,20 +18,16 @@ import type { Project } from '../entities/project.entity.js';
 import type { ActionResult } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import { SENDGRID_DELIVERY_EVENTS, type EnvironmentSpec } from '../spec/spec.schema.js';
-import { findCloudflareZone, getCloudflareAdapterFromHints } from './cloudflare-ops.service.js';
-import { cloudflareScopeHintsForDomain, normalizeDomainName } from './domain-scope.js';
+import { normalizeDomainName } from './domain-scope.js';
 import {
   EMAIL_OPERATIONS,
   deliveryEventsUrl,
   emailAuthorizationConfigHash,
   emailConfigHash,
   emailDeliveryEventsConfigHash,
-  emailDnsConfigHash,
-  emailForwardingConfigHash,
   emailInboundConfigHash,
   emailRuntimeConfigHash,
   emailRuntimeKeysForService,
-  inboundParseUrl,
   type SendGridInboundParseRoute,
 } from './email-plan.service.js';
 import {
@@ -154,12 +154,10 @@ function senderRuntimeVars(environmentSpec: EnvironmentSpec): Record<string, str
 
 function runtimeVarsForService(
   environmentSpec: EnvironmentSpec,
-  serviceName: string,
-  apiKey: string
+  serviceName: string
 ): Record<string, string> {
   const inbound = environmentSpec.email.inbound;
   return {
-    SENDGRID_API_KEY: apiKey,
     ...senderRuntimeVars(environmentSpec),
     ...(inbound?.service === serviceName
       ? {
@@ -188,26 +186,6 @@ async function applyRuntime(params: {
     return staleAction('Runtime targets or configuration changed.');
   }
 
-  const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
-  if ('error' in sendgrid) {
-    return { success: false, status: 'blocked', message: 'SendGrid connection unavailable', error: sendgrid.error };
-  }
-  const credentialHash = createHash('sha256')
-    .update(sendgrid.credentials.apiKey, 'utf8')
-    .digest('hex');
-  if (stringValue(metadata, 'credentialHash') !== credentialHash) {
-    return staleAction('The reviewed SendGrid runtime credential changed.');
-  }
-  const scopes = assessSendGridScopes(await sendgrid.adapter.getScopes());
-  if (!scopes.hasMailSend) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: 'SendGrid runtime key cannot send mail',
-      error: `Missing SendGrid scope(s): ${scopes.missingScopes.mailSend.join(', ')}`,
-    };
-  }
-
   const runtimeBinding = asRecord(currentEmailBindings(params.environment).runtime);
   const previousKeys = asRecord(runtimeBinding?.perServiceKeys);
   const perServiceKeys: Record<string, string[]> = {};
@@ -222,27 +200,31 @@ async function applyRuntime(params: {
       break;
     }
     const desiredKeys = emailRuntimeKeysForService(params.environmentSpec, serviceName);
-    const synced = await syncHostingEnvVars({
-      project: params.project,
-      environment: params.environment,
-      service,
-      vars: runtimeVarsForService(params.environmentSpec, serviceName, sendgrid.credentials.apiKey),
-      deferDeployment: params.environmentSpec.deploy?.strategy === 'branch'
-        && params.environmentSpec.deploy.trigger === 'ci',
-    });
-    if (!synced.success) {
-      failures.push(`${serviceName}: ${synced.error ?? synced.message}`);
-      break;
-    }
-    const syncedData = asRecord(synced.data);
-    deploymentDeferred ||= syncedData?.deploymentDeferred === true;
-    runtimeRolloutRequired ||= syncedData?.runtimeRolloutRequired === true;
-    if (syncedData?.runtimeRolloutRequired === true && syncedData.rolloutBaseline) {
-      rolloutBaselines[serviceName] = syncedData.rolloutBaseline;
+    if (desiredKeys.length > 0) {
+      const synced = await syncHostingEnvVars({
+        project: params.project,
+        environment: params.environment,
+        service,
+        vars: runtimeVarsForService(params.environmentSpec, serviceName),
+        deferDeployment: params.environmentSpec.deploy?.strategy === 'branch'
+          && params.environmentSpec.deploy.trigger === 'ci',
+      });
+      if (!synced.success) {
+        failures.push(`${serviceName}: ${synced.error ?? synced.message}`);
+        break;
+      }
+      const syncedData = asRecord(synced.data);
+      deploymentDeferred ||= syncedData?.deploymentDeferred === true;
+      runtimeRolloutRequired ||= syncedData?.runtimeRolloutRequired === true;
+      if (syncedData?.runtimeRolloutRequired === true && syncedData.rolloutBaseline) {
+        rolloutBaselines[serviceName] = syncedData.rolloutBaseline;
+      }
     }
 
     const obsoleteKeys = stringArray(previousKeys, serviceName)
-      .filter((key) => !desiredKeys.includes(key));
+      // Legacy email bindings included the setup key. Ownership now belongs
+      // to the application's secret slot; transferring it must not delete it.
+      .filter((key) => key !== 'SENDGRID_API_KEY' && !desiredKeys.includes(key));
     if (obsoleteKeys.length > 0) {
       const removed = await removeHostingEnvVars({
         project: params.project,
@@ -267,7 +249,7 @@ async function applyRuntime(params: {
   if (failures.length > 0) {
     return {
       success: false,
-      message: 'Failed to sync declarative SendGrid runtime configuration',
+      message: 'Failed to sync email sender and inbound settings',
       error: failures.join('; '),
       data: { services: expectedServices, keys: [...new Set(Object.values(perServiceKeys).flat())].sort() },
     };
@@ -275,14 +257,13 @@ async function applyRuntime(params: {
 
   updateEmailBinding(params.environment, 'runtime', {
     configHash: emailRuntimeConfigHash(params.environmentSpec),
-    credentialHash,
     services: expectedServices,
     perServiceKeys,
     updatedAt: new Date().toISOString(),
   });
   return {
     success: true,
-    message: `Synced SendGrid runtime configuration to ${expectedServices.length} service(s)`,
+    message: `Synced email sender and inbound settings to ${expectedServices.length} service(s)`,
     data: {
       services: expectedServices,
       keys: [...new Set(Object.values(perServiceKeys).flat())].sort(),
@@ -430,127 +411,15 @@ async function applyAuthorization(params: {
   return { success: true, message: `SendGrid sender ${address} is verified`, data: { address, senderId: externalId } };
 }
 
-function sendGridDnsRecords(auth: SendGridDomainAuthentication): Array<{
-  type: string;
-  name: string;
-  content: string;
-  priority?: number;
-}> {
-  return [auth.dns.dkim1, auth.dns.dkim2, auth.dns.mail_cname]
-    .filter((record): record is NonNullable<typeof record> => Boolean(record))
-    .map((record) => ({
-      type: record.type.toUpperCase(),
-      name: record.host.toLowerCase().replace(/\.$/, ''),
-      content: record.data.toLowerCase().replace(/\.$/, ''),
-    }));
-}
-
-async function applyDns(params: {
+/** Historical DNS actions never authorize direct provider record writes. */
+async function applyDns(_params: {
   project: Project;
   environment: Environment;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
 }): Promise<ActionResult> {
-  const metadata = asRecord(params.action.metadata);
-  const expectedHash = emailDnsConfigHash(params.environmentSpec);
-  const domain = params.environmentSpec.domain
-    ? normalizeDomainName(params.environmentSpec.domain)
-    : undefined;
-  if (
-    !domain
-    || params.action.resource.provider !== 'cloudflare'
-    || params.action.resource.name !== domain
-    || stringValue(metadata, 'domain') !== domain
-    || stringValue(metadata, 'configHash') !== expectedHash
-  ) {
-    return staleAction('Email DNS target changed.');
-  }
-
-  const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
-  if ('error' in sendgrid) {
-    return { success: false, status: 'blocked', message: 'SendGrid connection unavailable', error: sendgrid.error };
-  }
-  const authMatches = exactDomainMatches(await sendgrid.adapter.listDomainAuthentications(), domain);
-  if (authMatches.length !== 1) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: `Cannot resolve one SendGrid domain authentication for ${domain}`,
-      error: authMatches.length === 0 ? 'Apply the authorization action first.' : 'Resolve duplicate SendGrid domain authentications.',
-    };
-  }
-  const records = sendGridDnsRecords(authMatches[0]);
-  if (params.environmentSpec.email.inbound) {
-    records.push({
-      type: 'MX',
-      name: params.environmentSpec.email.inbound.hostname.toLowerCase(),
-      content: 'mx.sendgrid.net',
-      priority: 10,
-    });
-  }
-
-  const cloudflare = getCloudflareAdapterFromHints(cloudflareScopeHintsForDomain(domain));
-  if ('error' in cloudflare) {
-    return { success: false, status: 'blocked', message: 'Cloudflare connection unavailable', error: cloudflare.error };
-  }
-  const zone = await findCloudflareZone(cloudflare.adapter, domain);
-  if (!zone) {
-    return { success: false, status: 'blocked', message: `Cloudflare zone not found for ${domain}`, error: 'Connect the DNS zone that owns this domain.' };
-  }
-  const liveRecords = await cloudflare.adapter.listDnsRecords(zone.id);
-  for (const record of records) {
-    const matches = liveRecords.filter((candidate) =>
-      candidate.type.toUpperCase() === record.type
-      && candidate.name.toLowerCase().replace(/\.$/, '') === record.name
-    );
-    if (matches.length > 1) {
-      return { success: false, status: 'blocked', message: `Multiple Cloudflare records match ${record.type} ${record.name}`, error: 'Resolve duplicate DNS identities before applying.' };
-    }
-  }
-
-  const operation = stringValue(metadata, 'operation');
-  const recordBindings: Array<Record<string, unknown>> = [];
-  if (operation === EMAIL_OPERATIONS.dnsAdopt) {
-    for (const record of records) {
-      const match = liveRecords.find((candidate) =>
-        candidate.type.toUpperCase() === record.type
-        && candidate.name.toLowerCase().replace(/\.$/, '') === record.name
-        && candidate.content.toLowerCase().replace(/\.$/, '') === record.content
-        && (record.priority === undefined || candidate.priority === record.priority)
-      );
-      if (!match) return staleAction(`The reviewed ${record.type} ${record.name} DNS adoption candidate changed.`);
-      recordBindings.push({ id: match.id, type: record.type, name: record.name, priority: record.priority ?? null });
-    }
-  } else {
-    for (const record of records) {
-      const result = await cloudflare.adapter.upsertDnsRecord(
-        zone.id,
-        record.name,
-        record.type,
-        record.content,
-        { proxied: false, ...(record.priority !== undefined ? { priority: record.priority } : {}) }
-      );
-      const verified = result.record.content.toLowerCase().replace(/\.$/, '') === record.content
-        && (record.priority === undefined || result.record.priority === record.priority);
-      if (!verified) {
-        return { success: false, message: `Cloudflare did not verify ${record.type} ${record.name}`, error: 'The provider receipt did not match the requested DNS record.' };
-      }
-      recordBindings.push({ id: result.record.id, type: record.type, name: record.name, priority: record.priority ?? null });
-    }
-  }
-
-  updateEmailBinding(params.environment, 'dns', {
-    configHash: expectedHash,
-    provider: 'cloudflare',
-    zoneId: zone.id,
-    records: recordBindings,
-    updatedAt: new Date().toISOString(),
-  });
-  return {
-    success: true,
-    message: `${operation === EMAIL_OPERATIONS.dnsAdopt ? 'Recorded' : 'Synchronized'} ${records.length} SendGrid DNS record(s) in Cloudflare`,
-    data: { domain, records: recordBindings },
-  };
+  return { success: false, status: 'blocked', message: 'Email DNS needs a reviewed infrastructure engine plan',
+    error: 'Re-run hv_plan with the exact DNS provider and zone selected. Apply the saved DNS stage before email verification.' };
 }
 
 function routeMatches(route: SendGridInboundParseRoute, expectedUrl: string, inbound: NonNullable<EnvironmentSpec['email']['inbound']>): boolean {
@@ -564,15 +433,26 @@ async function applyInbound(params: {
   environment: Environment;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
+  confirmedActionIds?: ReadonlySet<string>;
 }): Promise<ActionResult> {
+  if (params.action.type === 'noop') return {success: true, message: 'No inbound route mutation requested'};
   const inbound = params.environmentSpec.email.inbound;
   const metadata = asRecord(params.action.metadata);
+  const operation = stringValue(metadata, 'operation');
   const expectedHash = emailInboundConfigHash(params.environmentSpec);
   if (!inbound || !expectedHash) return staleAction('Inbound parse was removed.');
+  const targetBlock = inboundSigningTargetBlock(params.environment, params.environmentSpec);
+  if (targetBlock) return {success: false, status: 'blocked', message: targetBlock};
   const hostname = inbound.hostname.toLowerCase();
   if (
-    params.action.resource.provider !== 'sendgrid'
+    params.action.id !== `email:sendgrid:inbound:${hostname}`
+    || params.action.resource.kind !== 'email'
+    || params.action.resource.provider !== 'sendgrid'
     || params.action.resource.name !== hostname
+    || metadata?.blockedReason !== undefined
+    || (operation === EMAIL_OPERATIONS.inboundReplace ? params.action.type !== 'replace'
+      : operation === EMAIL_OPERATIONS.inboundAdopt ? params.action.type !== 'update'
+      : operation !== EMAIL_OPERATIONS.inboundEnsure || !['create', 'update'].includes(params.action.type))
     || stringValue(metadata, 'hostname') !== hostname
     || stringValue(metadata, 'service') !== inbound.service
     || stringValue(metadata, 'path') !== inbound.path
@@ -583,7 +463,22 @@ async function applyInbound(params: {
   ) {
     return staleAction('Inbound parse target or options changed.');
   }
-  const expectedUrl = inboundParseUrl(params.environment, inbound);
+  if (operation === EMAIL_OPERATIONS.inboundReplace
+    && (params.action.requiresConfirm !== true || !params.confirmedActionIds?.has(params.action.id))) {
+    return {success: false, status: 'blocked', message: 'Confirm this exact inbound settings action before changing the route.'};
+  }
+  if (params.action.type === 'create' && inbound.signatureVerification !== undefined) {
+    return {success: false, status: 'blocked', message: 'An existing signed Inbound Parse route is required; automatic security-policy setup is not supported.'};
+  }
+  let callback = resolveInboundCallback({ environment: params.environment, spec: params.environmentSpec });
+  if (callback.blockedReason) {
+    try {
+      callback = resolveInboundCallback({ environment: params.environment, spec: params.environmentSpec,
+        observed: await observeHosting(params.project, params.environment, params.environmentSpec) });
+    } catch { return staleAction('The accepted inbound callback attachment could not be observed.'); }
+  }
+  if (callback.blockedReason) return staleAction(callback.blockedReason);
+  const expectedUrl = callback.url;
   if (!expectedUrl) {
     return { success: false, status: 'blocked', message: `Inbound service ${inbound.service} has no public provider URL`, error: 'Apply its service action first, then re-run hv_plan.' };
   }
@@ -595,21 +490,26 @@ async function applyInbound(params: {
   if ('error' in sendgrid) {
     return { success: false, status: 'blocked', message: 'SendGrid connection unavailable', error: sendgrid.error };
   }
-  const permissions = assessSendGridScopes(await sendgrid.adapter.getScopes());
-  if (!permissions.canConfigureInboundParse) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: 'SendGrid inbound-parse permission is missing',
-      error: `Missing SendGrid scope(s): ${permissions.missingScopes.inboundParse.join(', ')}`,
-    };
+  let matches: SendGridInboundParseRoute[];
+  try {
+    const scopes = await sendgrid.adapter.getScopes();
+    const missingScopes = operation === EMAIL_OPERATIONS.inboundReplace
+      ? missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParseUpdate)
+      : operation === EMAIL_OPERATIONS.inboundAdopt
+        ? missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParseRead)
+        : assessSendGridScopes(scopes).missingScopes.inboundParse;
+    if (missingScopes.length) {
+      return {success: false, status: 'blocked', message: 'SendGrid inbound-parse permission is missing',
+        error: `Missing SendGrid scope(s): ${missingScopes.join(', ')}`};
+    }
+    const routes = await sendgrid.adapter.listInboundParseWebhooks();
+    matches = routes.filter((route) => route.hostname.toLowerCase() === hostname);
+  } catch {
+    return {success: false, status: 'blocked', message: 'Inbound route or permission observation is unavailable. No provider write was attempted; check SendGrid access and re-plan.'};
   }
-  const routes = await sendgrid.adapter.listInboundParseWebhooks();
-  const matches = routes.filter((route) => route.hostname.toLowerCase() === hostname);
   if (matches.length > 1) {
     return { success: false, status: 'blocked', message: `Multiple SendGrid inbound parse routes match ${hostname}`, error: 'Resolve duplicate provider identities before applying.' };
   }
-  const operation = stringValue(metadata, 'operation');
   let route: SendGridInboundParseRoute;
   if (operation === EMAIL_OPERATIONS.inboundAdopt) {
     if (matches.length !== 1 || !routeMatches(matches[0], expectedUrl, inbound)) {
@@ -620,30 +520,29 @@ async function applyInbound(params: {
     if (params.action.type !== 'replace' || matches.length !== 1) {
       return staleAction('The reviewed inbound parse replacement identity changed.');
     }
-    const previous = matches[0];
-    await sendgrid.adapter.deleteInboundParseWebhook(hostname);
     try {
-      route = await sendgrid.adapter.createInboundParseWebhook(hostname, expectedUrl, {
-        spam_check: inbound.spamCheck,
-        send_raw: inbound.sendRaw,
-      });
-    } catch (error) {
-      let rollbackError: string | undefined;
-      try {
-        await sendgrid.adapter.createInboundParseWebhook(previous.hostname, previous.url, {
-          spam_check: previous.spam_check,
-          send_raw: previous.send_raw,
-        });
-      } catch (rollback) {
-        rollbackError = rollback instanceof Error ? rollback.message : String(rollback);
+      const previous = await sendgrid.adapter.getInboundParseWebhook(hostname);
+      if (!previous.security_policy || previous.security_policy !== stringValue(metadata, 'expectedPolicyId')) {
+        return staleAction('The exact inbound policy association is unknown or changed; preserve the route and re-plan.');
       }
-      return {
-        success: false,
-        message: `Failed to replace SendGrid inbound parse route for ${hostname}`,
-        error: `${error instanceof Error ? error.message : String(error)}${rollbackError ? `; rollback also failed: ${rollbackError}` : '; the previous route was restored'}`,
-      };
+      if (!routeMatches(previous, expectedUrl, inbound)) {
+        await sendgrid.adapter.attachInboundParseSecurityPolicy(hostname, previous.security_policy, {
+          url: expectedUrl, spam_check: inbound.spamCheck, send_raw: inbound.sendRaw,
+        });
+      }
+      route = previous;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        route = await sendgrid.adapter.getInboundParseWebhook(hostname);
+        if (route.security_policy !== previous.security_policy) return staleAction('Inbound policy changed during route verification; re-plan.');
+        if (routeMatches(route, expectedUrl, inbound)) break;
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!routeMatches(route, expectedUrl, inbound)) return {success: false, status: 'pending', message: 'Inbound settings update is not yet observable; re-plan before continuing.'};
+    } catch {
+      return {success: false, message: 'Inbound settings update could not be verified; re-plan to reconcile. Existing policy and route were not deleted.'};
     }
   } else if (matches.length === 0) {
+    if (inbound.signatureVerification !== undefined) return {success: false, status: 'blocked', message: 'An existing signed Inbound Parse route is required; preserve the requested verification intent and re-plan.'};
     route = await sendgrid.adapter.createInboundParseWebhook(hostname, expectedUrl, {
       spam_check: inbound.spamCheck,
       send_raw: inbound.sendRaw,
@@ -654,22 +553,27 @@ async function applyInbound(params: {
     return staleAction('The inbound route now requires a reviewed replacement.');
   }
 
-  const verified = (await sendgrid.adapter.listInboundParseWebhooks())
+  const verified = operation === EMAIL_OPERATIONS.inboundReplace ? route : (await sendgrid.adapter.listInboundParseWebhooks())
     .find((candidate) => candidate.hostname.toLowerCase() === hostname);
   if (!verified || !routeMatches(verified, expectedUrl, inbound)) {
     return { success: false, message: `SendGrid did not verify inbound parse for ${hostname}`, error: 'The provider read-back did not match the requested route.' };
   }
-  updateEmailBinding(params.environment, 'inbound', {
-    configHash: expectedHash,
-    hostname,
-    service: inbound.service,
-    path: inbound.path,
-    url: route.url,
-    aliases: [...inbound.aliases].map((alias) => alias.toLowerCase()).sort(),
-    spamCheck: inbound.spamCheck,
-    sendRaw: inbound.sendRaw,
-    updatedAt: new Date().toISOString(),
-  });
+  try {
+    if (!updateEmailBinding(params.environment, 'inbound', {
+      ...(verified.security_policy ? { securityPolicyId: verified.security_policy } : {}),
+      configHash: expectedHash,
+      hostname,
+      service: inbound.service,
+      path: inbound.path,
+      url: verified.url,
+      aliases: [...inbound.aliases].map((alias) => alias.toLowerCase()).sort(),
+      spamCheck: inbound.spamCheck,
+      sendRaw: inbound.sendRaw,
+      updatedAt: new Date().toISOString(),
+    })) throw new Error();
+  } catch {
+    return {success: false, message: 'Inbound route configuration was observed but its binding could not be recorded. Re-plan to reconcile; the route and policy were not deleted.'};
+  }
   return {
     success: true,
     message: `${operation === EMAIL_OPERATIONS.inboundAdopt ? 'Adopted' : 'Configured'} SendGrid inbound parse for ${hostname}`,
@@ -723,7 +627,10 @@ async function applyDeliveryEvents(params: {
       error: `Missing SendGrid scope(s): ${permissions.missingScopes.eventWebhook.join(', ')}`,
     };
   }
-  const live = await sendgrid.adapter.getEventWebhookSettings();
+  const endpointId = stringValue(asRecord(currentEmailBindings(params.environment).eventSigning), 'endpointId')
+    ?? stringValue(asRecord(currentEmailBindings(params.environment).deliveryEvents), 'endpointId');
+  const live = await sendgrid.adapter.getEventWebhookSettings(endpointId);
+  if (endpointId && live.id !== undefined && live.id !== endpointId) return staleAction('Delivery-event endpoint identity changed.');
   const operation = stringValue(metadata, 'operation');
   if (operation === EMAIL_OPERATIONS.deliveryEventsAdopt) {
     if (!eventSettingsMatch(live, expectedUrl, desired.events)) {
@@ -733,13 +640,14 @@ async function applyDeliveryEvents(params: {
     const settings = Object.fromEntries(
       SENDGRID_DELIVERY_EVENTS.map((event) => [event, desired.events.includes(event)])
     );
-    await sendgrid.adapter.updateEventWebhookSettings({ enabled: true, url: expectedUrl, ...settings });
+    await sendgrid.adapter.updateEventWebhookSettings({ enabled: true, url: expectedUrl, ...settings }, endpointId);
   }
-  const verified = await sendgrid.adapter.getEventWebhookSettings();
-  if (!eventSettingsMatch(verified, expectedUrl, desired.events)) {
+  const verified = await sendgrid.adapter.getEventWebhookSettings(endpointId);
+  if (endpointId && verified.id !== undefined && verified.id !== endpointId || !eventSettingsMatch(verified, expectedUrl, desired.events)) {
     return { success: false, message: 'SendGrid did not verify the delivery-event webhook', error: 'Provider read-back differs from the reviewed settings.' };
   }
   updateEmailBinding(params.environment, 'deliveryEvents', {
+    ...((endpointId ?? verified.id) ? { endpointId: endpointId ?? verified.id } : {}),
     configHash: expectedHash,
     url: expectedUrl,
     service: desired.service,
@@ -764,40 +672,13 @@ function forwardingAliasDestination(environmentSpec: EnvironmentSpec, alias: str
   return entry?.[1].toLowerCase();
 }
 
-async function applyForwardingDns(params: {
+async function applyForwardingDns(_params: {
   environment: Environment;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
 }): Promise<ActionResult> {
-  const metadata = asRecord(params.action.metadata);
-  const domain = forwardingDomain(params.environmentSpec);
-  if (
-    !domain
-    || params.action.resource.provider !== 'cloudflare'
-    || params.action.resource.name !== domain
-    || stringValue(metadata, 'domain') !== domain
-    || stringValue(metadata, 'configHash') !== emailForwardingConfigHash(params.environmentSpec)
-  ) return staleAction('Forwarding DNS target changed.');
-  const context = await resolveCloudflareEmailContext(domain);
-  if ('error' in context) return { success: false, status: 'blocked', message: 'Cloudflare email context unavailable', error: context.error };
-  const operation = stringValue(metadata, 'operation');
-  const settings = await context.adapter.getEmailRoutingSettings(context.zone.id);
-  if (operation === EMAIL_OPERATIONS.forwardingDnsAdopt) {
-    if (!settings.enabled) return staleAction('The reviewed Email Routing DNS adoption candidate changed.');
-  } else if (!settings.enabled) {
-    await context.adapter.enableEmailRoutingDns(context.zone.id);
-  }
-  const verified = await context.adapter.getEmailRoutingSettings(context.zone.id);
-  if (!verified.enabled) {
-    return { success: false, message: `Cloudflare did not enable Email Routing for ${domain}`, error: 'Provider read-back still reports disabled.' };
-  }
-  updateForwardingBinding(params.environment, 'dns', {
-    zoneId: context.zone.id,
-    accountId: context.accountId,
-    enabled: true,
-    updatedAt: new Date().toISOString(),
-  });
-  return { success: true, message: `Cloudflare Email Routing DNS is enabled for ${domain}`, data: { domain } };
+  return { success: false, status: 'blocked', message: 'Email Routing DNS requires an infrastructure engine capability',
+    error: 'Automatic Email Routing DNS activation is unavailable until its exact provider records can be included in a reviewed engine plan. Existing routing and bindings were preserved.' };
 }
 
 async function applyForwardingDestination(params: {
@@ -1035,6 +916,7 @@ export async function applyEmailAction(params: {
   environmentName: string;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
+  confirmedActionIds?: ReadonlySet<string>;
 }): Promise<ActionResult> {
   const environment = environmentRepo.findByProjectAndName(params.project.id, params.environmentName);
   if (!environment) {
@@ -1042,6 +924,18 @@ export async function applyEmailAction(params: {
   }
   if (!params.environmentSpec.email.enabled) return staleAction('Email is no longer enabled.');
   const operation = stringValue(asRecord(params.action.metadata), 'operation');
+  if (operation === INBOUND_SIGNING_KEY_OPERATION) {
+    if (params.action.type === 'noop') return {success: true, message: 'No inbound signing mutation requested'};
+    const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
+    if ('error' in sendgrid) return {success: false, status: 'blocked', message: sendgrid.error};
+    return applyInboundSigningKey({...params, environment, spec: params.environmentSpec, adapter: sendgrid.adapter});
+  }
+  if (operation === EMAIL_SIGNING_OPERATIONS.signing || operation === EMAIL_SIGNING_OPERATIONS.key) {
+    if (params.action.type === 'noop') return { success: true, message: 'No signing mutation requested' };
+    const sendgrid = verifiedSendGridAdapter(params.project, params.environmentSpec);
+    if ('error' in sendgrid) return { success: false, status: 'blocked', message: sendgrid.error };
+    return applyEventSigning({ ...params, environment, spec: params.environmentSpec, adapter: sendgrid.adapter });
+  }
   switch (operation) {
     case EMAIL_OPERATIONS.runtimeSync:
       return applyRuntime({ ...params, environment });

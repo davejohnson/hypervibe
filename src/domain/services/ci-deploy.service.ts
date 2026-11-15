@@ -1,6 +1,10 @@
+import { SpecStore } from '../spec/spec.store.js';
+import { pendingCredentialOperations } from './runtime-rollout.service.js';
+import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../../adapters/providers/github/github-credential-activation.js';
+import { acceptedCredentialCiInputs } from './accepted-credential-inputs.js';
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { githubPackagePullCredentials } from '../../adapters/providers/github/package-pull.js';
+import { githubPackagePullSource } from '../../adapters/providers/github/package-pull.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
@@ -23,10 +27,11 @@ import {
   IOS_RELEASE_REQUIRED_SECRETS,
   MATCH_SIGNING_REQUIRED_SECRETS,
   iosReleaseWorkflowPath,
+  iosBuildCredentialsEnvironment,
 } from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
-import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
+import { connectionSetupUrl, formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
   APPLIED_SPEC_HASH_OPERATION,
@@ -55,7 +60,7 @@ export function requiredProviderSecretNamesForGitHubActions(provider: string): s
   return Array.from(new Set(names));
 }
 
-export function missingProviderSecretsMessage(provider: string, missingProviderSecrets: string[]): string {
+export function missingProviderSecretsMessage(provider: string, missingProviderSecrets: string[], options: { project?: string; scope?: string } = {}): string {
   const missingDatabaseUrl = missingProviderSecrets.includes('DATABASE_URL');
   const providerSecrets = missingProviderSecrets.filter((name) => name !== 'DATABASE_URL');
   const parts = providerSecrets.length > 0
@@ -67,11 +72,11 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push('Missing managed database secret: DATABASE_URL. Hypervibe could not resolve an externally reachable database URL for the GitHub Actions migration step; reconcile the database and re-run hv_plan.');
   }
   if (missingProviderApiSecrets) {
-    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
+    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider, options)}`);
   }
   if (missingImageRegistrySecrets) {
     const displayName = providerRegistry.getMetadata(provider)?.displayName ?? provider;
-    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${GITHUB_TOKEN_URLS.packageRead}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, options)}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { ...options, intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
 }
@@ -134,9 +139,16 @@ export function isGitHubActionsAppliedSpecHashAction(action: PlanAction): boolea
   return action.metadata?.operation === APPLIED_SPEC_HASH_OPERATION;
 }
 
+interface ManagedCiCredentialSource {
+  connectionId: string;
+  credentialKey: string;
+  name: string;
+  containerPull?: boolean;
+}
+
 export function providerSecretsForGitHubActions(
   provider: string,
-  options: { githubLogin?: string; githubRepo?: string } = {}
+  options: { githubLogin?: string; githubRepo?: string; onSource?: (source: ManagedCiCredentialSource) => void } = {}
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
   const connection = connectionRepo.findBestVerifiedMatch(provider, options.githubRepo);
@@ -150,21 +162,32 @@ export function providerSecretsForGitHubActions(
       const value = credentials[credentialKey];
       if (typeof value === 'string' && value.length > 0) {
         secrets.push({ name, value });
+        options.onSource?.({ connectionId: connection.id, credentialKey, name });
       }
     }
   }
 
   if (ci?.requiresGitHubPackagePull) {
-    const pull = githubPackagePullCredentials({ githubRepo: options.githubRepo, githubLogin: options.githubLogin });
+    const pull = githubPackagePullSource({ githubRepo: options.githubRepo, githubLogin: options.githubLogin });
     if (pull) {
       secrets.push(
         { name: 'IMAGE_REGISTRY_USERNAME', value: pull.username },
         { name: 'IMAGE_REGISTRY_TOKEN', value: pull.token }
       );
+      options.onSource?.({ connectionId: pull.connectionId, credentialKey: pull.credentialKey,
+        name: 'IMAGE_REGISTRY_TOKEN', containerPull: true });
     }
   }
 
   return secrets;
+}
+
+/** Value-free source identities for provider-declared CI mappings. Presence of
+ * a similarly named delegated secret never establishes this relationship. */
+export function managedCiCredentialSources(provider: string, repository: string): ManagedCiCredentialSource[] {
+  const sources: ManagedCiCredentialSource[] = [];
+  providerSecretsForGitHubActions(provider, { githubRepo: repository, onSource: source => sources.push(source) });
+  return sources;
 }
 
 /**
@@ -426,7 +449,7 @@ function appStoreSecretsForGitHubActions(environmentSpec: EnvironmentSpec): {
   secrets: ProviderSecret[];
   error?: string;
 } {
-  if (!environmentSpec.ios?.release) return { secrets: [] };
+  if (!environmentSpec.ios?.release || environmentSpec.ios.release.promoteFrom) return { secrets: [] };
   const resolved = getVerifiedAppStoreConnectCredentials(environmentSpec.ios.bundleId);
   if ('error' in resolved) return { secrets: [], error: resolved.error };
   return {
@@ -440,11 +463,60 @@ function appStoreSecretsForGitHubActions(environmentSpec: EnvironmentSpec): {
 
 function requiredIosBuildSecrets(environmentSpec: EnvironmentSpec): string[] {
   const release = environmentSpec.ios?.release;
-  if (!release) return [];
+  if (!release || release.promoteFrom) return [];
   return [
     ...release.build.requiredSecrets,
     ...(release.signing.provider === 'match' ? MATCH_SIGNING_REQUIRED_SECRETS : []),
   ];
+}
+
+interface IosBuildCredentialsSource {
+  id: number;
+  name: string;
+  requiredSecretNames: string[];
+  presentSecretNames: string[];
+}
+
+function alternateIosBuildCredentialsEnvironment(environmentSpec: EnvironmentSpec, environmentName: string): string | undefined {
+  if (!environmentSpec.ios?.release || environmentSpec.ios.release.promoteFrom) return undefined;
+  const source = iosBuildCredentialsEnvironment(environmentSpec.ios, environmentName);
+  return source.toLowerCase() === environmentName.toLowerCase() ? undefined : source;
+}
+
+function iosBuildCredentialsNotice(environmentName: string, source: string): string {
+  return `${environmentName} iOS builds use secrets and protection rules from the GitHub environment "${source}". Secret names prove presence only, not valid credentials.`;
+}
+
+async function observeIosBuildCredentialsSource(params: {
+  adapter: GitHubAdapter; owner: string; repo: string; environmentSpec: EnvironmentSpec; environmentName: string;
+}): Promise<{ source?: IosBuildCredentialsSource; error?: string }> {
+  const name = alternateIosBuildCredentialsEnvironment(params.environmentSpec, params.environmentName);
+  if (name === undefined) return {};
+  const requiredSecretNames = [...new Set(requiredIosBuildSecrets(params.environmentSpec))].sort();
+  try {
+    const observed = await params.adapter.observeBuildCredentialsEnvironment(params.owner, params.repo, name, requiredSecretNames);
+    const source = { id: observed.id, name: observed.name, requiredSecretNames,
+      presentSecretNames: presentManagedSecretNames(requiredSecretNames, observed.secretNames) };
+    if (observed.customProtectionRuleIds.length > 0) {
+      return { source, error: `The iOS build credentials environment "${name}" has custom deployment protection rules, which are unsupported for a build job without a deployment.` };
+    }
+    const missing = requiredSecretNames.filter(key => !source.presentSecretNames.includes(key));
+    if (missing.length > 0) {
+      return { source, error: `The iOS build credentials environment "${name}" is missing required secret names: ${missing.join(', ')}.` };
+    }
+    return { source };
+  } catch {
+    return { error: `Cannot verify the existing iOS build credentials environment "${name}". Re-run hv_plan after its identity, secret names and protection rules can be read.` };
+  }
+}
+
+function sameIosBuildCredentialsSource(reviewed: unknown, current: IosBuildCredentialsSource): boolean {
+  const record = asRecord(reviewed);
+  const required = reviewedSecretNames(record?.requiredSecretNames);
+  const present = reviewedSecretNames(record?.presentSecretNames);
+  return record?.id === current.id && typeof record?.name === 'string' && record.name.toLowerCase() === current.name.toLowerCase()
+    && required !== null && present !== null
+    && sameStringLists(required, current.requiredSecretNames) && sameStringLists(present, current.presentSecretNames);
 }
 
 async function resolveManagedWorkflowSecrets(params: {
@@ -460,6 +532,7 @@ async function resolveManagedWorkflowSecrets(params: {
   availableSecretHashes: Record<string, string>;
   missingProviderSecrets: string[];
   missingDatabaseSecrets: string[];
+  providerError?: string;
   appStoreError?: string;
 }> {
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(
@@ -468,7 +541,8 @@ async function resolveManagedWorkflowSecrets(params: {
   const requiredDatabaseSecrets = params.workflow.requiredSecrets.includes('DATABASE_URL')
     ? ['DATABASE_URL']
     : [];
-  const availableSecrets = providerSecretsForGitHubActions(
+  let providerError: string | undefined;
+  let availableSecrets = providerSecretsForGitHubActions(
     params.environmentSpec.hosting.provider,
     { githubRepo: params.repository }
   ).filter((secret) => params.workflow.requiredSecrets.includes(secret.name));
@@ -478,6 +552,14 @@ async function resolveManagedWorkflowSecrets(params: {
       params.environmentName
     );
     if (databaseUrlSecret) availableSecrets.push(databaseUrlSecret);
+  }
+  // An explicit accepted role owns these exact destinations. Future CI sync
+  // must not restore an older connection value or pick up a local file edit.
+  for (const tracked of acceptedCredentialCiInputs(params.project, params.repository, params.environmentName)) {
+    if (!params.workflow.requiredSecrets.includes(tracked.name)) continue;
+    availableSecrets = availableSecrets.filter(secret => secret.name !== tracked.name);
+    if (tracked.value !== undefined) availableSecrets.push({ name: tracked.name, value: tracked.value });
+    else providerError = 'A declared credential role has not completed reviewed synchronization. Recover its credential plan before CI synchronization.';
   }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const appStore = appStoreSecretsForGitHubActions(params.environmentSpec);
@@ -489,6 +571,7 @@ async function resolveManagedWorkflowSecrets(params: {
     availableSecretHashes: secretHashes(availableSecrets),
     missingProviderSecrets: requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name)),
     missingDatabaseSecrets: requiredDatabaseSecrets.filter((name) => !availableSecretNames.includes(name)),
+    ...(providerError ? { providerError } : {}),
     ...(appStore.error ? { appStoreError: appStore.error } : {}),
   };
 }
@@ -511,6 +594,7 @@ function buildAction(params: {
   staleEnvironmentSecrets?: string[];
   retiredPaths?: string[];
   workflowPublicationRequired?: boolean;
+  iosBuildCredentialsSource?: IosBuildCredentialsSource;
   dependsOn?: string[];
 }): PlanAction {
   return {
@@ -518,10 +602,13 @@ function buildAction(params: {
     type: params.type,
     resource: { kind: 'ci', name: `deploy-branch:${params.workflow.environment}`, provider: 'github' },
     verified: params.verified,
-    reason: params.reason,
+    reason: params.iosBuildCredentialsSource
+      ? `${params.reason}. ${iosBuildCredentialsNotice(params.workflow.environment, params.iosBuildCredentialsSource.name)}`
+      : params.reason,
     ...(params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
     metadata: {
       operation: OPERATION,
+      ...(params.iosBuildCredentialsSource ? { iosBuildCredentialsSource: params.iosBuildCredentialsSource } : {}),
       ...(params.workflowPublicationRequired ? { workflowPublicationRequired: true } : {}),
       repository: params.repo,
       provider: params.provider,
@@ -668,6 +755,7 @@ export async function planGitHubActionsDeploy(params: {
   const bindingHasInputContract = Boolean(binding?.inputHash);
   const inputContractNeedsAdoption = !bindingHasInputContract;
   const inputContractChanged = bindingHasInputContract && binding?.inputHash !== inputHash;
+  let iosBuildCredentialsSource: IosBuildCredentialsSource | undefined;
   const unverifiedPublication = (warning: string) => {
     warnings.push(warning);
     return {
@@ -677,6 +765,7 @@ export async function planGitHubActionsDeploy(params: {
         repo,
         workflow,
         inputHash,
+        iosBuildCredentialsSource,
         reason: `Cannot verify the live GitHub Actions deploy workflow ${workflow.path}`,
         verified: false,
         workflowPublicationRequired: true,
@@ -692,6 +781,14 @@ export async function planGitHubActionsDeploy(params: {
     return unverifiedPublication(
       `Cannot observe GitHub Actions workflow for ${repo}: ${adapterResult.error}`
     );
+  }
+
+  const alternateSource = alternateIosBuildCredentialsEnvironment(environmentSpec, environmentName);
+  if (alternateSource !== undefined) {
+    warnings.push(iosBuildCredentialsNotice(environmentName, alternateSource));
+    const observed = await observeIosBuildCredentialsSource({ adapter: adapterResult.adapter, owner, repo: repoName, environmentSpec, environmentName });
+    iosBuildCredentialsSource = observed.source;
+    if (observed.error) return unverifiedPublication(observed.error);
   }
 
   let observation: Awaited<ReturnType<typeof observeManagedWorkflowFiles>>;
@@ -726,6 +823,7 @@ export async function planGitHubActionsDeploy(params: {
         repo,
         workflow,
         inputHash,
+        iosBuildCredentialsSource,
         reason,
         verified: true,
         workflowPublicationRequired: true,
@@ -743,6 +841,7 @@ export async function planGitHubActionsDeploy(params: {
     availableSecretHashes,
     missingProviderSecrets,
     missingDatabaseSecrets,
+    providerError,
     appStoreError,
   } = await resolveManagedWorkflowSecrets({
     project,
@@ -754,7 +853,7 @@ export async function planGitHubActionsDeploy(params: {
   if (missingProviderSecrets.length > 0) {
     warnings.push(
       `GitHub Actions deploy workflow ${workflow.path} requires provider secrets that Hypervibe cannot sync: ${missingProviderSecrets.join(', ')}. `
-      + missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets)
+      + missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets, { project: project.name, scope: repo })
     );
   }
   if (missingDatabaseSecrets.length > 0) {
@@ -764,6 +863,7 @@ export async function planGitHubActionsDeploy(params: {
     );
   }
   if (appStoreError) warnings.push(appStoreError);
+  if (providerError) warnings.push(providerError);
   const requiredBuildSecrets = requiredIosBuildSecrets(environmentSpec);
 
   let environmentSecretNames: string[] = [];
@@ -780,7 +880,8 @@ export async function planGitHubActionsDeploy(params: {
   const staleProviderSecrets = requiredProviderSecrets.filter(needsSync);
   const staleDatabaseSecrets = requiredDatabaseSecrets.filter(needsSync);
   const staleEnvironmentSecrets = Object.keys(availableSecretHashes).filter(needsSync);
-  const missingEnvironmentSecrets = requiredBuildSecrets.filter((name) => !environmentSecretNames.includes(name));
+  const buildSecretNames = iosBuildCredentialsSource?.presentSecretNames ?? environmentSecretNames;
+  const missingEnvironmentSecrets = requiredBuildSecrets.filter((name) => !buildSecretNames.includes(name));
   const missingSecretSync = missingProviderSecrets.length > 0
     || missingDatabaseSecrets.length > 0
     || Boolean(appStoreError)
@@ -816,6 +917,7 @@ export async function planGitHubActionsDeploy(params: {
       repo,
       workflow,
       inputHash,
+      iosBuildCredentialsSource,
       reason,
       verified: environmentSecretsObserved,
       missingProviderSecrets,
@@ -825,7 +927,7 @@ export async function planGitHubActionsDeploy(params: {
       desiredEnvironmentSecretHashes: availableSecretHashes,
       reviewedEnvironmentSecrets: environmentSecretsObserved
         ? presentManagedSecretNames(
-            [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...requiredBuildSecrets],
+            [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...(iosBuildCredentialsSource ? [] : requiredBuildSecrets)],
             environmentSecretNames
           )
         : undefined,
@@ -844,6 +946,9 @@ export async function applyGitHubActionsDeploy(params: {
   action: PlanAction;
   authority?: 'publication-only' | 'secret-sync';
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  if (params.action.type === 'noop') {
+    return { success: true, message: 'No GitHub Actions workflow or secret changes were requested.', data: { skipped: true, reason: 'noop' } };
+  }
   const { project, environmentName, environmentSpec } = params;
   const authority = params.authority ?? (
     params.action.metadata?.workflowPublicationRequired === true
@@ -896,6 +1001,17 @@ export async function applyGitHubActionsDeploy(params: {
     };
   }
   const { acceptance } = observation;
+  const buildCredentials = await observeIosBuildCredentialsSource({ adapter, owner, repo: repoName, environmentSpec, environmentName });
+  const iosBuildCredentialsSource = buildCredentials.source;
+  if (buildCredentials.error || (iosBuildCredentialsSource
+      ? !sameIosBuildCredentialsSource(params.action.metadata?.iosBuildCredentialsSource, iosBuildCredentialsSource)
+      : params.action.metadata?.iosBuildCredentialsSource !== undefined)) {
+    return {
+      success: false, status: 'blocked', message: 'The reviewed iOS build credentials source changed or cannot be verified',
+      error: buildCredentials.error ?? 'The iOS build credentials environment identity or required secret names changed after planning. Re-run hv_plan before any workflow or secret write.',
+    };
+  }
+
   if (authority === 'publication-only') {
     if (acceptance !== 'drift') {
       return {
@@ -936,6 +1052,7 @@ export async function applyGitHubActionsDeploy(params: {
                 'Installs existing Match assets read-only when managed signing is selected.',
                 'Revalidates the IPA before sending it to the declared TestFlight groups.',
                 'Does not submit the app to the App Store automatically.',
+                ...(iosBuildCredentialsSource ? [iosBuildCredentialsNotice(environmentName, iosBuildCredentialsSource.name)] : []),
               ],
               mergeEffect: workflow.autoDeployOnPush
                 ? `This release workflow waits for a successful ${environmentName} server deployment; merging it does not bypass that check.`
@@ -976,6 +1093,7 @@ export async function applyGitHubActionsDeploy(params: {
     missingProviderSecrets,
     missingDatabaseSecrets,
     availableSecretHashes,
+    providerError,
     appStoreError,
   } = await resolveManagedWorkflowSecrets({
     project,
@@ -1004,7 +1122,7 @@ export async function applyGitHubActionsDeploy(params: {
     };
   }
   const currentEnvironmentSecrets = presentManagedSecretNames(
-    [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...requiredIosBuildSecrets(environmentSpec)],
+    [...Object.keys(availableSecretHashes), ...requiredProviderSecrets, ...requiredDatabaseSecrets, ...(iosBuildCredentialsSource ? [] : requiredIosBuildSecrets(environmentSpec))],
     environmentSecretNames
   );
   if (!sameStringLists(currentEnvironmentSecrets, reviewedEnvironmentSecrets)) {
@@ -1020,7 +1138,7 @@ export async function applyGitHubActionsDeploy(params: {
       success: false,
       status: 'blocked',
       message: `Cannot sync ${workflow.path} because required managed secrets are missing`,
-      error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingManagedSecrets),
+      error: providerError ?? missingProviderSecretsMessage(environmentSpec.hosting.provider, missingManagedSecrets, { project: project.name, scope: repo }),
       data: {
         workflow: workflow.path,
         syncedEnvironmentSecrets: [],
@@ -1033,7 +1151,7 @@ export async function applyGitHubActionsDeploy(params: {
   if (environmentSpec.ios?.release) {
     const requiredBuildSecrets = requiredIosBuildSecrets(environmentSpec);
     const missingBuildSecrets = requiredBuildSecrets
-      .filter((name) => !environmentSecretNames.includes(name));
+      .filter((name) => !(iosBuildCredentialsSource?.presentSecretNames ?? environmentSecretNames).includes(name));
     if (missingBuildSecrets.length > 0) {
       return {
         success: false,
@@ -1263,7 +1381,7 @@ export async function planGitHubActionsRelease(params: {
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl);
   const [owner, repo] = repository?.split('/') ?? [];
   if (!repository || !owner || !repo) {
-    warnings.push(`Cannot plan the ${params.environmentName} release required by database.seedCommand.`);
+    warnings.push(`Cannot plan the ${params.environmentName} release required by post-release work.`);
     return { warnings };
   }
   const contract = resolveManagedWorkflowContract({
@@ -1302,9 +1420,9 @@ export async function planGitHubActionsRelease(params: {
   });
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
-    warnings.push(`Cannot observe the exact release required before database seeding: ${adapterResult.error}`);
+    warnings.push(`Cannot observe the exact release required before post-release work: ${adapterResult.error}`);
     return {
-      action: action(false, `Cannot verify the ${params.environmentName} release required before database seeding`, {
+      action: action(false, `Cannot verify the ${params.environmentName} release required before post-release work`, {
         blockedReason: 'github_release_observation_unknown',
       }),
       warnings,
@@ -1349,7 +1467,7 @@ export async function planGitHubActionsRelease(params: {
         true,
         existing && !mustReleaseAfterPrerequisites
           ? `Exact commit ${targetSha} is already verified as deployed`
-          : `Deploy and verify exact commit ${targetSha} before database seeding`,
+          : `Deploy and verify exact commit ${targetSha} before post-release work`,
         {
           targetSha,
           workflowInputHash,
@@ -1362,9 +1480,9 @@ export async function planGitHubActionsRelease(params: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    warnings.push(`Cannot observe the exact release required before database seeding: ${message}`);
+    warnings.push(`Cannot observe the exact release required before post-release work: ${message}`);
     return {
-      action: action(false, `Cannot verify the ${params.environmentName} release required before database seeding`, {
+      action: action(false, `Cannot verify the ${params.environmentName} release required before post-release work`, {
         blockedReason: 'github_release_observation_unknown',
       }),
       warnings,
@@ -1458,7 +1576,16 @@ export async function applyGitHubActionsRelease(params: {
       environmentName: params.environmentName,
       targetSha: params.targetSha,
     });
-  if (alreadyReleased) {
+  const storedSpec = new SpecStore().get(params.project)?.spec;
+  const releaseEnvironment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
+  const credentialPending = releaseEnvironment && Object.keys(pendingCredentialOperations(releaseEnvironment)).length > 0;
+  if (credentialPending && !storedSpec) return { success: false, status: 'blocked', message: 'Credential rollout requires the accepted project spec.' };
+  let existingCredentialActivation: Awaited<ReturnType<typeof observeGitHubCredentialRollout>> = [];
+  if (alreadyReleased && credentialPending && storedSpec) {
+    try { existingCredentialActivation = await observeGitHubCredentialRollout({ project: params.project, spec: storedSpec, runId: String(alreadyReleased.runId) }); }
+    catch { /* An older release has no authority for the replacement; dispatch the reviewed new release. */ }
+  }
+  if (alreadyReleased && (!credentialPending || existingCredentialActivation.length)) {
     return {
       success: true,
       message: `Verified deployed commit ${params.targetSha}`,
@@ -1488,7 +1615,13 @@ export async function applyGitHubActionsRelease(params: {
       error: `${error}${reason === 'observation-failed' ? '' : ' Re-run hv_plan.'}`,
     };
   }
-  await adapter.triggerWorkflow(owner, repo, params.workflow, params.ref, { commit_sha: params.targetSha });
+  let dispatchInputs: Record<string, string> = { commit_sha: params.targetSha };
+  try {
+    if (storedSpec) dispatchInputs = await prepareGitHubCredentialRollout({ project: params.project, spec: storedSpec, definition: params.workflow, ref: params.ref, inputs: dispatchInputs });
+  } catch {
+    return { success: false, status: 'blocked', message: 'Managed credential rollout preparation could not verify the exact reviewed workflow. Re-run hv_plan.' };
+  }
+  await adapter.triggerWorkflow(owner, repo, params.workflow, params.ref, dispatchInputs);
   const deadline = Date.now() + (params.timeoutMs ?? RELEASE_WAIT_TIMEOUT_MS);
   let selectedRun: Awaited<ReturnType<GitHubAdapter['listWorkflowRuns']>>['workflow_runs'][number] | undefined;
   while (Date.now() < deadline) {
@@ -1534,10 +1667,17 @@ export async function applyGitHubActionsRelease(params: {
       data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url },
     };
   }
+  let credentialActivation: Awaited<ReturnType<typeof observeGitHubCredentialRollout>> = [];
+  try {
+    if (storedSpec) credentialActivation = await observeGitHubCredentialRollout({ project: params.project, spec: storedSpec, runId: String(selectedRun.id) });
+  } catch {
+    return { success: false, status: 'pending', message: 'The managed release finished, but credential activation evidence remains unverified.',
+      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url } };
+  }
   return {
     success: true,
     message: `Deployed and verified exact commit ${params.targetSha}`,
-    data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url, artifactId: releaseEvidence.id },
+    data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url, artifactId: releaseEvidence.id, ...(credentialActivation.length ? { credentialActivation } : {}) },
   };
 }
 

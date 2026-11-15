@@ -6,6 +6,7 @@
  */
 
 import { NotSupportedError } from '../domain/errors/not-supported.error.js';
+import { redactSensitiveString } from '../utils/redact-sensitive-string.js';
 
 export type ErrorCode =
   | 'NOT_FOUND'
@@ -42,7 +43,7 @@ export interface CommandEnvelope {
   /** Safe, machine-readable retry metadata for an interactive interface. */
   confirmation?: {
     message: string;
-    retryInput: Record<string, boolean | string[]>;
+    retryInput: Record<string, boolean | string | string[]>;
   };
 }
 
@@ -105,23 +106,6 @@ function isSensitiveKey(key: string): boolean {
   return false;
 }
 
-function redactSensitiveString(value: string): string {
-  return value
-    .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?-----END [^-]+PRIVATE KEY-----/g, REDACTED)
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+:[^@\s/]+)@/gi, `$1${REDACTED}@`)
-    .replace(/\bgithub_pat_[A-Za-z0-9_]+/g, REDACTED)
-    .replace(/\bgh[oprsu]_[A-Za-z0-9_]{20,}/g, REDACTED)
-    .replace(/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED)
-    .replace(/\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{16,}/g, REDACTED)
-    .replace(/\bsk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED)
-    .replace(/\brk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED)
-    .replace(/\bwhsec_[A-Za-z0-9]{16,}/g, REDACTED)
-    .replace(/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, REDACTED)
-    .replace(/\bsbp_[A-Za-z0-9_]{16,}/g, REDACTED)
-    .replace(/\bsb_secret_[A-Za-z0-9_]{16,}/g, REDACTED)
-    .replace(/\bxox[abprs]-[A-Za-z0-9-]{16,}/g, REDACTED);
-}
-
 function redactForResponse(value: unknown, keyHint?: string, seen = new WeakSet<object>()): unknown {
   if (typeof value === 'string') {
     if (keyHint && isSensitiveKey(keyHint)) {
@@ -142,6 +126,17 @@ function redactForResponse(value: unknown, keyHint?: string, seen = new WeakSet<
 
   if (Array.isArray(value)) {
     const output = value.map((entry) => redactForResponse(entry, keyHint, seen));
+    seen.delete(value);
+    return output;
+  }
+
+  // Ordinary repository configuration is stored in desired state, but values
+  // are unnecessary in command responses; show only names and adoption intent.
+  if (keyHint === 'repositoryVariables') {
+    const output = Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, entry]) => [name,
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? { ...redactForResponse(entry, undefined, seen) as Record<string, unknown>, value: REDACTED }
+        : REDACTED]));
     seen.delete(value);
     return output;
   }
@@ -179,7 +174,7 @@ function hasConnectionSetup(data: Record<string, unknown>): boolean {
   return isRecord(setup) || (Array.isArray(setup) && setup.some(isRecord));
 }
 
-const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
+const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Preserve the complete query string, including the name and description; Hypervibe has prepared the supported known fields. Never replace a pre-filled form link with a dashboard URL or a click-by-click navigation checklist, and do not invent or rewrite query parameters. Explain only the remaining manual fields, review, or consent from the guidance; never put secrets in URLs. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
 
 function successAgentInstruction(data: unknown): CommandEnvelope['agentInstruction'] | undefined {
   if (!isRecord(data)) return undefined;

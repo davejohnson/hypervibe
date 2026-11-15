@@ -82,6 +82,45 @@ function provider(
 }
 
 describe('ProviderRegistry lifecycle capabilities', () => {
+  it('rejects contradictory volume support and unsupported claims', () => {
+    const candidate = provider('contradictory-volumes', 'deployment');
+    Object.assign(candidate.metadata.lifecycle!.hosting!, {
+      serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' },
+      serviceVolumesUnsupported: { reason: 'No persistent filesystem mounts.', documentationUrl: 'https://example.com/limits' },
+    });
+    expect(() => new ProviderRegistry().register(candidate)).toThrow(/serviceVolumes.*mutually exclusive/);
+  });
+
+  it.each([
+    null, {}, { reason: ' ', documentationUrl: 'https://example.com/limits' },
+    { reason: 'Unsupported', documentationUrl: 'not-a-url' },
+    { reason: 'Unsupported', documentationUrl: 'http://example.com/limits' },
+  ])('rejects unsupported-volume claims without a reason and HTTPS evidence: %j', (claim) => {
+    const candidate = provider('invalid-volume-limitation', 'deployment');
+    Object.assign(candidate.metadata.lifecycle!.hosting!, { serviceVolumesUnsupported: claim });
+    expect(() => new ProviderRegistry().register(candidate)).toThrow(/serviceVolumesUnsupported/);
+  });
+
+  it.each([
+    { workloadKinds: [], retention: 'retain-only' },
+    { workloadKinds: ['web', 'web'], retention: 'retain-only' },
+    { workloadKinds: ['worker'], retention: 'retain-only' },
+    { workloadKinds: ['web'], retention: 'delete' },
+    { workloadKinds: ['web'], retention: 'retain-only', attachmentTiming: 'implicit' },
+  ])('rejects invalid supported-volume capability claims: %j', (claim) => {
+    const candidate = provider('invalid-volume-capability', 'deployment');
+    Object.assign(candidate.metadata.lifecycle!.hosting!, { serviceVolumes: claim });
+    expect(() => new ProviderRegistry().register(candidate)).toThrow(/serviceVolumes/);
+  });
+
+  it.each(['service-update', 'workload-create'])('accepts explicit volume attachment timing %s', (attachmentTiming) => {
+    const candidate = provider('volume-timing', 'deployment');
+    Object.assign(candidate.metadata.lifecycle!.hosting!, {
+      serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only', attachmentTiming },
+    });
+    expect(() => new ProviderRegistry().register(candidate)).not.toThrow();
+  });
+
   it('rejects local env metadata that names a missing credential role', () => {
     const registry = new ProviderRegistry();
     const invalid = provider('bad-local-env', 'ai');

@@ -240,7 +240,7 @@ struct CompanionSettingsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Coding agents")
                     .font(.title2.weight(.semibold))
-                Text("Connect every project below to a desktop MCP client using Hypervibe’s bundled runtime.")
+                Text("Connect your projects using the runtime included with Hypervibe. Codex also receives Hypervibe’s workflow guidance.")
                     .foregroundStyle(.secondary)
             }
 
@@ -262,7 +262,7 @@ struct CompanionSettingsView: View {
                                     ? AnyShapeStyle(.secondary)
                                     : AnyShapeStyle(.red)
                             )
-                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     Spacer()
@@ -270,6 +270,18 @@ struct CompanionSettingsView: View {
                     if model.updatingMCPHosts.contains(host) {
                         ProgressView()
                             .controlSize(.small)
+                    }
+                    if let status = model.mcpHostStatuses[host],
+                        status.isFullyConnected,
+                        status.skill.needsUpdate {
+                        Button(status.skill.state == .missing ? "Install guidance" : "Update guidance") {
+                            Task { await model.updateMCPHostSkill(host) }
+                        }
+                        .clickTargetCursor()
+                        .disabled(
+                            !CompanionDistribution.isReadyForOnboarding
+                                || model.updatingMCPHosts.contains(host)
+                        )
                     }
                     Button(hostActionTitle(host)) {
                         Task {
@@ -287,9 +299,11 @@ struct CompanionSettingsView: View {
                 .companionCardSurface(cornerRadius: 9)
             }
 
-            Text("After connecting, fully restart the desktop client. Hypervibe keeps a one-time backup beside each configuration file.")
+            Text("Restart your coding agent after connecting or updating its guidance. Claude Desktop receives guidance through MCP; it does not use a local skill folder.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Link("Claude Code and OpenCode setup", destination: URL(string: "https://github.com/davejohnson/hypervibe/blob/main/docs/agent-installation.md")!)
+                .font(.caption)
         }
     }
 
@@ -307,7 +321,21 @@ struct CompanionSettingsView: View {
             return "Add a project to enable setup."
         }
         if status.isFullyConnected {
-            return "Connected to \(status.connectedProjectCount) project\(status.connectedProjectCount == 1 ? "" : "s"). Restart required after changes."
+            let connection = "Connected to \(status.connectedProjectCount) project\(status.connectedProjectCount == 1 ? "" : "s")."
+            switch status.skill.state {
+            case .current:
+                return "\(connection) Hypervibe guidance is current."
+            case .missing:
+                return "\(connection) Install Hypervibe guidance to complete Codex setup."
+            case .updateAvailable:
+                return "\(connection) Updated Hypervibe guidance is available from this app."
+            case .modified:
+                return "\(connection) Your custom Hypervibe guidance is preserved."
+            case .unavailable:
+                return "\(connection) Hypervibe could not verify the installed guidance."
+            case .notSupported:
+                return "\(connection) Guidance is supplied through MCP."
+            }
         }
         if status.connectedProjectCount > 0 {
             return "\(status.connectedProjectCount) of \(status.projectCount) projects connected."

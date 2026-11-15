@@ -11,7 +11,7 @@ import { hostingBindingsSchema } from '../../domain/ports/hosting.port.js';
  */
 
 /** projects.policies — free-form policy map (includes legacy desiredState). */
-export const policiesColumnSchema = z.record(z.unknown()).default({});
+export const policiesColumnSchema = z.record(z.string(), z.unknown()).default({});
 
 /** environments.platform_bindings — provider bindings (see HostingBindings). */
 export const platformBindingsColumnSchema = hostingBindingsSchema;
@@ -71,7 +71,7 @@ export const componentBindingsColumnSchema = z
   .default({});
 
 /** runs.plan */
-export const runPlanColumnSchema = z.record(z.unknown()).default({});
+export const runPlanColumnSchema = z.record(z.string(), z.unknown()).default({});
 
 /** runs.receipts */
 export const runReceiptsColumnSchema = z.array(z.unknown()).default([]);

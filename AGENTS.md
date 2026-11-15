@@ -1,87 +1,124 @@
-# Agent Notes
+# Hypervibe development
 
-Read `ARCHITECTURE.md` before changing lifecycle, provider, plan/apply, deploy, database migration, DNS/domain, CI, connection, or secret-handling code. That file is the source of truth for Hypervibe's infrastructure model.
+Hypervibe makes it easy for vibe coders to deploy and operate apps on Google
+Cloud, AWS and Azure. The user describes the app; Hypervibe handles infrastructure,
+authentication, deployment, rollback, recovery, observability, secrets and
+third-party integrations. Use the
+[audience guide](docs/development/product.md#who-we-build-and-write-for) when
+changing customer-facing pages, emails, prompts or errors.
 
-Hypervibe is an infrastructure creation, migration, and destruction orchestrator. It is not a loose collection of imperative provider functions.
+<a id="working-method"></a>
 
-Hypervibe is built for nontechnical vibe coders who want to bring their projects to life on the web. Optimize the product and agent experience for the easiest, fastest sensible path from an existing repository to a working deployment. Hypervibe should do the infrastructure work and explain the outcome in plain language.
+## Design for the complete journey
 
-Onboarding and deployment defaults:
+- Build toward the [common cloud user journey](docs/development/user-journey.md).
+  It is the acceptance target for GCP, AWS and Azure, not a claim of current
+  support. Provider notes and historical checklists do not define extra scope.
+- Optimize for a working app with the fewest user chores and installed tools.
+  Infer routine choices from the repository; ask for missing access, consequential
+  decisions and approvals, not an infrastructure design exercise.
+- OpenTofu is the chosen infrastructure lifecycle engine. Hypervibe must manage
+  pinned, private engine dependencies automatically. Do not make users separately
+  install or operate OpenTofu, Terraform, cloud CLIs or Docker for deployment.
+  The current npm path still requires Node.js/npm; distinguish targets from
+  implemented and verified installation paths.
+- Focus new cloud work on GCP, AWS and Azure. Preserve Railway for existing apps.
+  Keep new infrastructure on the managed engine. Removing obsolete code or
+  documentation does not authorize discarding state, data or working workflows.
+- Prove the smallest complete path from installation and cloud access to a running
+  app before expanding providers or features. An engine wrapper or passing unit
+  tests alone do not establish a supported deployment. Say what is implemented,
+  what is verified and what remains unavailable.
+- Keep changes scoped and preserve unrelated work. Read relevant sections, batch
+  independent checks, and show useful results instead of verbose logs. Use agents
+  for bounded independent work when useful; one owner verifies integration.
+- If two attempts leave the same user-visible step blocked, reassess the diagnosis
+  and explain what the next attempt will establish. Fix missing Hypervibe
+  capabilities in the shared workflow instead of handing users recurring manual
+  provider setup.
 
-- Make routine decisions instead of asking users to design infrastructure. Infer the application name and runtime from the repository, reuse verified connections when their resource scope belongs to the selected project, and choose supported, economical defaults. Do not ask users to approve ordinary names, suffixes, or other reversible implementation details.
-- For a new web project without an existing environment policy, prepare production and staging together. Derive names from the application, for example production `xyz` and staging `xyz-staging`, and state the proposed setup directly. Preserve existing environment names and explicit user choices. Keep staging data, secrets, and resource identities isolated from production; do not add databases, caches, or other paid services the application does not need.
-- Prefer HTTPS, private datastores, least-privilege workload identities, generated application secrets, managed CI deploys, and economical staging capacity wherever implemented. Explain any unsupported or blocked part honestly instead of presenting an intended default as completed infrastructure.
-- Hide provider setup complexity behind the desired-state lifecycle where possible. Automatically discover unambiguous authorized account and billing scope, derive valid resource names, and plan required project creation, API enablement, identity setup, and runtime wiring through declared provider capabilities. A Hypervibe environment is not a GCP project; do not confuse their names or assume that a connection to another application's cloud project authorizes using it.
-- Ask only for missing access, genuinely ambiguous ownership or billing choices, external-party secrets, or consequential approvals required by the lifecycle contract. Present a concrete plan with the chosen defaults and cost implications before asking for those approvals. Naming defaults never authorize spending, billing attachment, adoption, or destructive changes.
-- When a missing capability forces a user to perform routine provider setup manually, treat it as an onboarding product gap to fix in the shared application/provider path. Do not normalize repeated dashboard chores, credential copying, or provider-specific questionnaires as the deployment experience.
+<a id="non-negotiable-boundaries"></a>
 
-Core rules for coding agents:
+## Boundaries that survive the engine change
 
-- Add the least code needed for the requested behavior. Prefer deleting or extending existing paths over introducing new layers, helpers, configuration, compatibility branches, or abstractions for hypothetical future needs.
-- Keep MCP and CLI as thin adapters over `src/application`. Define command ids, schemas, descriptions, safety metadata, handlers, redaction, and structured results once; never put provider calls or lifecycle orchestration in an interface.
-- Every supported command must be reachable through both adapters unless architecture documentation explicitly declares it interface-specific. Contract tests must pin registry/MCP parity and CLI routing.
-- Redact command results before they reach any interface. MCP `structuredContent` and CLI `--json` must expose the same safe envelope; prompts, human output, stderr, and validation errors must follow the same secret boundary.
-- The `hypervibe` CLI is safe to use because it shares Hypervibe state and reconciliation. Direct provider CLIs remain prohibited for infrastructure operations, and MCP agents should use available `hv_*` tools instead of spawning the CLI.
-- Keep the desired-state loop central: `hv_spec` defines intent, `hv_plan` computes drift and blocked work, `hv_apply` converges a specific plan, and `hv_status` verifies convergence.
-- Lifecycle infrastructure changes belong in spec/plan/apply. Do not hide creates, attaches, purchases, migrations, deploy-source changes, DNS changes, schedules, or destroys inside CI, diagnostics, or helper tools.
-- Treat the persisted plan as an authorization boundary. An apply handler may mutate only the resource and operation named by its current non-noop action; dependencies must be explicit plan edges. Never let a service, environment-variable, secret, deploy, or diagnostic action implicitly create, repair, attach, or destroy a database or another unrelated resource.
-- A noop action must cause zero provider mutations. When a live resource exists but its local binding is missing, plan explicit adoption/binding reconciliation or block with guidance; do not silently adopt it and do not create a replacement from a shared bootstrap path.
-- Treat observation as present/absent/unknown. Only a provider-confirmed not-found response proves absence. Permission errors, unsupported observation, partial reads, timeouts, rate limits, and provider failures must block or preserve affected state; never turn them into an empty list/null/false that can plan a create or destroy.
-- Resolve resource identity by durable provider id first. Name matches are adoption candidates only; detect and block multiple matching services, databases, buckets, queues, projects, apps, or domains instead of choosing the first.
-- When a provider resource id is scoped by project, account, region, or environment, preserve the provider-native id and present its scope beside it in bindings, observations, and human output. Matching unscoped ids alone must never imply that two environments share the same data instance.
-- On request-scaled platforms, background workers must explicitly receive continuous/instance CPU and a nonzero runtime floor; web services must explicitly preserve request-based CPU when the provider requires a value. Provider contract tests must cover both shapes and ensure one-off jobs do not inherit service-only CPU settings.
-- Treat health probes as per-service runtime configuration. Apply and verify a declared probe for web or worker services across direct and generated-CI paths; only one-off jobs categorically omit HTTP probes.
-- Release commands must run from the exact candidate image with its reviewed runtime configuration before any runtime workload changes. Correlate the provider's exact execution identity, fail before rollout on missing or failed evidence, store only a versioned command hash for drift, and keep direct, GitHub, and portable CI behavior aligned.
-- Any reviewed plan that asks a provider to build from a mutable branch must freeze the full source commit first and require provider-resolved provenance to match it before creating or updating release resources. Never treat a branch name, caller-supplied digest, or unverified build result as immutable release evidence.
-- Preserve a live workload's provider-observed runtime identity on updates. When a provider distinguishes control-plane and workload identities, a deploy/admin connection must never seed or become the runtime principal, even for a new resource; use a deterministic least-privilege runtime identity and fail closed when it is unavailable.
-- Treat provider-generated, non-retrievable credentials as a write-only transaction: validate the exact creation identity, verify all consumers before storing, persist the complete connection set atomically, and best-effort delete the exact new credential on every intervening failure. If the provider client fails before returning the credential to orchestration, that client owns the cleanup.
-- Generate passwords, tokens, and other secret material only with a cryptographically secure random source; `Math.random()` is never an acceptable secret generator.
-- Select deployment credentials with the exact repository scope. Repository and organization wildcards may intentionally match, and a verified global connection may intentionally fall back, but a connection scoped to another repository must never be used.
-- Generated CI may build an application image and update or execute exact provider resources that a reviewed apply already created and bound. It must never create a same-named registry, service, job, database, or other infrastructure resource on demand.
-- For auto-deploy workflows, a first push with no applied desired-state marker must end as a neutral no-deploy bootstrap. Once a marker exists, any desired/applied contract mismatch remains a hard failure until the exact plan is applied.
-- Keep application workload kind separate from provider resource type. A cron workload may be a provider service; derive `service` versus `job` only from the durable provider binding and cover mixed web/worker/cron topology through the real spec-to-workflow path.
-- Keep environment-owned CI credentials and database URLs in the CI provider's exact environment scope. Test both apply orders and legacy binding migration with stateful observations across multiple hosting providers; repository-wide secret names cannot prove environment isolation.
-- Evaluate CI conditions only where their required context exists. Execute generated gates and compare committed check workflows with desired triggers/commands; a spec-only assertion does not prove the safeguard is running.
-- Treat a managed GitHub Actions workflow's reviewed content hash plus semantic input hash as its lock. Environment values and generator implementation changes alone must not rewrite a deployed workflow; change the renderer revision for an intentional template migration. When stable provider identities need both workflow publication and runtime updates, publish and re-observe the workflow in its own plan stage before authorizing provider mutations.
-- Require a managed GitHub Actions deploy branch to equal the provider-observed repository default branch. GitHub registers `workflow_dispatch` workflows on the default branch; publishing only to another branch creates a workflow that cannot be dispatched reliably.
-- Treat a project-level generated CI program as one shared multi-environment contract. Publish it only when every desired target has complete bindings from its selected provider, retain the reviewed proposal on every matching environment binding until teardown can finish in any order, and retire only variables whose stored ownership hash still matches after the replacement program is accepted.
-- Make creates and destroys retry-safe and honest. Billable or data-bearing actions require exact action-id confirmation; deletes must treat already-absent as success, wait for realistic provider completion, verify terminal absence, and only then remove local bindings. A helper resource created before its durable parent binding must be exact-identity compensated on later failure or retained as explicit recovery state; a retry must never silently adopt it. A successful provider mutation is acknowledgment, not convergence: boundedly re-observe the exact expected identity or revision before issuing dependent mutations or reporting success.
-- Order multi-resource destroys by dependency and stop on unknown or failed deletion. Never delete a datastore volume, bucket contents, security group, credential, or other dependent resource after deletion of its owning resource failed or could not be verified.
-- Require lifecycle contract tests for noop mutation freedom, action-scoped mutation authority, observation errors, duplicate identities, import round trips, billable/data-bearing confirmation, and idempotent deletion. Database lifecycle changes must run the same contract against Railway, Supabase, Cloud SQL, and RDS.
-- A storage provider id is supported only with a registered adapter covering private creation, ownership-safe observation, runtime wiring, streaming list/get/put, and confirmed teardown. Schema acceptance or an S3-shaped example alone is not provider support.
-- Storage placement belongs in desired state, not connection credentials. Reuse an explicitly compatible primary cloud connection for storage and derive provider runtime credentials during apply; never require operators to fetch a second bucket/account/HMAC key when the connected cloud identity can create it safely.
-- Cloud storage must accept the provider-native local credential path (AWS default profile/SSO chain, Google Application Default Credentials, and the Azure default credential chain) as well as explicit automation credentials. A temporary local session may manage or migrate data but must never be copied into a deployed workload as durable authentication; use workload identity or fail with targeted guidance.
-- Keep provider behavior behind the provider boundary. Generic plan/apply/services/tools code should route through adapter capabilities and provider registry metadata, not provider-name branches or direct provider adapter imports.
-- Generic commands such as `hv_inspect` and `hv_import` must not default to, narrow their schema to, expose identifier fields for, or dispatch directly to one provider. Accept registered provider names, route through declared capabilities/provider-owned drivers, and return explicit `UNSUPPORTED` for a missing capability. Keep provider names, API shapes, and provider-specific mapping logic out of `src/tools`; contract tests must scan the full registered tool surface for regressions.
-- Report honestly. Do not return success unless provider receipts, health checks, logs, or live observation prove the intended state. Use explicit failed/skipped/pending/blocked receipts for partial progress.
-- Treat provider support as an evidence ladder. Schema or registry presence, adapter code, documentation, and mocked tests may establish `ready-for-live`, but they never substitute for a successful recent live lifecycle contract. Keep public docs, provider metadata, capability matrices, and live-evidence status aligned; when they disagree, preserve the lower proven status and report the gap rather than describing the feature as supported.
-- Carry every declarative provider field through validation, observation, fingerprints, drift, action stale checks, create/update requests, receipts, and durable state; partial field support is not reconciliation.
-- Work stage-by-stage. After any blocked, failed, pending, or confirmation-required Hypervibe result, stop and report what worked, what failed, and the next decision needed from the user. Do not keep trying alternate tools, bypasses, or provider-specific workarounds unless the user explicitly asks you to investigate broadly or keep iterating.
-- Use `hv_inspect` for read-only provider forensics. Use `hv_import` only when the user explicitly wants to adopt existing provider infrastructure into Hypervibe local/repo state.
-- Secrets never cross output boundaries. Accept them through `credentialsRef`, encrypted plans, or verified connections; do not print them in tool output, warnings, logs, receipts, specs, or snapshots.
-- Never ask a user to invent an opaque application secret that Hypervibe can generate safely. Declare a Hypervibe-owned, versioned generator in the spec, derive a strong per-project/per-environment value inside the encrypted plan boundary, and install it automatically. Require user input only when an external party owns the value; confirmation is still required before replacing accepted live state with meaningful session, encryption, cost, or data consequences.
-- Provider errors can echo request inputs. Scrub exact secret and environment-variable values before persistence or output; pattern-based redaction alone is not sufficient.
-- Stale-plan fingerprints must include both environment-variable hashes and sorted key presence. Providers may mask secret values, so a newly present or removed key is meaningful state even when no hash is available.
-- Consequential confirmation is part of mutation authority, not a caller-only flag. At apply time, recompute the transition from fresh provider and binding evidence, then require both the persisted `requiresConfirm` marker and the exact caller-confirmed action id before any write.
-- Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs when asking users for credentials. Raw credentials in chat are still accepted when the user intentionally chooses that path.
-- Generated dotenv placeholders must be commented, idempotent, value-free, and receipt-bearing: never overwrite an existing value, never write before proving each exact private env path is untracked and repository-ignored, never make an ignored template trackable until every assignment is proven empty, reject symlinks and special files, remove group/world access without adding owner permissions, treat blanks as missing, and never copy provider credentials into runtime or environment-specific deploy files. Enforce default private-file permissions in the shared env loader so plan and deploy paths cannot diverge; explicitly selected arbitrary files remain owner-controlled. Refresh Hypervibe-owned guidance when its source contract changes, while leaving owner comments and values intact. Test the composed scaffold-then-load path so a generated empty slot cannot mask a selected base value.
-- Provider-declared local credential inputs must have one opinionated env slot per credential role, and every such slot must be classified as control-plane-only by the deploy-env boundary. Keep compatibility aliases out of generated placeholder lists.
-- Before writing repo-backed desired state or derived files, prove the current checkout belongs to the selected project using its committed spec or normalized repository identity; a spec-less unrelated checkout is not an empty canvas. When the selected project has a known remote, require a readable normalized exact remote match and never fall back to the checkout basename. When one operation journals desired state and derives repository files from it, order or stage writes so a derived-file failure cannot advance the authoritative spec or revision. Keep failure-injection and wrong-checkout regressions for these boundaries.
-- Token and permission guidance must include the exact credential type, official creation URL, required permissions/scopes, resource scope, caveats, and a safe `hv_connections` example.
-- Whenever a GitHub PAT is required, provide a role-specific pre-filled creation URL with its name/description and required scopes or fine-grained permissions already selected. Never send users only to a generic GitHub token settings page; keep every PAT role covered by regression tests.
-- Whenever a provider officially documents credential-template URLs, use them with the known required name and least-privilege permissions pre-filled. Do not reverse-engineer undocumented dashboard parameters; call out any optional permissions the official template cannot represent.
-- For push deploys, `deploy.trigger: "ci"` is the portable default. Provider-native deploys are explicit opt-in and may require provider-specific external app access.
-- Dispatch Hypervibe-managed CI deploys only through `hv_ci_trigger`. Inspect them through `hv_ci_status`: list definitions/workflows, then runs, jobs, and bounded log tails as needed, followed by `hv_health` after success. Do not dispatch, monitor, or inspect them with `gh`, code-host connectors/apps, browser/UI inspection, or direct CI/provider APIs; if `hv_ci_trigger` or `hv_ci_status` is blocked, stop and report its connection/error guidance.
-- Automated repair must fail closed when its declared failure evidence is absent or incomplete. Never invoke the repair agent or publish a patch from an empty artifact download; keep runtime labels and pull-request metadata derived from the configured agent instead of hardcoding a model name.
-- Do not use temporary release-command changes for one-off data operations. Use declarative `database.seedCommand` for first seed/bootstrap. Schema migrations belong in container startup or durable declared release configuration; database moves, resets, and other lifecycle operations must be modeled through spec/plan/apply rather than exposed as imperative tools.
-- Do not introduce dependencies on provider CLIs for infrastructure operations. Use provider adapters and recorded Hypervibe connections so state, audit history, and drift detection stay coherent.
-- Do not run Hypervibe's full release gate, bump a version, or publish a release for every small change or merged pull request. Use focused tests while developing small fixes and let them accumulate into a coherent release batch. Run the full release gate and publish only when the batch is actually ready, when the user explicitly requests a release, or when a release is necessary to unblock the current task; confirm with the user before publishing unless they already requested it.
-- When building or releasing Hypervibe, update the configured local MCP runtime first and verify that it reports the new version. Never kill or restart Hypervibe MCP or Codex processes to activate a build; tell the user to restart Codex themselves.
-- On macOS, configure every parent write descriptor used for child-process IPC with `F_SETNOSIGPIPE` before handing it to an async transport. An immediately exiting child must surface an ordinary write/process error instead of terminating the host; keep immediate-exit and crash coverage in the release-gated companion tests.
-- Release macOS advisory instance locks explicitly with `flock(LOCK_UN)` before closing their descriptor. Keep release-and-immediate-reacquisition coverage in the release-gated companion tests; descriptor close alone is not a sufficiently deterministic handoff across runner architectures.
-- After creating a pull request, always provide its URL and explicitly offer to open it in the user's browser. Open it only after the user accepts.
+- Use `hv_spec` → `hv_plan` → approved `hv_apply` → verification for managed
+  infrastructure. A plan authorizes only its exact current actions and dependencies;
+  noop means zero mutations. OpenTofu runs inside this boundary, not alongside it
+  as a second user-operated workflow.
+- Keep present, absent and unknown distinct. Only provider-confirmed absence proves
+  absence. Verify native IDs, scope and ownership; names are search hints. Errors,
+  incomplete reads and ambiguity must not become permission to create or destroy.
+- Billable/data-bearing actions require exact action confirmation. Account,
+  billing, invitation, secret import and apply authorizations remain distinct.
+  Reuse approval for unchanged work within its scope. Verify convergence before
+  dependent effects; deletion follows dependencies and stops on failed or unknown
+  results.
+- Secret values never cross output boundaries. Use safe references, encrypted
+  plans or verified connections; redact supplied values from every output and
+  diagnostic. Treat engine plans and state as potentially secret-bearing.
+  Control-plane access does not authorize copying credentials into runtime.
+  Preserve repository/environment scope and supported workload identities.
+- MCP and CLI are thin adapters over `src/application`, with shared commands,
+  validation, redaction and results. Keep both reachable unless architecture
+  records an exception. Provider behavior belongs behind registered capabilities;
+  cloud lifecycle operations belong in the chosen engine integration.
+- Use Hypervibe for infrastructure it manages. Do not bypass plans, state or
+  blockers with direct provider writes, one-off scripts, credential edits or
+  resource recreation. Read-only diagnostics are allowed. A workaround needs the
+  user's explicit exception after explaining the missing capability and tradeoff.
+- Honor result stages and continuation contracts. Failed, blocked, pending or
+  confirmation-required work stops dependent effects unless an explicit bounded
+  continuation applies. An attempted action is not proof of success.
 
-- A shared container image default is distinct from each workload's runtime command. Preserve explicit web/worker/cron commands when selecting a generated image default; test the real spec-to-workflow path with different workload commands and execute the emitted Dockerfile-generation shell. Never require workers to use the web command just to build a shared image.
-- Generated-workflow tests must execute the emitted shell and JavaScript against a realistic multi-service fixture. Substring assertions may supplement those contract tests, but cannot stand in for proving target selection, provider calls, evidence writing, rollback, and fail-closed behavior.
-- Version release evidence from one source and migrate every producer, generated consumer, runtime consumer, and fixture together. Validate historical provenance against the exact source revision; compare current program/resource compatibility separately so a compatible env-only update preserves immutable rollback. Execute a generated consumer against producer-shaped evidence so stale schemas cannot pass on matching mocks.
-- Distinguish failed execution from work that was never attempted. When confirmation is missing or an earlier action fails or blocks progress, report subsequent unattempted actions as skipped or aborted and name the prerequisite or confirmation that stopped them. Reserve failed for actions actually attempted that failed; preserve confirmation-required, pending, or blocked for the action awaiting that condition. Apply this distinction consistently to receipts, structured results, summaries, and human output.
+<a id="read-the-relevant-contracts"></a>
+
+## Read only what the change touches
+
+[ARCHITECTURE.md](ARCHITECTURE.md) defines the infrastructure model. Consult the
+relevant sections and topic rules, not the entire linked document tree. Previously
+read, unchanged guidance need not be loaded again. The [documentation map](docs/README.md)
+locates current requirements and implementation evidence. Delete superseded
+backlogs and designs after preserving any unique current safeguards in these
+contracts; use Git history for the old material rather than an archive in docs.
+
+| Change | Relevant rules |
+| --- | --- |
+| Cloud journey, feature scope or completion claims | [Common cloud journey](docs/development/user-journey.md) |
+| Onboarding and customer experience | [Product](docs/development/product.md) |
+| What is in scope or supported on each cloud | [Support matrix](docs/development/support-matrix.md) |
+| Provider APIs or shared capabilities | [Provider evidence](docs/development/provider-evidence.md) |
+| Spec, plan, apply, observation, import or teardown | [Lifecycle](docs/development/lifecycle.md) |
+| Authentication, secrets or IAM | [Connections](docs/development/connections.md) |
+| Workflows, deployment or promotion | [CI](docs/development/ci.md) |
+| Backup, restore or persistent storage | [Recovery](docs/development/recovery.md) |
+| Interfaces, PRs, releases or macOS | [Workflow](docs/development/workflow.md) |
+
+The installed customer workflow is [skills/hypervibe/SKILL.md](skills/hypervibe/SKILL.md);
+customers do not inherit this file. Keep its instructions honest about current
+capabilities. Update current contracts when policy changes and explain the
+decision in the pull request. Git history preserves earlier policy.
+
+<a id="verification-and-delivery"></a>
+<a id="merge-handoff"></a>
+
+## Verification and handoff
+
+Match verification to the affected behavior. Documentation changes need content
+and link review; runtime changes need focused behavioral checks and required CI.
+For bugs, follow the [evidence method](docs/development/workflow.md#dg-135), including
+a failing boundary regression before the fix. Preserve required independent reviews
+without inventing new gates or repeating settled checks.
+
+Before recommending chat closure, commit and push task changes, include them in a
+PR, and verify every task worktree is clean. Preserve unrelated edits; report any
+remaining blocker and who acts next. Never restart or kill the user's MCP/client
+processes to activate a build; explain any needed restart.
+
+Accept the user's report that a PR merged. After a successful authorized merge,
+report the result/link and stop: no fetch/pull, branch comparison, repeated tests,
+CI/deployment polling or browser checks unless requested. If the outcome is
+ambiguous, make one bounded status lookup; report queued auto-merge as queued.
+Preserve required pre-merge checks, explicitly requested release validation and
+independently scheduled reviewers. See the
+[workflow](docs/development/workflow.md) for detailed verification, release and
+merge rules.

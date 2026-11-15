@@ -1,3 +1,18 @@
+import { isDatabasePasswordAction, DATABASE_PASSWORD_OPERATIONS } from './database-password-plan.contract.js';
+import { isServiceInstanceAction } from '../services/service-instance.service.js';
+import { isRepositoryVariableAction } from '../services/repository-variables.service.js';
+import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
+import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
+import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
+import { databaseCredentialAliasesActionSchema, DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
+import { scheduleActivationActionMetadataSchema } from '../services/schedule-activation.service.js';
+import { INBOUND_SIGNING_KEY_OPERATION } from '../services/email-inbound-signing.service.js';
+import { databaseCheckpointIdentitySchema } from '../services/database-checkpoint.js';
+import { backupPolicyActionId, backupPolicyActionMetadataSchema, DAILY_BACKUP_OPERATION } from '../services/backup-policy-plan.service.js';
+import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction, DATABASE_PROVISION_RECOVERY_OPERATION, DATABASE_PROVISION_CANDIDATE_OPERATION, isDatabaseProvisionRecoveryAction } from '../services/database-scope-binding.service.js';
+import { providerRegistry } from '../registry/provider.registry.js';
+import { API_POLICY_OPERATION } from '../services/api-policy.js';
+import { EMAIL_SIGNING_OPERATIONS } from '../services/email-signing.service.js';
 import type { PlanAction, PlanResourceKind } from './plan.types.js';
 import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
 import {
@@ -15,14 +30,7 @@ import {
   GITHUB_DELEGATED_SECRET_DESTROY_OPERATION,
   GITHUB_DELEGATED_SECRET_OPERATION,
   isGitHubNativeSettingAction,
-  isGitHubOpenAISecretAction,
-  OPENAI_ACTIONS_SECRET,
 } from '../services/github-infrastructure.service.js';
-import {
-  isGitHubPagesAction,
-  isGitHubPagesBindingCleanupAction,
-  isGitHubPagesDnsAction,
-} from '../services/github-pages.service.js';
 import { IOS_OPERATIONS, isIosAction } from '../services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS, isQueueAction } from '../services/queue-plan.service.js';
 import { STORAGE_OPERATIONS, isStorageAction } from '../services/storage-plan.service.js';
@@ -43,19 +51,12 @@ import { isProviderNativeDeploySourceAction } from '../services/provider-native-
 import { CACHE_OPERATIONS, isCacheAction } from '../services/cache-plan.service.js';
 import {
   GITHUB_ACTIONS_ROLLBACK_OPERATION,
-  GITLAB_CI_ROLLBACK_OPERATION,
-  GITLAB_ROLLBACK_REF_ENSURE_OPERATION,
 } from '../services/ci-rollback.contract.js';
 import {
   DATABASE_RESILIENCE_OPERATIONS,
   isDatabaseResilienceAction,
 } from '../services/database-resilience-plan.service.js';
-import {
-  isLoadBalancerAction,
-  LOAD_BALANCER_OPERATIONS,
-} from '../services/load-balancer-plan.service.js';
 import { EMAIL_OPERATIONS } from '../services/email-plan.service.js';
-import { MESSAGING_OPERATIONS } from '../services/twilio-messaging.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
@@ -68,50 +69,32 @@ import {
   MAINTENANCE_OPERATIONS,
   isMaintenanceAction,
 } from '../services/maintenance-plan.service.js';
-import {
-  CI_APPLIED_SPEC_SYNC_OPERATION,
-  CI_BINDING_REMOVE_OPERATION,
-  CI_CONFIGURATION_SYNC_OPERATION,
-  CI_VARIABLE_DELETE_OPERATION,
-  CI_VARIABLE_SYNC_OPERATION,
-} from '../services/managed-ci.contract.js';
-import {
-  CODE_REPOSITORY_BINDING_REMOVE_OPERATION,
-  CODE_REPOSITORY_CREATE_OPERATION,
-  CODE_REPOSITORY_DESTROY_OPERATION,
-} from '../services/managed-code-repository.contract.js';
 
 export type PlanMutationCapability =
+  | 'database.bootstrap'
+  | 'database.fresh-initialization'
+  | 'credential.lifecycle.update'
+  | 'database.credential-aliases.repair'
+  | 'database.scope.bind'
+  | 'database.provision.recover'
+  | 'database.provision.candidate.bind'
+  | 'backup-policy.configure'
+  | 'api.policy.accept'
+  | 'hosting.volume.mutate'
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
   | 'github.ci.sync'
   | 'github.ci.rollback'
-  | 'gitlab.rollback-ref.ensure'
-  | 'gitlab.ci.rollback'
   | 'github.ci.release'
   | 'github.applied-spec-hash.sync'
-  | 'ci.configuration.sync'
-  | 'ci.variable.sync'
-  | 'ci.variable.delete'
-  | 'ci.binding.remove'
-  | 'ci.applied-spec-hash.sync'
-  | 'code.repository.create'
-  | 'code.repository.destroy'
-  | 'code.repository.binding.remove'
+  | 'ci.repository-variable.sync'
   | 'github.collaboration.sync'
   | 'github.infrastructure.sync'
-  | 'github.openai-secret.sync'
   | 'github.delegated-secret.sync'
   | 'github.setting.sync'
-  | 'github.pages.sync'
-  | 'github.pages-binding.cleanup'
-  | 'github.pages-dns.sync'
   | 'appstore.mutate'
   | 'queue.mutate'
   | 'storage.mutate'
-  | 'load-balancer.monitor.mutate'
-  | 'load-balancer.pool.mutate'
-  | 'load-balancer.mutate'
   | 'hosting.delegated-secret.sync'
   | 'stripe.hosting-env.sync'
   | 'stripe.catalog.mutate'
@@ -124,6 +107,7 @@ export type PlanMutationCapability =
   | 'cache.retained.destroy'
   | 'database.provision'
   | 'database.availability.configure'
+  | 'database.checkpoint.create'
   | 'database.backup-policy.configure'
   | 'database.replica.provision'
   | 'database.replica.destroy'
@@ -151,12 +135,11 @@ export type PlanMutationCapability =
   | 'email.inbound.mutate'
   | 'email.delivery-events.mutate'
   | 'email.forwarding.mutate'
-  | 'messaging.service.mutate'
-  | 'messaging.sender.mutate'
-  | 'messaging.runtime.sync'
   | 'local.environment.record'
   | 'hosting.project.ensure'
+  | 'hosting.schedule.activate'
   | 'hosting.service.converge'
+  | 'hosting.service-instance.create'
   | 'hosting.service.rollback';
 
 export interface PlanActionAuthority {
@@ -277,11 +260,6 @@ function metadataPositiveInteger(action: PlanAction, key: string): number | unde
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function metadataPositiveIntegerString(action: PlanAction, key: string): string | undefined {
-  const value = metadataString(action, key);
-  return value && /^[1-9]\d*$/.test(value) ? value : undefined;
-}
-
 function metadataSha256(action: PlanAction, key: string): string | undefined {
   const value = metadataString(action, key);
   return value && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
@@ -342,30 +320,6 @@ function cacheDesiredConfigIsPinned(action: PlanAction): boolean {
     const value = action.metadata?.[key];
     return value === null || (typeof value === 'string' && value.length > 0);
   });
-}
-
-function loadBalancerOriginsArePinned(action: PlanAction): boolean {
-  const origins = action.metadata?.origins;
-  if (!Array.isArray(origins) || origins.length < 2 || !metadataSha256(action, 'originsHash')) {
-    return false;
-  }
-  const names = new Set<string>();
-  for (const value of origins) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const origin = value as Record<string, unknown>;
-    if (
-      typeof origin.name !== 'string'
-      || !origin.name
-      || names.has(origin.name)
-      || typeof origin.address !== 'string'
-      || !origin.address
-      || typeof origin.hostHeader !== 'string'
-      || !origin.hostHeader
-      || origin.enabled !== true
-    ) return false;
-    names.add(origin.name);
-  }
-  return true;
 }
 
 function operationTypeIsValid(action: PlanAction): boolean {
@@ -468,8 +422,46 @@ export function resolvePlanActionAuthority(
   action: PlanAction
 ): PlanActionAuthority | null {
   if (action.type === 'noop') return null;
+  if (isRepositoryVariableAction(action)) return authority(action, 'ci.repository-variable.sync');
+  if (isDatabaseBootstrapAction(action)) return authority(action, 'database.bootstrap');
+  if (DATABASE_PASSWORD_OPERATIONS.includes(action.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number])) return isDatabasePasswordAction(action) ? authority(action, 'credential.lifecycle.update') : null;
+  if (action.metadata?.operation === CREDENTIAL_OPERATION) return isCredentialAction(action) ? authority(action, 'credential.lifecycle.update') : null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
+  }
+
+  if (action.metadata?.operation === DATABASE_CREDENTIAL_ALIASES_OPERATION) {
+    return databaseCredentialAliasesActionSchema.safeParse(action).success
+      ? authority(action, 'database.credential-aliases.repair') : null;
+  }
+
+  if (action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION) {
+    return isDatabaseScopeBindingAction(action) ? authority(action, 'database.scope.bind') : null;
+  }
+  if (action.metadata?.operation === DATABASE_PROVISION_RECOVERY_OPERATION) {
+    return isDatabaseProvisionRecoveryAction(action) ? authority(action, 'database.provision.recover') : null;
+  }
+  if (action.metadata?.operation === DATABASE_PROVISION_CANDIDATE_OPERATION) {
+    return isDatabaseProvisionRecoveryAction(action) ? authority(action, 'database.provision.candidate.bind') : null;
+  }
+  if (action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION) {
+    return isDatabaseInitializationAction(action) ? authority(action, 'database.fresh-initialization') : null;
+  }
+
+  if (action.metadata?.operation === DAILY_BACKUP_OPERATION) {
+    const parsed = backupPolicyActionMetadataSchema.safeParse(action.metadata);
+    if (!parsed.success) return null;
+    const { item, source } = parsed.data;
+    const capability = providerRegistry.getMetadata(action.resource.provider)?.lifecycle?.dailyBackups;
+    if (action.type !== 'update' || !action.verified || action.requiresConfirm !== true
+      || action.billable !== true || action.dataBearing !== true
+      || action.id !== backupPolicyActionId(item.resource)
+      || item.resource.kind !== action.resource.kind || item.resource.name !== action.resource.name
+      || item.resource.provider !== action.resource.provider || source.provider !== action.resource.provider
+      || item.target.kind !== item.resource.kind || !capability?.[item.resource.kind]
+      || (item.target.kind === 'database' ? item.target.componentId !== item.resource.componentId
+        : item.target.name !== item.resource.name)) return null;
+    return authority(action, 'backup-policy.configure');
   }
 
   if (
@@ -525,6 +517,9 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'domain.registration.mutate');
   }
+  if (action.metadata?.operation === API_POLICY_OPERATION && exactResource(action, 'ci', 'hypervibe')
+    && action.type === 'update' && action.resource.name === `api-policy:${metadataString(action, 'environmentName')}`
+    && metadataString(action, 'desiredHash') && metadataString(action, 'previousHash')) return authority(action, 'api.policy.accept');
   if (
     isGitHubActionsDeployAction(action)
     && exactResource(action, 'ci', 'github')
@@ -533,122 +528,6 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'repository')
   ) {
     return authority(action, 'github.ci.sync');
-  }
-  if (
-    action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
-    && exactResource(action, 'ci')
-    && action.resource.provider === metadataString(action, 'ciProvider')
-    && action.resource.name === 'configuration'
-    && action.type === 'update'
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && metadataString(action, 'baseSha')
-    && metadataString(action, 'programHash')
-  ) {
-    return authority(action, 'ci.configuration.sync');
-  }
-  if (
-    action.metadata?.operation === CODE_REPOSITORY_CREATE_OPERATION
-    && exactResource(action, 'repo')
-    && action.type === 'create'
-    && action.dataBearing === true
-    && action.requiresConfirm === true
-    && action.resource.provider === metadataString(action, 'codeProvider')
-    && action.resource.name === metadataString(action, 'repositoryScope')
-    && metadataString(action, 'repositoryConfigHash')
-    && metadataString(action, 'desiredState') === 'present'
-    && metadataString(action, 'management') === 'managed'
-  ) {
-    return authority(action, 'code.repository.create');
-  }
-  if (
-    action.metadata?.operation === CODE_REPOSITORY_DESTROY_OPERATION
-    && exactResource(action, 'repo')
-    && action.type === 'destroy'
-    && action.dataBearing === true
-    && action.requiresConfirm === true
-    && action.resource.provider === metadataString(action, 'codeProvider')
-    && action.resource.name === metadataString(action, 'repositoryScope')
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryConfigHash')
-    && metadataString(action, 'desiredState') === 'absent'
-    && metadataString(action, 'management') === 'managed'
-  ) {
-    return authority(action, 'code.repository.destroy');
-  }
-  if (
-    action.metadata?.operation === CODE_REPOSITORY_BINDING_REMOVE_OPERATION
-    && exactResource(action, 'repo')
-    && action.type === 'update'
-    && action.resource.provider === metadataString(action, 'codeProvider')
-    && action.resource.name === metadataString(action, 'repositoryScope')
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryConfigHash')
-    && metadataString(action, 'desiredState') === 'absent'
-  ) {
-    return authority(action, 'code.repository.binding.remove');
-  }
-  if (
-    action.metadata?.operation === CI_VARIABLE_SYNC_OPERATION
-    && exactResource(action, 'secret')
-    && action.resource.provider === metadataString(action, 'ciProvider')
-    && hasType(action, 'create', 'update')
-    && action.resource.name === `${metadataString(action, 'environmentName') ?? ''}:${metadataString(action, 'variableKey') ?? ''}`
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'environmentScope') === metadataString(action, 'environmentName')
-    && metadataString(action, 'valueHash')
-    && metadataString(action, 'valueSource')
-  ) {
-    return authority(action, 'ci.variable.sync');
-  }
-  if (
-    action.metadata?.operation === CI_VARIABLE_DELETE_OPERATION
-    && exactResource(action, 'secret')
-    && action.resource.provider === metadataString(action, 'ciProvider')
-    && action.type === 'destroy'
-    && action.dataBearing === true
-    && action.requiresConfirm === true
-    && action.resource.name === `${metadataString(action, 'environmentName') ?? ''}:${metadataString(action, 'variableKey') ?? ''}`
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && metadataString(action, 'environmentScope')
-    && metadataString(action, 'valueHash')
-    && metadataString(action, 'programHash')
-  ) {
-    return authority(action, 'ci.variable.delete');
-  }
-  if (
-    action.metadata?.operation === CI_BINDING_REMOVE_OPERATION
-    && exactResource(action, 'ci')
-    && action.resource.provider === metadataString(action, 'ciProvider')
-    && action.type === 'update'
-    && action.resource.name === `binding:${metadataString(action, 'environmentName') ?? ''}`
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && metadataString(action, 'programHash')
-  ) {
-    return authority(action, 'ci.binding.remove');
-  }
-  if (
-    action.metadata?.operation === CI_APPLIED_SPEC_SYNC_OPERATION
-    && exactResource(action, 'secret')
-    && action.resource.provider === metadataString(action, 'ciProvider')
-    && hasType(action, 'create', 'update')
-    && action.resource.name === `${metadataString(action, 'environmentName') ?? ''}:${metadataString(action, 'variableKey') ?? ''}`
-    && metadataString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && metadataString(action, 'environmentScope')
-    && metadataString(action, 'valueHash')
-    && metadataString(action, 'valueSource') === 'desired:deployment-contract'
-    && metadataString(action, 'programHash')
-  ) {
-    return authority(action, 'ci.applied-spec-hash.sync');
   }
   if (
     action.metadata?.operation === GITHUB_ACTIONS_ROLLBACK_OPERATION
@@ -666,42 +545,6 @@ export function resolvePlanActionAuthority(
     return authority(action, 'github.ci.rollback');
   }
   if (
-    action.metadata?.operation === GITLAB_ROLLBACK_REF_ENSURE_OPERATION
-    && exactResource(action, 'repo', 'gitlab')
-    && action.type === 'create'
-    && action.resource.name === metadataString(action, 'rollbackRef')
-    && /^hypervibe-rollback-[a-z0-9-]+-[0-9a-f]{12}-[1-9]\d*$/.test(metadataString(action, 'rollbackRef') ?? '')
-    && metadataPositiveIntegerString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && /^[0-9a-f]{40}$/i.test(metadataString(action, 'targetSha') ?? '')
-    && metadataPositiveIntegerString(action, 'targetJobId')
-    && metadataString(action, 'targetArtifactId') === `${metadataString(action, 'targetJobId')}:.hypervibe-release.json`
-    && metadataPositiveIntegerString(action, 'targetPipelineId')
-    && metadataPositiveIntegerString(action, 'observedLatestPipelineId')
-  ) {
-    return authority(action, 'gitlab.rollback-ref.ensure');
-  }
-  if (
-    action.metadata?.operation === GITLAB_CI_ROLLBACK_OPERATION
-    && exactResource(action, 'ci', 'gitlab-ci')
-    && action.type === 'update'
-    && action.resource.name === `deploy-branch:${metadataString(action, 'environmentName') ?? ''}`
-    && metadataPositiveIntegerString(action, 'repositoryId')
-    && metadataString(action, 'instanceScope')
-    && metadataString(action, 'repositoryScope')
-    && metadataString(action, 'definition')
-    && /^hypervibe-rollback-[a-z0-9-]+-[0-9a-f]{12}-[1-9]\d*$/.test(metadataString(action, 'rollbackRef') ?? '')
-    && /^[0-9a-f]{40}$/i.test(metadataString(action, 'targetSha') ?? '')
-    && metadataPositiveIntegerString(action, 'targetJobId')
-    && metadataString(action, 'targetArtifactId') === `${metadataString(action, 'targetJobId')}:.hypervibe-release.json`
-    && metadataPositiveIntegerString(action, 'targetPipelineId')
-    && metadataPositiveIntegerString(action, 'observedLatestPipelineId')
-    && metadataString(action, 'programHash')
-  ) {
-    return authority(action, 'gitlab.ci.rollback');
-  }
-  if (
     isGitHubActionsAppliedSpecHashAction(action)
     && exactResource(action, 'ci', 'github')
     && action.type === 'update'
@@ -710,6 +553,11 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'desiredHash')
   ) {
     return authority(action, 'github.applied-spec-hash.sync');
+  }
+  if (action.type === 'update' && exactResource(action, 'service') && action.billable === true && action.requiresConfirm === true
+      && action.id === `service:${action.resource.name}:activate-schedule`
+      && scheduleActivationActionMetadataSchema.safeParse(action.metadata).success) {
+    return authority(action, 'hosting.schedule.activate');
   }
   if (
     isGitHubActionsReleaseAction(action)
@@ -733,6 +581,8 @@ export function resolvePlanActionAuthority(
   }
   if (
     isGitHubInfrastructureAction(action)
+    && (action.metadata?.backupWorkflowPublicationRequired !== true || action.requiresConfirm === true
+      && (action.billable === true || Array.isArray(action.metadata?.desiredFiles) && action.metadata.desiredFiles.length === 0))
     && exactResource(action, 'repo', 'github')
     && action.type === 'update'
     && action.resource.name === metadataString(action, 'repository')
@@ -742,16 +592,6 @@ export function resolvePlanActionAuthority(
     )
   ) {
     return authority(action, 'github.infrastructure.sync');
-  }
-  if (
-    isGitHubOpenAISecretAction(action)
-    && exactResource(action, 'secret', 'github')
-    && action.type === 'update'
-    && action.resource.name === OPENAI_ACTIONS_SECRET
-    && metadataString(action, 'secretName') === OPENAI_ACTIONS_SECRET
-    && metadataString(action, 'repository')
-  ) {
-    return authority(action, 'github.openai-secret.sync');
   }
   if (
     isGitHubDelegatedSecretAction(action)
@@ -779,39 +619,6 @@ export function resolvePlanActionAuthority(
     return authority(action, 'github.setting.sync');
   }
   if (
-    isGitHubPagesAction(action)
-    && exactResource(action, 'repo', 'github')
-    && (
-      (metadataBoolean(action, 'enabled') === true && hasType(action, 'create', 'update'))
-      || (metadataBoolean(action, 'enabled') === false && action.type === 'destroy')
-    )
-    && action.resource.name === metadataString(action, 'repository')
-  ) {
-    return authority(action, 'github.pages.sync');
-  }
-  if (
-    isGitHubPagesBindingCleanupAction(action)
-    && exactResource(action, 'repo', 'github')
-    && action.type === 'update'
-    && action.resource.name === metadataString(action, 'repository')
-    && typeof action.metadata?.observedCertificateAttempt === 'object'
-    && action.metadata.observedCertificateAttempt !== null
-  ) {
-    return authority(action, 'github.pages-binding.cleanup');
-  }
-  if (
-    isGitHubPagesDnsAction(action)
-    && exactResource(action, 'domain', 'cloudflare')
-    && (
-      (metadataBoolean(action, 'enabled') === true && action.type === 'update')
-      || (metadataBoolean(action, 'enabled') === false && action.type === 'destroy')
-    )
-    && metadataString(action, 'repository')
-    && Array.isArray(action.metadata?.desiredRecords)
-  ) {
-    return authority(action, 'github.pages-dns.sync');
-  }
-  if (
     isIosAction(action)
     && exactResource(action, 'ios', 'appstoreconnect')
     && operationTypeIsValid(action)
@@ -834,6 +641,15 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'environmentName')
   ) {
     const operation = action.metadata?.operation;
+    if (operation === MAINTENANCE_OPERATIONS.edgeRoute
+      && action.resource.provider === 'cloudflare'
+      && action.resource.name === metadataString(action, 'hostname')
+      && action.requiresConfirm === true && action.billable === true
+      && metadataString(action, 'targetEnvironment') && metadataString(action, 'targetService')
+      && /^https:\/\//.test(metadataString(action, 'origin') ?? '')
+      && /^[a-f0-9]{64}$/.test(metadataString(action, 'targetFingerprint') ?? '')) {
+      return authority(action, 'maintenance.edge.mutate');
+    }
     if (
       (operation === MAINTENANCE_OPERATIONS.edgeEnable
         || operation === MAINTENANCE_OPERATIONS.edgeDisable)
@@ -973,69 +789,6 @@ export function resolvePlanActionAuthority(
     return authority(action, 'storage.mutate');
   }
   if (
-    isLoadBalancerAction(action)
-    && exactResource(action, 'load-balancer')
-    && action.resource.name === metadataString(action, 'hostname')
-    && metadataString(action, 'accountId')
-    && metadataString(action, 'zoneId')
-    && metadataString(action, 'configHash')
-  ) {
-    const operation = action.metadata?.operation;
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
-      && hasType(action, 'create', 'update')
-      && action.id === 'load-balancer:monitor'
-      && metadataString(action, 'externalName')
-    ) {
-      return authority(action, 'load-balancer.monitor.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-      && hasType(action, 'create', 'update')
-      && action.id === 'load-balancer:pool'
-      && metadataString(action, 'externalName')
-      && (metadataStringArray(action, 'services')?.length ?? 0) >= 2
-      && (Boolean(action.metadata?.blockedReason) || loadBalancerOriginsArePinned(action))
-      && (Boolean(action.metadata?.blockedReason) || action.billable === true)
-    ) {
-      return authority(action, 'load-balancer.pool.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.ensure
-      && hasType(action, 'create', 'update')
-      && action.id === `load-balancer:${action.resource.name}`
-      && (metadataStringArray(action, 'services')?.length ?? 0) >= 2
-      && (action.type !== 'create' || action.billable === true)
-    ) {
-      return authority(action, 'load-balancer.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.destroy
-      && action.type === 'destroy'
-      && action.id === `load-balancer:${action.resource.name}:destroy`
-      && metadataString(action, 'externalId')
-    ) {
-      return authority(action, 'load-balancer.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.poolDestroy
-      && action.type === 'destroy'
-      && action.id === 'load-balancer:pool:destroy'
-      && metadataString(action, 'externalId')
-    ) {
-      return authority(action, 'load-balancer.pool.mutate');
-    }
-    if (
-      operation === LOAD_BALANCER_OPERATIONS.monitorDestroy
-      && action.type === 'destroy'
-      && action.id === 'load-balancer:monitor:destroy'
-      && metadataString(action, 'externalId')
-    ) {
-      return authority(action, 'load-balancer.monitor.mutate');
-    }
-    return null;
-  }
-  if (
     isDelegatedSecretAction(action)
     && exactResource(action, 'secret')
     && action.type === 'update'
@@ -1136,6 +889,18 @@ export function resolvePlanActionAuthority(
   }
   if (exactResource(action, 'database')) {
     if (isDatabaseResilienceAction(action) && metadataString(action, 'primaryExternalId')) {
+      const checkpointSource = databaseCheckpointIdentitySchema.safeParse(action.metadata?.source);
+      if (action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.checkpointCreate
+        && ['create', 'update'].includes(action.type) && action.requiresConfirm === true
+        && action.billable === true && action.dataBearing === true
+        && metadataString(action, 'checkpointId')
+        && action.id === `database:${action.resource.provider}:checkpoint:${metadataString(action, 'checkpointId')}`
+        && checkpointSource.success
+        && checkpointSource.data.provider === action.resource.provider
+        && checkpointSource.data.primaryExternalId === metadataString(action, 'primaryExternalId')) {
+        return authority(action, 'database.checkpoint.create');
+      }
+
       if (
         action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure
         && action.type === 'update'
@@ -1240,6 +1005,14 @@ export function resolvePlanActionAuthority(
   }
   if (
     exactResource(action, 'domain')
+    && action.type === 'update'
+    && action.metadata?.operation === 'domainDnsReady'
+    && action.metadata?.dnsEngineReady === true
+  ) {
+    return authority(action, 'domain.configure');
+  }
+  if (
+    exactResource(action, 'domain')
     && hasType(action, 'create', 'update', 'replace')
     && !action.metadata?.operation
   ) {
@@ -1266,7 +1039,10 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'serviceId')
     && metadataString(action, 'environmentId')
     && metadataString(action, 'providerDomainId')
-    && metadataString(action, 'zoneId')
+    && (metadataString(action, 'zoneId') || action.metadata?.dnsEngineRemoved === true
+      || (action.metadata?.dnsCancellationVerified === true && action.metadata?.dnsCancellationRequired === true
+        && typeof (action.metadata.dnsCancellationProof as Record<string, unknown> | undefined)?.zoneFingerprint === 'string'
+        && typeof (action.metadata.dnsCancellationProof as Record<string, unknown> | undefined)?.connectionId === 'string'))
     && metadataStringArray(action, 'dnsRecordIds')
   ) {
     return authority(action, 'domain.configure');
@@ -1312,6 +1088,12 @@ export function resolvePlanActionAuthority(
     && action.id === 'email:sendgrid:delivery-events'
     && hasType(action, 'update', 'replace')
   ) return authority(action, 'email.delivery-events.mutate');
+  if (action.resource.kind === 'email' && action.type === 'update' && action.id === 'email:sendgrid:inbound-key'
+    && action.resource.name === 'inbound-key' && action.metadata?.operation === INBOUND_SIGNING_KEY_OPERATION) return authority(action, 'email.inbound.mutate');
+  if (action.resource.kind === 'email' && action.type === 'update' && (
+    action.metadata?.operation === EMAIL_SIGNING_OPERATIONS.signing && action.id === 'email:sendgrid:delivery-signing' && action.resource.provider === 'sendgrid' && action.resource.name === 'delivery-signing'
+    || action.metadata?.operation === EMAIL_SIGNING_OPERATIONS.key && action.id === 'email:sendgrid:delivery-key' && action.resource.name === 'delivery-key'
+  )) return authority(action, 'email.delivery-events.mutate');
   if (action.resource.provider === 'cloudflare') {
     const forwardingOperation = action.metadata?.operation;
     const forwardingTypeIsValid =
@@ -1328,33 +1110,6 @@ export function resolvePlanActionAuthority(
       || (forwardingOperation === EMAIL_OPERATIONS.forwardingRuleDestroy && action.type === 'destroy');
     if (forwardingTypeIsValid) return authority(action, 'email.forwarding.mutate');
   }
-  if (
-    exactResource(action, 'messaging', 'twilio')
-    && (
-      action.metadata?.operation === MESSAGING_OPERATIONS.serviceEnsure
-      || action.metadata?.operation === MESSAGING_OPERATIONS.serviceAdopt
-    )
-    && hasType(action, 'create', 'update')
-    && metadataString(action, 'configHash')
-  ) return authority(action, 'messaging.service.mutate');
-  if (
-    exactResource(action, 'messaging', 'twilio')
-    && (
-      action.metadata?.operation === MESSAGING_OPERATIONS.senderAttach
-      || action.metadata?.operation === MESSAGING_OPERATIONS.senderMove
-    )
-    && hasType(action, 'create', 'replace')
-    && metadataString(action, 'phoneNumberSid') === action.resource.name
-    && metadataString(action, 'serviceName')
-    && metadataString(action, 'configHash')
-  ) return authority(action, 'messaging.sender.mutate');
-  if (
-    exactResource(action, 'messaging')
-    && action.metadata?.operation === MESSAGING_OPERATIONS.runtimeSync
-    && action.type === 'update'
-    && metadataString(action, 'configHash')
-    && metadataStringArray(action, 'services')
-  ) return authority(action, 'messaging.runtime.sync');
   if (
     exactResource(action, 'environment')
     && hasType(action, 'create', 'update')
@@ -1376,6 +1131,7 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'hosting.service.converge');
   }
+  if (isServiceInstanceAction(action)) return authority(action, 'hosting.service-instance.create');
   if (
     exactResource(action, 'service')
     && action.type === 'update'
@@ -1384,5 +1140,11 @@ export function resolvePlanActionAuthority(
   ) {
     return authority(action, 'hosting.service.rollback');
   }
+  if (exactResource(action, 'volume')
+    && ((action.type === 'create' && action.metadata?.operation === 'serviceVolumeCreate')
+      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeFinalize')
+      || (['create', 'update'].includes(action.type) && action.metadata?.operation === 'serviceVolumeComponentApply' && metadataString(action, 'component'))
+      || (action.type === 'update' && action.metadata?.operation === 'serviceVolumeComponentFinalize' && metadataString(action, 'component'))))
+    return authority(action, 'hosting.volume.mutate');
   return null;
 }

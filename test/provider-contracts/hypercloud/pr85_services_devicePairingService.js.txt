@@ -1,0 +1,115 @@
+// Source lines 7-10
+const PAIRING_LIFETIME_MS = 10 * 60 * 1000;
+const USER_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const REQUEST_ACCESS_MS = 30 * 24 * 60 * 60 * 1000;
+const ENROLLMENT_SCOPES = ["activity:write", PERMISSIONS.OPERATIONS_READ];
+
+// Source lines 54-60
+  async function createPairing({ input }) {
+    const repository = repositoryFullName(input?.repositoryFullName);
+    const purpose = input?.purpose ?? "reporting";
+    if (!["reporting", "credential-requests"].includes(purpose)) throw invalid("Select a supported pairing purpose.");
+    const environmentKey = purpose === "credential-requests" ? input.environment : null;
+    if (purpose === "credential-requests" && !/^[a-z0-9][a-z0-9-]{0,79}$/.test(environmentKey || "")) throw invalid("Select the environment for credential requests.");
+    const scope = purpose === "credential-requests" ? { purpose, environment: environmentKey } : {};
+
+// Source lines 77-87
+        const verificationUrl = new URL("/pair", publicBaseUrl);
+        verificationUrl.searchParams.set("code", displayCode);
+        return {
+          ...scope,
+          deviceCode,
+          expiresAt: expiresAt.toISOString(),
+          intervalSeconds: 2,
+          repository: repository,
+          userCode: displayCode,
+          verificationUrl: verificationUrl.toString()
+        };
+
+// Source lines 142-147
+  async function approve({ actor, userCode: code }) {
+    requireApprovalPermission(actor);
+    return database.transaction(async (transaction) => {
+      const pairing = await pairingByUserCode(code, transaction);
+      await assertCurrent(pairing, transaction);
+      if (pairing.purpose === "credential-requests" && !hasPermission(actor, PERMISSIONS.CREDENTIALS_MANAGE)) throw forbidden();
+
+// Source lines 164-167
+      if (pairing.purpose === "credential-requests") {
+        const [environment] = await project.getEnvironments({ where: { key: pairing.environmentKey }, limit: 1, transaction });
+        if (!environment) throw invalid("The requested environment is not available in this project.");
+      }
+
+// Source lines 189-210
+  async function exchange({ deviceCode }) {
+    if (
+      typeof deviceCode !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(deviceCode)
+    ) {
+      throw unauthorized("Device pairing is invalid.");
+    }
+    // OK: The 256-bit device secret is the identity boundary for this
+    // unauthenticated exchange. No tenant input participates in the lookup.
+    const pairing = await DevicePairing.scope("withCodeHashes").findOne({
+      where: { deviceCodeHash: hashCode(deviceCode) }
+    });
+    if (!pairing) throw unauthorized("Device pairing is invalid.");
+    if (pairing.expiresAt <= now()) {
+      if (pairing.status !== "expired") await pairing.update({ status: "expired" });
+      throw invalid("Device pairing expired. Start again from the current project.");
+    }
+    if (pairing.status === "pending") {
+      return { applied: 0, retryAfterSeconds: 2, skipped: 1, status: "pending" };
+    }
+    if (pairing.status !== "approved") {
+      throw invalid("Device pairing was already completed. Start again if needed.");
+
+// Source lines 220-267
+      if (locked.status !== "approved" || locked.expiresAt <= now()) {
+        throw invalid("Device pairing is no longer available.");
+      }
+      const project = await locked.getProject({ transaction });
+      const approver = await locked.getApprovedByMembership({ transaction });
+      const role = approver && await approver.getRole({ transaction });
+      if (!project || !approver || approver.status !== "active" || approver.revokedAt
+        || approver.AccountId !== project.AccountId || !role || role.AccountId !== project.AccountId
+        || !hasPermission({ role }, locked.purpose === "credential-requests" ? PERMISSIONS.CREDENTIALS_MANAGE : PERMISSIONS.PROJECTS_ENROLL)) throw forbidden();
+      const requestAccess = locked.purpose === "credential-requests";
+      const expiresAt = new Date(now().getTime() + REQUEST_ACCESS_MS);
+      const environments = await project.getEnvironments({
+        ...(requestAccess ? { where: { key: locked.environmentKey } } : {}),
+        order: [["key", "ASC"]],
+        transaction
+      });
+      if (requestAccess && environments.length !== 1) throw invalid("The approved environment is no longer available.");
+      const credentials = [];
+      for (const environment of environments) {
+        const token = createEnrollmentToken();
+        await environment.createEnrollmentCredential(
+          {
+            id: token.credentialKey,
+            CreatedByMembershipId: approver.id,
+            scopes: requestAccess ? [PERMISSIONS.CREDENTIALS_MANAGE] : [...ENROLLMENT_SCOPES],
+            ...(requestAccess ? { expiresAt } : {}),
+            tokenHash: token.tokenHash
+          },
+          { transaction }
+        );
+        credentials.push({
+          environment: { id: environment.id, key: environment.key, name: environment.name },
+          token: token.token,
+          ...(requestAccess ? { expiresAt: expiresAt.toISOString() } : {})
+        });
+      }
+      await locked.update(
+        { completedAt: now(), status: "completed" },
+        { transaction }
+      );
+      return {
+        ...(requestAccess ? { purpose: "credential-requests", environment: locked.environmentKey } : {}),
+        applied: credentials.length,
+        credentials,
+        project: { id: project.id, name: project.name },
+        skipped: 0,
+        status: "completed"
+      };

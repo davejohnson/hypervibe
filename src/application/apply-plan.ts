@@ -1,4 +1,22 @@
+import { domainServiceFor, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
+import { applyServiceInstanceAction } from '../domain/services/service-instance.service.js';
+import { applyRepositoryVariable, isRepositoryVariableAction, pendingRepositoryVariableEnvironment, repositoryVariablesEnvironment } from '../domain/services/repository-variables.service.js';
+import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from '../domain/services/database-credential-aliases.service.js';
+import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
+import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
+import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
+import { databaseBootstrapActionSchema, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
+import { applyDatabaseBootstrap } from '../domain/services/database-bootstrap.service.js';
+import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
+import { classifyPlanBlocks, type PlanBlock } from '../domain/plan/plan-block.js';
+import { applyApiPolicy, planApiPolicy } from '../domain/services/api-policy.js';
+import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
+import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
+import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
+import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
+import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
   ConvergeExecutor,
   fingerprintObservedState,
@@ -16,6 +34,11 @@ import {
 } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { applyInfrastructureEngine } from './infrastructure-engine.js';
+import { applyDnsPlan } from './dns-hosting.js';
+import { hasOwnedDnsRecords } from './dns-engine.js';
+import { verifyDnsTrafficAbsent } from './dns-absence.js';
+import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
 import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
@@ -24,6 +47,7 @@ import { applyIosAction } from '../domain/services/appstore-plan.service.js';
 import { applyQueueAction } from '../domain/services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
 import { applyStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
+import { applyServiceVolumeAction, hasRetainedServiceVolumes, observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock } from '../domain/services/service-volume.service.js';
 import {
   generatedSecretBindingEvidence,
   immutableSecretConflict,
@@ -33,20 +57,12 @@ import {
 } from '../domain/services/delegated-secret.service.js';
 import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
 import {
-  applyGitHubActionsAppliedSpecHash,
-  applyGitHubActionsDeploy,
   applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
-import { applyManagedCodeRepositoryAction } from '../domain/services/managed-code-repository.service.js';
-import {
-  CI_APPLIED_SPEC_SYNC_OPERATION,
-  CI_BINDING_REMOVE_OPERATION,
-  CI_CONFIGURATION_SYNC_OPERATION,
-  CI_VARIABLE_DELETE_OPERATION,
-  CI_VARIABLE_SYNC_OPERATION,
-} from '../domain/services/managed-ci.contract.js';
+import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
+import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import {
   applyGitHubCollaboration,
   resolveCollaborationRepository,
@@ -55,16 +71,10 @@ import {
   applyGitHubInfrastructure,
   applyGitHubDelegatedSecret,
   applyGitHubNativeSetting,
-  applyGitHubOpenAISecret,
   resolveGitHubInfrastructureRepository,
   shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
 } from '../domain/services/github-infrastructure.service.js';
-import {
-  applyGitHubPages,
-  applyGitHubPagesBindingCleanup,
-  applyGitHubPagesDns,
-} from '../domain/services/github-pages.service.js';
 import { setupCustomDomain, teardownCustomDomain } from '../domain/services/domain.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
@@ -73,7 +83,9 @@ import {
 import {
   credentialFieldsFromSchema,
   connectionSetupDetails,
+  connectionSetupUrl,
   GITHUB_TOKEN_URLS,
+  type ConnectionGuidanceContext,
 } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 import { removeHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
@@ -120,14 +132,8 @@ import {
   resolveEmailIntegrationState,
 } from '../domain/services/email-plan.service.js';
 import {
-  applyTwilioMessagingAction,
-  resolveTwilioMessagingState,
-  twilioMessagingFingerprint,
-} from '../domain/services/twilio-messaging.service.js';
-import {
   applyProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
-import { applyLoadBalancerAction } from '../domain/services/load-balancer-plan.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import {
@@ -135,6 +141,7 @@ import {
   resolvePlanActionAuthority,
 } from '../domain/plan/action-authority.js';
 import { applyDatabaseResilienceAction } from './apply-database-resilience.js';
+import { applyBackupPolicyAction } from './apply-backup-policy.js';
 import { applyDataMigrationAction } from './apply-data-migration.js';
 import { applyMaintenanceAction } from './apply-maintenance.js';
 import { bindingIdentityFingerprint } from '../domain/services/binding-identity.js';
@@ -332,20 +339,13 @@ function blockedActionIdentity(
   };
 }
 
-export type ConnectionBlock = {
-  provider: string;
-  reason?: string;
-  scope?: string;
-  policy?: 'hard' | 'action-scoped-if-independent-actions';
-  actionIds?: string[];
-  /** Exact provider credential roles required by this block. */
-  requiredCredentialKeys?: string[];
-};
+/** Compatibility name for callers that supply only connection blockers. */
+export type ConnectionBlock = PlanBlock;
 
 function uniqueConnectionBlocks(blocks: ConnectionBlock[]): ConnectionBlock[] {
   const seen = new Set<string>();
   const output: ConnectionBlock[] = [];
-  for (const block of blocks) {
+  for (const block of classifyPlanBlocks(blocks).connections) {
     const key = `${block.provider}:${block.scope ?? ''}:${block.reason ?? ''}:${[...(block.requiredCredentialKeys ?? [])].sort().join(',')}`;
     if (seen.has(key)) {
       continue;
@@ -454,6 +454,36 @@ export function connectionRecoveryDetails(
 }
 
 
+export function planBlockRecovery(
+  blocked: PlanBlock[],
+  options: { project?: string; gitRemoteUrl?: string; connectionAfter: string; connectionNext: string[] }
+) {
+  const { connections, prerequisites } = classifyPlanBlocks(blocked);
+  const reasons = prerequisites.map(block => block.reason).filter(Boolean).join(' ');
+  const prerequisiteHint = prerequisites.length
+    ? `Prerequisites are incomplete. ${reasons} Resolve the reported gaps, then run hv_plan to review a fresh plan before applying or deploying.`
+    : '';
+  const connectionHint = connections.length
+    ? connectionRecoveryHint(connections, { ...options, after: prerequisites.length ? undefined : options.connectionAfter })
+    : '';
+  return {
+    code: prerequisites.length ? 'VALIDATION' as const : 'MISSING_CONNECTION' as const,
+    message: prerequisites.length
+      ? `Prerequisites block this operation. ${reasons}`
+      : `Missing verified connections: ${connectionProviders(connections).join(', ')}.`,
+    details: {
+      blocked,
+      ...(connections.length ? connectionRecoveryDetails(connections, options) : {}),
+    },
+    hint: [prerequisiteHint, connectionHint].filter(Boolean).join(' '),
+    ...(prerequisites.length ? { agentInstruction: { action: 'stop_and_report' as const,
+      message: 'Stop here. Report the prerequisite blockers and resolve them before reviewing a fresh plan. Do not apply or deploy this blocked plan.' } } : {}),
+    next: prerequisites.length
+      ? [...(connections.length ? ['hv_connections'] : []), 'hv_plan']
+      : options.connectionNext,
+  };
+}
+
 export function syncProjectGitRemoteUrl(ctx: CommandContext, project: Project, spec: ProjectSpec): Project {
   const gitRemoteUrl = spec.gitRemoteUrl?.trim();
   if (!gitRemoteUrl || gitRemoteUrl === project.gitRemoteUrl) {
@@ -513,7 +543,8 @@ function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, 
 
 export function splitActionScopedConnectionBlocks(
   blocked: ConnectionBlock[],
-  actions: PlanAction[]
+  actions: PlanAction[],
+  context: ConnectionGuidanceContext = {}
 ): {
   hardBlocked: ConnectionBlock[];
   actionScopedBlocked: ConnectionBlock[];
@@ -524,7 +555,7 @@ export function splitActionScopedConnectionBlocks(
     && !isCloudflareDomainRegistrationAction(action)
   );
   const actionScopedBlocked = blocked.filter((entry) =>
-    entry.policy === 'action-scoped-if-independent-actions'
+    entry.category !== 'prerequisite' && entry.policy === 'action-scoped-if-independent-actions'
     && (entry.actionIds?.some((id) => actions.some((action) => action.id === id && action.type !== 'noop')) ?? hasIndependentPendingAction)
   );
   const ciCredentialBlocks = actions.flatMap((action) => {
@@ -545,12 +576,12 @@ export function splitActionScopedConnectionBlocks(
         ? { requiredCredentialKeys: ['apiToken', 'packageReadToken'] }
         : {}),
       reason: hasImageRegistrySecret
-        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${GITHUB_TOKEN_URLS.packageRead}) before relying on push-to-deploy.`
+        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, context)}) before relying on push-to-deploy.`
         : `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${missing.join(', ')}). Connect and verify ${String(action.metadata?.provider ?? action.resource.provider)} before relying on push-to-deploy.`,
     }];
   });
   return {
-    hardBlocked: blocked.filter((entry) => entry.policy !== 'action-scoped-if-independent-actions'),
+    hardBlocked: blocked.filter((entry) => entry.category === 'prerequisite' || entry.policy !== 'action-scoped-if-independent-actions'),
     actionScopedBlocked: [...actionScopedBlocked, ...ciCredentialBlocks],
   };
 }
@@ -629,7 +660,9 @@ async function executeRepositoryPlanApply(
   const projectForApply = syncProjectGitRemoteUrl(ctx, params.project, params.spec);
   const planService = new PlanService();
   const blocked = planService.projectPreflight(projectForApply, params.spec, params.envName);
-  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions, {
+    project: projectForApply.name, repositoryUrl: projectForApply.gitRemoteUrl,
+  });
   const applyBlocked = [
     ...hardBlocked,
     ...actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked),
@@ -648,21 +681,7 @@ async function executeRepositoryPlanApply(
       };
     }
     if (
-      authority.capability === 'code.repository.create'
-      || authority.capability === 'code.repository.destroy'
-      || authority.capability === 'code.repository.binding.remove'
-    ) {
-      return applyManagedCodeRepositoryAction({
-        project: projectForApply,
-        spec: params.spec,
-        environmentName: params.envName,
-        action,
-      });
-    }
-    if (
       action.resource.name !== expectedRepository
-      && authority.capability !== 'github.pages-dns.sync'
-      && authority.capability !== 'github.openai-secret.sync'
       && authority.capability !== 'github.delegated-secret.sync'
     ) {
       return blockedActionIdentity(
@@ -681,40 +700,6 @@ async function executeRepositoryPlanApply(
         });
       case 'github.setting.sync':
         return applyGitHubNativeSetting({ action });
-      case 'github.pages.sync':
-        return applyGitHubPages({
-          spec: params.spec,
-          action,
-          project: projectForApply,
-          environmentName: params.envName,
-        });
-      case 'github.pages-binding.cleanup':
-        return applyGitHubPagesBindingCleanup({
-          spec: params.spec,
-          action,
-          project: projectForApply,
-          environmentName: params.envName,
-        });
-      case 'github.pages-dns.sync':
-        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-          return blockedActionIdentity(action, `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`);
-        }
-        return applyGitHubPagesDns({
-          spec: params.spec,
-          action,
-        });
-      case 'github.openai-secret.sync':
-        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-          return blockedActionIdentity(
-            action,
-            `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
-          );
-        }
-        return applyGitHubOpenAISecret({
-          project: projectForApply,
-          environmentName: params.envName,
-          action,
-        });
       case 'github.delegated-secret.sync':
         if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
           return blockedActionIdentity(
@@ -768,46 +753,136 @@ export async function executePlanApply(ctx: CommandContext, params: {
   alwaysRunBootstrap?: boolean;
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
-  const providerValidation = firstProviderSpecValidationFailure(spec);
-  if (providerValidation) {
-    return {
-      kind: 'invalid_spec',
-      message: providerValidation.message,
-      hint: providerValidation.hint,
-      details: providerValidation.details,
-    };
-  }
+  // Loading a plan is read-only. Inspect its scope before admitting isolated
+  // operations on existing credentials or retained execution recovery.
   const planService = new PlanService();
 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(planId);
+  // Validate only the plan's environment; credential plans span environments.
+  const validationEnvironment = 'error' in loaded || (loaded.document.scope ?? 'full') === 'credentials'
+    ? undefined : loaded.document.environmentName;
+  const providerValidation = firstProviderSpecValidationFailure(spec, validationEnvironment);
+  const invalidSpec = providerValidation ? { kind: 'invalid_spec' as const, message: providerValidation.message,
+    hint: providerValidation.hint, details: providerValidation.details } : undefined;
   if ('error' in loaded) {
-    return { kind: 'plan_not_found', error: loaded.error };
+    return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
+  }
+  // Older persisted plans may put GitHub secret writes before reviewed file
+  // publication. Require the prerequisite before any effects, including when
+  // publication was moved to the end for confirmation.
+  const githubPublication = loaded.document.actions.find(action =>
+    action.type !== 'noop' && resolvePlanActionAuthority(action)?.capability === 'github.infrastructure.sync');
+  if (githubPublication && loaded.document.actions.some(action =>
+    action.type !== 'noop'
+    && resolvePlanActionAuthority(action)?.capability === 'github.delegated-secret.sync'
+    && !action.dependsOn?.includes(githubPublication.id))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'github',
+      reason: 'This plan must publish and verify the reviewed GitHub workflows before changing their keys. Run hv_plan again.' }] };
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
-  const retainedCleanupOnly = planScope === 'retained-cleanup';
-  const managedCiBindingsOnly = planScope === 'managed-ci-bindings';
-  const workflowPublicationOnly = planScope === 'managed-ci-publication';
-  if (loaded.document.inputRequired?.length) {
-    return {
-      kind: 'input_required',
-      envName,
-      requirements: loaded.document.inputRequired,
-    };
+  if (planScope === 'dns-engine') {
+    if (invalidSpec) return invalidSpec;
+    const outcome = await applyDnsPlan(ctx, { project, spec, specRevision: params.specRevision,
+      planId, confirmActions: params.confirmActions ?? [] });
+    return outcome.kind === 'blocked'
+      ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: outcome.reason }] }
+      : { ...outcome, actionScopedWarnings: [] };
   }
-  const envSpec = spec.environments[envName];
+  if (planScope === 'infrastructure-engine') {
+    if (invalidSpec) return invalidSpec;
+    const engineOutcome = await applyInfrastructureEngine(ctx, { project, spec, specRevision: params.specRevision,
+      planId, confirmActions: params.confirmActions });
+    return engineOutcome.kind === 'blocked'
+      ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'gcp', reason: engineOutcome.reason }] }
+      : { ...engineOutcome, actionScopedWarnings: [] };
+  }
+  const secretsOnly = planScope === 'secrets';
+  const retainedCleanupOnly = planScope === 'retained-cleanup';
+  const backupProvisioningOnly = planScope === 'backup-provisioning';
+  const ciCredentialsOnly = planScope === 'managed-ci-credentials';
+  const managedCiBindingsOnly = planScope === 'managed-ci-bindings' || planScope === 'hosting-bindings';
+  const workflowPublicationOnly = planScope === 'managed-ci-publication' || planScope === 'backup-program-publication';
+  const projectForPreflight = spec.gitRemoteUrl
+    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
+    : project;
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  try {
+    const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
+    if (pendingVariables && (planScope !== 'full' || envName !== pendingVariables
+      || !loaded.document.actions.some(action => action.type !== 'noop')
+      || !loaded.document.actions.every(isRepositoryVariableAction))) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Reconcile the pending repository-variable write in its canonical full plan before other mutations.' }] };
+    }
+  } catch { return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+    reason: 'Retained repository-variable ownership is malformed or ambiguous; no new mutation is authorized.' }] }; }
+  const bootstrapAction = loaded.document.actions[0];
+  const observationOrCleanup = planScope === 'database-bootstrap' && environment
+    && loaded.run.projectId === project.id && loaded.run.environmentId === environment.id
+    && loaded.document.actions.length === 1 && bootstrapAction
+    && ctx.repos.components.findByEnvironmentId(environment.id).some(component =>
+      component.id === bootstrapAction.metadata?.componentId
+      && matchesDatabaseBootstrapObservationOrCleanup(component.bindings, bootstrapAction));
+  if (invalidSpec && !observationOrCleanup && planScope !== 'credentials') return invalidSpec;
+  // These exceptions depend on the validated persisted scope and, for retained
+  // tasks, its exact acknowledged execution. User-supplied scope labels cannot
+  // authorize infrastructure through the credential/recovery executor.
+  if (isEngineManaged(spec.environments[envName]) && planScope !== 'credentials' && !observationOrCleanup) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'cloudrun',
+      reason: 'Cloud Run infrastructure requires an OpenTofu plan. Run hv_plan again before applying this older plan.' }] };
+  }
+  if (loaded.document.inputRequired?.length) {
+    return { kind: 'input_required', envName, requirements: loaded.document.inputRequired };
+  }
+  const pendingDatabaseAliases = environment ? ctx.repos.components.findByEnvironmentId(environment.id)
+    .some(component => component.bindings.credentialAliasRepair !== undefined) : false;
+  if (pendingDatabaseAliases && planScope !== 'database-credential-aliases') {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'A database reference repair needs readback verification. Recover its isolated plan before other mutations.' }] };
+  }
+  const initializationEnvironments = planScope === 'credentials'
+    ? ctx.repos.environments.findByProjectId(project.id) : environment ? [environment] : [];
+  if (planScope !== 'database-bootstrap' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseBootstrap(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Private database bootstrap has a retained attempt. Recover its isolated stage before other mutations.' }] };
+  }
+  if (planScope !== 'database-initialization' && initializationEnvironments.some(candidate =>
+    ctx.repos.components.findByEnvironmentId(candidate.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Database initialization needs exact readback verification. Recover its isolated stage before other mutations.' }] };
+  }
+  if (planScope === 'credentials') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'Credential plans require the exact existing environment and cannot bootstrap.' }] };
+    const result = await applyCredentialLifecycle(ctx, { project: projectForPreflight, spec, specRevision: params.specRevision, planId, confirmActions: params.confirmActions });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Use the managed rollout, then status/health. Configuration, authentication, deployment and application operation are separate outcomes. Revocation remains pending.'] };
+  }
+  const pendingCredential = pendingCredentialUpdate(project.id);
+  if (pendingCredential) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: `Recover credential plan ${pendingCredential} before other lifecycle mutations.` }] };
+
+  const repositoryVariablesOnly = planScope === 'full'
+    && loaded.document.actions.every(isRepositoryVariableAction)
+    && (loaded.document.actions.length > 0 || spec.devops?.ci?.repositoryVariables !== undefined)
+    && envName === repositoryVariablesEnvironment(spec);
+  if (repositoryVariablesOnly) {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Repository variables require the exact isolated plan and cannot bootstrap a deployment.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action => applyRepositoryVariable({ project: projectForPreflight,
+        spec, environmentName: envName, action }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Repository-variable readback does not prove a workflow ran.'] };
+  }
+  const rawEnvironmentSpec = spec.environments[envName];
+  const envSpec = rawEnvironmentSpec && planScope === 'backup-provisioning'
+    ? withBackupStorageDefaults(rawEnvironmentSpec) : rawEnvironmentSpec;
   if (!envSpec) {
-    const repositoryLifecycleOnly = loaded.document.actions.length > 0
-      && loaded.document.actions.every((action) => {
-        const capability = resolvePlanActionAuthority(action)?.capability;
-        return capability === 'code.repository.create'
-          || capability === 'code.repository.destroy'
-          || capability === 'code.repository.binding.remove';
-      });
+    if (secretsOnly) return { kind: 'env_missing', envName };
     return shouldPlanGitHubInfrastructure(spec, envName)
       || shouldPlanGitHubDelegatedSecrets(spec, envName)
-      || repositoryLifecycleOnly
       ? executeRepositoryPlanApply(ctx, {
           project,
           spec,
@@ -825,10 +900,161 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
-  const projectForPreflight = spec.gitRemoteUrl
-    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
-    : project;
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (planScope === 'database-bootstrap') {
+    const reviewedAction = databaseBootstrapActionSchema.safeParse(loaded.document.actions[0]);
+    if (loaded.document.databaseBootstrapReady !== true || !environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || !reviewedAction.success || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database bootstrap requires one exact action and the existing environment; it cannot deploy applications.' }] };
+    }
+    const blocked = planService.providerPreflight([reviewedAction.data.metadata.hostingProvider]);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.bootstrap'
+          ? applyDatabaseBootstrap({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseBootstrapEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database bootstrap action is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'Private task authentication and schema bootstrap do not prove running application readiness. Future backups, restore verification and managed deployment remain separate.' ] };
+  }
+  if (planScope === 'database-initialization') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+      || loaded.document.actions.length !== 1 || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Initialization requires its exact ready plan and existing environment; it cannot bootstrap applications.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision,
+      confirmActions: params.confirmActions, handler: action =>
+        resolvePlanActionAuthority(action)?.capability === 'database.fresh-initialization'
+          ? applyDatabaseFreshInitialization({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+            action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseInitializationEncrypted })
+          : Promise.resolve({ success: false, status: 'blocked' as const, message: 'Only the exact reviewed database initialization is authorized.' }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [
+      'This stage authorizes only database storage initialization. Application rollout, schema migrations, SQL access, backups and restore remain separate.' ] };
+  }
+  if (planScope === 'database-credential-aliases') {
+    if (loaded.document.databaseCredentialAliasesReady !== true || !environment || loaded.run.projectId !== project.id
+      || loaded.run.environmentId !== environment.id || params.alwaysRunBootstrap) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Credential alias repair requires its ready plan and exact existing environment; it cannot deploy.' }] };
+    }
+    if (!loaded.document.actions.length && !await verifyDatabaseCredentialAliases({ project: projectForPreflight,
+      spec: envSpec, environmentName: envName, metadata: loaded.document.databaseCredentialAliasesVerification })) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'Database reference configuration changed or could not be verified. Re-plan; no repair was attempted.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: action => applyDatabaseCredentialAliases({ project: projectForPreflight, spec: envSpec, environmentName: envName,
+        action, confirmed: new Set(params.confirmActions), encrypted: loaded.document.overrides?.databaseCredentialAliasesEncrypted }) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: ['Database reference configuration is separate from SQL authentication, application use and runtime rollout.'] };
+  }
+  if (secretsOnly && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
+    || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci' || params.alwaysRunBootstrap)) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'Secret-only apply requires the reviewed existing project/environment and managed CI; it cannot deploy or repair bindings.' }] };
+  }
+  if (secretsOnly) {
+    const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, projectForPreflight);
+    if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
+        reason: 'The hosting adapter cannot verify secret-only updates without restarting workloads.' }] };
+    }
+  }
+  if ((backupProvisioningOnly || ciCredentialsOnly) && (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id)) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed prerequisite plan belongs to another project or environment.' }] };
+  }
+  if (planScope === 'backup-readiness') {
+    if (asRecord(loaded.document.backupReadiness)?.ready === true) {
+      const result = await executor.execute({ planRunId: planId, confirmActions: [], currentSpecRevision: params.specRevision,
+        handler: async () => ({ success: false, status: 'blocked', message: 'Backup diagnostics authorize no provider mutations.' }) });
+      return { kind: 'executed', envName, result, actionScopedWarnings: ['This diagnostic plan performs no provider mutation or application deployment. Use hv_status for current backup health.'] };
+    }
+    // Saved diagnostics are not execution authority and may predate this field.
+    const savedGaps = asRecord(loaded.document.backupReadiness)?.gaps;
+    const gaps = Array.isArray(savedGaps) ? savedGaps.filter((gap): gap is string => typeof gap === 'string').join(' ') : '';
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: `Backup readiness is blocked. ${gaps} No provider mutation is authorized; run hv_plan after resolving the reported protection gaps.` }] };
+  }
+  if (planScope === 'database-bindings') {
+    if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The database binding plan belongs to another project or environment.' }] };
+    }
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions,
+      currentSpecRevision: params.specRevision, handler: async action => {
+        if (!['database.scope.bind', 'database.provision.recover', 'database.provision.candidate.bind'].includes(resolvePlanActionAuthority(action)?.capability ?? '')) {
+          return { success: false, status: 'blocked', message: 'This stage can only record the reviewed existing database scope.' };
+        }
+        return applyDatabaseScopeBinding({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+          action, confirmedActionIds: new Set(params.confirmActions), specRevision: params.specRevision });
+      } });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  // Identity-only prerequisite stages may create a missing workload, but may
+  // never update an existing workload or activate its schedule.
+  const serviceIdentityOnly = managedCiBindingsOnly && (planScope === 'hosting-bindings'
+    || Object.values(envSpec.services).some(service => service.volume)
+    || hasRetainedServiceVolumes(environment));
+  const isDeferredIdentityCandidate = (action: PlanAction) => serviceIdentityOnly
+    && resolvePlanActionAuthority(action)?.capability === 'hosting.service.converge'
+    && (action.type === 'create' || action.type === 'update' && action.metadata?.workloadCreateRequired === true);
+  if (planScope === 'backup-policy') {
+    if (!environment) return { kind: 'env_missing', envName };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed backup policy plan belongs to another project or environment.' }] };
+    }
+    const blocked = planService.providerPreflight(loaded.document.actions.map(action => action.resource.provider));
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({
+      planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
+      handler: async action => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'backup-policy.configure') {
+          return { success: false, status: 'blocked', message: 'The backup policy stage can only configure the reviewed daily schedule. Re-run hv_plan.' };
+        }
+        return applyBackupPolicyAction({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+          action, confirmedActionIds: new Set(params.confirmActions) });
+      },
+    });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  if (planScope === 'database-checkpoint') {
+    if (!environment) return { kind: 'env_missing', envName };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The snapshot plan belongs to a different project or environment.' }] };
+    }
+    const blocked = planService.providerPreflight([envSpec.database?.provider ?? 'unconfigured']);
+    if (blocked.length) return { kind: 'blocked', applyBlocked: blocked };
+    const result = await executor.execute({
+      planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
+      handler: async (action) => {
+        if (resolvePlanActionAuthority(action)?.capability !== 'database.checkpoint.create') {
+          return { success: false, status: 'blocked', message: 'The snapshot stage cannot mutate deployment configuration. Re-run hv_plan.' };
+        }
+        return applyDatabaseResilienceAction({ ctx, project, environmentName: envName, environmentSpec: envSpec,
+          action, confirmedActionIds: new Set(params.confirmActions) });
+      },
+    });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  if (planScope === 'api-policy') {
+    if (!environment) return { kind: 'env_missing', envName };
+    if (loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The reviewed API policy plan belongs to a different project or environment.' }] };
+    const result = await executor.execute({ planRunId: planId, confirmActions: params.confirmActions, currentSpecRevision: params.specRevision,
+      handler: async action => {
+        const current = ctx.repos.environments.findByProjectAndName(project.id, envName);
+        if (!current || resolvePlanActionAuthority(action)?.capability !== 'api.policy.accept') return { success: false, status: 'blocked', message: 'API policy identity changed; run hv_plan again.' };
+        return applyApiPolicy(envName, current.platformBindings.apiPolicy, envSpec.api, action, new Set(params.confirmActions),
+          apiPolicy => { ctx.repos.environments.updatePlatformBindings(current.id, { apiPolicy }); });
+      },
+    });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  const apiPolicyState = planApiPolicy(envName, environment?.platformBindings.apiPolicy, envSpec.api);
+  if (!secretsOnly && (apiPolicyState.error || apiPolicyState.action)) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: apiPolicyState.error ?? 'API policy changed; run hv_plan and accept the isolated policy stage first.' }] };
   const migrationActions = loaded.document.actions.filter((action) =>
     action.type === 'update'
     && (
@@ -856,13 +1082,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
     .map((action) => action.resource.provider);
   const workflowPublicationActions = loaded.document.actions.filter((action) =>
     action.type !== 'noop'
-    && action.metadata?.workflowPublicationRequired === true
+    && (action.metadata?.workflowPublicationRequired === true || action.metadata?.backupWorkflowPublicationRequired === true)
   );
   const workflowPublicationProviders = workflowPublicationActions.map((action) => {
     const codeProvider = stringField(asRecord(action.metadata), 'codeProvider');
     return codeProvider ?? action.resource.provider;
   });
-  const blocked = retainedCleanupOnly
+  const selectedCi = resolveDevOpsSelection(spec)?.ci;
+  const credentialConnectionProvider = selectedCi
+    ? devOpsProviderRegistry.ciProvider(selectedCi.provider)?.connectionProvider : undefined;
+  const blocked = secretsOnly
+    ? planService.providerPreflight([envSpec.hosting.provider])
+    : retainedCleanupOnly
     ? planService.providerPreflight([
         envSpec.hosting.provider,
         ...cleanupProviders,
@@ -871,7 +1102,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? planService.providerPreflight(migrationProviders)
     : workflowPublicationOnly
     ? planService.providerPreflight(workflowPublicationProviders)
-    : managedCiBindingsOnly
+    : ciCredentialsOnly
+    ? planService.providerPreflight(credentialConnectionProvider ? [credentialConnectionProvider]
+      : loaded.document.actions.map(action => action.resource.provider))
+    : managedCiBindingsOnly || backupProvisioningOnly
     ? planService.providerPreflight(
         loaded.document.actions
           .filter((action) => action.type !== 'noop')
@@ -882,7 +1116,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         ...planService.projectPreflight(projectForPreflight, spec, envName),
         ...planService.providerPreflight(cleanupProviders),
       ];
-  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions, {
+    project: projectForPreflight.name, repositoryUrl: projectForPreflight.gitRemoteUrl,
+  });
   const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
   const applyBlocked = [...hardBlocked, ...connectBeforeApply];
   if (applyBlocked.length > 0) {
@@ -890,8 +1126,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   let freshIntegrationFingerprints: Record<string, string> | undefined;
   const shouldRefreshIntegration = (configured: boolean, planned?: string) =>
-    !retainedCleanupOnly
+    !secretsOnly && !retainedCleanupOnly
     && !workflowPublicationOnly
+    && !backupProvisioningOnly
+    && !ciCredentialsOnly
     && (managedCiBindingsOnly ? Boolean(planned) : configured || Boolean(planned));
   const stripeSpec = envSpec.payments?.stripe;
   if (shouldRefreshIntegration(Boolean(stripeSpec), loaded.document.integrationFingerprints?.stripe)) {
@@ -919,6 +1157,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   if (shouldRefreshIntegration(envSpec.email.enabled, loaded.document.integrationFingerprints?.email)) {
     const emailState = await resolveEmailIntegrationState({
       project: projectForPreflight,
+      environment,
       environmentSpec: envSpec,
     });
     freshIntegrationFingerprints = {
@@ -926,28 +1165,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
       email: emailIntegrationFingerprint(emailState),
     };
   }
-  if (shouldRefreshIntegration(Boolean(envSpec.messaging), loaded.document.integrationFingerprints?.messaging)) {
-    if (!envSpec.messaging) {
-      return {
-        kind: 'blocked',
-        applyBlocked: [{ provider: 'twilio', reason: 'Twilio messaging desired state changed after planning.', policy: 'hard' }],
-      };
-    }
-    const messagingState = await resolveTwilioMessagingState({
-      project: projectForPreflight,
-      spec: envSpec.messaging,
-    });
-    freshIntegrationFingerprints = {
-      ...(freshIntegrationFingerprints ?? {}),
-      messaging: twilioMessagingFingerprint(messagingState),
-    };
-  }
   const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
   const actionScopedWarnings = softActionScopedBlocked.map((entry) =>
     `${entry.reason} This blocks only the related action; independent service and CI actions will still be applied.`
   );
 
-  const projectForApply = retainedCleanupOnly
+  const projectForApply = retainedCleanupOnly || secretsOnly
     ? project
     : syncProjectGitRemoteUrl(ctx, project, spec);
 
@@ -955,21 +1178,34 @@ export async function executePlanApply(ctx: CommandContext, params: {
   // proposal state. Unrelated hosting drift cannot stale-reject that stage.
   let observed: ObservedState | null = null;
   let freshFingerprint: string | null = null;
-  if (!workflowPublicationOnly) {
+  if (!workflowPublicationOnly && !ciCredentialsOnly) {
     ({ observed } = await planService.observeEnvironment(
       projectForApply,
       environment,
       envSpec,
-      { hostingOnly: retainedCleanupOnly }
+      { hostingOnly: retainedCleanupOnly || secretsOnly }
     ));
     freshFingerprint = observed ? fingerprintObservedState(observed) : null;
   }
+  if (secretsOnly) {
+    try {
+      const evidence = scopedSecretObservation(environment!, envSpec, observed, loaded.document.overrides!.delegatedSecretKeys!);
+      if (loaded.document.actions.some(action => action.metadata?.targetFingerprint !== evidence.targetFingerprint)) {
+        throw new Error('The reviewed secret destinations have changed. Re-run the secret-only plan.');
+      }
+      freshFingerprint = evidence.fingerprint;
+    } catch (error) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: envSpec.hosting.provider,
+        reason: error instanceof Error ? error.message : 'Secret destinations could not be verified.' }] };
+    }
+  }
 
   // The bootstrap path derives the hosting adapter from project.defaultPlatform.
-  let applyProject: Project = projectForApply;
+  let applyProject: Project = secretsOnly ? { ...projectForApply, defaultPlatform: envSpec.hosting.provider } : projectForApply;
   if (
-    !retainedCleanupOnly
+    !secretsOnly && !retainedCleanupOnly
     && !workflowPublicationOnly
+    && !ciCredentialsOnly
     && projectForApply.defaultPlatform !== envSpec.hosting.provider
   ) {
     applyProject = ctx.repos.projects.update(projectForApply.id, { defaultPlatform: envSpec.hosting.provider }) ?? projectForApply;
@@ -988,6 +1224,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const delegatedSecretEnvVars = overrides?.delegatedSecretVarsEncrypted
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.delegatedSecretVarsEncrypted)
     : undefined;
+  if (secretsOnly && (!delegatedSecretEnvVars
+    || JSON.stringify(Object.keys(delegatedSecretEnvVars).sort()) !== JSON.stringify([...overrides!.delegatedSecretKeys!].sort())
+    || Object.values(delegatedSecretEnvVars).some(value => typeof value !== 'string' || !value))) {
+    return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'The encrypted secret input must match exactly the reviewed keys. Re-run hv_plan.' }] };
+  }
   const confirmedActionIds = new Set(params.confirmActions);
   const buildDeployBootstrapParams = async () => {
     let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec, spec.runtime);
@@ -1068,11 +1310,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
   let deployBootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const serviceBootstraps = new Map<string, { success: boolean; summary: Record<string, unknown> }>();
 
-  const ensureServiceBootstrap = async (serviceName: string) => {
+  const ensureServiceBootstrap = async (serviceName: string, requireNewWorkload = false) => {
     const existing = serviceBootstraps.get(serviceName);
     if (existing) return existing;
     const base = await buildDeployBootstrapParams();
-    const result = await executeBootstrap(scopeBootstrapParamsToService(base, serviceName));
+    const result = await executeBootstrap({ ...scopeBootstrapParamsToService(base, serviceName),
+      ...(serviceIdentityOnly ? { provisionOnly: true } : {}),
+      ...(requireNewWorkload ? { requireNewWorkload: true } : {}),
+    });
     serviceBootstraps.set(serviceName, result);
     return result;
   };
@@ -1114,18 +1359,66 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     const capability = authority.capability;
+    if (secretsOnly && (!isScopedSecretAction(action) || capability !== 'hosting.delegated-secret.sync')) {
+      return blockedActionIdentity(action, 'Secret-only apply permits only the reviewed delegated secret updates.');
+    }
+    if (ciCredentialsOnly && !isManagedCiCredentialAction(action)) {
+      return { success: false, status: 'blocked', message: 'This stage can synchronize only reviewed CI credentials; no application or release mutation is authorized.' };
+    }
+    const volumeEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const boundServices = asRecord(volumeEnvironment?.platformBindings.services);
+    const boundService = boundServices && Object.prototype.hasOwnProperty.call(boundServices, action.resource.name)
+      ? asRecord(boundServices[action.resource.name]) : undefined;
+    const servicesComplete = observed && (observed.completeness?.services === 'complete'
+      || observed.completeness?.services === undefined && observed.partial === false);
+    const observedServiceIds = observed?.services.filter(service => service.externalId === boundService?.serviceId) ?? [];
+    const deferredIdentityCreation = isDeferredIdentityCandidate(action) && servicesComplete
+      && (action.type === 'create' && !boundService?.serviceId && !action.metadata?.externalId
+          && observed?.services.some(service => service.name === action.resource.name) === false
+        || action.metadata?.workloadCreateRequired === true && typeof boundService?.serviceId === 'string'
+          && action.metadata.externalId === boundService.serviceId && observedServiceIds.length === 1
+          && observedServiceIds[0].identityOnly === true);
+    if (isDeferredIdentityCandidate(action) && !deferredIdentityCreation) {
+      return { success: false, status: 'blocked', message: 'Identity-only prerequisites cannot update an existing workload. Re-plan after observing its exact identity.' };
+    }
+    const requireNewWorkload = Boolean(deferredIdentityCreation);
 
-    if (
-      capability === 'code.repository.create'
-      || capability === 'code.repository.destroy'
-      || capability === 'code.repository.binding.remove'
-    ) {
-      return applyManagedCodeRepositoryAction({
-        project: applyProject,
-        spec,
-        environmentName: envName,
-        action,
+    const volumeSafetyBlock = retainedVolumeHostingBlock(volumeEnvironment, envSpec, action);
+    if (volumeSafetyBlock) return { success: false, status: 'blocked', message: volumeSafetyBlock };
+    if (capability === 'hosting.service-instance.create') {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !result.adapter.serviceInstances || !volumeEnvironment)
+        return { success: false, status: 'blocked', message: 'Scoped service instance capability or environment unavailable.' };
+      return applyServiceInstanceAction({ project: applyProject, environment: volumeEnvironment, action,
+        driver: result.adapter.serviceInstances, confirmedActionIds, specRevision: params.specRevision, planId });
+    }
+    if (capability === 'hosting.volume.mutate') {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const volumes = (result.adapter as IProviderAdapter | undefined)?.serviceVolumes;
+      if (!result.success || result.adapter?.name !== envSpec.hosting.provider || !volumes || !volumeEnvironment) return { success: false, status: 'blocked', message: 'Volume adapter or bound environment unavailable.' };
+      return applyServiceVolumeAction({ environment: volumeEnvironment, environmentSpec: envSpec, action, volumes, confirmedActionIds,
+        save: (serviceVolumes) => {
+          if (!ctx.repos.environments.updatePlatformBindings(volumeEnvironment.id, { serviceVolumes })) throw new Error('Volume recovery state was not persisted.');
+        },
       });
+    }
+    // Independently enforce attachment readiness even if a persisted action's
+    // dependency list is stripped. Empty managed-CI binding stages do not deploy.
+    const createsDeferredWorkload = capability === 'hosting.service.converge'
+      && observed?.services.some(service => service.name === action.resource.name && service.identityOnly === true);
+    if (createsDeferredWorkload && (action.requiresConfirm !== true || action.billable !== true || !confirmedActionIds.has(action.id))) {
+      return { success: false, status: 'blocked', message: 'Creating the first workload in a bound app requires the persisted billable confirmation and exact confirmed action ID.' };
+    }
+    const deployNeedsVolumes = (!managedCiBindingsOnly || createsDeferredWorkload) && (
+      capability === 'hosting.service.converge' || capability === 'hosting.service.rollback'
+      || capability === 'github.ci.release' || capability === 'github.ci.rollback'
+      || capability === 'github.applied-spec-hash.sync'
+    );
+    if (deployNeedsVolumes && (volumeEnvironment?.platformBindings.serviceVolumes !== undefined || Object.values(envSpec.services).some((s) => s.volume))) {
+      const result = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, applyProject);
+      const liveVolumes = await observeServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, volumes: (result.adapter as IProviderAdapter | undefined)?.serviceVolumes });
+      const pendingVolume = planServiceVolumes({ environment: volumeEnvironment, environmentSpec: envSpec, observed: { serviceVolumes: liveVolumes } as ObservedState }).actions.find((a) => a.type !== 'noop');
+      if (pendingVolume) return { success: false, status: 'blocked', message: `Deployment requires verified retained volume attachment: ${pendingVolume.reason}` };
     }
 
     if (capability.startsWith('maintenance.')) {
@@ -1145,18 +1438,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (capability === 'hosting.environment.ensure') {
       return ensureHostingEnvironment(ctx, applyProject, envName, action);
     }
-    if (
-      capability === 'load-balancer.monitor.mutate'
-      || capability === 'load-balancer.pool.mutate'
-      || capability === 'load-balancer.mutate'
-    ) {
-      return applyLoadBalancerAction({
-        project: applyProject,
-        envName,
-        environmentSpec: envSpec,
-        action,
-      });
-    }
     if (capability === 'domain.registration.mutate') {
       const expectedDomain = envSpec.domain?.trim().replace(/\.$/, '').toLowerCase();
       if (!expectedDomain || action.resource.name !== expectedDomain) {
@@ -1168,6 +1449,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (capability === 'github.ci.sync') {
+      if (ciCredentialsOnly && !resolveGitHubActionsSelection(spec)) {
+        return blockedActionIdentity(action, 'The selected CI provider changed; re-run hv_plan.');
+      }
       const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
       if (
         action.resource.name !== `deploy-branch:${envName}`
@@ -1179,33 +1463,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
           `The GitHub deploy target must be ${expectedRepository ?? 'an unset repository'}/${envName} for ${envSpec.hosting.provider}.`
         );
       }
-      return applyGitHubActionsDeploy({
-        project: applyProject,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        action,
-        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
-      });
-    }
-    if (
-      capability === 'ci.configuration.sync'
-      || capability === 'ci.variable.sync'
-      || capability === 'ci.variable.delete'
-      || capability === 'ci.binding.remove'
-    ) {
-      const expectedOperation = capability === 'ci.configuration.sync'
-        ? CI_CONFIGURATION_SYNC_OPERATION
-        : capability === 'ci.variable.sync'
-          ? CI_VARIABLE_SYNC_OPERATION
-          : capability === 'ci.variable.delete'
-            ? CI_VARIABLE_DELETE_OPERATION
-            : CI_BINDING_REMOVE_OPERATION;
-      if (
-        action.metadata?.operation !== expectedOperation
-        || action.metadata?.ciProvider !== action.resource.provider
-      ) {
-        return blockedActionIdentity(action, 'The reviewed CI provider, operation, or resource identity no longer matches.');
-      }
       return applyManagedCiAction({
         project: applyProject,
         spec,
@@ -1213,6 +1470,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
         action,
         appliedSpecHash: false,
+        authority: workflowPublicationOnly ? 'publication-only' : 'secret-sync',
       });
     }
     if (capability === 'github.applied-spec-hash.sync') {
@@ -1231,20 +1489,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
           error: 'The reviewed repository, environment, resource name, or desired hash no longer matches. Re-run hv_plan.',
         };
       }
-      return applyGitHubActionsAppliedSpecHash({
-        project: applyProject,
-        environmentName: envName,
-        desiredHash,
-      });
-    }
-    if (capability === 'ci.applied-spec-hash.sync') {
-      if (
-        action.metadata?.operation !== CI_APPLIED_SPEC_SYNC_OPERATION
-        || action.metadata?.ciProvider !== action.resource.provider
-        || action.metadata?.environmentName !== envName
-      ) {
-        return blockedActionIdentity(action, 'The reviewed applied-spec CI action no longer matches the environment or provider.');
-      }
       return applyManagedCiAction({
         project: applyProject,
         spec,
@@ -1253,6 +1497,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action,
         appliedSpecHash: true,
       });
+    }
+    if (capability === 'hosting.schedule.activate') {
+      return applyScheduleActivation({ project: applyProject, spec, environmentName: envName, action });
     }
     if (capability === 'github.ci.release') {
       const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
@@ -1299,6 +1546,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });
     }
     if (capability === 'github.infrastructure.sync') {
+      if (planScope === 'backup-program-publication') {
+        const publishing = Array.isArray(action.metadata?.desiredFiles) && action.metadata.desiredFiles.length > 0;
+        if (action.metadata?.backupEnvironment !== envName || envSpec.backups?.mode !== (publishing ? 'daily' : 'disabled')) {
+          return { success: false, status: 'blocked', message: 'The selected backup publication no longer matches the explicit environment backup intent. Re-run hv_plan scope="backups".' };
+        }
+      }
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
       if (action.resource.name !== expectedRepository) {
         return blockedActionIdentity(
@@ -1307,51 +1560,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
       return applyGitHubInfrastructure({ action });
-    }
-    if (capability === 'github.pages.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (action.resource.name !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `Reviewed repository is ${action.resource.name}; GitHub Pages currently targets ${expectedRepository ?? 'no repository'}.`
-        );
-      }
-      return applyGitHubPages({ spec, action, project: applyProject, environmentName: envName });
-    }
-    if (capability === 'github.pages-binding.cleanup') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (action.resource.name !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `Reviewed repository is ${action.resource.name}; GitHub Pages binding cleanup currently targets ${expectedRepository ?? 'no repository'}.`
-        );
-      }
-      return applyGitHubPagesBindingCleanup({
-        spec,
-        action,
-        project: applyProject,
-        environmentName: envName,
-      });
-    }
-    if (capability === 'github.pages-dns.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`
-        );
-      }
-      return applyGitHubPagesDns({ spec, action });
-    }
-    if (capability === 'github.openai-secret.sync') {
-      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
-      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
-        return blockedActionIdentity(
-          action,
-          `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
-        );
-      }
-      return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
     }
     if (capability === 'github.delegated-secret.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
@@ -1567,6 +1775,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
         }
       }
 
+      let secretObserved = observed;
+      if (secretsOnly) {
+        try {
+          secretObserved = (await planService.observeEnvironment(applyProject, latestEnvironment, envSpec, { hostingOnly: true })).observed;
+          const fresh = scopedSecretObservation(latestEnvironment, envSpec, secretObserved, [key]);
+          const previous = scopedSecretObservation(environment!, envSpec, observed, [key]);
+          if (fresh.targetFingerprint !== metadata?.targetFingerprint || fresh.fingerprint !== previous.fingerprint) {
+            return blockedActionIdentity(action, 'The selected secret or its destination changed before this write.');
+          }
+        } catch {
+          return blockedActionIdentity(action, 'The exact secret destinations could not be verified before this write.');
+        }
+      }
+
       if (bindingOnly) {
         try {
           recordDelegatedSecretBinding({
@@ -1608,13 +1830,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
       const failures: string[] = [];
       let appliedCount = 0;
-      let deploymentDeferred = false;
-      let runtimeRolloutRequired = false;
+      let deploymentDeferred = secretsOnly;
+      let runtimeRolloutRequired = secretsOnly;
       const rolloutBaselines: Record<string, unknown> = {};
       for (const serviceName of destinationServices) {
+        if (secretsOnly && secretObserved?.services.find(service => service.name === serviceName)?.envVarHashes[key] === hashEnvValue(value)) {
+          continue;
+        }
         const service = ctx.repos.services.findByProjectAndName(project.id, serviceName);
         if (!service) {
           failures.push(`${serviceName}: service is not tracked locally`);
+          if (secretsOnly) break;
           continue;
         }
         const receipt = await syncHostingEnvVars({
@@ -1622,10 +1848,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
           environment: latestEnvironment,
           service,
           vars: { [action.resource.name]: value },
-          deferDeployment: envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native',
+          deferDeployment: secretsOnly || envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native',
+          ...(secretsOnly ? { requireDeferredSecretUpdate: true } : {}),
         });
         if (!receipt.success) {
           failures.push(`${serviceName}: ${receipt.error ?? receipt.message}`);
+          if (secretsOnly) break;
         } else {
           appliedCount += 1;
           const receiptData = asRecord(receipt.data);
@@ -1644,7 +1872,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         requestedCount: destinationServices.length,
         appliedCount,
         failedCount: failures.length,
-        skippedCount: 0,
+        skippedCount: secretsOnly ? destinationServices.length - appliedCount - failures.length : 0,
       };
       if (failures.length > 0) {
         return {
@@ -1655,7 +1883,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
         };
       }
 
-      if (immutableContract) {
+      if (immutableContract || secretsOnly) {
+        const expectedValueHash = immutableContract?.expectedValueHash ?? hashEnvValue(value);
         let verified = false;
         for (let attempt = 0; attempt < 3; attempt += 1) {
           const verificationEnvironment = ctx.repos.environments
@@ -1663,7 +1892,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           if (!verificationEnvironment) {
             return blockedActionIdentity(
               action,
-              `Environment ${envName} disappeared before immutable ${key} could be verified.`
+              `Environment ${envName} disappeared before ${key} could be verified.`
             );
           }
           bindingEnvironment = verificationEnvironment;
@@ -1678,7 +1907,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           } catch {
             verificationObserved = null;
           }
-          const conflict = immutableSecretConflict({
+          const conflict = immutableContract && immutableSecretConflict({
             environment: verificationEnvironment,
             observed: verificationObserved,
             serviceNames: destinationServices,
@@ -1702,14 +1931,19 @@ export async function executePlanApply(ctx: CommandContext, params: {
             destinationServices,
             key
           );
+          let targetsMatch = true;
+          if (secretsOnly) {
+            try { targetsMatch = scopedSecretObservation(verificationEnvironment, envSpec, verificationObserved, [key]).targetFingerprint === metadata?.targetFingerprint; }
+            catch { targetsMatch = false; }
+          }
           if (
-            verifiedLive.state === 'consistent'
-            && verifiedLive.hash === immutableContract.expectedValueHash
+            targetsMatch && verifiedLive.state === 'consistent'
+            && verifiedLive.hash === expectedValueHash
           ) {
             verified = true;
             break;
           }
-          if (verifiedLive.hashes.some((hash) => hash !== immutableContract.expectedValueHash)) {
+          if (immutableContract && verifiedLive.hashes.some((hash) => hash !== expectedValueHash)) {
             return {
               success: false,
               status: 'blocked',
@@ -1726,7 +1960,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           return {
             success: false,
             status: 'pending',
-            message: `Provider acknowledged ${key}, but its immutable value is not yet visible on every target`,
+            message: `Provider acknowledged ${key}, but its reviewed value is not yet visible on every target`,
             error: `Re-run hv_plan after ${key} becomes observable; no binding was recorded.`,
             data: { ...counts, bindingRecorded: false, failureStage: 'verification' },
           };
@@ -1892,7 +2126,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
       });
     }
     if (
-      capability === 'database.availability.configure'
+      capability === 'database.checkpoint.create'
+      || capability === 'database.availability.configure'
       || capability === 'database.backup-policy.configure'
       || capability === 'database.replica.provision'
       || capability === 'database.replica.destroy'
@@ -1903,6 +2138,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentName: envName,
         environmentSpec: envSpec,
         action,
+        confirmedActionIds,
       });
     }
     if (capability === 'database.seed') {
@@ -1948,18 +2184,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentName: envName,
         environmentSpec: envSpec,
         action,
-      });
-    }
-    if (
-      capability === 'messaging.service.mutate'
-      || capability === 'messaging.sender.mutate'
-      || capability === 'messaging.runtime.sync'
-    ) {
-      return applyTwilioMessagingAction({
-        project: applyProject,
-        environmentName: envName,
-        environmentSpec: envSpec,
-        action,
+        confirmedActionIds,
       });
     }
     if (capability === 'local.environment.record') {
@@ -2001,7 +2226,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           error: 'Resolve or explicitly clean up the retained provider service identity before applying another service create. No hosting mutation was attempted.',
         };
       }
-      const result = await ensureServiceBootstrap(action.resource.name);
+      const result = await ensureServiceBootstrap(action.resource.name, requireNewWorkload);
       return bootstrapActionResultFromSummary(action, result);
     }
     return {
@@ -2026,6 +2251,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const planIsAllNoop = loaded.document.actions.every((action) => action.type === 'noop');
   if (
     params.alwaysRunBootstrap
+    && !deploymentPrerequisitePhase(loaded.document)
     && planIsAllNoop
     && !deployBootstrap
     && result.success
@@ -2438,6 +2664,9 @@ async function applyDomain(
     const metadata = asRecord(action.metadata);
     const bindings = parseHostingBindings(environment);
     const domainBinding = bindings.domainDns;
+    if (hasOwnedDnsRecords(environment, 'hosting-domain')) return {
+      success: false, status: 'blocked', message: 'Preserve the hosting domain claim until its owned DNS is removed by a reviewed OpenTofu plan.',
+    };
     const reviewedRecordIds = stringArrayField(metadata, 'dnsRecordIds').sort();
     const currentRecordIds = (domainBinding?.records ?? []).map((record) => record.id).sort();
     const bindingMatches = action.metadata?.operation === DOMAIN_DETACH_OPERATION
@@ -2450,6 +2679,7 @@ async function applyDomain(
       && stringField(metadata, 'environmentId') === domainBinding.environmentId
       && stringField(metadata, 'providerDomainId') === domainBinding.providerDomainId
       && stringField(metadata, 'zoneId') === domainBinding.zoneId
+      && (domainBinding.dnsEngineRemoved !== true || metadata?.dnsEngineRemoved === true)
       && JSON.stringify(reviewedRecordIds) === JSON.stringify(currentRecordIds);
     if (!bindingMatches) {
       return {
@@ -2460,10 +2690,26 @@ async function applyDomain(
       };
     }
 
+    let verifiedDnsAbsence: { zoneFingerprint: string; connectionId: string } | undefined;
+    if (metadata?.dnsCancellationVerified === true) {
+      const proof = asRecord(metadata.dnsCancellationProof);
+      const zoneFingerprint = stringField(proof, 'zoneFingerprint');
+      const connectionId = stringField(proof, 'connectionId');
+      if (domainBinding.dnsStagePending !== true || !domainBinding.dnsSelection || domainBinding.zoneId
+        || !Array.isArray(domainBinding.records) || domainBinding.records.length !== 0 || !zoneFingerprint || !connectionId) {
+        return { success: false, status: 'blocked', message: 'The pending attachment or reviewed DNS absence evidence changed. Run hv_plan again.' };
+      }
+      const absence = await verifyDnsTrafficAbsent({ ctx, project, domain: action.resource.name,
+        zone: dnsZoneIdentity(domainBinding.dnsSelection), connectionScope: domainBinding.dnsSelection.connectionScope,
+        expected: { zoneFingerprint, connectionId } });
+      if (!absence.ready) return { success: false, status: 'blocked', message: absence.reason };
+      verifiedDnsAbsence = { zoneFingerprint: absence.zoneFingerprint, connectionId: absence.connectionId };
+    }
     const result = await teardownCustomDomain({
       project,
       environment,
       domain: action.resource.name,
+      verifiedDnsAbsence,
     });
     if (!result.success) {
       return {
@@ -2490,7 +2736,7 @@ async function applyDomain(
     });
     return {
       success: true,
-      message: `Detached domain ${action.resource.name} and removed its managed DNS records`,
+      message: `Detached domain ${action.resource.name} after verifying DNS cleanup or absence`,
       data: result as unknown as Record<string, unknown>,
     };
   }
@@ -2506,6 +2752,18 @@ async function applyDomain(
     };
   }
   const metadata = asRecord(action.metadata);
+  if (metadata?.operation === 'domainDnsReady' && metadata.dnsEngineReady === true) {
+    const adapter = await ctx.adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+    if (!adapter.success || !adapter.adapter?.observe) return { success: false, status: 'blocked', message: 'The hosting certificate cannot be observed.' };
+    const observed = await adapter.adapter.observe(environment);
+    const binding = parseHostingBindings(environment).domainDns;
+    const matches = observed.services.filter(service => service.externalId === binding?.serviceId && service.customDomains.includes(action.resource.name));
+    const status = matches.length === 1 ? matches[0]!.customDomainStatus?.[action.resource.name] : undefined;
+    if (!binding?.providerDomainId || status?.providerDomainId !== binding.providerDomainId) return { success: false, status: 'blocked', message: 'The exact hosting domain identity changed. Run hv_plan again.' };
+    return status.providerVerified === true
+      ? { success: true, message: 'The provider verified the custom domain and its DNS.' }
+      : { success: false, status: 'pending', message: 'DNS is configured; hosting certificate verification is still pending.' };
+  }
   if (metadata?.operation === DOMAIN_ADOPT_OPERATION) {
     const providerDomainId = stringField(metadata, 'providerDomainId');
     const projectId = stringField(metadata, 'projectId');
@@ -2677,8 +2935,10 @@ async function applyDomain(
     project,
     environment,
     domain: action.resource.name,
+    serviceName: domainServiceFor(environmentSpec),
     trafficProxied: effectiveDomainProxy,
     recreate: recreateRequested,
+    dnsZone: environmentSpec.dns?.zone.name,
   });
   if (
     result.customDomainAttached
@@ -2703,6 +2963,11 @@ async function applyDomain(
         }
         : {}),
       domainDns: {
+        ...(bindings.domainDns?.name === action.resource.name ? bindings.domainDns : {}),
+        ...(!bindings.domainDns && environmentSpec.dns && !hasOwnedDnsRecords(environment, 'hosting-domain')
+          ? { dnsStagePending: true, dnsSelection: { provider: environmentSpec.dns.provider, zone: environmentSpec.dns.zone,
+            ...(environmentSpec.dns.connectionScope ? { connectionScope: environmentSpec.dns.connectionScope } : {}) } }
+          : {}),
         name: action.resource.name,
         proxied: effectiveDomainProxy,
         ...(result.customDomainId ? { providerDomainId: result.customDomainId } : {}),
@@ -2710,7 +2975,7 @@ async function applyDomain(
         ...(serviceBinding?.serviceId ? { serviceId: serviceBinding.serviceId } : {}),
         ...(bindings.environmentId ? { environmentId: bindings.environmentId } : {}),
         ...(result.zone?.id ? { zoneId: result.zone.id } : {}),
-        records: (result.dnsRecords ?? []).map((record) => ({
+        records: (bindings.domainDns?.name === action.resource.name ? bindings.domainDns.records : undefined) ?? (result.dnsRecords ?? []).map((record) => ({
           id: record.id,
           name: record.name,
           type: record.type,
@@ -2726,7 +2991,7 @@ async function applyDomain(
     return {
       success: true,
       status: 'pending',
-      message: `Configured DNS for ${action.resource.name}; ${action.resource.provider} domain verification is pending`,
+      message: `Recorded the hosting attachment for ${action.resource.name}; run hv_plan to review its DNS records through OpenTofu`,
       data: result as unknown as Record<string, unknown>,
     };
   }
@@ -4116,7 +4381,7 @@ async function createDatabase(
   const engine = desired.engine as DatabaseType;
   const provisioned = await adapterResult.adapter.provision(engine, environment, {
     databaseName: 'app',
-    resourceName: `${project.name}-${envName}-${engine}`,
+    resourceName: environmentResourceName(engine, environment),
   });
   if (!provisioned.receipt.success) {
     const recoverableComponentRetained = retainFailedProvisionIdentity({
@@ -4288,7 +4553,7 @@ async function createCache(
     };
   }
   const provisioned = await adapterResult.adapter.provision(engine, environment, {
-    resourceName: `${project.name}-${envName}-${engine}`,
+    resourceName: unresolvedNetworkCreate?.cacheName ?? environmentResourceName(engine, environment),
     ...target,
     component: existingProvider === action.resource.provider ? existing : null,
   });
@@ -4583,6 +4848,10 @@ export async function applyDatabaseSeed(
     };
   }
 
+  const databaseGeneration = databaseSeedGeneration(component, environment.platformBindings);
+  if (databaseGeneration === null || action.metadata?.databaseGeneration !== databaseGeneration) {
+    return { success: false, status: 'blocked', message: 'The database generation changed or is unverified. Re-plan before running the seed command.' };
+  }
   const result = await runEnvironmentTask({
     project,
     environment,
@@ -4612,12 +4881,19 @@ export async function applyDatabaseSeed(
     };
   }
 
+  const currentComponent = ctx.repos.components.findById(component.id);
+  const currentEnvironment = ctx.repos.environments.findById(environment.id);
+  if (!currentComponent || !currentEnvironment || currentComponent.externalId !== component.externalId
+    || databaseSeedGeneration(currentComponent, currentEnvironment.platformBindings) !== databaseGeneration) {
+    return { success: false, status: 'blocked', message: 'The database generation changed during the seed task. Its outcome was not recorded as current seed completion.' };
+  }
   const seededAt = new Date().toISOString();
   ctx.repos.components.updateBindings(component.id, {
     seed: {
       commandHash,
       seededAt,
       source: 'hv_apply',
+      ...(databaseGeneration ? { databaseGeneration } : {}),
     },
   });
 

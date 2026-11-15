@@ -1,0 +1,184 @@
+# Shared recovery contract
+
+Recovery uses the existing spec/plan/apply lifecycle and managed deployment
+evidence. The shared contract describes exact source identity, a recovery point,
+durable operation state, and separate verification boundaries. Provider adapters
+own their native identifiers, polling, correlation and restore implementation.
+This identity and evidence contract does not itself authorize a restore or
+provider mutation. The existing native checkpoint/drill capabilities and the
+separate [managed retained-set runtime](default-backup-policy.md#managed-retained-recovery-sets)
+perform only their reviewed lifecycle operations.
+
+[Daily backup defaults](default-backup-policy.md) describe recurring protection
+for databases, persistent mounts and object storage through this same lifecycle.
+An observed daily policy does not establish an available recovery point or a
+tested restore. Named checkpoints retain their isolated execution priority;
+recurring policy work does not enlarge checkpoint mutation authority.
+
+## Identity, points and operations
+
+`RecoverySourceIdentity` includes the provider, exact primary resource ID,
+provider scope and additional resource identity. All coordinates are explicitly
+allowlisted identity fields; arbitrary metadata and credential fields are
+rejected, along with URL-like values and control characters. Provider resolvers
+validate that required coordinates are native non-secret identifiers; a generic
+schema cannot identify every secret disguised as an ID. Equality includes the provider and every coordinate,
+so equal-looking IDs in different projects, accounts or instances are different
+sources. Adding a coordinate requires reviewing its export safety.
+
+`RecoveryPoint` distinguishes a named snapshot from a timestamp/LSN in retained
+history. A point describes what was selected; it does not prove availability.
+Snapshot creation time is not automatically the time represented by its data.
+Timestamp/LSN selection has no fabricated snapshot or workflow ID. Provider
+adapters must check the source's actual retention window and eligibility.
+
+The checkpoint capability creates named snapshots only. Before creation it
+persists the exact source, unique request label, request time and prior inventory.
+An acknowledged request can carry an opaque operation ID, but the shared contract
+does not require a Railway workflow. The adapter observes the retained request
+and reports pending, failed, unknown or complete with its exact correlated point.
+Unknown acknowledgement or observation never permits a second creation. Shared
+orchestration rechecks source identity and point availability before completion.
+Railway still requires both terminal workflow success and the matching inventory.
+
+Existing Railway records remain readable through an exact legacy decoder. They
+are identified as Railway from that old schema, never from the current desired
+provider. Operation identities and uncertain reservations survive normalization,
+repository export/import and resume. Conflicting records block recovery.
+
+Restore-drill compilation uses a provider-owned source resolver over the bound
+environment and database component. The shared compiler verifies ownership and
+the safe identity before passing it to the provider compiler. Cloud SQL restore
+drills are unavailable: the old workflow created and deleted instances outside
+OpenTofu and has been removed. A replacement must use the managed engine.
+
+## Legacy database scope reconciliation
+
+An existing database whose `providerScope` is absent or a valid, nonconflicting
+partial identity may receive one
+confirmed `database-bindings` action. The shared planner uses the native
+`dailyBackups.observe` source, before any managed-program projection. Every
+scope coordinate must agree with the legacy component or its same-provider
+environment binding. Missing, malformed or conflicting evidence is not authority
+to infer placement, adopt another database or overwrite existing scope.
+
+The action pins the exact component, provider, engine, external ID, complete
+recovery source and a credential-free binding fingerprint. Apply rechecks the
+current binding and freshly observed source before merging only missing scope
+coordinates. A reviewed partial scope must still match exactly, or already equal
+the complete reviewed scope after an earlier persistence attempt. Recorded keys
+are never replaced. The optional runtime-reference metadata capability can add
+an absent URL variable-name binding under the same isolated source checks.
+It preserves the spec, services, credentials, checkpoint history and deployment
+markers, and reports applied/skipped counts with zero provider mutations. Re-plan
+after applying the prerequisite; it does not enable a schedule or verify a
+restore. An outstanding checkpoint retains priority.
+
+Identity repair is independent of `backups.mode`: disabling backup management
+still permits the same confirmed, independently verified repair. A database with
+complete recorded scope but no committed `databaseTopology.primary` receives an
+identity-only repair under the same checks. Apply and export retries re-observe
+the exact source without enabling schedules or mutating provider resources.
+
+The disabled-policy regression failed before removing the shared selector's
+backup-policy guard: the full planner returned `full` instead of
+`database-bindings` for an already scoped Railway database missing its committed
+primary. The expanded contract had 20 failures and 44 passes before the fix;
+all 64 checks pass afterward, as do 106 adjacent backup/provider checks and
+source typechecking. Both policy modes exercise confirmation, conflicting and
+ambiguous identities, unverifiable scope, and persistence retries. Railway
+transport fixtures are synthetic and validated against the pinned official SDL;
+they are not live repair evidence. These checks remain in ordinary `npm test`.
+The committed acceptance workflow and desired required-check configuration both
+include that gate; live branch-protection enforcement was not inspected.
+
+The following review, dated 2026-10-02, covers all eight registered database
+providers. Eligibility is adapter behavior checked against these native identity
+contracts, not a claim of live compatibility.
+
+| Provider | Native identity evidence | Missing-scope repair |
+| --- | --- | --- |
+| Railway | [Pinned official SDL, CLI `f60f3a77`](https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json): project-owned service/environment, environment-specific service instance and volume instance. | Eligible only with a matching legacy component project anchor and independently verified exact source, including one active volume. Missing both scope and anchor remains unknown. Ordinary database observation preserves the same complete scope, including custom-image fallback. |
+| Cloud SQL | [Instance GET](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/instances/get) selects project and instance; its response identifies project and region. | Blocked: the existing native daily observer requires durable project scope before reading. |
+| RDS | [Instance identity](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DBInstance.html) includes ARN and immutable regional `DbiResourceId`. | Unsupported: no native daily observation port. |
+| Azure PostgreSQL | [Server GET](https://learn.microsoft.com/en-us/rest/api/postgresql/servers/get?view=rest-postgresql-2024-08-01): ARM server ID includes subscription and resource group. | Unsupported: no native daily observation port. |
+
+Normal acceptance includes real SQLite plan/apply tests and Railway's actual
+serialized GraphQL client against the pinned official schema. Fixture state is
+synthetic. These tests establish preservation, identity rejection and query-only
+provider access; they do not perform a live repair, backup or restore.
+
+## Verification means separate evidence
+
+Checkpoint receipts and rollback previews use the same versioned `recovery`
+assessment. Each check is `verified`, `unknown`, `failed` or `unsupported`;
+missing evidence is unknown. The checks are:
+
+| Check | Evidence required to call it verified |
+| --- | --- |
+| `recoveryPoint` | Exact source and point remain observable, usable and within retention; required native completion is terminal. |
+| `restoreTargetIsolation` | Restoration targets a separate exact resource and leaves the source unchanged. |
+| `restoreSideEffectIsolation` | Restored background jobs, triggers and outbound integrations cannot affect live systems. A new resource ID is insufficient. |
+| `databaseValidation` | The declared data/schema checks actually pass against the restored database. |
+| `applicationArtifact` | Original release provenance and immutable artifact identity satisfy the existing release validator. |
+| `applicationAvailability` | The artifact remains available through the provider's exact restoration path, including registry pull authorization where applicable; exact targets/runtime configuration have been verified. |
+| `applicationHealth` | The restored application passes its health checks with the intended data and configuration. |
+| `migrationCompatibility` | The candidate schema/migrations are compatible with the selected recovery release, based on explicit validation. |
+| `cleanup` | Temporary drill resources are verified removed; no cleanup outcome is assumed from an accepted request. |
+
+`ready` is true only when every check is verified. This report is evidence
+presentation, never mutation authorization. Existing confirmation, exact-resource
+authority, deployment locks and release validators remain authoritative.
+Neither a provider capability flag nor an unchanged migration command verifies
+any of these boundaries. A compiled drill is not an executed drill. Cloud SQL has no supported restore
+drill executor.
+
+A checkpoint receipt can verify `recoveryPoint` while all restore/application
+checks remain unknown. A compatible rollback preview can verify
+`applicationArtifact` while registry availability, restoration, database recovery
+and migration compatibility remain unknown. Legacy release blockers remain in
+place. Code rollback does not reverse database migrations or restore data.
+
+## Named provider review
+
+Reviewed against the registry and official sources on 2026-09-30. These are
+contract constraints and implementation coverage, not live certifications.
+Normal acceptance tests enumerate all eight database providers and all seven
+hosting providers; adding a provider requires updating that explicit review.
+
+| Database provider | Native model checked | Current Hypervibe recovery implementation |
+| --- | --- | --- |
+| Railway | [Volume backups](https://docs.railway.com/volumes/backups): native restore replaces the original service's volume within its project/environment. Volume deletion removes its backups. | Named native checkpoint; no isolated native-volume restore adapter. The separate [logical retained-set runtime](postgres-logical-backup-runtime.md) restores copied SQL bytes into a fresh local PostgreSQL instance. |
+| Cloud SQL | [BackupRun API](https://docs.cloud.google.com/sql/docs/postgres/admin-api/rest/v1beta4/backupRuns): IDs are scoped to an instance and native statuses distinguish successful, pending and failed backups. [Recovery](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/restore): PITR creates another instance. | OpenTofu-managed backup/PITR policy; named checkpoints and restore drills are unavailable. |
+| RDS | [Snapshot restore](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html) creates a new instance. Snapshot identity is not a volume-instance identity; an available instance can still be loading data. | Checkpoint and drill unsupported by Hypervibe. |
+| Azure PostgreSQL | [Backup/restore](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore): PITR creates a server; on-demand backup eligibility depends on tier/storage. [Restore configuration](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/how-to-restore-full-backup) requires its own checks. | Checkpoint and drill unsupported by Hypervibe. |
+
+Managed immutable-image rollback recipes exist for Railway, Cloud Run, ECS
+Express and Azure Container Apps.
+capability in Hypervibe. The coverage test invokes every registered provider recipe;
+it does not claim that a generated recipe has been exercised live. Direct-provider
+deployment history still lacks the required immutable recovery evidence and is
+not accepted as rollback authority.
+
+| Hosting provider | Official recovery semantics checked |
+| --- | --- |
+| Railway | [Deployment actions](https://docs.railway.com/deployments/deployment-actions) depend on retention of the selected deployment image. Historical deployment identity does not prove current availability. |
+| Cloud Run | [Revisions](https://docs.cloud.google.com/run/docs/managing/revisions) are immutable but can be removed. The [revision API](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.revisions) distinguishes resolved image digest from readiness. |
+| ECS Express | [Service updates](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-update-full.html) use image identity plus health/traffic checks; [service revisions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-revision.html) identify immutable configurations. |
+| Azure Container Apps | [Revisions](https://learn.microsoft.com/en-us/azure/container-apps/revisions) do not version application-scoped secrets, ingress and registry credentials. Restoring an old revision does not restore all configuration. |
+
+## Acceptance and remaining work
+
+The ordinary `npm test` path checks registry completeness, provider capability
+truth, safe source identity across all eight database models, unsupported
+checkpoint planning, and the existing real Railway transport/lifecycle and
+Cloud SQL unsupported-capability boundaries. An RDS-shaped compiler/operation fixture tests the
+shared boundary without enabling an RDS adapter. Timestamp/LSN tests establish
+point-in-time representation only. Provider documentation is cited
+evidence; only the existing pinned API fixtures claim schema validation.
+
+This change fixes the shared contract and its existing consumers. It does not
+add recovery mutations to the six remaining database adapters, perform a live
+restore, prove application/schema compatibility, or make the HLS August release
+executable through the current rollback consumer. Those require separately
+reviewed adapter implementations and live evidence through this same contract.

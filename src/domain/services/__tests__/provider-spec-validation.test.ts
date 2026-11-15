@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import '../../../application/providers.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
+import { providerRegistry } from '../../registry/provider.registry.js';
 import {
   firstProviderSpecValidationFailure,
+  introducedProviderSpecValidationFailure,
   validateProjectSpecProviders,
 } from '../provider-spec-validation.js';
+
+// Synthetic metadata exercises the generic workload validator independently of clouds.
+const hostingFixture = providerRegistry.get('cloudrun')!;
+providerRegistry.register({ ...hostingFixture, metadata: { ...hostingFixture.metadata, name: 'fixture-web-hosting',
+  lifecycle: { hosting: { workloadKinds: ['web'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+  maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } } } });
 
 function spec(hosting: string, database?: string, cache?: string) {
   return projectSpecSchema.parse({
@@ -42,7 +50,7 @@ function storageSpec(provider: string) {
   });
 }
 
-function infrastructureSpec(params: { hosting: string; loadBalancer?: string; queues?: boolean }) {
+function infrastructureSpec(params: { hosting: string; queues?: boolean }) {
   return projectSpecSchema.parse({
     version: 1,
     project: 'provider-infrastructure-contract',
@@ -57,15 +65,6 @@ function infrastructureSpec(params: { hosting: string; loadBalancer?: string; qu
           ? { database: { provider: 'railway' } }
           : {}),
         ...(params.queues ? { queues: { jobs: {} } } : {}),
-        ...(params.loadBalancer
-          ? {
-              domain: 'api.example.com',
-              loadBalancer: {
-                provider: params.loadBalancer,
-                services: ['api', 'fallback'],
-              },
-            }
-          : {}),
       },
     },
   });
@@ -92,63 +91,58 @@ function workloadSpec(provider: string, workloadKind: 'web' | 'worker' | 'cron')
 }
 
 describe('validateProjectSpecProviders', () => {
-  it('accepts installed primary and derived lifecycle adapters', () => {
-    expect(validateProjectSpecProviders(spec('railway', 'railway'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('cloudrun', 'cloudsql'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', undefined, 'railway'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('ecs', undefined, 'elasticache'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', undefined, 'elasticache'))).toContainEqual(
-      expect.objectContaining({
-        field: 'cache.provider',
-        provider: 'elasticache',
-        incompatibleHostingProvider: 'railway',
-        available: ['ecs'],
-      })
-    );
+  it('rejects spec writes only for environments the write changes', () => {
+    const write = (environments: Record<string, unknown>) =>
+      projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments });
+    const production = { hosting: { provider: 'railway' }, services: {} };
+    const aws = { hosting: { provider: 'ecs' }, services: {} };
+    const previous = write({ production, aws });
+    const editProduction = write({ production: { ...production, domain: 'app.example.com' }, aws });
+    expect(introducedProviderSpecValidationFailure(previous, editProduction)).toBeUndefined();
+    const editAws = write({ production, aws: { ...aws, domain: 'aws.example.com' } });
+    expect(introducedProviderSpecValidationFailure(previous, editAws)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
+    const addAzure = write({ production, aws, azure: { hosting: { provider: 'azure-container-apps' }, services: {} } });
+    expect(introducedProviderSpecValidationFailure(previous, addAzure)).toMatchObject({ details: { path: 'environments.azure.hosting.provider' } });
+    expect(introducedProviderSpecValidationFailure(null, editProduction)).toMatchObject({ details: { maturityStatus: 'planned' } });
+  });
+  it('scopes validation to the requested environment so another environment cannot block it', () => {
+    const candidate = projectSpecSchema.parse({ version: 1, project: 'provider-contract', environments: {
+      production: { hosting: { provider: 'railway' }, services: {} },
+      aws: { hosting: { provider: 'ecs' }, services: {} },
+    } });
+    expect(firstProviderSpecValidationFailure(candidate)).toMatchObject({ details: { path: 'environments.aws.hosting.provider' } });
+    expect(firstProviderSpecValidationFailure(candidate, 'production')).toBeUndefined();
+    expect(firstProviderSpecValidationFailure(candidate, 'aws')).toMatchObject({ details: { maturityStatus: 'planned' } });
+  });
+  it.each(['ecs', 'azure-container-apps'])('reports %s as awaiting engine integration, not an unknown provider', provider => {
+    expect(firstProviderSpecValidationFailure(spec(provider))).toMatchObject({
+      message: expect.stringContaining('is planned'),
+      hint: expect.stringContaining('OpenTofu'),
+      details: { maturityStatus: 'planned', path: 'environments.staging.hosting.provider' },
+    });
   });
 
-  it('enforces each hosting adapter\'s complete workload-kind lifecycle before planning', () => {
-    const expectedKinds = new Map<string, Array<'web' | 'worker' | 'cron'>>([
-      ['railway', ['web', 'worker', 'cron']],
-      ['cloudrun', ['web', 'worker', 'cron']],
-      ['digitalocean', ['web', 'worker', 'cron']],
-      ['fly', ['web', 'worker']],
-      ['ecs', ['web']],
-      ['azure-container-apps', ['web']],
-      ['vercel', ['web']],
-    ]);
+  it('keeps Railway volume lifecycle available while cloud provisioning awaits the engine', () => {
+    expect(providerRegistry.namesFor('hosting').filter(name => name !== 'fixture-web-hosting')).toEqual(['railway']);
+    const candidate = workloadSpec('railway', 'web');
+    candidate.environments.staging.services.processor.volume = { mountPath: '/data' };
+    expect(firstProviderSpecValidationFailure(candidate)).toBeUndefined();
+  });
 
-    for (const [provider, supportedKinds] of expectedKinds) {
-      for (const workloadKind of ['web', 'worker', 'cron'] as const) {
-        const workloadIssues = validateProjectSpecProviders(workloadSpec(provider, workloadKind))
-          .filter((issue) => issue.field === 'services.workloadKind');
-        if (supportedKinds.includes(workloadKind)) {
-          expect(workloadIssues, `${provider} ${workloadKind}`).toEqual([]);
-        } else {
-          expect(workloadIssues, `${provider} ${workloadKind}`).toEqual([
-            expect.objectContaining({
-              environment: 'staging',
-              provider,
-              service: 'processor',
-              workloadKind,
-              available: supportedKinds,
-            }),
-          ]);
-        }
-      }
+  it('accepts Railway primary and derived lifecycle adapters', () => {
+    expect(validateProjectSpecProviders(spec('railway', 'railway', 'railway'))).toEqual([]);
+  });
+
+  it('accepts all retained Railway workload kinds', () => {
+    for (const kind of ['web', 'worker', 'cron'] as const) {
+      expect(validateProjectSpecProviders(workloadSpec('railway', kind))).toEqual([]);
     }
   });
 
-  it('returns an exact actionable path for an unsupported hosting workload kind', () => {
-    expect(firstProviderSpecValidationFailure(workloadSpec('ecs', 'worker'))).toMatchObject({
-      message: 'ecs hosting does not support workload kind "worker" for service "processor" in environment "staging".',
-      hint: expect.stringContaining('Supported workload kinds for ecs: web.'),
-      details: {
-        path: 'environments.staging.services.processor.workloadKind',
-        capability: 'hosting',
-        service: 'processor',
-        workloadKind: 'worker',
-      },
+  it('keeps unsupported workload kinds distinct from missing lifecycle implementations', () => {
+    expect(firstProviderSpecValidationFailure(workloadSpec('fixture-web-hosting', 'worker'))).toMatchObject({
+      message: expect.stringContaining('does not support workload kind "worker"'),
+      details: { path: 'environments.staging.services.processor.workloadKind', capability: 'hosting', service: 'processor', workloadKind: 'worker' },
     });
   });
 
@@ -172,95 +166,22 @@ describe('validateProjectSpecProviders', () => {
       }),
     ]);
     expect(issues[0].available).toContain('railway');
-    expect(issues[1].available).toContain('supabase');
+    expect(issues[1].available).toContain('railway');
     expect(issues[2].available).toContain('railway');
   });
 
-  it('enforces each datastore provider\'s implemented hosting-network contract', () => {
-    expect(validateProjectSpecProviders(spec('cloudrun', 'railway'))).toContainEqual(
-      expect.objectContaining({
-        field: 'database.provider',
-        provider: 'railway',
-        capability: 'database',
-        incompatibleHostingProvider: 'cloudrun',
-        available: ['railway'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('railway', 'railway'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('cloudrun', undefined, 'railway'))).toContainEqual(
-      expect.objectContaining({
-        field: 'cache.provider',
-        provider: 'railway',
-        capability: 'cache',
-        incompatibleHostingProvider: 'cloudrun',
-        available: ['railway'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('railway', undefined, 'railway'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', 'fly'))).toContainEqual(
-      expect.objectContaining({
-        field: 'database.provider',
-        provider: 'fly',
-        capability: 'database',
-        incompatibleHostingProvider: 'railway',
-        available: ['fly'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('fly', 'fly'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', 'cloudsql'))).toContainEqual(
-      expect.objectContaining({
-        field: 'database.provider',
-        provider: 'cloudsql',
-        capability: 'database',
-        incompatibleHostingProvider: 'railway',
-        available: ['cloudrun'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('cloudrun', 'cloudsql'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', 'rds'))).toContainEqual(
-      expect.objectContaining({
-        field: 'database.provider',
-        provider: 'rds',
-        capability: 'database',
-        incompatibleHostingProvider: 'railway',
-        available: ['ecs'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('ecs', 'rds'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', 'azure-postgres'))).toContainEqual(
-      expect.objectContaining({
-        field: 'database.provider',
-        provider: 'azure-postgres',
-        capability: 'database',
-        incompatibleHostingProvider: 'railway',
-        available: ['azure-container-apps'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('azure-container-apps', 'azure-postgres'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', undefined, 'memorystore'))).toContainEqual(
-      expect.objectContaining({
-        field: 'cache.provider',
-        provider: 'memorystore',
-        capability: 'cache',
-        incompatibleHostingProvider: 'railway',
-        available: ['cloudrun'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('cloudrun', undefined, 'memorystore'))).toEqual([]);
-    expect(validateProjectSpecProviders(spec('railway', undefined, 'azure-managed-redis'))).toContainEqual(
-      expect.objectContaining({
-        field: 'cache.provider',
-        provider: 'azure-managed-redis',
-        capability: 'cache',
-        incompatibleHostingProvider: 'railway',
-        available: ['azure-container-apps'],
-      })
-    );
-    expect(validateProjectSpecProviders(spec('azure-container-apps', undefined, 'azure-managed-redis'))).toEqual([]);
+  it('enforces Railway datastore hosting boundaries', () => {
+    for (const capability of ['database', 'cache'] as const) {
+      const candidate = capability === 'database' ? spec('fixture-web-hosting', 'railway') : spec('fixture-web-hosting', undefined, 'railway');
+      expect(validateProjectSpecProviders(candidate)).toContainEqual(expect.objectContaining({
+        field: capability + '.provider', provider: 'railway', capability, incompatibleHostingProvider: 'fixture-web-hosting', available: ['railway'],
+      }));
+    }
+    expect(validateProjectSpecProviders(spec('railway', 'railway', 'railway'))).toEqual([]);
   });
 
   it('validates storage provider lifecycle maturity', () => {
-    expect(validateProjectSpecProviders(storageSpec('s3'))).toEqual([]);
+    expect(firstProviderSpecValidationFailure(storageSpec('s3'))).toMatchObject({ details: { maturityStatus: 'planned' } });
     expect(validateProjectSpecProviders(storageSpec('missing-storage'))).toContainEqual(
       expect.objectContaining({
         field: 'storage.provider',
@@ -273,8 +194,8 @@ describe('validateProjectSpecProviders', () => {
   it('validates queue lifecycle through hosting-provider metadata', () => {
     expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'cloudrun', queues: true }))).toEqual([]);
     expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'railway', queues: true }))).toEqual([]);
-    expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'fly', queues: true }))).toContainEqual(
-      expect.objectContaining({ field: 'queues', provider: 'fly', capability: 'queue' })
+    expect(validateProjectSpecProviders(infrastructureSpec({ hosting: 'ecs', queues: true }))).toContainEqual(
+      expect.objectContaining({ field: 'queues', provider: 'ecs', capability: 'queue' })
     );
   });
 
@@ -333,55 +254,6 @@ describe('validateProjectSpecProviders', () => {
     expect(validateProjectSpecProviders(managedPubSub)).toEqual([]);
   });
 
-  it('validates provider-managed load-balancer lifecycle independently of hosting', () => {
-    expect(validateProjectSpecProviders(infrastructureSpec({
-      hosting: 'railway',
-      loadBalancer: 'cloudflare',
-    }))).toEqual([]);
-    expect(validateProjectSpecProviders(infrastructureSpec({
-      hosting: 'railway',
-      loadBalancer: 'missing-edge',
-    }))).toContainEqual(expect.objectContaining({
-      field: 'loadBalancer.provider',
-      provider: 'missing-edge',
-      capability: 'load-balancer',
-    }));
-  });
 
-  it('validates open DevOps provider ids and code-host compatibility through the separate registry', () => {
-    const base = {
-      version: 1 as const,
-      project: 'devops-provider-contract',
-      gitRemoteUrl: 'https://gitlab.com/acme/app.git',
-      environments: {
-        staging: {
-          hosting: { provider: 'railway' },
-          services: {},
-          deploy: { strategy: 'branch' as const, trigger: 'ci' as const },
-        },
-      },
-    };
-    const gitlab = projectSpecSchema.parse({
-      ...base,
-      devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/app' },
-        ci: { provider: 'gitlab-ci' },
-      },
-    });
-    expect(validateProjectSpecProviders(gitlab)).toEqual([]);
-
-    const incompatible = projectSpecSchema.parse({
-      ...base,
-      devops: {
-        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/app' },
-        ci: { provider: 'github-actions' },
-      },
-    });
-    expect(validateProjectSpecProviders(incompatible)).toContainEqual(expect.objectContaining({
-      field: 'devops.ci.provider',
-      provider: 'github-actions',
-      capability: 'ci',
-    }));
-  });
 
 });

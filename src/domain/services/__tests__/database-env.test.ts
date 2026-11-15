@@ -23,17 +23,13 @@ function component(
 describe('database runtime projection registry', () => {
   it('projects the shared PostgreSQL contract for every registered database provider', () => {
     const connectionUrl = 'postgresql://app:secret@db.internal:5433/app';
-    const providers = providerRegistry.namesFor('database').sort();
+    const providers = providerRegistry.all().filter(provider => provider.databaseRuntime).map(provider => provider.metadata.name).sort();
 
     expect(providers).toEqual([
       'azure-postgres',
       'cloudsql',
-      'digitalocean',
-      'fly',
-      'neon',
       'railway',
       'rds',
-      'supabase',
     ]);
     for (const provider of providers) {
       const env = buildDatabaseEnvVarsFromComponent(component(provider, {
@@ -62,7 +58,7 @@ describe('database runtime projection registry', () => {
         DB_NAME: 'app',
         PGDATABASE: 'app',
       });
-      expect(env.DATABASE_SSL, provider).toBe(provider === 'supabase' ? 'true' : undefined);
+      expect(env.DATABASE_SSL, provider).toBeUndefined();
     }
   });
 

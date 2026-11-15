@@ -50,6 +50,8 @@ export interface ImportRailwayProjectOptions {
   storageMappings?: Record<string, string>;
   /** Explicit service-backed datastore adoption: Railway service id -> engine. */
   databaseMappings?: Record<string, 'postgres'>;
+  /** Provider-observed reference keys, indexed by exact service and environment. */
+  databaseDirectUrlVariables?: Record<string, Record<string, 'DIRECT_URL' | 'DATABASE_PRIVATE_URL' | 'DATABASE_URL'>>;
   /** Explicit service-backed cache adoption: Railway service id -> engine. */
   cacheMappings?: Record<string, 'redis'>;
 }
@@ -452,11 +454,14 @@ export async function importRailwayProject(
         environmentId: env.railwayId,
         providerScope: {
           projectId: details.id,
-          ...(type === 'redis' ? { environmentId: env.railwayId } : {}),
+          environmentId: env.railwayId,
         },
         resourceKind: 'service',
         serviceId,
         pluginName: service.name,
+        ...(type === 'postgres' && options.databaseDirectUrlVariables?.[serviceId]?.[env.railwayId]
+          ? { directUrlVariable: options.databaseDirectUrlVariables[serviceId][env.railwayId] }
+          : {}),
         ...(type === 'redis'
           ? { connectionUrl: '${{' + service.name + '.REDIS_URL}}' }
           : {}),
@@ -466,6 +471,13 @@ export async function importRailwayProject(
         componentRepo.update(existing.id, { type, externalId: serviceId, bindings });
       } else {
         componentRepo.create({ environmentId: env.id, type, externalId: serviceId, bindings });
+      }
+      if (type === 'postgres') {
+        // The confirmed mapping is the identity evidence; commit it as the primary
+        // database so hosted inspection compares this service as the database.
+        const topology = asRecord(envRepo.findById(env.id)?.platformBindings.databaseTopology) ?? {};
+        envRepo.updatePlatformBindings(env.id, { databaseTopology: {
+          ...topology, primary: { provider: 'railway', externalId: serviceId }, replicas: asRecord(topology.replicas) ?? {} } });
       }
       const prior = createdComponents.findIndex((component) =>
         component.environmentId === env.id && component.type === type

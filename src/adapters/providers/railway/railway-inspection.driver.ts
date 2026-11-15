@@ -1,6 +1,8 @@
 import type { ComponentType } from '../../../domain/entities/component.entity.js';
 import type { ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import type { RailwayAdapter, RailwayProjectDetails } from './railway.adapter.js';
+import { railwayDatabaseReferences, selectRailwayDatabaseDirectUrlVariable } from './railway-postgres-template.js';
+import { railwayDeploySource, normalizeRailwayGitRepo } from './railway-deploy-source.js';
 
 export interface ImportCandidate {
   name: string;
@@ -26,6 +28,8 @@ export interface ImportServiceSummary {
     numReplicas?: number;
     sleepApplication?: boolean;
     sourceImage?: string;
+    sourceState?: 'connected' | 'disconnected' | 'unknown';
+    source?: { repo: string; branch?: string };
   }>;
 }
 
@@ -44,6 +48,38 @@ export interface RailwayProjectInspection {
   envVarNames: string[];
   autoDetected: Record<string, string>;
   needsMapping: string[];
+}
+
+/** Exact confirmed import targets only; provider values never leave this helper. */
+export async function inspectRailwayDatabaseImportReferences(
+  adapter: RailwayAdapter,
+  inspection: RailwayProjectInspection,
+  databaseMappings: Record<string, 'postgres'>,
+  environmentMappings: Record<string, string>
+): Promise<Record<string, Record<string, 'DIRECT_URL' | 'DATABASE_PRIVATE_URL' | 'DATABASE_URL'>>> {
+  const references: Record<string, Record<string, 'DIRECT_URL' | 'DATABASE_PRIVATE_URL' | 'DATABASE_URL'>> = {};
+  for (const serviceId of Object.keys(databaseMappings)) {
+    const matches = inspection.services.filter(service => service.railwayId === serviceId);
+    if (matches.length !== 1) throw new Error('Railway database import service identity is ambiguous or unavailable.');
+    for (const name of Object.keys(environmentMappings)) {
+      const environments = inspection.environments.filter(environment => environment.name === name);
+      if (environments.length !== 1) throw new Error('Railway database import environment identity is ambiguous or unavailable.');
+      const environmentId = environments[0].railwayId;
+      if (!matches[0].instancesByEnv[environmentId]) continue;
+      let directUrlVariable: ReturnType<typeof selectRailwayDatabaseDirectUrlVariable>;
+      try {
+        const variables = await adapter.getServiceVariables(inspection.details.id, serviceId, environmentId);
+        directUrlVariable = selectRailwayDatabaseDirectUrlVariable(variables);
+      } catch {
+        throw new Error('Unable to verify Railway database runtime reference keys for the selected import scope.');
+      }
+      if (!directUrlVariable) throw new Error('Railway database import requires usable DATABASE_URL and direct URL reference keys.');
+      railwayDatabaseReferences(matches[0].name, directUrlVariable);
+      references[serviceId] ??= {};
+      references[serviceId][environmentId] = directUrlVariable;
+    }
+  }
+  return references;
 }
 
 function mapPluginToComponentType(pluginName: string): ComponentType {
@@ -102,7 +138,15 @@ export async function inspectRailwayProject(
     const instancesByEnv: ImportServiceSummary['instancesByEnv'] = {};
     for (const instanceEdge of serviceEdge.node.serviceInstances?.edges ?? []) {
       const instance = instanceEdge.node;
+      const source = railwayDeploySource({
+        projectId: details.id, serviceId: serviceEdge.node.id, environmentId: instance.environmentId,
+        triggers: serviceEdge.node.repoTriggers,
+        instanceSourceObserved: instance.source !== undefined,
+        instanceRepo: instance.source?.repo,
+      });
       instancesByEnv[instance.environmentId] = {
+        sourceState: source.state,
+        ...(source.source ? { source: source.source } : {}),
         domains: instance.domains?.serviceDomains?.map((domain) => domain.domain) ?? [],
         customDomains: instance.domains?.customDomains?.map((domain) => domain.domain) ?? [],
         startCommand: instance.startCommand,
@@ -121,12 +165,17 @@ export async function inspectRailwayProject(
       serviceEdge.node.name,
       ...sourceImages,
     ].join(' '));
+    const instances = Object.values(instancesByEnv);
+    const firstSource = instances[0]?.source;
+    const uniformSource = firstSource && instances.every(instance => instance.sourceState === 'connected'
+      && normalizeRailwayGitRepo(instance.source?.repo) === normalizeRailwayGitRepo(firstSource.repo)
+      && instance.source?.branch === firstSource.branch) ? firstSource : undefined;
     return {
       name: serviceEdge.node.name,
       railwayId: serviceEdge.node.id,
-      repo: serviceEdge.node.repoTriggers.edges[0]?.node.repository ?? null,
-      branch: serviceEdge.node.repoTriggers.edges[0]?.node.branch ?? null,
-      hasGitHubDeploy: serviceEdge.node.repoTriggers.edges.length > 0,
+      repo: uniformSource?.repo ?? null,
+      branch: uniformSource?.branch ?? null,
+      hasGitHubDeploy: instances.some(instance => instance.sourceState === 'connected'),
       ...(datastoreEngine ? { datastoreEngine } : {}),
       instancesByEnv,
     };

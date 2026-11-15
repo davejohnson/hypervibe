@@ -24,6 +24,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe('GcsStorageAdapter', () => {
+
   it('inventories bounded buckets with durable project scope', async () => {
     const request = vi.fn(async () => json({ items: [
       { name: 'customer-documents', location: 'US-CENTRAL1' },
@@ -92,54 +93,6 @@ describe('GcsStorageAdapter', () => {
     });
   });
 
-  it('creates a private labeled bucket and returns composite project scope', async () => {
-    let createdName: string | undefined;
-    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/storage/v1/b/') && (!init?.method || init.method === 'GET')) {
-        return createdName
-          ? json({
-              name: createdName,
-              location: 'us-central1',
-              labels: {
-                hypervibe_environment_id: 'environment-1',
-                hypervibe_storage_name: 'documents',
-              },
-            })
-          : json({ error: { message: 'missing' } }, 404);
-      }
-      if (url.includes('/storage/v1/b?') && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body));
-        createdName = body.name;
-        expect(body).toMatchObject({
-          location: 'us-central1',
-          labels: {
-            hypervibe_environment_id: 'environment-1',
-            hypervibe_storage_name: 'documents',
-          },
-          iamConfiguration: {
-            publicAccessPrevention: 'enforced',
-            uniformBucketLevelAccess: { enabled: true },
-          },
-        });
-        return json({ name: body.name });
-      }
-      throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
-    });
-    const adapter = new GcsStorageAdapter({
-      fetch: request as typeof fetch,
-      tokenProvider: async () => ({ token: 'token', email: 'hypervibe@cloud-project.iam.gserviceaccount.com' }),
-    });
-    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
-
-    const contextResult = await adapter.ensureContext('friend-app', environment());
-    const result = await adapter.ensureBucket(environment(), contextResult.context!, 'documents', 'us-central1');
-
-    expect(contextResult.context).toMatchObject({ projectId: 'cloud-project' });
-    expect(result.receipt.success).toBe(true);
-    expect(result.externalId).toMatch(/^hv-friend-app-production-documents-[0-9a-f]{10}$/);
-  });
-
   it('observes only buckets labeled for the selected environment with usage', async () => {
     const request = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -177,79 +130,13 @@ describe('GcsStorageAdapter', () => {
     })).rejects.toThrow('adminAuth="default"');
   });
 
-  it('refuses to adopt an existing deterministic bucket without ownership labels', async () => {
-    const request = vi.fn(async (input: string | URL | Request) => {
-      const name = decodeURIComponent(new URL(String(input)).pathname.split('/').at(-1)!);
-      return json({ name, labels: {} });
-    });
-    const adapter = new GcsStorageAdapter({
-      fetch: request as typeof fetch,
-      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
-    });
-    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
-    const context = (await adapter.ensureContext('friend-app', environment())).context!;
-
-    const result = await adapter.ensureBucket(environment(), context, 'documents', 'us-central1');
-
-    expect(result.receipt.success).toBe(false);
-    expect(result.receipt.error).toContain('not owned');
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not report creation success until the exact bucket is observable', async () => {
-    let reads = 0;
-    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/storage/v1/b/') && (!init?.method || init.method === 'GET')) {
-        reads += 1;
-        return json({ error: { message: 'missing' } }, 404);
-      }
-      if (url.includes('/storage/v1/b?') && init?.method === 'POST') {
-        return json({});
-      }
-      throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
-    });
-    const adapter = new GcsStorageAdapter({
-      fetch: request as typeof fetch,
-      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
-    });
-    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
-    const context = (await adapter.ensureContext('friend-app', environment())).context!;
-
-    const result = await adapter.ensureBucket(environment(), context, 'documents', 'us-central1');
-
-    expect(result.receipt).toMatchObject({ success: false });
-    expect(result.receipt.error).toContain('did not become observable after creation');
-    expect(reads).toBe(2);
-  });
-
-  it('does not treat a malformed successful exact lookup as absence or delete the bucket', async () => {
-    const request = vi.fn(async (
-      _input: string | URL | Request,
-      _init?: RequestInit
-    ) => json({}));
-    const adapter = new GcsStorageAdapter({
-      fetch: request as typeof fetch,
-      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
-    });
-    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
-
-    const result = await adapter.destroyBucket(
-      environment(),
-      { projectId: 'cloud-project', environmentId: 'environment-1' },
-      'managed'
-    );
-
-    expect(result).toMatchObject({ success: false });
-    expect(result.error).toContain('absence was not confirmed');
-    expect(request.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
-  });
-
   it('provides GCS-native runtime and object transfer contracts', async () => {
     const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/o?') && !init?.method) return json({ items: [{ name: 'folder/a.pdf', size: '3' }] });
-      if (url.includes('alt=media')) return new Response('pdf', { headers: { 'content-type': 'application/pdf', 'content-length': '3' } });
+      if (url.includes('alt=media')) return new Response('pdf', { headers: { 'content-type': 'application/pdf', 'content-length': '3', 'x-goog-generation': '1', 'x-goog-metageneration': '1' } });
+      // Reads freeze the native revision before streaming media, preserving metadata and stored bytes.
+      if (url.includes('/o/folder%2Fa.pdf?') && !init?.method) return json({ name: 'folder/a.pdf', size: '3', generation: '1', metageneration: '1', contentType: 'application/pdf' });
       if (url.includes('/upload/storage/v1/') && init?.method === 'POST') return json({ name: 'folder/a.pdf' });
       if (url.includes('/storage/v1/') && init?.method === 'PATCH') return json({ name: 'folder/a.pdf' });
       throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
@@ -265,7 +152,9 @@ describe('GcsStorageAdapter', () => {
       'OBJECT_STORAGE_PROVIDER', 'OBJECT_STORAGE_BUCKET', 'GOOGLE_CLOUD_PROJECT',
       'GOOGLE_CLOUD_STORAGE_BUCKET', 'GOOGLE_CLOUD_CREDENTIALS_JSON',
     ]);
-    await expect(adapter.getRuntimeEnv(environment(), context, 'managed', 'documents')).resolves.toMatchObject({
+    await expect(adapter.getRuntimeEnv(environment(), context, 'managed', 'documents', {
+      hostingProvider: 'railway', connectionProvider: 'gcs',
+    })).resolves.toMatchObject({
       OBJECT_STORAGE_PROVIDER: 'gcs', GOOGLE_CLOUD_STORAGE_BUCKET: 'managed', GOOGLE_CLOUD_PROJECT: 'cloud-project',
     });
     const transfer = await adapter.openObjectTransfer(environment(), context, 'managed');
@@ -276,33 +165,5 @@ describe('GcsStorageAdapter', () => {
     });
     expect(request.mock.calls.some(([, init]) => init?.method === 'PATCH'
       && String(init.body).includes('"metadata":{"source":"migration"}'))).toBe(true);
-  });
-
-  it('empties an owned bucket before confirmed deletion', async () => {
-    let bucketReads = 0;
-    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith('/storage/v1/b/managed') && !init?.method) {
-        bucketReads += 1;
-        return bucketReads === 1
-          ? json({ name: 'managed', labels: { hypervibe_environment_id: 'environment-1' } })
-          : json({ error: { message: 'missing' } }, 404);
-      }
-      if (url.includes('/storage/v1/b/managed/o?') && !init?.method) {
-        return json({ items: [{ name: 'a.pdf', size: '3' }] });
-      }
-      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
-      throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
-    });
-    const adapter = new GcsStorageAdapter({
-      fetch: request as typeof fetch,
-      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
-    });
-    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
-
-    await expect(adapter.destroyBucket(
-      environment(), { projectId: 'cloud-project', environmentId: 'environment-1' }, 'managed'
-    )).resolves.toMatchObject({ success: true });
-    expect(request.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(2);
   });
 });

@@ -27,6 +27,7 @@ const interfaceModules: Array<[string, URL]> = [
 ];
 
 const providerNeutralHostingServices: Array<[string, URL]> = [
+  ['src/domain/services/resource-names.ts', new URL('../../domain/services/resource-names.ts', import.meta.url)],
   ['src/domain/services/hosting-env.service.ts', new URL('../../domain/services/hosting-env.service.ts', import.meta.url)],
   ['src/domain/services/deploy-source.ts', new URL('../../domain/services/deploy-source.ts', import.meta.url)],
   ['src/domain/services/bootstrap.service.ts', new URL('../../domain/services/bootstrap.service.ts', import.meta.url)],

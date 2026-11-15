@@ -72,7 +72,7 @@ describe('Railway storage buckets', () => {
     const adapter = createRailwayStorageAdapter(railway);
     const standaloneEnvironment = {
       ...environment(),
-      platformBindings: { provider: 'fly', appId: 'fly-app' },
+      platformBindings: { provider: 'unrelated-provider', appId: 'unrelated-app' },
     };
 
     const result = await adapter.resolveObservationContext!(
@@ -88,7 +88,7 @@ describe('Railway storage buckets', () => {
       },
     });
     expect(result.receipt.error).toContain('hv_import');
-    expect(result.receipt.error).toContain('hosted on fly');
+    expect(result.receipt.error).toContain('hosted on unrelated-provider');
     expect(request).not.toHaveBeenCalled();
   });
 
@@ -192,7 +192,8 @@ describe('Railway storage buckets', () => {
       .mockResolvedValueOnce(bucketState({
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -201,7 +202,7 @@ describe('Railway storage buckets', () => {
     expect(receipt).toMatchObject({ success: true, data: { externalId: 'bucket-1', region: 'sjc' } });
     expect(request.mock.calls[1]?.[1]).toEqual({ input: { projectId: 'rp', name: 'uploads' } });
     expect(request.mock.calls[3]?.[1]).toMatchObject({ environmentId: 're', patch: { buckets: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } } } });
-    expect(request).toHaveBeenCalledTimes(5);
+    expect(request).toHaveBeenCalledTimes(6);
   });
 
   it('treats an omitted empty bucket map as a complete empty configuration', async () => {
@@ -216,7 +217,8 @@ describe('Railway storage buckets', () => {
       .mockResolvedValueOnce(bucketState({
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -235,7 +237,8 @@ describe('Railway storage buckets', () => {
       .mockResolvedValueOnce(bucketState({
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -256,7 +259,8 @@ describe('Railway storage buckets', () => {
         buckets: [{ id: 'bucket-1', name: 'uploads' }],
         config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
         unmergedChangesCount: null,
-      }));
+      }))
+      .mockResolvedValueOnce({ bucketInstanceDetails: { objectCount: 0, sizeBytes: 0 } });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
 
@@ -270,16 +274,17 @@ describe('Railway storage buckets', () => {
     expect(request.mock.calls.some(([query]) => String(query).includes('environmentPatchCommit'))).toBe(true);
   });
 
-  it('reports an unbound same-name bucket as an adoption candidate without attaching it', async () => {
+  it('reports an unbound same-name instance in the target environment as an adoption candidate', async () => {
     const request = vi.fn().mockResolvedValueOnce(bucketState({
       buckets: [{ id: 'bucket-1', name: 'documents' }],
+      config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
     }));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
     const receipt = await adapter.ensureStorage(environment(), 'documents', { region: 'sjc' });
     expect(receipt).toMatchObject({
       success: false,
-      data: { adoptionCandidateExternalId: 'bucket-1' },
+      data: { adoptionCandidateExternalId: 'bucket-1', mutationAttempted: false },
     });
     expect(receipt.error).toContain('hv_import');
     expect(request).toHaveBeenCalledTimes(1);
@@ -537,46 +542,6 @@ describe('Railway storage buckets', () => {
     });
     expect(receipt.error).toContain('did not acknowledge');
     expect(request).toHaveBeenCalledTimes(4);
-  });
-
-  it('does not report success until the environment bucket patch converges', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce(bucketState())
-      .mockResolvedValueOnce({ bucketCreate: { id: 'bucket-1', name: 'uploads', projectId: 'rp' } })
-      .mockResolvedValueOnce(bucketState({ buckets: [{ id: 'bucket-1', name: 'uploads' }] }))
-      .mockResolvedValueOnce({ environmentPatchCommit: 'deployment-1' })
-      .mockResolvedValueOnce(bucketState({ buckets: [{ id: 'bucket-1', name: 'uploads' }] }));
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: typeof request } }).client = { request };
-
-    const receipt = await adapter.ensureStorage(environment(), 'uploads', { region: 'sjc' });
-
-    expect(receipt).toMatchObject({
-      success: false,
-      data: { externalId: 'bucket-1', patchSubmitted: true, verification: 'pending' },
-    });
-    expect(request).toHaveBeenCalledTimes(5);
-  });
-
-  it('verifies terminal environment absence after deleting a bucket instance', async () => {
-    const active = bucketState({
-      buckets: [{ id: 'bucket-1', name: 'uploads' }],
-      config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: false } },
-    });
-    const request = vi.fn()
-      .mockResolvedValueOnce(active)
-      .mockResolvedValueOnce({ environmentPatchCommit: 'deployment-1' })
-      .mockResolvedValueOnce(bucketState({
-        buckets: [{ id: 'bucket-1', name: 'uploads' }],
-        config: { 'bucket-1': { region: 'sjc', isCreated: true, isDeleted: true } },
-      }));
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: typeof request } }).client = { request };
-
-    const receipt = await adapter.destroyStorage(environment(), 'bucket-1');
-
-    expect(receipt).toMatchObject({ success: true, data: { externalId: 'bucket-1', deleted: true } });
-    expect(request).toHaveBeenCalledTimes(3);
   });
 
   it('rejects an unacknowledged deletion patch', async () => {

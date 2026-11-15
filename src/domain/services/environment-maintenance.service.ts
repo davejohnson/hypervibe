@@ -10,16 +10,21 @@ import type {
 } from '../ports/maintenance.port.js';
 import {
   supportsEdgeMaintenance,
+  supportsEdgeTraffic,
   supportsWorkloadMaintenance,
 } from '../ports/maintenance.port.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { getCloudflareAdapter } from './cloudflare-ops.service.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import { observePostgresWriteFence } from './postgres-maintenance.service.js';
+import { observeDomainTarget } from './domain-target.service.js';
 
 export interface EnvironmentMaintenanceBinding {
+  mode?: 'application' | 'data';
   state?: 'entering' | 'active' | 'exiting';
   edge?: MaintenanceEdgeBinding;
+  /** Exact proposed script update saved before changing the owned route. */
+  pendingEdge?: MaintenanceEdgeBinding;
   workloads?: Record<string, MaintenanceWorkloadSnapshot>;
   database?: {
     componentId?: string;
@@ -27,6 +32,27 @@ export interface EnvironmentMaintenanceBinding {
     fenced?: boolean;
   };
   updatedAt?: string;
+}
+
+export function maintenanceMode(spec: EnvironmentSpec, binding?: EnvironmentMaintenanceBinding): 'application' | 'data' {
+  return spec.maintenance?.mode ?? binding?.mode ?? 'data';
+}
+
+export function maintenanceModeChanged(spec: EnvironmentSpec, binding?: EnvironmentMaintenanceBinding): boolean {
+  return Boolean(binding && maintenanceMode(spec, binding) !== (binding.mode ?? 'data'));
+}
+
+export function maintenanceTransitionChanged(spec: EnvironmentSpec, binding?: EnvironmentMaintenanceBinding,
+  target?: { origin: string; targetFingerprint: string }): boolean {
+  const pending = binding?.pendingEdge;
+  if (!pending) return false;
+  if (spec.maintenance?.enabled !== true) return true;
+  // An explicitly reviewed return to the 503 page is always a safe continuation
+  // on this owned route, even when the replacement can no longer pass health checks.
+  if (spec.maintenance.page !== 'off') return false;
+  if (!pending.origin) return spec.maintenance.page === 'off';
+  return spec.maintenance.page !== 'off' || target?.origin !== pending.origin
+    || target.targetFingerprint !== pending.targetFingerprint;
 }
 
 export function maintenanceWorkloadsRestored(
@@ -51,25 +77,34 @@ function stringField(record: Record<string, unknown> | undefined, key: string): 
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function parseEdge(value: unknown): MaintenanceEdgeBinding | undefined {
+  const edge = asRecord(value);
+  if (!edge) return undefined;
+  if (!['hostname', 'accountId', 'zoneId', 'routeId', 'scriptName', 'contentHash'].every(field => stringField(edge, field))) return undefined;
+  const origin = stringField(edge, 'origin');
+  const targetFingerprint = stringField(edge, 'targetFingerprint');
+  if ((edge.origin !== undefined || edge.targetFingerprint !== undefined)
+    && (!origin || !targetFingerprint || !/^[a-f0-9]{64}$/.test(targetFingerprint))) {
+    throw new Error('Stored maintenance routing identity is incomplete.');
+  }
+  return {
+    hostname: stringField(edge, 'hostname')!, accountId: stringField(edge, 'accountId')!,
+    zoneId: stringField(edge, 'zoneId')!, routeId: stringField(edge, 'routeId')!,
+    scriptName: stringField(edge, 'scriptName')!, contentHash: stringField(edge, 'contentHash')!,
+    ...(origin && targetFingerprint ? { origin, targetFingerprint } : {}),
+  };
+}
+
 export function parseEnvironmentMaintenanceBinding(
   environment: Pick<Environment, 'platformBindings'> | null | undefined
 ): EnvironmentMaintenanceBinding | undefined {
   const source = asRecord(environment?.platformBindings?.maintenance);
   if (!source) return undefined;
-  const edge = asRecord(source.edge);
   const workloads = asRecord(source.workloads);
-  const parsedEdge = edge
-    && ['hostname', 'accountId', 'zoneId', 'routeId', 'scriptName', 'contentHash']
-      .every((field) => stringField(edge, field))
-    ? {
-        hostname: stringField(edge, 'hostname')!,
-        accountId: stringField(edge, 'accountId')!,
-        zoneId: stringField(edge, 'zoneId')!,
-        routeId: stringField(edge, 'routeId')!,
-        scriptName: stringField(edge, 'scriptName')!,
-        contentHash: stringField(edge, 'contentHash')!,
-      }
-    : undefined;
+  const parsedEdge = parseEdge(source.edge);
+  const pendingEdge = parseEdge(source.pendingEdge);
+  if (source.pendingEdge !== undefined && !pendingEdge) throw new Error('Stored maintenance transition identity is incomplete.');
+  if (source.mode !== undefined && source.mode !== 'application' && source.mode !== 'data') throw new Error('Stored maintenance mode is invalid.');
   const parsedWorkloads = Object.fromEntries(
     Object.entries(workloads ?? {}).flatMap(([name, value]) => {
       const item = asRecord(value);
@@ -83,7 +118,9 @@ export function parseEnvironmentMaintenanceBinding(
     ...(source.state === 'entering' || source.state === 'active' || source.state === 'exiting'
       ? { state: source.state }
       : {}),
+    ...(source.mode === 'application' || source.mode === 'data' ? { mode: source.mode } : {}),
     ...(parsedEdge ? { edge: parsedEdge } : {}),
+    ...(pendingEdge ? { pendingEdge } : {}),
     ...(Object.keys(parsedWorkloads).length > 0 ? { workloads: parsedWorkloads } : {}),
     ...(asRecord(source.database) ? { database: asRecord(source.database) as EnvironmentMaintenanceBinding['database'] } : {}),
     ...(stringField(source, 'updatedAt') ? { updatedAt: stringField(source, 'updatedAt') } : {}),
@@ -97,13 +134,32 @@ export async function observeEnvironmentMaintenance(params: {
   hostingAdapter: unknown;
 }): Promise<EnvironmentMaintenanceObservation> {
   const binding = parseEnvironmentMaintenanceBinding(params.environment);
+  const mode = maintenanceMode(params.environmentSpec, binding);
   const hostname = params.environmentSpec.domain ?? '';
   const edgeResult = hostname ? getCloudflareAdapter(hostname) : { error: 'domain missing' };
-  const edge = !hostname
+  const observeEdge = async (edgeBinding?: MaintenanceEdgeBinding) => !hostname
     ? { state: 'unknown' as const, hostname, markerVerified: false, reason: 'maintenance_domain_missing' }
     : 'error' in edgeResult || !supportsEdgeMaintenance(edgeResult.adapter)
       ? { state: 'unknown' as const, hostname, markerVerified: false, reason: 'maintenance_edge_connection_unavailable' }
-      : await edgeResult.adapter.observeMaintenanceEdge(hostname, binding?.edge);
+      : edgeBinding?.origin && edgeBinding.targetFingerprint
+        ? supportsEdgeTraffic(edgeResult.adapter)
+          ? await edgeResult.adapter.observeTrafficEdge(hostname, { origin: edgeBinding.origin, targetFingerprint: edgeBinding.targetFingerprint }, edgeBinding)
+          : { state: 'unknown' as const, hostname, markerVerified: false, reason: 'maintenance_routing_unsupported' }
+        : await edgeResult.adapter.observeMaintenanceEdge(hostname, edgeBinding);
+  let edge = await observeEdge(binding?.edge);
+  if (binding?.pendingEdge) {
+    const pending = await observeEdge(binding.pendingEdge);
+    if (pending.state === 'active' && pending.markerVerified) edge = pending;
+  }
+  const page = edge.state === 'active'
+    ? (edge.binding?.origin ? 'off' as const : 'active' as const)
+    : edge.state === 'inactive' ? 'off' as const : 'unknown' as const;
+  const desiredPage = params.environmentSpec.maintenance?.page ?? 'active';
+  const routing = mode === 'application' && params.environmentSpec.domainTarget
+    ? await observeDomainTarget(params) : undefined;
+  const routingMatches = desiredPage !== 'off' || (routing?.state === 'ready' && routing.target
+    && edge.binding?.targetFingerprint === routing.target.targetFingerprint
+    && edge.binding.origin === routing.target.origin);
 
   const workloads: Record<string, ObservedMaintenanceWorkload> = {};
   for (const [name, spec] of Object.entries(params.environmentSpec.services ?? {})) {
@@ -128,7 +184,11 @@ export async function observeEnvironmentMaintenance(params: {
   }
 
   let database: EnvironmentMaintenanceObservation['database'];
-  if (!params.environmentSpec.database) {
+  if (maintenanceModeChanged(params.environmentSpec, binding)) {
+    database = { state: 'unknown', reason: 'maintenance_mode_changed' };
+  } else if (mode === 'application') {
+    database = { state: 'unmanaged' };
+  } else if (!params.environmentSpec.database) {
     database = { state: 'not-applicable' };
   } else if (params.environmentSpec.database.engine !== 'postgres') {
     database = { state: 'unknown', reason: 'maintenance_database_engine_unsupported' };
@@ -142,13 +202,15 @@ export async function observeEnvironmentMaintenance(params: {
   const workloadStates = Object.values(workloads).map((workload) => workload.state);
   const allSuspended = workloadStates.every((state) => state === 'suspended');
   const allRestored = maintenanceWorkloadsRestored(workloads, binding);
-  const databaseFenced = database.state === 'fenced' || database.state === 'not-applicable';
-  const databaseUnfenced = database.state === 'unfenced' || database.state === 'not-applicable';
-  const active = edge.state === 'active' && edge.markerVerified && allSuspended && databaseFenced;
+  const databaseFenced = database.state === 'fenced' || database.state === 'not-applicable' || database.state === 'unmanaged';
+  const databaseUnfenced = database.state === 'unfenced' || database.state === 'not-applicable' || database.state === 'unmanaged';
+  const active = edge.state === 'active' && edge.markerVerified && allSuspended && databaseFenced
+    && page === desiredPage && routingMatches;
   const inactive = edge.state === 'inactive' && allRestored && databaseUnfenced;
   const unknown = edge.state === 'unknown'
     || workloadStates.includes('unknown')
-    || database.state === 'unknown';
+    || database.state === 'unknown'
+    || (desiredPage === 'off' && routing?.state !== 'ready');
   const state = active ? 'active' : inactive ? 'inactive' : unknown ? 'unknown' : 'partial';
   const stage = active ? 'verified'
     : edge.state !== (params.environmentSpec.maintenance?.enabled ? 'active' : 'inactive') ? 'edge'
@@ -156,10 +218,14 @@ export async function observeEnvironmentMaintenance(params: {
         || (!params.environmentSpec.maintenance?.enabled && allRestored)) ? 'workloads'
         : !((params.environmentSpec.maintenance?.enabled && databaseFenced)
           || (!params.environmentSpec.maintenance?.enabled && databaseUnfenced)) ? 'database'
-          : params.environmentSpec.maintenance?.enabled ? 'verified' : 'exit';
+          : !routingMatches || page !== desiredPage ? 'routing'
+            : params.environmentSpec.maintenance?.enabled ? 'verified' : 'exit';
 
   return {
     state,
+    mode,
+    page,
+    ...(routing ? { routing } : {}),
     stage,
     edge: {
       state: edge.state,

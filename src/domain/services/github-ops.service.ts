@@ -1,3 +1,5 @@
+import { iosBuildContractFingerprint } from './ios-release-evidence.js';
+import { API_RELEASE_WORKFLOW_RENDERER_REVISION, buildApiReleaseWorkflowSteps } from './api-release-workflow.js';
 import { createHash } from 'crypto';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -10,11 +12,12 @@ import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
 import { effectiveRuntimeInstallCommand, type ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
-import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
+import { buildIosReleaseWorkflow, IOS_RELEASE_WORKFLOW_RENDERER_REVISION } from './ios-release-workflow.service.js';
 import { resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import {
   MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+  MANAGED_CI_CREDENTIAL_ACTIVATION_RUNTIME_SOURCE,
   MANAGED_CI_RELEASE_EVIDENCE_FILE,
   managedCiReleaseArtifactPrefix,
 } from './managed-ci-evidence.js';
@@ -57,7 +60,9 @@ export type {
   BranchDeployWorkflow,
 };
 
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 3;
+// Removing target.backupPolicy already migrates affected inputs; preserve unrelated reviewed locks.
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 7;
+const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
 function migrationWorkflowInput(migration: { includeStep: boolean; command?: string }) {
@@ -78,16 +83,25 @@ export function githubActionsWorkflowInputHash(params: {
   delete target.providerImageUris;
   delete target.programFingerprint;
   delete target.deploymentContractFingerprint;
+  const providerRendererRevision = providerRegistry.getMetadata(params.provider)?.orchestration?.ci?.rendererRevision;
   const ios = params.ios?.release
-    ? { bundleId: params.ios.bundleId, release: params.ios.release }
+    ? {
+        rendererRevision: IOS_RELEASE_WORKFLOW_RENDERER_REVISION,
+        buildContractFingerprint: iosBuildContractFingerprint(params.ios!, params.target.runtime),
+        bundleId: params.ios.bundleId,
+        release: params.ios.release,
+      }
     : undefined;
   return canonicalJsonSha256({
     version: 1,
     rendererRevision: GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION,
+    ...(providerRendererRevision !== undefined ? { providerRendererRevision } : {}),
     provider: params.provider,
     target,
     migration: migrationWorkflowInput(params.migration),
     ...(ios ? { ios } : {}),
+    ...(target.api ? { apiRendererRevision: API_RELEASE_WORKFLOW_RENDERER_REVISION } : {}),
+    ...(target.promoteFromEnvironment ? { promotionRendererRevision: GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION } : {}),
   });
 }
 
@@ -208,6 +222,10 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
     inputs:
       commit_sha:
         description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string
+      credential_operations:
+        description: 'Non-secret accepted credential operation bindings supplied by Hypervibe.'
         required: false
         type: string
       rollback:
@@ -454,12 +472,31 @@ function expectedReleaseTarget(provider, environment, serviceNamesValue, scopeVa
   return { scope, resources, bindingsFingerprint: fingerprint };
 }
 
+${MANAGED_CI_CREDENTIAL_ACTIVATION_RUNTIME_SOURCE}
+
+function credentialActivationForRelease(operations, deployments, resources) {
+  if (!asEvidenceRecord(operations) || !Array.isArray(deployments)) throw new Error('Credential activation input is malformed');
+  const seen = new Set();
+  for (const entry of deployments) {
+    if (!exactEvidenceKeys(entry, ['serviceId', 'deploymentIds', ...(entry && entry.configurationVersion !== undefined ? ['configurationVersion'] : [])]) || seen.has(entry.serviceId) || !resources.some((resource) => resource.providerResourceId === entry.serviceId)) throw new Error('Credential deployment is not an exact reviewed resource');
+    seen.add(entry.serviceId);
+  }
+  const result = [];
+  for (const [service, operation] of Object.entries(operations)) {
+    if (!exactEvidenceKeys(operation, ['serviceId', 'operationId', ...(operation && operation.configurationVersion !== undefined ? ['configurationVersion'] : [])]) || !resources.some((resource) => resource.logicalName === service && resource.providerResourceId === operation.serviceId)) throw new Error('Credential operation is not an exact reviewed resource');
+    const deployment = deployments.find((entry) => entry.serviceId === operation.serviceId);
+    if (deployment && deployment.configurationVersion !== operation.configurationVersion) throw new Error('Credential deployment does not prove the accepted configuration version');
+    if (deployment) result.push({ service, serviceId: operation.serviceId, operationId: operation.operationId, deploymentIds: deployment.deploymentIds, ...(operation.configurationVersion !== undefined ? { configurationVersion: operation.configurationVersion } : {}) });
+  }
+  return normalizeCredentialActivation({ version: 1, operations: result }, resources);
+}
+
 function validateReleaseEvidence(evidence, expected) {
   const failure = () => {
     throw new Error(expected.label + ' release evidence does not match the exact reviewed provider, environment, repository, SHA, scope, bindings fingerprint, resources, program, deployment contract provenance, and immutable image');
   };
   try {
-    if (!exactEvidenceKeys(evidence, ['deploymentContractFingerprint', 'environment', 'programFingerprint', 'provider', 'source', 'target', 'verifiedAt', 'version'])
+    if (!exactEvidenceKeys(evidence, ['deploymentContractFingerprint', 'environment', 'programFingerprint', 'provider', 'source', 'target', 'verifiedAt', 'version', ...(evidence && evidence.credentialActivation !== undefined ? ['credentialActivation'] : [])])
         || evidence.version !== ${MANAGED_CI_RELEASE_EVIDENCE_VERSION}
         || evidence.provider !== expected.provider
         || evidence.environment !== expected.environment
@@ -485,6 +522,7 @@ function validateReleaseEvidence(evidence, expected) {
         && (images.some((imageUri) => imageUri === null) || new Set(images).size !== 1)) {
       failure();
     }
+    if (evidence.credentialActivation !== undefined) normalizeCredentialActivation(evidence.credentialActivation, resources);
     return { resources, imageUri: images[0] ?? null };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith(expected.label + ' release evidence')) throw error;
@@ -496,12 +534,18 @@ module.exports = {
   deploymentContractFingerprint,
   expectedReleaseTarget,
   validateReleaseEvidence,
+  credentialActivationForRelease,
 };
 `;
 
 const RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256 = createHash('sha256')
   .update(`${RELEASE_EVIDENCE_VALIDATION_RUNTIME.trim()}\n`, 'utf8')
   .digest('hex');
+
+/** Shared with the declared-task CI consumer; never interpolate runtime inputs. */
+export function releaseEvidenceValidationRuntime(): string {
+  return RELEASE_EVIDENCE_VALIDATION_RUNTIME;
+}
 
 const RELEASE_EVIDENCE_VALIDATION_LOADER = `
 const { createHash: createValidatorHash } = require('crypto');
@@ -648,6 +692,9 @@ function buildPromotionEvidenceStep(
   if (!target.promoteFromEnvironment) return '';
   const sourceEnvironment = target.promoteFromEnvironment;
   const sourceProvider = target.promoteFromProvider ?? provider;
+  if (!target.promoteFromBranch) {
+    throw new Error(`Promotion target ${target.environmentName} has no reviewed source branch`);
+  }
   if (target.promoteFromServiceNames === undefined) {
     throw new Error(`Promotion target ${target.environmentName} has no reviewed source service set`);
   }
@@ -666,61 +713,89 @@ function buildPromotionEvidenceStep(
         env:
           HYPERVIBE_PROMOTE_FROM_ENVIRONMENT: ${JSON.stringify(sourceEnvironment)}
           HYPERVIBE_PROMOTE_FROM_WORKFLOW: ${JSON.stringify(sourceWorkflowPath)}
+          HYPERVIBE_PROMOTE_FROM_BRANCH: ${JSON.stringify(target.promoteFromBranch)}
           HYPERVIBE_PROMOTION_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const sourceEnvironment = process.env.HYPERVIBE_PROMOTE_FROM_ENVIRONMENT;
             const sourceWorkflow = process.env.HYPERVIBE_PROMOTE_FROM_WORKFLOW;
+            const sourceBranch = process.env.HYPERVIBE_PROMOTE_FROM_BRANCH;
+            const expectedRepository = (context.repo.owner + '/' + context.repo.repo).toLowerCase();
             const targetSha = (process.env.HYPERVIBE_PROMOTION_SHA || '').toLowerCase();
             if (!/^[0-9a-f]{40}$/.test(targetSha)) {
               throw new Error('Promotion requires a full 40-character Git commit SHA');
             }
             const expectedArtifactName = '${managedCiReleaseArtifactPrefix(sourceEnvironment)}' + targetSha;
-            const response = await github.rest.actions.listWorkflowRuns({
+            // Resolve heads explicitly: workflow_dispatch also accepts tags.
+            const { data: sourceRef } = await github.rest.git.getRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: sourceWorkflow,
-              head_sha: targetSha,
-              status: 'success',
-              per_page: 20,
+              ref: 'heads/' + sourceBranch,
             });
-            const runs = Array.isArray(response.data.workflow_runs) ? response.data.workflow_runs : [];
-            const candidates = runs.filter((run) => (
-              Number.isSafeInteger(run.id)
-              && run.id > 0
-              && String(run.head_sha || '').toLowerCase() === targetSha
-              && run.conclusion === 'success'
-              && run.path === sourceWorkflow
-            ));
-            if (candidates.length === 0) {
-              throw new Error(
-                'No successful ' + sourceEnvironment + ' deployment of ' + targetSha
-                + ' was found in ' + sourceWorkflow
-              );
+            const trustedHeadSha = String(sourceRef?.object?.sha || '').toLowerCase();
+            if (!sourceBranch || sourceRef?.ref !== 'refs/heads/' + sourceBranch
+              || sourceRef?.object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(trustedHeadSha)) {
+              throw new Error('Promotion source branch could not be verified');
             }
             let verified;
-            for (const run of candidates) {
-              const artifactResponse = await github.rest.actions.listWorkflowRunArtifacts({
+            for (let page = 1; page <= 10; page += 1) {
+              const artifactResponse = await github.rest.actions.listArtifactsForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                run_id: run.id,
+                name: expectedArtifactName,
                 per_page: 100,
+                page,
               });
-              const artifacts = Array.isArray(artifactResponse.data.artifacts)
-                ? artifactResponse.data.artifacts
-                : [];
-              const artifact = artifacts.find((candidate) => (
+              const artifacts = artifactResponse.data.artifacts;
+              if (!Array.isArray(artifacts)) throw new Error('Promotion artifact listing is incomplete');
+              const candidates = artifacts.filter((candidate) => (
                 Number.isSafeInteger(candidate.id)
                 && candidate.id > 0
                 && candidate.name === expectedArtifactName
                 && candidate.expired === false
-                && candidate.workflow_run?.id === run.id
-                && String(candidate.workflow_run?.head_sha || '').toLowerCase() === targetSha
+                && Number.isSafeInteger(candidate.workflow_run?.id)
+                && candidate.workflow_run.id > 0
+                && /^[0-9a-f]{40}$/.test(String(candidate.workflow_run?.head_sha || '').toLowerCase())
               ));
-              if (artifact) {
+              for (const artifact of candidates) {
+                const { data: run } = await github.rest.actions.getWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: artifact.workflow_run.id,
+                });
+                // Content fingerprints are public: authenticate the producer
+                // independently before trusting its claimed deployment commit.
+                const workflowSha = String(run.head_sha || '').toLowerCase();
+                if (run.id !== artifact.workflow_run.id
+                  || run.status !== 'completed' || run.conclusion !== 'success'
+                  || !['push', 'workflow_dispatch'].includes(run.event)
+                  || run.path !== sourceWorkflow || run.head_branch !== sourceBranch
+                  || String(run.repository?.full_name || '').toLowerCase() !== expectedRepository
+                  || String(run.head_repository?.full_name || '').toLowerCase() !== expectedRepository
+                  || !Number.isSafeInteger(run.repository?.id) || run.repository.id <= 0
+                  || run.head_repository?.id !== run.repository.id
+                  || artifact.workflow_run.repository_id !== run.repository.id
+                  || artifact.workflow_run.head_repository_id !== run.repository.id
+                  || artifact.workflow_run.head_branch !== sourceBranch
+                  || workflowSha !== artifact.workflow_run.head_sha.toLowerCase()) continue;
+                // A branch label alone cannot prove accepted source. Compare
+                // immutable commits so a same-named tag cannot supply new code.
+                const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  basehead: workflowSha + '...' + trustedHeadSha,
+                  per_page: 1,
+                });
+                if (!['ahead', 'identical'].includes(comparison?.status)
+                  || String(comparison?.base_commit?.sha || '').toLowerCase() !== workflowSha
+                  || String(comparison?.merge_base_commit?.sha || '').toLowerCase() !== workflowSha) continue;
+                // The trusted workflow SHA may differ from the application SHA
+                // checked separately in the artifact name and evidence contents.
                 verified = { run, artifact };
                 break;
               }
+              if (verified || artifacts.length < 100) break;
+              if (page === 10) throw new Error('Promotion artifact search exceeded its 1000-artifact limit');
             }
             if (!verified) {
               throw new Error(
@@ -838,10 +913,12 @@ function buildServerReleaseEvidenceStep(
           HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: \${{ steps.deployment_contract.outputs.fingerprint }}
           HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: ${releaseImageUri ? 'true' : 'false'}
           HYPERVIBE_RELEASE_IMAGE_URI: ${releaseImageUri ?? "''"}
+          HYPERVIBE_CREDENTIAL_OPERATIONS: \${{ inputs.credential_operations || '{}' }}
+          HYPERVIBE_CREDENTIAL_DEPLOYMENTS: \${{ steps.runtime_deploy.outputs.credential_deployments || '[]' }}
         with:
           script: |
 ${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
-            const { expectedReleaseTarget } = validatorModule.exports;
+            const { expectedReleaseTarget, credentialActivationForRelease } = validatorModule.exports;
             const { writeFileSync } = require('fs');
             const sha = String(process.env.HYPERVIBE_RELEASE_SHA || '').trim().toLowerCase();
             const repository = String(process.env.GITHUB_REPOSITORY || '').trim();
@@ -883,6 +960,9 @@ ${indentWorkflowJavaScript(RELEASE_EVIDENCE_VALIDATION_LOADER)}
                   imageUri: imageUri || null,
                 })),
               },
+              ...(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS ? { credentialActivation: credentialActivationForRelease(
+                JSON.parse(process.env.HYPERVIBE_CREDENTIAL_OPERATIONS), JSON.parse(process.env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS || '[]'), expectedTarget.resources
+              ) } : {}),
               programFingerprint: process.env.HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT,
               verifiedAt: new Date().toISOString(),
             }, null, 2) + '\\n');
@@ -992,10 +1072,16 @@ export function buildBranchDeployWorkflow(
     : '';
   const promotionEvidenceStep = buildPromotionEvidenceStep(provider, target);
   const releaseEvidenceStep = buildServerReleaseEvidenceStep(provider, target, deployBlock.releaseImageUri);
+  const apiRelease = buildApiReleaseWorkflowSteps({ environmentName: target.environmentName, api: target.api, workflowPath, runtime: target.runtime,
+    serverValidation: { loader: RELEASE_EVIDENCE_VALIDATION_LOADER, sha256: RELEASE_EVIDENCE_VALIDATION_RUNTIME_SHA256,
+      expected: { provider, environment: target.environmentName, programFingerprint: programFingerprintForWorkflow(target),
+        target: releaseTargetForWorkflow(target), requireImmutableImage: immutableRollback } },
+  });
   const providerName = deployBlock.displayName ?? providerRegistry.getMetadata(provider)?.displayName ?? provider;
   let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
+  if (target.promotionTests?.packageReadToken) requiredSecrets.push('NODE_AUTH_TOKEN');
   const requiredVariables = [...deployBlock.requiredVariables];
   const permissionsBlock = deployBlock.permissions ?? `    permissions:
       actions: read
@@ -1026,8 +1112,19 @@ ${target.autoDeployOnPush ? `  reconciliation:
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" != push || -n "$HYPERVIBE_APPLIED_SPEC_HASH" ]]; then echo ready=true; else echo ready=false; fi >> "$GITHUB_OUTPUT"
-` : ''}  deploy:
-${target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
+` : ''}${target.promotionTests ? `  promotion_tests:
+    if: \${{ !inputs.rollback }}
+    uses: ./${target.promotionTests.workflow}
+    permissions:
+      contents: read
+    with:
+      commit_sha: \${{ inputs.commit_sha || github.sha }}
+${target.promotionTests.packageReadToken ? `    secrets:
+      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+` : ''}` : ''}  deploy:
+${target.promotionTests
+    ? "    needs: promotion_tests\n    if: ${{ !cancelled() && (inputs.rollback || needs.promotion_tests.result == 'success') }}\n"
+    : target.autoDeployOnPush ? "    needs: reconciliation\n    if: needs.reconciliation.outputs.ready == 'true'\n" : ''}    runs-on: ubuntu-latest
     environment: ${target.environmentName}
 ${permissionsBlock.trimEnd()}
     steps:
@@ -1112,7 +1209,7 @@ ${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
           persist-credentials: false
-${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
+${buildDeploymentContractStep(target.environmentName)}${rollbackEvidenceSteps}${promotionEvidenceStep}${apiRelease.beforeDeploy}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}${apiRelease.afterDeploy}      - name: Upload server release evidence
         uses: actions/upload-artifact@v7
         with:
           name: ${managedCiReleaseArtifactPrefix(target.environmentName)}\${{ steps.deploy.outputs.sha }}
@@ -1145,6 +1242,9 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     ...(migrationStep ? ['Runs the declared database migration before deploying the services.'] : []),
     ...(target.promoteFromEnvironment
       ? [`Requires an unexpired successful ${target.promoteFromEnvironment} release for the exact commit before building.`]
+      : []),
+    ...(target.promotionTests
+      ? [`Requires ${target.promotionTests.workflow} to pass for the exact promoted commit, ${target.promotionTests.packageReadToken ? 'with only the package-read NODE_AUTH_TOKEN secret' : 'with no forwarded secrets'}. Rollbacks retain their verified release-evidence path.`]
       : []),
     ...(deployBlock.reviewDetails ?? []),
     deployBlock.releaseImageUri

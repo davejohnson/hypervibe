@@ -1,4 +1,5 @@
 import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
+import { isDeepStrictEqual } from 'node:util';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../adapters/db/repositories/component.repository.js';
@@ -38,10 +39,10 @@ export interface CommandContext {
   adapterFactory: typeof adapterFactory;
 
   /** Resolve by name/id, repository identity of the active interface workspace, or CLI single-project fallback. */
-  resolveProject(opts?: { project?: string }): Project | null;
+  resolveProject(opts?: { project?: string; readOnly?: boolean }): Project | null;
 
   /** Like resolveProject but throws HvError(NOT_FOUND | AMBIGUOUS_PROJECT). */
-  resolveProjectOrThrow(opts?: { project?: string }): Project;
+  resolveProjectOrThrow(opts?: { project?: string; readOnly?: boolean }): Project;
 
   /** Resolve environment by name (default "staging"); throws HvError(NOT_FOUND). */
   resolveEnvironmentOrThrow(project: Project, envName?: string): Environment;
@@ -83,13 +84,23 @@ export function createCommandContext(): CommandContext {
 
   const hydrateRepoBindings = (
     project: Project,
-    bindings: NonNullable<ReturnType<typeof readRepoBindingsFile>> | null
+    bindings: NonNullable<ReturnType<typeof readRepoBindingsFile>> | null,
+    readOnly = false
   ): void => {
     if (!bindings) return;
 
     for (const [envName, entry] of Object.entries(bindings.document.environments)) {
       const existing = repos.environments.findByProjectAndName(project.id, envName);
       const platformBindings = entry.platformBindings;
+      if (readOnly) {
+        if (!existing || !isDeepStrictEqual(existing.platformBindings,
+          mergeRepoPlatformBindings(existing.platformBindings, platformBindings))) {
+          throw new HvError('VALIDATION', 'Repository bindings differ from recorded environment state.', {
+            hint: 'Reconcile the reviewed bindings before read-only inspection; preview does not adopt provider identities or create environments.',
+          });
+        }
+        continue;
+      }
       if (!existing) {
         repos.environments.create({ projectId: project.id, name: envName, platformBindings });
         continue;
@@ -102,7 +113,7 @@ export function createCommandContext(): CommandContext {
     }
   };
 
-  const resolveRepoBackedProject = (ref?: string, startDir?: string): Project | null => {
+  const resolveRepoBackedProject = (ref?: string, startDir?: string, readOnly = false): Project | null => {
     let repoSpec;
     try {
       repoSpec = readRepoSpecFile(startDir);
@@ -123,11 +134,21 @@ export function createCommandContext(): CommandContext {
     const existing = repos.projects.findByName(repoSpec.spec.project);
     const gitRemoteUrl = repoSpec.spec.gitRemoteUrl ?? detectGitRemoteUrl(startDir) ?? undefined;
     if (existing) {
+      if (readOnly && gitRemoteUrl && existing.gitRemoteUrl !== gitRemoteUrl) {
+        throw new HvError('VALIDATION', 'Repository identity differs from the recorded project.', {
+          hint: 'Reconcile the reviewed project identity before read-only inspection.',
+        });
+      }
       const project = gitRemoteUrl && existing.gitRemoteUrl !== gitRemoteUrl
         ? repos.projects.update(existing.id, { gitRemoteUrl }) ?? existing
         : existing;
-      hydrateRepoBindings(project, repoBindings);
+      hydrateRepoBindings(project, repoBindings, readOnly);
       return project;
+    }
+    if (readOnly) {
+      throw new HvError('NOT_FOUND', 'The repository project is not recorded in Hypervibe.', {
+        hint: 'Initialize the intended project through the reviewed spec workflow before read-only inspection. Preview will not create it or select another project.',
+      });
     }
 
     const project = repos.projects.create({
@@ -139,10 +160,10 @@ export function createCommandContext(): CommandContext {
     return project;
   };
 
-  const hydrateAndReturn = (project: Project | null, startDir?: string): Project | null => {
+  const hydrateAndReturn = (project: Project | null, startDir?: string, readOnly = false): Project | null => {
     if (project) {
       if (startDir) selectWorkspaceDirectory(startDir);
-      hydrateRepoBindings(project, readRepoBindingsOrThrow(project.name, startDir));
+      hydrateRepoBindings(project, readRepoBindingsOrThrow(project.name, startDir), readOnly);
     }
     return project;
   };
@@ -161,8 +182,9 @@ export function createCommandContext(): CommandContext {
     return Boolean(remoteUrl && repos.projects.findByGitRemoteUrl(remoteUrl)?.id === project.id);
   };
 
-  const resolve = (opts?: { project?: string }): Project | null => {
+  const resolve = (opts?: { project?: string; readOnly?: boolean }): Project | null => {
     const ref = opts?.project?.trim();
+    const readOnly = opts?.readOnly === true;
     if (!ref) {
       const resolved = new Map<string, { project: Project; startDir: string }>();
       let repositoryIdentityFound = false;
@@ -176,7 +198,7 @@ export function createCommandContext(): CommandContext {
             continue;
           }
         }
-        const repoBacked = resolveRepoBackedProject(undefined, startDir);
+        const repoBacked = resolveRepoBackedProject(undefined, startDir, readOnly);
         if (repoBacked) {
           repositoryIdentityFound = true;
           resolved.set(repoBacked.id, { project: repoBacked, startDir });
@@ -184,24 +206,24 @@ export function createCommandContext(): CommandContext {
       }
       if (resolved.size === 1) {
         const selection = [...resolved.values()][0]!;
-        return hydrateAndReturn(selection.project, selection.startDir);
+        return hydrateAndReturn(selection.project, selection.startDir, readOnly);
       }
       if (resolved.size > 1 || repositoryIdentityFound || currentWorkspaceDirectories() !== undefined) {
         // Client workspace roots and repository identities are stronger than
         // the legacy single-project fallback. Never select unrelated state.
         return null;
       }
-      return hydrateAndReturn(resolveProject({}));
+      return hydrateAndReturn(resolveProject({}), undefined, readOnly);
     }
     // Accept either a project id or name in one field.
     const stored = repos.projects.findById(ref) ?? repos.projects.findByName(ref);
     if (stored) {
       const matchingDirectory = workspaceDirectories()
         .find((startDir) => workspaceMatchesProject(stored, startDir));
-      return hydrateAndReturn(stored, matchingDirectory);
+      return hydrateAndReturn(stored, matchingDirectory, readOnly);
     }
     for (const startDir of workspaceDirectories()) {
-      const repoBacked = resolveRepoBackedProject(ref, startDir);
+      const repoBacked = resolveRepoBackedProject(ref, startDir, readOnly);
       if (repoBacked) {
         selectWorkspaceDirectory(startDir);
         return repoBacked;

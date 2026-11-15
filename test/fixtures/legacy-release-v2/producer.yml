@@ -1,0 +1,26 @@
+jobs:
+  deploy:
+    steps:
+      - name: Write server release evidence
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_RELEASE_SHA: ${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_RELEASE_IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.release_image.outputs.image_uri }}
+        with:
+          script: |
+            const { writeFileSync } = require('fs');
+            const imageUri = String(process.env.HYPERVIBE_RELEASE_IMAGE_URI || '').trim().toLowerCase();
+            if (!/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri)) {
+              throw new Error('Verified deployment did not produce an immutable image digest');
+            }
+            writeFileSync('hypervibe-server-release.json', JSON.stringify({
+              version: 2,
+              environment: "production",
+              server: {
+                repository: process.env.GITHUB_REPOSITORY,
+                sha: process.env.HYPERVIBE_RELEASE_SHA,
+                imageUri: process.env.HYPERVIBE_RELEASE_IMAGE_URI,
+              },
+              services: ["web","worker","cron"],
+              verifiedAt: new Date().toISOString(),
+            }, null, 2) + '\n');

@@ -8,6 +8,7 @@ import {
   validateRailwayStorageCreateRecoveryResolution,
 } from '../../domain/services/import.service.js';
 import { connectionSetupOptions } from '../../domain/services/connection-guidance.js';
+import { inspectRailwayDatabaseImportReferences } from '../../adapters/providers/railway/railway-inspection.driver.js';
 
 export const importRailwayProvider: ProviderImportDriver = async (ctx, input) => {
   const {
@@ -55,7 +56,7 @@ export const importRailwayProvider: ProviderImportDriver = async (ctx, input) =>
       selectedProjectName = matches[0].name;
     }
 
-    const inspection = await inspectRailwayProject(adapter, selectedProjectId!);
+    const inspection = await inspectRailwayProject(adapter, selectedProjectId!, { includeEnvVarNames: false });
     if (!inspection) {
       return commandError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
         hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec, hv_plan, and hv_apply.',
@@ -231,11 +232,15 @@ export const importRailwayProvider: ProviderImportDriver = async (ctx, input) =>
       });
     }
 
+    const databaseDirectUrlVariables = await inspectRailwayDatabaseImportReferences(
+      adapter, inspection, databaseMappings ?? {}, environmentMappings
+    );
     const result = await importRailwayProject(details, environmentMappings, services, components, {
       force,
       storageMappings,
       databaseMappings,
       cacheMappings,
+      databaseDirectUrlVariables,
     });
     if (result.status === 'already_exists') {
       return commandError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);

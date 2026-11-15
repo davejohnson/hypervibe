@@ -1,8 +1,12 @@
+import { isEngineManaged, releaseEngineServices } from '../application/infrastructure-engine.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
+import { localRepositoryFor } from '../application/local-repository.js';
 import { PlanService } from '../domain/plan/plan.service.js';
+import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
+import { previewManagedCiRollback } from '../domain/services/rollback-preflight.service.js';
 import { executeRollback } from '../domain/services/rollback.service.js';
 import { CI_ROLLBACK_NOTE } from '../domain/services/ci-rollback.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -11,10 +15,9 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { CommandContext } from '../application/context.js';
 import {
-  connectionProviders,
   connectionRecoveryDetails,
-  connectionRecoveryHint,
   executePlanApply,
+  planBlockRecovery,
 } from '../application/apply-plan.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
@@ -74,10 +77,10 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       project: projectField,
       env: envField,
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
-      envVars: z.record(z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
+      envVars: z.record(z.string(), z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
-      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
+      secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
       confirm: confirmField,
     },
     wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs, confirm }) => {
@@ -91,7 +94,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           next: ['hv_spec', 'hv_inspect', 'hv_import'],
         });
       }
-      const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
+      const providerValidation = firstProviderSpecValidationFailure(specResult.spec, env?.trim() || 'staging');
       if (providerValidation) {
         return commandError('VALIDATION', providerValidation.message, {
           hint: providerValidation.hint,
@@ -118,6 +121,42 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ?? ctx.repos.environments.create({ projectId: project.id, name: envName });
 
       assertConfirmed(project, environment, confirm, 'hv_deploy');
+
+      if (isEngineManaged(envSpec)) {
+        const supplied = [envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined);
+        if (supplied) {
+          return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
+        }
+        const sourceDirectory = localRepositoryFor(project, specResult.source);
+        const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });
+        if ('blocked' in released) {
+          return commandError('VALIDATION', released.blocked, {
+            next: ['hv_plan'],
+            agentInstruction: { action: 'stop_and_report', message: 'Report the blocker. Releases never create infrastructure.' },
+          });
+        }
+        const failed = released.results.filter((result) => result.status !== 'released');
+        if (failed.length) {
+          return commandError('PROVIDER_ERROR', 'The release did not complete.', {
+            details: { environment: envName, results: released.results },
+            hint: failed.some((result) => result.status === 'unknown') ? 'Check hv_status before retrying; the outcome is not yet known.' : 'Fix the reported problem, then re-run hv_deploy.',
+            next: ['hv_status', 'hv_logs'],
+          });
+        }
+        return commandSuccess({
+          status: 'succeeded',
+          environment: envName,
+          applyRunId: released.applyRunId,
+          ...(released.source ? { source: released.source } : {}),
+          results: released.results,
+          serviceUrls: Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url])),
+          message: `Released ${released.results.length} service(s).`,
+        }, {
+          ...(released.source?.uncommittedChangesExcluded
+            ? { warnings: ['Only committed code was deployed; uncommitted changes in this repository were not included.'] } : {}),
+          next: ['hv_health'],
+        });
+      }
 
       const ciDeploy = ciBranchDeployGuidance(project, envName);
       if (ciDeploy) {
@@ -146,6 +185,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       }
       const deploySourceStage = planned.actions.length > 0
         && planned.actions.every(isProviderNativeDeploySourceAction);
+      const prerequisitePhase = deploymentPrerequisitePhase(planned);
 
       const outcome = await executePlanApply(ctx, {
         project,
@@ -153,8 +193,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         specRevision: specResult.revision,
         planId: planned.planRunId,
         confirmActions: [],
-        verifyHttpHealth: !deploySourceStage,
-        alwaysRunBootstrap: !deploySourceStage,
+        verifyHttpHealth: !prerequisitePhase,
+        alwaysRunBootstrap: !prerequisitePhase,
       });
       if (outcome.kind === 'invalid_spec') {
         return commandError('VALIDATION', outcome.message, {
@@ -180,14 +220,9 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         });
       }
       if (outcome.kind === 'blocked') {
-        return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
-          details: {
-            blocked: outcome.applyBlocked,
-            ...connectionRecoveryDetails(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }),
-          },
-          hint: connectionRecoveryHint(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then re-run hv_deploy.' }),
-          next: ['hv_connections', 'hv_deploy'],
-        });
+        const recovery = planBlockRecovery(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
+          connectionAfter: 'Then re-run hv_deploy.', connectionNext: ['hv_connections', 'hv_deploy'] });
+        return commandError(recovery.code, recovery.message, recovery);
       }
       if (!outcome.result.success && !outcome.result.applyRunId) {
         const conflict = outcome.result.conflict;
@@ -200,20 +235,26 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         });
       }
 
-      if (deploySourceStage && outcome.result.success) {
+      if (prerequisitePhase && outcome.result.success) {
         return commandSuccess(
           {
             planId: planned.planRunId,
             applyRunId: outcome.result.applyRunId,
             status: 'pending',
+            deployment: 'not_started',
+            phase: prerequisitePhase,
             environment: envName,
             receipts: outcome.result.receipts,
-            message: 'Provider-native deploy sources were reconciled; application deployment has not started.',
+            message: deploySourceStage
+              ? 'Provider-native deploy sources were reconciled; application deployment has not started.'
+              : `The ${prerequisitePhase} prerequisite stage completed; application deployment has not started.`,
           },
           {
-            hint: 'Re-run hv_deploy. The fresh plan will verify that every native source is disconnected before authorizing application or infrastructure mutations.',
+            hint: deploySourceStage
+              ? 'Re-run hv_deploy. The fresh plan will verify that every native source is disconnected before authorizing application or infrastructure mutations.'
+              : 'Run hv_plan to review the next stage, then apply only its exact confirmed actions with hv_apply. Re-plan after each prerequisite; no later stage is automatically authorized.',
             warnings: outcome.actionScopedWarnings,
-            next: ['hv_deploy'],
+            next: deploySourceStage ? ['hv_deploy'] : ['hv_plan'],
           }
         );
       }
@@ -253,24 +294,48 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
 
   commands.register(
     'hv_rollback',
-    'Rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
+    'Preview one exact recovery candidate read-only with action=preview, toSha, sourceWorkflowRunId and sourceArtifactId; preview never dispatches or requires confirmation. Original legacy v2 evidence is inspected without upgrading it or enabling unsupported legacy execution. Otherwise rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
+      action: z.enum(['preview', 'execute']).optional().describe('Default execute. Preview reads exact original evidence and reports blockers without dispatching, including for the currently running SHA.'),
+      sourceWorkflowRunId: z.string().regex(/^[1-9][0-9]*$/).optional().describe('Exact successful source workflow run; required only for preview.'),
+      sourceArtifactId: z.string().regex(/^[1-9][0-9]*$/).optional().describe('Exact unexpired release artifact from that run; required only for preview.'),
       toRunId: z.string().uuid().optional().describe('Legacy compatibility selector. Direct-provider runs lack verified immutable release evidence, so this input fails closed; managed CI uses toSha. Mutually exclusive with toSha.'),
       toSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Specific previously verified exact Git SHA for a managed CI rollback. Mutually exclusive with toRunId.'),
       services: z.array(z.string()).optional().describe('Legacy direct-provider selector. Managed CI restores the complete verified release and rejects per-service rollback; direct-provider rollback is unsupported.'),
       confirm: confirmField,
     },
-    wrapCommandHandler(async ({ project: projectRef, env, toRunId, toSha, services, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, toRunId, toSha, services, confirm, action, sourceWorkflowRunId, sourceArtifactId }) => {
       if (toRunId && toSha) {
         throw new HvError('VALIDATION', 'Pass either toRunId or toSha, not both.', {
           hint: 'Use toSha for a managed-CI release. toRunId is retained only for compatibility and cannot authorize a direct-provider rollback.',
         });
       }
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: action === 'preview' });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
+      if (action === 'preview') {
+        if (!toSha || toRunId || services?.length || !sourceWorkflowRunId || !sourceArtifactId
+            || !Number.isSafeInteger(Number(sourceWorkflowRunId)) || !Number.isSafeInteger(Number(sourceArtifactId))) {
+          return commandError('VALIDATION', 'Rollback preview requires toSha and exact sourceWorkflowRunId/sourceArtifactId, and rejects legacy run or service selectors.');
+        }
+        try {
+          const preview = await previewManagedCiRollback({ project, environment, toSha,
+            sourceWorkflowRunId: Number(sourceWorkflowRunId), sourceArtifactId: Number(sourceArtifactId) });
+          return commandSuccess(preview, {
+            hint: 'Read-only evidence inspection is not a verified restore. Resolve every blocker and unchecked boundary before claiming recovery readiness.',
+            warnings: [CI_ROLLBACK_NOTE],
+          });
+        } catch {
+          return commandError('PROVIDER_ERROR', 'Rollback preview could not verify the exact original release evidence or source contract. No workflow was dispatched.', {
+            hint: 'Ensure the reviewed spec and bindings are already recorded and match the repository, then verify source run/artifact selectors and the repository connection with hv_ci_status. Missing or mismatched observations remain blocked.',
+          });
+        }
+      }
+      if (sourceWorkflowRunId || sourceArtifactId) {
+        return commandError('VALIDATION', 'Explicit source workflow/artifact selectors are read-only preview inputs and cannot authorize execution.');
+      }
       assertConfirmed(project, environment, confirm, 'hv_rollback');
 
       const result = await executeRollback({

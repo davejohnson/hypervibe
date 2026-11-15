@@ -1,0 +1,11 @@
+{
+  "sourceUrl": "https://raw.githubusercontent.com/github/rest-api-description/755ee33b4a81d51f6f07a902cce26cbec3b822f2/descriptions/api.github.com/api.github.com.json",
+  "revision": "755ee33b4a81d51f6f07a902cce26cbec3b822f2",
+  "sourceSha256": "3177ad6a86ca04c57a9bef3fc24e28a339efb8eb040c6f950af3d3ed2fee7fa3",
+  "schemaSha256": "43d16dd72491542eca4d5154ca9a11a46ff331fc13947b46853f14c9a4407621",
+  "apiVersion": "2026-03-10",
+  "extraction": "Exact workflow-run-attempt jobs path and transitive component references; no schema modifications.",
+  "documentationUrl": "https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt",
+  "evidence": "Official OpenAPI; response fixtures reconstructed, not live recordings.",
+  "schemaFile": "workflow-attempt.openapi.json"
+}

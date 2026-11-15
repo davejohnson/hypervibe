@@ -9,24 +9,16 @@ import {
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { EcsExpressAdapter } from '../aws/ecs-express.adapter.js';
 import { AzureContainerAppsAdapter } from '../azure/azure-container-apps.adapter.js';
-import { DigitalOceanAdapter } from '../digitalocean/digitalocean.adapter.js';
-import { FlyAdapter } from '../fly/fly.adapter.js';
 import { CloudRunAdapter } from '../gcp/cloudrun.adapter.js';
 import { GitHubAdapter } from '../github/github.adapter.js';
-import { GitLabAdapter } from '../gitlab/gitlab.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
-import { VercelAdapter } from '../vercel/vercel.adapter.js';
 
 const deploymentAdapterPrototypes = new Map<string, unknown>([
   ['railway', RailwayAdapter.prototype],
   ['cloudrun', CloudRunAdapter.prototype],
   ['ecs', EcsExpressAdapter.prototype],
   ['azure-container-apps', AzureContainerAppsAdapter.prototype],
-  ['digitalocean', DigitalOceanAdapter.prototype],
-  ['vercel', VercelAdapter.prototype],
-  ['fly', FlyAdapter.prototype],
   ['github', GitHubAdapter.prototype],
-  ['gitlab', GitLabAdapter.prototype],
 ]);
 
 function environment(platformBindings: Record<string, unknown>): Environment {

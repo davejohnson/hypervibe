@@ -10,6 +10,8 @@ import type {
   ProjectSpec,
 } from '../spec/spec.schema.js';
 import { githubActionsCanonicalEnvironment } from '../spec/devops-selection.js';
+import { isDeepStrictEqual } from 'node:util';
+import { credentialRuntimeServices } from './credential-runtime-consumers.js';
 
 export const DELEGATED_SECRET_OPERATION = 'delegatedSecretSync';
 
@@ -411,7 +413,6 @@ export function planDelegatedSecrets(params: {
   blockers: ManagedSecretBlocker[];
 } {
   const slots = managedSecretsForEnvironment(params.spec, params.environmentName);
-  const serviceNames = Object.keys(params.spec.environments[params.environmentName]?.services ?? {}).sort();
   const bindings = new Map(parseDelegatedSecretBindings(params.environment).map((binding) => [binding.name, binding]));
   const suppliedValues = params.suppliedValues ?? {};
   const actions: PlanAction[] = [];
@@ -421,12 +422,39 @@ export function planDelegatedSecrets(params: {
   const blockers: ManagedSecretBlocker[] = [];
 
   for (const [key, slot] of slots) {
+    const serviceNames = credentialRuntimeServices(params.spec, params.environmentName, key, slot.credential);
+    if (!serviceNames.length) continue;
     const binding = bindings.get(key);
     const suppliedValue = suppliedValues[key];
     const live = liveHashesForSecret(params.observed, serviceNames, key, {
       destinationsAreKnownAbsent: params.destinationsAreKnownAbsent,
     });
     const actionId = delegatedSecretActionId(key);
+
+    if (slot.credential) {
+      const tracked = asRecord(asRecord(params.environment?.platformBindings.credentialUpdates)?.[slot.credential.role]);
+      const hashes = asRecord(asRecord(tracked?.hostingHashes)?.[key]);
+      const observedValuesMatch = params.observed && !params.observed.partial && serviceNames.every(name => {
+        const service = params.observed!.services.find(service => service.name === name);
+        return service?.envVarEvidence !== 'recorded-update' && service?.envVarHashes[key]
+          && service.envVarHashes[key] === (hashes?.[name] ?? binding?.valueHash);
+      });
+      const acknowledgedOnly = asRecord(tracked?.hostingEvidence)?.[key] === 'acknowledgement'
+        && params.observed && (params.observed.completeness?.serviceIdentities === 'complete'
+          || !params.observed.partial && params.observed.completeness?.services === 'complete')
+        && serviceNames.every(name => {
+          const service = params.observed!.services.find(service => service.name === name);
+          return service?.envVarKeys.includes(key) && (service.envVarEvidence === 'recorded-update' || !service.envVarHashes[key] || service.envVarHashes[key] === (hashes?.[name] ?? binding?.valueHash));
+        });
+      const accepted = tracked?.state === 'accepted' && isDeepStrictEqual(tracked.descriptor, slot.credential)
+        && binding && (observedValuesMatch || acknowledgedOnly)
+        && (slot.ownership !== 'hypervibe' || binding.source === 'hypervibe-generated' && binding.generation === slot.generation);
+      const reason = accepted ? `Preserve accepted credential ${key}` : `Review credential role ${slot.credential.role} with scope=credentials before deploying`;
+      if (!accepted) blockers.push({ key, reason });
+      actions.push({ id: actionId, type: accepted ? 'noop' : 'update', resource: { kind: 'secret', name: key, provider: params.hostingProvider }, verified: Boolean(accepted), reason,
+        metadata: { operation: DELEGATED_SECRET_OPERATION, services: serviceNames, inputProvided: false, ...(accepted ? {} : { blockedReason: 'credential_review_required' }) } });
+      continue;
+    }
 
     if (slot.ownership === 'hypervibe') {
       const generatedValue = params.generatedValues?.[key];

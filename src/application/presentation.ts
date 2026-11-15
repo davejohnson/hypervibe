@@ -45,6 +45,8 @@ const COMMAND_PRESENTATION = {
   hv_destroy: { label: 'DESTROY' },
   hv_logs: { label: 'LOGS' },
   hv_health: { label: 'HEALTH' },
+  hv_launch: { label: 'LAUNCH' },
+  hv_migrate: { label: 'MIGRATE' },
   hv_ci_status: { label: 'CI STATUS' },
   hv_ci_trigger: { label: 'CI TRIGGER' },
   hv_spec: { label: 'SPEC' },
@@ -53,6 +55,9 @@ const COMMAND_PRESENTATION = {
   hv_apply: { label: 'APPLY' },
   hv_connections: { label: 'CONNECTIONS' },
   hv_cloud_pair: { label: 'CLOUD PAIR' },
+  hv_cloud_requests: { label: 'CREDENTIAL REQUESTS' },
+  hv_cloud_secrets: { label: 'SECRET IMPORT' },
+  hv_cloud_connections: { label: 'CLOUD CONNECTIONS' },
 } as const;
 
 export const PRESENTED_COMMAND_IDS = Object.freeze(Object.keys(COMMAND_PRESENTATION));
@@ -237,7 +242,14 @@ function planPresentation(data: DataRecord): CommandPresentation {
   const noop = numberValue(data.noopActionCount) ?? 0;
   const confirmations = actions.filter((value) => record(value)?.requiresConfirm === true).length;
   const isBlocked = blocked.length > 0 || inputRequired.length > 0 || connectBeforeApply;
-  const title = isBlocked ? 'PLAN BLOCKED' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
+  const email = record(data.emailSenderReadiness);
+  const dns = record(email?.dns);
+  const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
+  const domainSecurity = record(data.domainSecurity);
+  const domainNeedsReview = Boolean(domainSecurity && domainSecurity.status !== 'observed');
+  const webhookReadiness = record(data.webhookReadiness);
+  const webhooksNeedReview = Boolean(webhookReadiness && webhookReadiness.status !== 'configured');
+  const title = isBlocked ? 'PLAN BLOCKED' : emailNotReady ? 'EMAIL NOT READY' : domainNeedsReview ? 'DOMAIN SECURITY NEEDS REVIEW' : webhooksNeedReview ? 'WEBHOOKS NEED REVIEW' : pending === 0 ? 'IN SYNC' : 'PLAN READY';
   const stats = [
     plural(pending, 'change'),
     noop > 0 ? `${noop} already in sync` : undefined,
@@ -263,8 +275,8 @@ function planPresentation(data: DataRecord): CommandPresentation {
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked ? 'warning' : pending === 0 ? 'success' : 'info',
-    icon: isBlocked ? '🚧' : pending === 0 ? '✅' : '📋',
+    tone: isBlocked || emailNotReady || domainNeedsReview || webhooksNeedReview ? 'warning' : pending === 0 ? 'success' : 'info',
+    icon: isBlocked ? '🚧' : emailNotReady || domainNeedsReview || webhooksNeedReview ? '⚠️' : pending === 0 ? '✅' : '📋',
     title,
     ...(context ? { context } : {}),
     summary: pending === 0 ? 'No infrastructure changes.' : stats,
@@ -282,12 +294,21 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   const runtimeConfiguration = record(data.runtimeConfiguration);
   const rolloutServices = arrayValue(runtimeConfiguration?.services);
   const verified = data.verified === true;
-  const isBlocked = blocked.length > 0;
+  const apiPolicy = record(data.apiReleasePolicy);
+  const apiNeedsReview = Boolean(apiPolicy && apiPolicy.status !== 'configured');
+  const isBlocked = blocked.length > 0 || apiPolicy?.status === 'blocked';
+  const email = record(data.emailSenderReadiness);
+  const dns = record(email?.dns);
+  const emailNotReady = Boolean(email && (email.status !== 'verified' || (dns && dns.status !== 'configured')));
+  const domainSecurity = record(data.domainSecurity);
+  const domainNeedsReview = Boolean(domainSecurity && domainSecurity.status !== 'observed');
+  const webhookReadiness = record(data.webhookReadiness);
+  const webhooksNeedReview = Boolean(webhookReadiness && webhookReadiness.status !== 'configured');
   const title = isBlocked
     ? 'STATUS BLOCKED'
     : restartRequired
       ? 'RESTART REQUIRED'
-      : inSync
+      : apiNeedsReview ? 'API POLICY NEEDS REVIEW' : emailNotReady ? 'EMAIL NOT READY' : domainNeedsReview ? 'DOMAIN SECURITY NEEDS REVIEW' : webhooksNeedReview ? 'WEBHOOKS NEED REVIEW' : inSync
         ? 'IN SYNC'
         : drift.length > 0
           ? 'DRIFT DETECTED'
@@ -300,6 +321,7 @@ function statusPresentation(data: DataRecord): CommandPresentation {
     verified ? 'provider verified' : 'verification incomplete',
   ].filter(Boolean).join(' · ');
   const sections: PresentationSection[] = [];
+  if (apiPolicy) sections.push({ title: 'API RELEASE POLICY', lines: formatCommandDataLines({ apiReleasePolicy: apiPolicy }) });
   if (drift.length > 0) sections.push({ title: '🛠️  DRIFT', lines: actionRows(drift) });
   if (blocked.length > 0) {
     sections.push({ title: '🚧  BLOCKED', lines: formatCommandDataLines({ blocked }) });
@@ -314,8 +336,8 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
-    icon: isBlocked ? '🚧' : inSync && !restartRequired ? '✅' : restartRequired ? '♻️' : '⚠️',
+    tone: isBlocked || emailNotReady || domainNeedsReview || webhooksNeedReview ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
+    icon: isBlocked ? '🚧' : restartRequired ? '♻️' : emailNotReady || domainNeedsReview || webhooksNeedReview ? '⚠️' : inSync ? '✅' : '⚠️',
     title,
     context: [
       stringValue(data.environment),
@@ -362,6 +384,15 @@ function applyPresentation(data: DataRecord): CommandPresentation {
 }
 
 function healthPresentation(data: DataRecord): CommandPresentation {
+  if (typeof data.role === 'string' && ['verified', 'failed', 'unknown'].includes(String(data.state))) {
+    const verified = data.state === 'verified'; const failed = data.state === 'failed';
+    return { tone: verified ? 'success' : failed ? 'danger' : 'warning', icon: verified ? '✅' : failed ? '❌' : '⚠️',
+      title: `APPLICATION OPERATION ${verified ? 'VERIFIED' : failed ? 'FAILED' : 'UNVERIFIED'}`,
+      context: [data.role, compactId(data.operationId) ? `rotation ${compactId(data.operationId)}` : undefined].filter(Boolean).join(' · '),
+      summary: stringValue(data.reason),
+      sections: Array.isArray(data.checks) && data.checks.length ? [{ title: '🧾  OPERATION RECEIPTS', lines: formatCommandDataLines({ checks: data.checks }) }] : [],
+    };
+  }
   const check = record(data.check);
   const maintenance = record(data.maintenance);
   const deploymentHealth = record(data.deploymentHealth);
@@ -735,7 +766,55 @@ function specPresentation(data: DataRecord): CommandPresentation {
   };
 }
 
+function rollbackPresentation(data: DataRecord): CommandPresentation {
+  const presentation = commandPresentation('hv_rollback', data);
+  if (data.mode !== 'preview') return presentation;
+  const blocked = statusWord(data) === 'blocked';
+  return { ...presentation, tone: 'warning', icon: blocked ? '🚧' : '🔎',
+    title: blocked ? 'ROLLBACK PREVIEW BLOCKED' : 'ROLLBACK PREVIEW',
+    summary: 'Read-only evidence inspection. No workflow dispatched; restoration remains unverified.' };
+}
+
+function inspectionPresentation(data: DataRecord): CommandPresentation {
+  const presentation = commandPresentation('hv_inspect', data);
+  const databases = arrayValue(record(data.observed)?.databases);
+  const lines: string[] = [];
+  if (data.databaseAliasCoverage === 'unknown') lines.push('Declared database alias coverage: unknown; desired state was unavailable.');
+  const comparisonLabel = (value: unknown): string => {
+    const comparison = record(value);
+    if (comparison?.result === 'match' || comparison?.result === 'mismatch') return comparison.result;
+    const reason = stringValue(comparison?.reason);
+    return reason && ['missing', 'malformed', 'unresolved_reference', 'read_failed', 'scope_unverified', 'unsupported_url_options'].includes(reason)
+      ? `unknown (${reason})` : 'unknown';
+  };
+  for (const database of databases.slice(0, 25)) {
+    const item = record(database);
+    const alignment = record(item?.credentialAlignment);
+    if (!alignment) continue;
+    lines.push(`${stringValue(item?.name) ?? stringValue(item?.externalId) ?? 'Database'}: configured-variable-values; authentication unverified`);
+    lines.push('  Raw references, deployed configuration, and application operation: unchecked.');
+    const comparisons = arrayValue(record(alignment.issuer)?.comparisons);
+    for (const value of comparisons.slice(0, 25)) {
+      const comparison = record(value);
+      lines.push(`  ${stringValue(comparison?.source) ?? 'Source'} vs ${stringValue(comparison?.against) ?? 'issuer'}: ${comparisonLabel(comparison?.comparison)}`);
+    }
+    const consumers = arrayValue(alignment.consumers);
+    for (const value of consumers.slice(0, 25)) {
+      const consumer = record(value);
+      lines.push(`  ${stringValue(consumer?.name) ?? 'Consumer'} ${stringValue(consumer?.source) ?? 'source'} vs issuer ${stringValue(consumer?.issuerSource) ?? 'source'}: credentials ${comparisonLabel(consumer?.credentialComparison)}; target ${comparisonLabel(consumer?.target)}`);
+    }
+    if (comparisons.length > 25 || consumers.length > 25) lines.push('  Additional comparisons are available in the structured result.');
+  }
+  if (lines.length > 0) {
+    if (databases.length > 25) lines.push('Additional database comparisons are available in the structured result.');
+    presentation.sections.push({ title: 'DATABASE CONFIGURATION COMPARISONS', lines });
+  }
+  return presentation;
+}
+
 const PRESENTERS: Record<string, (data: DataRecord) => CommandPresentation> = {
+  hv_inspect: inspectionPresentation,
+  hv_rollback: rollbackPresentation,
   hv_spec: specPresentation,
   hv_plan: planPresentation,
   hv_apply: applyPresentation,

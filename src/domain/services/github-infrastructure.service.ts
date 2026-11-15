@@ -1,11 +1,12 @@
 import { createHash } from 'crypto';
+import { parse as parseYaml } from 'yaml';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import type {
   GitHubAdapter,
   GitHubPullRequestSummary,
 } from '../../adapters/providers/github/github.adapter.js';
-import type { OpenAIAdapter } from '../../adapters/providers/openai/openai.adapter.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -18,25 +19,25 @@ import type {
   ProjectRuntimeSpec,
   ProjectSpec,
 } from '../spec/spec.schema.js';
-import type { DatabaseRestoreDrillFile } from '../ports/database-restore-drill.port.js';
+import { parseHostingBindings } from '../ports/hosting.port.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
+import { compileEnvironmentTaskWorkflow } from './environment-task-workflow.service.js';
 import {
   githubActionsCanonicalEnvironment,
   resolveGitHubActionsSelection,
 } from '../spec/devops-selection.js';
-import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
+import { compileManagedBackupFiles } from './managed-backup-workflows.service.js';
+import { isManagedBackupFilePath, managedBackupFilePaths, parseBackupRetirementFiles, type BackupRetirementFile } from './backup-workflow.service.js';
+import { managedBackupTargetSchema } from './managed-backup-target.service.js';
+import { missingManagedCiReleaseBindings, resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
 import {
   delegatedGitHubSecretsForEnvironment,
   type DelegatedSecretInputRequirement,
 } from './delegated-secret.service.js';
-import {
-  compileGitHubPagesWorkflow,
-  GITHUB_PAGES_WORKFLOW_PATH,
-  planGitHubPages,
-} from './github-pages.service.js';
 
 export const GITHUB_INFRASTRUCTURE_OPERATION = 'githubInfrastructurePullRequest';
 export const GITHUB_INFRASTRUCTURE_BRANCH = 'hypervibe/github-infrastructure';
@@ -47,7 +48,6 @@ export const GITHUB_INFRASTRUCTURE_MANIFEST = '.github/hypervibe/manifest.json';
 export const GITHUB_PULL_REQUEST_TEMPLATE = '.github/pull_request_template.md';
 export const OPENAI_ACTIONS_SECRET = 'OPENAI_API_KEY';
 export const GITHUB_INFRASTRUCTURE_ACTION_ID = 'repo:github-infrastructure-pr';
-export const GITHUB_OPENAI_SECRET_ACTION_ID = 'secret:github-openai-actions';
 export const GITHUB_SECURITY_SETTINGS_ACTION_ID = 'repo:github-security-settings';
 export const GITHUB_CODE_SCANNING_ACTION_ID = 'repo:github-code-scanning';
 export const GITHUB_ACTIONS_PR_PERMISSION_ACTION_ID = 'repo:github-actions-pr-permission';
@@ -117,6 +117,7 @@ export const GITHUB_AUTOMATION_REGISTRY: Record<GitHubAutomationSpec['kind'], Gi
   autofix: { kind: 'autofix', fileBacked: true, needsOpenAI: true },
   'pull-request-review': { kind: 'pull-request-review', fileBacked: true, needsOpenAI: true },
   'code-audit': { kind: 'code-audit', fileBacked: true, needsOpenAI: true },
+  'environment-task': { kind: 'environment-task', fileBacked: true, needsOpenAI: false },
 };
 
 function sha256(value: string): string {
@@ -190,6 +191,17 @@ function automationReview(
           `Uses ${automation.agent.model} to inspect the repository on its declared schedule.`,
           'Creates GitHub issues for findings instead of changing code automatically.',
         ],
+      };
+    case 'environment-task':
+      return {
+        title: `${name} environment task`,
+        summary: `Adds or updates a manual task for the ${automation.service} service in ${automation.environment}.`,
+        details: [
+          'Runs only from the repository default branch with the reviewed arguments and typed inputs.',
+          'Verifies the exact deployed image and existing provider bindings before running the task.',
+          'Serializes tasks in the same environment and exposes only a safe task receipt.',
+        ],
+        mergeEffect: 'Each explicit dispatch creates, executes, and deletes a temporary workload in the bound environment, with a modest runtime cost.',
       };
   }
 }
@@ -1027,6 +1039,7 @@ export function compileGitHubAutomationWorkflow(
     case 'autofix': return buildAutofixWorkflow(id, automation, github, projectRuntime);
     case 'pull-request-review': return buildReviewWorkflow(id, automation);
     case 'code-audit': return buildAuditWorkflow(id, automation);
+    case 'environment-task': return compileEnvironmentTaskWorkflow(id, automation);
   }
 }
 
@@ -1076,6 +1089,17 @@ export function canonicalPullRequestTemplateContent(): string {
     '- [ ] Focused automated checks are listed with their results.',
     '- [ ] Manual verification is described, when applicable.',
     '- [ ] Any intentionally skipped broad checks are called out.',
+    '',
+    '### Assumption challenged',
+    '',
+    '<!-- Required for bug fixes and provider behavior changes; otherwise explain why N/A.',
+    '     Existing code, matching mocks, and request echoes are not independent evidence. -->',
+    '',
+    '- Assumption and affected behavior:',
+    '- Independent evidence (requirement/source URL + revision, or redacted observation; label synthetic/reconstructed/recorded):',
+    '- Counterexample and regression test (observed failure before fix -> passing afterward):',
+    '- Other affected lifecycle paths/providers checked, and checks not performed:',
+    '- Remaining uncertainty (including whether the customer incident cause is proven):',
     '',
     '## Deployment and infrastructure impact',
     '',
@@ -1150,7 +1174,7 @@ export function unresolvedGitHubCheckRuntimeIssues(
 export function compileManagedGitHubFiles(
   github: GitHubSpec,
   projectRuntime?: ProjectRuntimeSpec,
-  databaseRestoreDrillFiles: DatabaseRestoreDrillFile[] = []
+  databaseRestoreDrillFiles: Array<Pick<ManagedGitHubFile, 'path' | 'content' | 'review'>> = []
 ): ManagedGitHubFile[] {
   const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(github, projectRuntime);
   if (runtimeIssues.length > 0) {
@@ -1199,18 +1223,6 @@ export function compileManagedGitHubFiles(
       `.github/workflows/hypervibe-${id}.yml`,
       compileGitHubAutomationWorkflow(id, automation, github, projectRuntime),
       automationReview(id, automation)
-    ));
-  }
-  if (github.pages?.enabled) {
-    files.push(managedFile(
-      GITHUB_PAGES_WORKFLOW_PATH,
-      compileGitHubPagesWorkflow(github.pages),
-      {
-        title: 'GitHub Pages deployment',
-        summary: `Publishes ${github.pages.sourcePath} to GitHub Pages from ${github.pages.branch}.`,
-        details: ['Uploads a static artifact and deploys it through GitHub’s supported Pages Actions workflow.'],
-        mergeEffect: 'The workflow can publish only after this pull request is reviewed and merged.',
-      }
     ));
   }
   const dependabot = dependabotContent(github);
@@ -1306,7 +1318,7 @@ export function githubInfrastructureConnectionBlock(params: {
     ? githubDelegatedSecretActionIds(params.spec, params.environmentName, environment)
     : [];
   const actionIds = [
-    ...(plansInfrastructure ? [GITHUB_INFRASTRUCTURE_ACTION_ID, GITHUB_OPENAI_SECRET_ACTION_ID] : []),
+    ...(plansInfrastructure ? [GITHUB_INFRASTRUCTURE_ACTION_ID] : []),
     ...delegatedActionIds,
   ];
   if (actionIds.length === 0) return null;
@@ -1341,6 +1353,11 @@ function infrastructureAction(params: {
   drift: string[];
   blockedReason?: string;
   billable?: boolean;
+  requiresConfirm?: boolean;
+  backupWorkflowPublicationRequired?: boolean;
+  backupEnvironment?: string;
+  retiredManagedFiles?: BackupRetirementFile[];
+  preservedManagedPaths?: string[];
 }): PlanAction {
   return {
     id: GITHUB_INFRASTRUCTURE_ACTION_ID,
@@ -1354,12 +1371,17 @@ function infrastructureAction(params: {
       ? { diff: params.drift.map((path) => ({ field: `file:${path}`, from: 'drift', to: 'desired' })) }
       : {}),
     ...(params.billable ? { billable: true } : {}),
+    ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
     metadata: {
       operation: GITHUB_INFRASTRUCTURE_OPERATION,
       repository: params.repository,
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
+      ...(params.backupWorkflowPublicationRequired ? { backupWorkflowPublicationRequired: true } : {}),
+      ...(params.backupEnvironment ? { backupEnvironment: params.backupEnvironment } : {}),
+      ...(params.retiredManagedFiles ? { retiredManagedFiles: params.retiredManagedFiles } : {}),
+      ...(params.preservedManagedPaths !== undefined ? { preservedManagedPaths: params.preservedManagedPaths } : {}),
       ...(params.blockedReason ? { blockedReason: params.blockedReason } : {}),
     },
   };
@@ -1367,10 +1389,6 @@ function infrastructureAction(params: {
 
 export function isGitHubInfrastructureAction(action: PlanAction): boolean {
   return action.metadata?.operation === GITHUB_INFRASTRUCTURE_OPERATION;
-}
-
-export function isGitHubOpenAISecretAction(action: PlanAction): boolean {
-  return action.id === GITHUB_OPENAI_SECRET_ACTION_ID && action.metadata?.operation === 'githubOpenAIActionsSecret';
 }
 
 export function isGitHubNativeSettingAction(action: PlanAction): boolean {
@@ -1413,7 +1431,7 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function parseGitHubDelegatedBindings(environment: Environment | null): GitHubDelegatedBinding[] {
+export function parseGitHubDelegatedBindings(environment: Environment | null): GitHubDelegatedBinding[] {
   const github = asObject(environment?.platformBindings.github);
   const raw = github?.delegatedActionsBindings;
   if (!Array.isArray(raw)) return [];
@@ -1585,11 +1603,158 @@ export function isGitHubDelegatedSecretAction(action: PlanAction): boolean {
       .includes(String(action.metadata?.operation));
 }
 
+async function environmentTaskPublicationPrerequisites(params: {
+  project: Project;
+  spec: ProjectSpec;
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+}): Promise<{ verified: boolean; blockedReason?: string; warnings: string[]; paths: Set<string> }> {
+  const tasks = Object.entries(params.spec.github?.actions ?? {})
+    .filter(([, automation]) => automation.enabled && automation.kind === 'environment-task');
+  const result = { verified: true, warnings: [] as string[], paths: new Set<string>(), blockedReason: undefined as string | undefined };
+  if (tasks.length === 0) return result;
+  const environments = new EnvironmentRepository();
+  const secretsByEnvironment = new Map<string, string[] | null>();
+  const block = (code: string, message: string) => {
+    result.blockedReason ??= code;
+    result.warnings.push(message);
+  };
+  const targets = resolveReviewedBranchDeployTargets(params.project, params.spec).targets;
+  for (const [id, task] of tasks) {
+    if (task.kind !== 'environment-task') continue;
+    result.paths.add(`.github/workflows/hypervibe-${id}.yml`);
+    const desired = params.spec.environments[task.environment];
+    const metadata = providerRegistry.getMetadata(desired.hosting.provider);
+    const credentialNames = Object.keys(metadata?.orchestration?.ci?.secretCredentialKeys ?? {});
+    if (!metadata?.lifecycle?.hosting?.environmentTasks || credentialNames.length === 0) {
+      block('github_environment_task_unsupported', `Environment task ${id} requires a provider with a reviewed temporary-task and CI credential capability; ${desired.hosting.provider} does not declare both.`);
+      continue;
+    }
+    const environment = environments.findByProjectAndName(params.project.id, task.environment);
+    const bindings = parseHostingBindings(environment);
+    const target = targets.find((candidate) => candidate.environmentName === task.environment);
+    const workflows = Object.entries(asObject(asObject(bindings.ci)?.deployBranch) ?? {});
+    const workflow = workflows.length === 1 ? workflows[0] : undefined;
+    const accepted = asObject(workflow?.[1]);
+    if (!environment || bindings.provider !== desired.hosting.provider
+      || !target?.providerProjectId?.trim() || !target.providerEnvironmentId?.trim()
+      || missingManagedCiReleaseBindings(target).length > 0
+      || Object.entries(desired.services).some(([name, service]) => bindings.services?.[name]?.workloadKind !== service.workloadKind)
+      || !workflow || !/^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/.test(workflow[0])
+      || !/^[a-f0-9]{64}$/.test(String(accepted?.contentHash ?? ''))
+      || !/^[a-f0-9]{64}$/.test(String(accepted?.inputHash ?? ''))) {
+      block('github_environment_task_binding_missing', `Environment task ${id} requires complete durable ${task.environment} provider scope, service identities, and one accepted managed deployment workflow. Reconcile that environment before publishing the task.`);
+      continue;
+    }
+    if (!secretsByEnvironment.has(task.environment)) {
+      try {
+        secretsByEnvironment.set(task.environment, await params.adapter.listEnvironmentSecrets(params.owner, params.repo, task.environment));
+      } catch {
+        result.verified = false;
+        secretsByEnvironment.set(task.environment, null);
+        block('github_environment_task_secret_observation_unknown', `Cannot observe GitHub environment secret names for task ${id} in ${task.environment}. Restore authorized GitHub access before publication.`);
+      }
+    }
+    const observed = secretsByEnvironment.get(task.environment);
+    if (!observed) continue;
+    const missing = [...credentialNames, 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']
+      .filter((name) => !observed.includes(name));
+    if (missing.length > 0) block('github_environment_task_secret_missing', `Environment task ${id} requires these existing machine secrets in the exact ${task.environment} GitHub environment: ${missing.join(', ')}. Reconcile its managed deployment credentials; repository-only secrets do not establish environment isolation.`);
+  }
+  return result;
+}
+
+/** Recover historical generated ownership without requiring current backup readiness. */
+function isOwnedBackupProgram(project: string, environment: string, contents: Map<string, string | null>): boolean {
+  const [contractPath, workflowPath] = managedBackupFilePaths(environment);
+  const contractContent = contents.get(contractPath), workflowContent = contents.get(workflowPath);
+  if (!contractContent || !workflowContent?.startsWith('# Managed by Hypervibe. Change desired state with hv_spec.\n')) return false;
+  try {
+    const contract = managedBackupTargetSchema.parse(JSON.parse(contractContent));
+    const workflow = parseYaml(workflowContent);
+    const job = workflow?.jobs?.backup;
+    if (contract.project !== project || contract.environment !== environment || job?.environment !== environment
+      || !Array.isArray(job.steps)) return false;
+    return job.steps.some((step: { env?: Record<string, unknown> }) =>
+      step?.env?.HYPERVIBE_BACKUP_CONTRACT_HASH === canonicalJsonSha256(contract)
+      && step.env.HYPERVIBE_BACKUP_RUNNER_IMAGE === contract.runnerImage);
+  } catch { return false; }
+}
+
+async function planBackupRepositoryPublication(params: {
+  project: Project; spec: ProjectSpec; environmentName: string; backupEnvironment?: string;
+  repository: string; owner: string; repo: string;
+}) {
+  const environment = params.backupEnvironment!;
+  const empty = { warnings: [] as string[], blocked: [] as GitHubInfrastructureConnectionBlock[], inputRequired: [] as DelegatedSecretInputRequirement[] };
+  if (environment !== params.environmentName || !params.spec.environments[environment]?.backups) {
+    return { ...empty, actions: [], warnings: ['Backup publication requires the selected environment and an explicit backup declaration.'] };
+  }
+  const compiled = await compileManagedBackupFiles({ project: params.project, spec: params.spec, environmentName: environment });
+  const warnings = [...compiled.issues];
+  const paths = new Set(managedBackupFilePaths(environment));
+  const adapterResult = getGitHubAdapter(params.repository);
+  let verified = !('error' in adapterResult);
+  let blockedReason = compiled.issues.length ? 'managed_backup_prerequisites_incomplete' : undefined;
+  let retiredManagedFiles: BackupRetirementFile[] | undefined;
+  const drift: string[] = [];
+  if ('error' in adapterResult) {
+    blockedReason = 'github_observation_unavailable';
+    warnings.push(adapterResult.error);
+  } else try {
+    for (const required of compiled.requiredSecrets) {
+      const names = await adapterResult.adapter.listEnvironmentSecrets(params.owner, params.repo, environment);
+      const missing = required.names.filter(name => !names.includes(name));
+      if (missing.length) {
+        blockedReason = 'managed_backup_credentials_missing';
+        warnings.push(`Backup publication requires these existing provider credentials in GitHub environment ${environment}: ${missing.join(', ')}.`);
+      }
+    }
+    const manifest = await adapterResult.adapter.getFileContent(params.owner, params.repo, GITHUB_INFRASTRUCTURE_MANIFEST);
+    const previousPaths = parseManifest(manifest, true);
+    const desiredPaths = [...new Set([...previousPaths.filter(path => !paths.has(path)), ...compiled.files.map(file => file.path)])].sort();
+    if (params.spec.environments[environment].backups?.mode === 'disabled') {
+      const contents = new Map<string, string | null>();
+      for (const path of paths) contents.set(path, await adapterResult.adapter.getFileContent(params.owner, params.repo, path));
+      retiredManagedFiles = [...contents].map(([path, content]) => ({ path, hash: content === null ? null : sha256(content) }));
+      const present = retiredManagedFiles.filter(file => file.hash !== null);
+      if (present.some(file => !previousPaths.includes(file.path)) && !isOwnedBackupProgram(params.project.name, environment, contents)) {
+        verified = false;
+        blockedReason = 'github_backup_retirement_ownership_unknown';
+        warnings.push('Backup files still exist, but their managed ownership could not be established. Retirement is blocked; no schedule removal has been verified.');
+      }
+      drift.push(...present.map(file => file.path));
+    }
+    for (const file of compiled.files) {
+      const current = await adapterResult.adapter.getFileContent(params.owner, params.repo, file.path);
+      if (current !== file.content) drift.push(file.path);
+    }
+    if (JSON.stringify([...previousPaths].sort()) !== JSON.stringify(desiredPaths)) drift.push(GITHUB_INFRASTRUCTURE_MANIFEST);
+  } catch {
+    verified = false;
+    blockedReason = 'github_backup_publication_observation_unknown';
+    warnings.push('Backup publication observations are incomplete; no repository change is authorized.');
+  }
+  if (!drift.length && !blockedReason) return { ...empty, actions: [], warnings };
+  const action = infrastructureAction({ repository: params.repository, files: compiled.files,
+    type: 'update', verified, drift,
+    backupEnvironment: environment, backupWorkflowPublicationRequired: drift.length > 0,
+    ...(retiredManagedFiles ? { retiredManagedFiles } : {}),
+    billable: !blockedReason && drift.length > 0 && compiled.files.length > 0,
+    requiresConfirm: !blockedReason && drift.length > 0,
+    ...(blockedReason ? { blockedReason } : {}),
+  });
+  return { ...empty, actions: [action], warnings };
+}
+
 export async function planGitHubInfrastructure(params: {
   project: Project;
   spec: ProjectSpec;
   environmentName: string;
   suppliedSecretValues?: Record<string, string>;
+  /** Explicit backup lifecycle only; ordinary repository changes preserve backup programs. */
+  backupEnvironment?: string;
 }): Promise<{
   actions: PlanAction[];
   warnings: string[];
@@ -1598,7 +1763,7 @@ export async function planGitHubInfrastructure(params: {
 }> {
   const plansInfrastructure = shouldPlanGitHubInfrastructure(params.spec, params.environmentName);
   const plansDelegatedSecrets = shouldPlanGitHubDelegatedSecrets(params.spec, params.environmentName);
-  if (!plansInfrastructure && !plansDelegatedSecrets) {
+  if (!plansInfrastructure && !plansDelegatedSecrets && !params.backupEnvironment) {
     return { actions: [], warnings: [], blocked: [], inputRequired: [] };
   }
   const repository = resolveGitHubInfrastructureRepository(params.project, params.spec);
@@ -1612,6 +1777,8 @@ export async function planGitHubInfrastructure(params: {
   }
   const parts = repoParts(repository);
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [], inputRequired: [] };
+
+  if (params.backupEnvironment) return planBackupRepositoryPublication({ ...params, repository, ...parts });
 
   if (!plansInfrastructure) {
     const environment = new EnvironmentRepository().findByProjectAndName(
@@ -1676,7 +1843,7 @@ export async function planGitHubInfrastructure(params: {
     };
   }
   const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
-  const files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, restoreDrills.files);
+  let files = compileManagedGitHubFiles(githubSpec, params.spec.runtime, restoreDrills.files);
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
@@ -1698,11 +1865,39 @@ export async function planGitHubInfrastructure(params: {
     };
   }
 
+  const taskPrerequisites = await environmentTaskPublicationPrerequisites({
+    project: params.project, spec: params.spec, adapter: adapterResult.adapter,
+    owner: parts.owner, repo: parts.repo,
+  });
   const warnings: string[] = [
     ...artifactContractIssues,
     ...restoreDrills.issues.map((issue) => issue.message),
+    ...taskPrerequisites.warnings,
   ];
-  let verified = true;
+  let verified = taskPrerequisites.verified;
+  // Preserve independent backup programs by path. Their contents are neither
+  // desired repository writes nor prerequisites for unrelated reconciliation.
+  const deferredBackupPaths = new Set(Object.keys(params.spec.environments).flatMap(managedBackupFilePaths));
+  const preservedManifestPaths: string[] = [];
+  let backupPreservationBlockedReason: string | undefined;
+  {
+    try {
+      const content = await adapterResult.adapter.getFileContent(parts.owner, parts.repo, GITHUB_INFRASTRUCTURE_MANIFEST);
+      if (content !== null) {
+        for (const filePath of new Set(parseManifest(content, true))) {
+          if (!isManagedBackupFilePath(filePath)) continue;
+          deferredBackupPaths.add(filePath);
+          preservedManifestPaths.push(filePath);
+        }
+      }
+    } catch {
+      verified = false;
+      backupPreservationBlockedReason = 'github_backup_preservation_observation_unknown';
+      warnings.push('The managed repository manifest could not be observed safely; repository changes are deferred to preserve existing ownership.');
+    }
+    files = files.map(file => file.path === GITHUB_INFRASTRUCTURE_MANIFEST
+      ? managedManifestFile(file.content, [...parseManifest(file.content), ...preservedManifestPaths]) : file);
+  }
   const drift: string[] = [];
   for (const file of files) {
     try {
@@ -1735,17 +1930,21 @@ export async function planGitHubInfrastructure(params: {
   }
   const infrastructureBlockedReason = artifactContractIssues.length > 0
     ? 'github_autofix_artifact_contract_incomplete'
-    : restoreDrillBlockedReason;
+    : restoreDrillBlockedReason ?? backupPreservationBlockedReason ?? taskPrerequisites.blockedReason;
   const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
-  const actions: PlanAction[] = [infrastructureAction({
+  const taskWorkflowDrift = drift.some((path) => taskPrerequisites.paths.has(path));
+  const publicationAction = infrastructureAction({
     repository,
     files,
     type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
     verified,
     drift,
-    billable: !infrastructureBlockedReason && drift.some((path) => restoreDrillPaths.has(path)),
+    billable: !infrastructureBlockedReason && (taskWorkflowDrift || drift.some((path) => restoreDrillPaths.has(path))),
+    requiresConfirm: !infrastructureBlockedReason && taskWorkflowDrift,
+    preservedManagedPaths: [...deferredBackupPaths].sort(),
     ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
-  })];
+  });
+  const actions: PlanAction[] = [publicationAction];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];
   const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
   const delegatedSecrets = await planGitHubDelegatedSecrets({
@@ -1757,74 +1956,28 @@ export async function planGitHubInfrastructure(params: {
     environment,
     suppliedValues: params.suppliedSecretValues ?? {},
   });
-  actions.push(...delegatedSecrets.actions);
+  // Secret writes and retirement must follow the reviewed files even when a
+  // full plan moves confirmation-gated publication behind ordinary actions.
+  // Accepted secrets remain noops; secret-only setups have no publication.
+  actions.push(...delegatedSecrets.actions.map((action) => (
+    action.type !== 'noop' && publicationAction.type !== 'noop'
+      ? { ...action, dependsOn: [GITHUB_INFRASTRUCTURE_ACTION_ID] }
+      : action
+  )));
   warnings.push(...delegatedSecrets.warnings);
 
-  if (drift.length === 0) {
-    const pages = await planGitHubPages({
-      spec: params.spec,
-      repository,
-      adapter: adapterResult.adapter,
-      environment,
-    });
-    actions.push(...pages.actions);
-    warnings.push(...pages.warnings);
-    blocked.push(...pages.blocked);
-  }
-
-  // Secrets/settings are a second stage. A file PR must merge before Hypervibe
-  // exposes an AI key to the newly reviewed workflows.
-  if (drift.length === 0 && githubSpecNeedsOpenAI(githubSpec)) {
-    let secretPresent = false;
-    try {
-      secretPresent = (await adapterResult.adapter.listRepositorySecrets(parts.owner, parts.repo))
-        .includes(OPENAI_ACTIONS_SECRET);
-    } catch (error) {
-      verified = false;
-      warnings.push(`Cannot observe GitHub Actions secret names: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    const openAIConnection = new ConnectionRepository().findBestVerifiedMatch('openai', repository);
-    let desiredSecretHash: string | undefined;
-    if (openAIConnection) {
-      const openAIAdapter = await adapterFactory.getProviderAdapter('openai', params.project);
-      if (openAIAdapter.success && openAIAdapter.adapter) {
-        desiredSecretHash = (openAIAdapter.adapter as unknown as OpenAIAdapter).actionsApiKeyHash();
-      }
-    }
-    const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
-    const githubBindings = environment?.platformBindings.github;
-    const bindingRecord = githubBindings && typeof githubBindings === 'object' && !Array.isArray(githubBindings)
-      ? githubBindings as Record<string, unknown>
-      : {};
-    const storedSecretHash = typeof bindingRecord.openAIActionsSecretHash === 'string'
-      ? bindingRecord.openAIActionsSecretHash
-      : undefined;
-    const secretInSync = secretPresent && Boolean(desiredSecretHash) && storedSecretHash === desiredSecretHash;
-    actions.push({
-      id: GITHUB_OPENAI_SECRET_ACTION_ID,
-      type: secretInSync ? 'noop' : 'update',
-      resource: { kind: 'secret', name: OPENAI_ACTIONS_SECRET, provider: 'github' },
-      verified,
-      reason: secretInSync
-        ? 'OpenAI Actions secret is configured and matches the verified connection'
-        : 'OpenAI Actions secret must be synced from the verified OpenAI connection',
-      metadata: {
-        operation: 'githubOpenAIActionsSecret',
-        repository,
-        secretName: OPENAI_ACTIONS_SECRET,
-        canonicalEnvironment: params.environmentName,
-      },
-    });
-    if (!openAIConnection) {
+  // AI-backed automations read OPENAI_API_KEY like any other user-supplied
+  // API key: a delegated project secret delivered to GitHub Actions.
+  if (githubSpecNeedsOpenAI(githubSpec)) {
+    const declared = params.spec.secrets?.[OPENAI_ACTIONS_SECRET];
+    const deliveredToActions = Boolean(declared && 'githubActions' in declared && declared.githubActions?.repository);
+    if (!deliveredToActions) {
       blocked.push({
-        provider: 'openai',
+        provider: 'github',
         scope: repository,
-        policy: 'action-scoped-if-independent-actions',
-        actionIds: [GITHUB_OPENAI_SECRET_ACTION_ID],
-        reason: `No verified OpenAI connection for ${repository}. ${formatConnectionGuidance('openai', {
-          scope: repository,
-          intro: 'Connect OpenAI only if this repository should run autofix, pull-request review, or code-audit automations.',
-        })}`,
+        policy: 'hard',
+        reason: `Autofix, pull-request review and code-audit automations need ${OPENAI_ACTIONS_SECRET} in GitHub Actions. `
+          + `Declare secrets.${OPENAI_ACTIONS_SECRET} with githubActions.repository=true, then supply the key you create in your OpenAI account as a secretRef when planning.`,
       });
     }
   }
@@ -1980,7 +2133,11 @@ export async function planGitHubInfrastructure(params: {
       type: collaborationDrift ? 'update' : 'noop',
       resource: { kind: 'repo', name: repository, provider: 'github' },
       verified,
-      reason: collaborationDrift ? 'GitHub labels or pull-request guardrails need syncing' : 'GitHub collaboration settings are in sync',
+      reason: collaborationDrift
+        ? (githubSpec.collaboration.pullRequests.requirePr
+          ? 'Help protect your code on GitHub from accidental overwrites and keep work organized'
+          : 'Keep work organized on GitHub with labels')
+        : 'Your GitHub code safeguards and work labels are up to date',
       metadata: {
         operation: 'githubCollaborationSettings',
         repository,
@@ -1994,7 +2151,6 @@ export async function planGitHubInfrastructure(params: {
   }
   const actionPriority = (action: PlanAction): number => {
     if (action.id === GITHUB_INFRASTRUCTURE_ACTION_ID) return 0;
-    if (action.id === GITHUB_OPENAI_SECRET_ACTION_ID) return 20;
     if (action.id === GITHUB_CODE_SCANNING_ACTION_ID) return 30;
     return 10;
   };
@@ -2017,14 +2173,21 @@ export async function planGitHubInfrastructure(params: {
   };
 }
 
-function parseManifest(content: string | null): string[] {
-  if (!content) return [];
+function managedManifestFile(content: string | null, paths: Iterable<string>): ManagedGitHubFile {
+  const manifest = content === null ? { version: 1, managedBy: 'hypervibe' } : JSON.parse(content);
+  manifest.files = [...new Set(paths)].filter(path => path !== GITHUB_INFRASTRUCTURE_MANIFEST).sort();
+  return managedFile(GITHUB_INFRASTRUCTURE_MANIFEST, JSON.stringify(manifest, null, 2));
+}
+
+function parseManifest(content: string | null, requireValid = false): string[] {
+  if (content === null) return [];
   try {
     const parsed = JSON.parse(content) as { managedBy?: unknown; files?: unknown };
-    return parsed.managedBy === 'hypervibe' && Array.isArray(parsed.files)
-      ? parsed.files.filter((path): path is string => typeof path === 'string')
-      : [];
+    if (parsed?.managedBy !== 'hypervibe' || !Array.isArray(parsed.files)
+      || parsed.files.some(path => typeof path !== 'string')) throw new Error('The managed repository manifest is malformed.');
+    return parsed.files;
   } catch {
+    if (requireValid) throw new Error('The managed repository manifest is malformed.');
     return [];
   }
 }
@@ -2434,10 +2597,16 @@ export async function proposeGitHubInfrastructureFiles(params: {
   reconcileManifest?: boolean;
   /** Exact previously bound workflow paths this reviewed proposal may retire. */
   retiredManagedPaths?: string[];
+  /** Exact backup paths whose independent lifecycle must survive this proposal. */
+  preservedManagedPaths?: string[];
+  /** Selected backup lifecycle only; paths are derived from its environment. */
+  managedPathScope?: string[];
+  /** Reviewed contents/absence for both files of an explicitly retired program. */
+  retiredManagedFiles?: BackupRetirementFile[];
 }): Promise<GitHubInfrastructureProposalResult> {
   const { repository, desiredFiles } = params;
   const proposalBranch = params.proposalBranch ?? GITHUB_INFRASTRUCTURE_BRANCH;
-  if (desiredFiles.length === 0) {
+  if (desiredFiles.length === 0 && !params.managedPathScope?.length) {
     return { success: false, message: 'GitHub infrastructure plan action is invalid', error: 'Repository or desired files are missing.' };
   }
   const parts = repoParts(repository);
@@ -2484,6 +2653,23 @@ export async function proposeGitHubInfrastructureFiles(params: {
     };
   }
 
+  const retirementChanged = async (ref: string): Promise<boolean> => {
+    try {
+      for (const file of params.retiredManagedFiles ?? []) {
+        const current = await adapter.getFile(parts.owner, parts.repo, file.path, ref);
+        // Absence is also valid after a completed or interrupted prior attempt.
+        if (current !== null && (file.hash === null || sha256(current.content) !== file.hash)) return true;
+      }
+      return false;
+    } catch { return true; }
+  };
+  const retirementBlocked: GitHubInfrastructureProposalResult = {
+    success: false, status: 'blocked',
+    message: 'The backup files changed or could not be observed after review. Re-run hv_plan scope="backups" before removing them.',
+  };
+  // Do this before even creating/updating the proposal branch.
+  if (params.retiredManagedFiles && await retirementChanged(baseBranch)) return retirementBlocked;
+
   const branch = await reconcileGitHubInfrastructureBranch({
     adapter,
     repository,
@@ -2495,6 +2681,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   });
   if (!branch.success) return branch.result;
   const existingPull = branch.existingPull;
+  if (params.retiredManagedFiles && await retirementChanged(proposalBranch)) return retirementBlocked;
 
   const oldManifest = params.reconcileManifest
     ? await adapter.getFile(
@@ -2505,15 +2692,29 @@ export async function proposeGitHubInfrastructureFiles(params: {
     )
     : null;
   const previousPaths = Array.from(new Set([
-    ...(params.reconcileManifest ? parseManifest(oldManifest?.content ?? null) : []),
+    ...(params.reconcileManifest ? parseManifest(oldManifest?.content ?? null, params.preservedManagedPaths !== undefined || Boolean(params.managedPathScope?.length)) : []),
     ...(params.retiredManagedPaths ?? []),
+    ...(params.retiredManagedFiles ?? []).map(file => file.path),
   ])).sort();
-  const desiredPaths = new Set(desiredFiles.map((file) => file.path));
+  const preservedPaths = new Set(params.preservedManagedPaths);
+  if (params.preservedManagedPaths !== undefined) {
+    for (const path of previousPaths) if (isManagedBackupFilePath(path)) preservedPaths.add(path);
+  }
+  const managedScope = params.managedPathScope ? new Set(params.managedPathScope) : undefined;
+  const desiredPaths = new Set(managedScope ? [
+    ...previousPaths.filter(path => !managedScope.has(path)),
+    ...desiredFiles.map(file => file.path),
+  ] : [
+    ...desiredFiles.filter(file => !preservedPaths.has(file.path)).map(file => file.path),
+    ...previousPaths.filter(path => preservedPaths.has(path)),
+  ]);
   const changed: string[] = [];
   const removed: string[] = [];
   const fileChanges: GitHubInfrastructureFileChange[] = [];
-  const manifestFile = desiredFiles.find((file) => file.path === GITHUB_INFRASTRUCTURE_MANIFEST);
-  const contentFiles = desiredFiles.filter((file) => file.path !== GITHUB_INFRASTRUCTURE_MANIFEST);
+  let manifestFile = desiredFiles.find((file) => file.path === GITHUB_INFRASTRUCTURE_MANIFEST);
+  if (managedScope) manifestFile = managedManifestFile(oldManifest?.content ?? null, desiredPaths);
+  else if (manifestFile && preservedPaths.size) manifestFile = managedManifestFile(manifestFile.content, desiredPaths);
+  const contentFiles = desiredFiles.filter((file) => file.path !== GITHUB_INFRASTRUCTURE_MANIFEST && !preservedPaths.has(file.path));
   for (const file of contentFiles) {
     const current = await adapter.getFile(parts.owner, parts.repo, file.path, proposalBranch);
     if (current?.content === file.content) continue;
@@ -2535,6 +2736,8 @@ export async function proposeGitHubInfrastructureFiles(params: {
   for (const path of previousPaths.filter((path) => !desiredPaths.has(path))) {
     const current = await adapter.getFile(parts.owner, parts.repo, path, proposalBranch);
     if (!current) continue;
+    const reviewed = params.retiredManagedFiles?.find(file => file.path === path);
+    if (params.retiredManagedFiles && (!reviewed || reviewed.hash !== sha256(current.content))) return retirementBlocked;
     await adapter.deleteFile(
       parts.owner,
       parts.repo,
@@ -2545,6 +2748,17 @@ export async function proposeGitHubInfrastructureFiles(params: {
     );
     removed.push(path);
     fileChanges.push({ operation: 'removed', path });
+  }
+  if (params.retiredManagedFiles) {
+    try {
+      for (const file of params.retiredManagedFiles) {
+        if (await adapter.getFile(parts.owner, parts.repo, file.path, proposalBranch) !== null) {
+          return { success: false, status: 'blocked', message: 'Backup schedule removal is not yet verified on the proposal branch. Re-plan before continuing.' };
+        }
+      }
+    } catch {
+      return { success: false, status: 'blocked', message: 'Backup schedule removal could not be verified on the proposal branch. Re-plan before continuing.' };
+    }
   }
   if (manifestFile) {
     const current = await adapter.getFile(parts.owner, parts.repo, manifestFile.path, proposalBranch);
@@ -2599,6 +2813,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
 export async function applyGitHubInfrastructure(params: {
   action: PlanAction;
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  if (params.action.type === 'noop') return { success: true, message: 'No repository changes were planned.' };
   const repository = typeof params.action.metadata?.repository === 'string'
     ? params.action.metadata.repository
     : undefined;
@@ -2612,12 +2827,24 @@ export async function applyGitHubInfrastructure(params: {
         && typeof record.hash === 'string';
     })
     : [];
-  if (!repository || desiredFiles.length === 0) {
+  const backupEnvironment = typeof params.action.metadata?.backupEnvironment === 'string'
+    ? params.action.metadata.backupEnvironment : undefined;
+  const backupPaths = backupEnvironment && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/.test(backupEnvironment)
+    ? managedBackupFilePaths(backupEnvironment) : undefined;
+  if (!repository || (!backupPaths && desiredFiles.length === 0)
+    || (backupEnvironment !== undefined && (!backupPaths || desiredFiles.some(file => !backupPaths.includes(file.path))))) {
     return {
       success: false,
       message: 'GitHub infrastructure plan action is invalid',
       error: 'Repository or desired files are missing.',
     };
+  }
+  const retirement = backupEnvironment !== undefined && desiredFiles.length === 0;
+  const retiredManagedFiles = retirement ? parseBackupRetirementFiles(params.action.metadata?.retiredManagedFiles, backupEnvironment) : undefined;
+  if ((retirement && (!retiredManagedFiles || !params.action.verified || params.action.requiresConfirm !== true
+    || params.action.metadata?.blockedReason || params.action.metadata?.backupWorkflowPublicationRequired !== true))
+    || (!retirement && params.action.metadata?.retiredManagedFiles !== undefined)) {
+    return { success: false, status: 'blocked', message: 'Backup retirement requires reviewed file observations. Re-run hv_plan scope="backups".' };
   }
   const targetBranch = typeof params.action.metadata?.targetBranch === 'string'
     ? params.action.metadata.targetBranch
@@ -2627,52 +2854,12 @@ export async function applyGitHubInfrastructure(params: {
     desiredFiles,
     ...(targetBranch ? { targetBranch } : {}),
     reconcileManifest: true,
+    ...(backupPaths ? { managedPathScope: backupPaths } : {}),
+    ...(retiredManagedFiles ? { retiredManagedFiles } : {}),
+    ...(Array.isArray(params.action.metadata?.preservedManagedPaths)
+      ? { preservedManagedPaths: params.action.metadata.preservedManagedPaths.filter((path): path is string => typeof path === 'string') }
+      : {}),
   });
-}
-
-export async function applyGitHubOpenAISecret(params: {
-  project: Project;
-  environmentName: string;
-  action: PlanAction;
-}): Promise<{ success: boolean; status?: 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
-  const repository = typeof params.action.metadata?.repository === 'string' ? params.action.metadata.repository : undefined;
-  if (!repository) return { success: false, message: 'OpenAI secret plan action is invalid', error: 'Repository is missing.' };
-  const parts = repoParts(repository);
-  if (!parts) return { success: false, message: 'GitHub repository is invalid', error: `Could not parse ${repository}.` };
-  const githubResult = getGitHubAdapter(repository);
-  if ('error' in githubResult) return { success: false, status: 'blocked', message: 'GitHub connection is unavailable', error: githubResult.error };
-  const openAIResult = await adapterFactory.getProviderAdapter('openai', params.project);
-  if (!openAIResult.success || !openAIResult.adapter) {
-    return { success: false, status: 'blocked', message: 'OpenAI connection is unavailable', error: openAIResult.error };
-  }
-  const openAIAdapter = openAIResult.adapter as unknown as OpenAIAdapter;
-  const apiKey = openAIAdapter.actionsApiKey();
-  await (githubResult.adapter as GitHubAdapter).setRepositorySecret(
-    parts.owner,
-    parts.repo,
-    OPENAI_ACTIONS_SECRET,
-    apiKey
-  );
-  const environments = new EnvironmentRepository();
-  const environment = environments.findByProjectAndName(params.project.id, params.environmentName)
-    ?? environments.create({ projectId: params.project.id, name: params.environmentName });
-  const currentGitHub = environment.platformBindings.github;
-  const githubBindings = currentGitHub && typeof currentGitHub === 'object' && !Array.isArray(currentGitHub)
-    ? currentGitHub as Record<string, unknown>
-    : {};
-  environments.updatePlatformBindings(environment.id, {
-    github: {
-      ...githubBindings,
-      openAIActionsSecretName: OPENAI_ACTIONS_SECRET,
-      openAIActionsSecretHash: openAIAdapter.actionsApiKeyHash(),
-      openAIActionsSecretSyncedAt: new Date().toISOString(),
-    },
-  });
-  return {
-    success: true,
-    message: `Synced ${OPENAI_ACTIONS_SECRET} for OpenAI-backed GitHub automations`,
-    data: { repository, secretName: OPENAI_ACTIONS_SECRET },
-  };
 }
 
 export async function applyGitHubDelegatedSecret(params: {
@@ -2863,7 +3050,7 @@ export async function applyGitHubNativeSetting(params: {
           });
         }
       }
-      return { success: true, message: 'Synced GitHub labels and pull-request guardrails', data: { repository } };
+      return { success: true, message: 'Updated GitHub settings to match your project setup', data: { repository } };
     }
     return { success: false, message: 'GitHub settings plan action is invalid', error: `Unknown operation ${operation}.` };
   } catch (error) {

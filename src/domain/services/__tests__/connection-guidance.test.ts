@@ -9,12 +9,21 @@ import {
   credentialFieldsFromSchema,
   formatConnectionGuidance,
   GITHUB_TOKEN_URLS,
-  GITLAB_TOKEN_URLS,
   getConnectionGuidance,
 } from '../connection-guidance.js';
 
 describe('connection guidance', () => {
   const noSetupUrlExpected = new Set(['database', 'local', 'xcode']);
+
+  it('separates SendGrid setup access from the delegated application sending key', () => {
+    const guidance = getConnectionGuidance('sendgrid')!;
+    expect(guidance.credentialExample).toContain('.env#HYPERVIBE_SENDGRID_API_KEY');
+    expect(guidance.permissions.join(' ')).not.toContain('mail.send');
+    expect(guidance.notes?.join(' ')).toContain('SENDGRID_API_KEY');
+    expect(guidance.notes?.join(' ')).toContain('mail.send');
+    expect(guidance.notes?.join(' ')).toContain('every other permission No Access');
+    expect(guidance.notes?.join(' ')).toContain('delegated runtime secret');
+  });
 
   it('keeps every registered provider and secret manager actionable', () => {
     const providers = [...providerRegistry.names(), ...secretManagerRegistry.names()].sort();
@@ -33,6 +42,7 @@ describe('connection guidance', () => {
       expect(
         record.credentialExample.includes('credentialsRef=')
         || record.credentialExample.includes('credentials=')
+        || record.credentialExample.includes('action="connect"')
         || providerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true
         || secretManagerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true,
         provider
@@ -88,7 +98,7 @@ describe('connection guidance', () => {
     expect(guidance).toContain('DNS, custom domains, and email routing');
     expect(guidance).toContain('Registrar/domain purchase');
     expect(guidance).toContain('Create pre-filled Account API Token');
-    expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(guidance).toContain('https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fapi-tokens');
     expect(guidance).toContain('permissionGroupKeys=');
     expect(guidance).toContain('Create pre-filled User API Token');
     expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
@@ -115,6 +125,8 @@ describe('connection guidance', () => {
       { key: 'zone_settings', type: 'read' },
       { key: 'dns', type: 'edit' },
       { key: 'account_settings', type: 'read' },
+      { key: 'workers_routes', type: 'edit' },
+      { key: 'workers_scripts', type: 'edit' },
     ];
 
     for (const [kind, value] of Object.entries(CLOUDFLARE_TOKEN_URLS)) {
@@ -162,12 +174,13 @@ describe('connection guidance', () => {
       scope: 'davejohnson/livetrainer',
     });
 
-    expect(setup.recommendedSetupUrl).toBe(GITHUB_TOKEN_URLS.api);
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('description')).toBe('Hypervibe GitHub API for davejohnson/livetrainer');
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('scopes')).toBe('repo,workflow');
     expect(setup.setupUrls).toEqual(expect.arrayContaining([
-      `Create recommended combined classic token: ${GITHUB_TOKEN_URLS.combined}`,
-      `Create pre-filled classic API token: ${GITHUB_TOKEN_URLS.api}`,
-      `Create pre-filled fine-grained repository token: ${GITHUB_TOKEN_URLS.fineGrained}`,
-      `Create optional classic GHCR package token: ${GITHUB_TOKEN_URLS.packageRead}`,
+      expect.stringContaining('Create recommended combined classic token: https://github.com/settings/tokens/new?'),
+      expect.stringContaining('Create pre-filled classic API token: https://github.com/settings/tokens/new?'),
+      expect.stringContaining('Create pre-filled fine-grained repository token: https://github.com/settings/personal-access-tokens/new?'),
+      expect.stringContaining('Create optional classic GHCR package token: https://github.com/settings/tokens/new?'),
     ]));
     expect(setup.credentialExample).toBe(
       'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"'
@@ -182,7 +195,8 @@ describe('connection guidance', () => {
       requiredCredentialKeys: ['apiToken', 'packageReadToken'],
     });
 
-    expect(setup.recommendedSetupUrl).toBe(GITHUB_TOKEN_URLS.combined);
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('description')).toBe('Hypervibe CI deploys for davejohnson/livetrainer');
+    expect(new URL(setup.recommendedSetupUrl!).searchParams.get('scopes')).toBe('repo,workflow,read:packages');
     expect(setup.credentialExample).toBe(
       'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}'
     );
@@ -214,62 +228,6 @@ describe('connection guidance', () => {
     expect(new URL(GITHUB_TOKEN_URLS.railwayAppScope).searchParams.get('scopes')).toBe('repo');
   });
 
-  it('provides exact GitLab API and registry token guidance without asking for chat secrets', () => {
-    const guidance = formatConnectionGuidance('gitlab', {
-      scope: 'https://gitlab.com/acme/storefront',
-    });
-    const apiUrl = new URL(GITLAB_TOKEN_URLS.api);
-
-    expect(apiUrl.pathname).toBe('/-/user_settings/personal_access_tokens');
-    expect(apiUrl.searchParams.get('name')).toBe('Hypervibe');
-    expect(apiUrl.searchParams.get('description')).toContain('Hypervibe');
-    expect(apiUrl.searchParams.get('scopes')).toBe('api');
-    expect(guidance).toContain(GITLAB_TOKEN_URLS.api);
-    expect(guidance).toContain('Maintainer');
-    expect(guidance).toContain('Owner');
-    expect(guidance).toContain('read_registry');
-    expect(guidance).toContain('registryUsername');
-    expect(guidance).toContain('registryReadToken');
-    expect(guidance).toContain('credentialsRef="file:');
-    expect(guidance).toContain('scope="https://gitlab.com/acme/storefront"');
-    expect(guidance).toContain('one exact locked project runner id');
-    expect(guidance).toContain('operator attestation');
-  });
-
-  it('explains where every Twilio credential and optional provider id comes from', () => {
-    const guidance = formatConnectionGuidance('twilio');
-
-    expect(guidance).toContain('Console Dashboard -> Account Info');
-    expect(guidance).toContain('AC...');
-    expect(guidance).toContain('SK...');
-    expect(guidance).toContain('Twilio displays the secret only once');
-    expect(guidance).toContain('primary Auth Token');
-    expect(guidance).toContain('twilio/messaging/services/list');
-    expect(guidance).toContain('twilio/messaging/services.phonenumbers/create');
-    expect(guidance).toContain('twilio/messaging/messages/create');
-    expect(guidance).toContain('Numbers & Senders -> Phone Numbers');
-    expect(guidance).toContain('PN... SID');
-    expect(guidance).toContain('Use the SID, not the +E.164 phone number');
-    expect(guidance).toContain('Do not add TWILIO_MESSAGING_SERVICE_SID');
-    expect(guidance).toContain('same account');
-
-    const schema = providerRegistry.get('twilio')!.metadata.credentialsSchema;
-    expect(credentialFieldsFromSchema(schema)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'accountSid',
-        description: expect.stringContaining('Console Dashboard -> Account Info'),
-      }),
-      expect.objectContaining({
-        name: 'apiKeySecret',
-        description: expect.stringContaining('displayed once'),
-      }),
-      expect.objectContaining({
-        name: 'authToken',
-        description: expect.stringContaining('X-Twilio-Signature'),
-      }),
-    ]));
-  });
-
   it('explains the fast scoped Stripe sandbox workflow and restricted-key permissions', () => {
     const guidance = formatConnectionGuidance('stripe', { scope: 'development-personas' });
 
@@ -295,16 +253,6 @@ describe('connection guidance', () => {
         'mail.send',
         'whitelabel.read',
         'Full Access',
-      ],
-      twilio: [
-        'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-        'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
-        'Restricted API Key',
-        'twilio/messaging/services.phonenumbers/list',
-        'twilio/messaging/messages/create',
-        'X-Twilio-Signature',
-        'credentialsRef="dotenv:/absolute/path/.env"',
-        'Hypervibe does not buy phone numbers',
       ],
       cloudrun: [
         'https://console.cloud.google.com/iam-admin/serviceaccounts',
@@ -353,76 +301,6 @@ describe('connection guidance', () => {
         'exact default-VPC workload network',
         'credentialsRef="file:/absolute/path/rds.json"',
       ],
-      elasticache: [
-        'https://console.aws.amazon.com/iam/home#/security_credentials',
-        'AWS IAM access key',
-        'Reuse the verified ecs connection',
-        'elasticache:DescribeServerlessCaches',
-        'elasticache:CreateServerlessCache',
-        'ec2:AuthorizeSecurityGroupIngress',
-        'iam:CreateServiceLinkedRole',
-        'Region and size belong in environments.<name>.cache',
-        'network, subnet, and security-group IDs are never connection credentials',
-        'credentialsRef="file:/absolute/path/aws-ecs.json"',
-      ],
-      supabase: [
-        'https://supabase.com/dashboard/account/tokens',
-        'personal access token',
-        'Owner or Administrator',
-      ],
-      neon: [
-        'https://console.neon.tech/app/settings/api-keys',
-        'personal API key or organization API key',
-        'create, read, and delete projects',
-        'project-scoped organization API key',
-        'organizationId',
-        'credentialsMap={"apiKey":"NEON_API_KEY"',
-      ],
-      digitalocean: [
-        'https://cloud.digitalocean.com/account/api/tokens',
-        'personal access token',
-        'database:read',
-        'database:view_credentials',
-        'database:create',
-        'regions:read',
-        'app:create',
-        'registry:read',
-        'registry:update',
-        'registry:create',
-        'account:read',
-        'custom-domain attach',
-        'free Starter registry',
-        'Full Access is a broader fallback',
-        'credentialsRef="file:/absolute/path/digitalocean.json"',
-      ],
-      fly: [
-        'https://fly.io/dashboard',
-        'https://fly.io/docs/security/tokens/',
-        'organization-scoped access token',
-        'Do not use fly auth token',
-        'Do not use an app deploy token',
-        'create/update Machines',
-        'Managed Postgres',
-        'organizationSlug',
-        'credentialsMap={"apiToken":"FLY_API_TOKEN","organizationSlug":"FLY_ORGANIZATION_SLUG"}',
-        'private to Fly networking',
-        'operation-scoped WireGuard peers',
-        'packaged userspace connector',
-      ],
-      vercel: [
-        'https://vercel.com/account/settings/tokens',
-        'personal access token',
-        'vcp_',
-        'Create Project',
-        'Full Production Deployment',
-        'Environment Variable Manager',
-        'teamId',
-        'source-less Vercel Projects',
-        'framework/static auto-detection',
-        'long-lived start commands',
-        'remove domains on the exact Project',
-        'credentialsRef="file:/absolute/path/vercel.json"',
-      ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',
@@ -437,26 +315,6 @@ describe('connection guidance', () => {
         'App Manager',
         'Admin role',
       ],
-      doppler: [
-        'https://docs.doppler.com/docs/service-tokens',
-        'read-only service token',
-        'project/config',
-      ],
-      bitwarden: [
-        'https://bitwarden.com/help/access-tokens/',
-        'machine account',
-        'organizationId',
-      ],
-      vault: [
-        'https://developer.hashicorp.com/vault/docs/secrets/kv/kv-v2',
-        'Vault token',
-        'AppRole',
-      ],
-      '1password': [
-        'https://www.1password.dev/service-accounts/',
-        'service account token',
-        'vaults',
-      ],
       'aws-secrets': [
         'https://docs.aws.amazon.com/secretsmanager/',
         'secretsmanager:GetSecretValue',
@@ -469,14 +327,6 @@ describe('connection guidance', () => {
         'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules/read',
         'start/end are 0.0.0.0',
         'credentialsRef="file:/absolute/path/azure-postgres.json"',
-      ],
-      'azure-managed-redis': [
-        'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-        'Microsoft Entra application service principal',
-        'Azure Managed Redis Contributor',
-        '3015e5ed-6856-4ab3-b2f0-b8492aa30ca6',
-        'listKeys',
-        'credentialsRef="file:/absolute/path/azure-managed-redis.json"',
       ],
       s3: [
         'https://console.aws.amazon.com/iam/home#/security_credentials',
@@ -523,8 +373,6 @@ describe('credentialFieldsFromSchema', () => {
       s3: ['authMode', 'accessKeyId', 'secretAccessKey'],
       gcs: ['authMode', 'credentials'],
       azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
-      digitalocean: ['apiToken'],
-      fly: ['apiToken', 'organizationSlug'],
     };
 
     for (const [provider, fields] of Object.entries(expected)) {
@@ -539,8 +387,6 @@ describe('credentialFieldsFromSchema', () => {
     expect(providerRegistry.connectionProviders('s3')).toEqual(['s3', 'ecs']);
     expect(providerRegistry.connectionProviders('gcs')).toEqual(['gcs', 'cloudrun']);
     expect(providerRegistry.connectionProviders('azureblob')).toEqual(['azureblob', 'azure-container-apps']);
-    expect(providerRegistry.connectionProviders('memorystore')).toEqual(['memorystore', 'cloudrun']);
-    expect(providerRegistry.connectionProviders('elasticache')).toEqual(['elasticache', 'ecs']);
   });
 
   it('describes required, optional, secret, multiline, and choice fields', () => {

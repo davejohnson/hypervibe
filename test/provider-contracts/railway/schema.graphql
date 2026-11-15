@@ -1,0 +1,4909 @@
+type AccessRule {
+  disallowed: String
+}
+
+enum ActiveFeatureFlag {
+  ACCESS_GROUPS
+  AGENT_BYOK
+  AGENT_CONTEXT_SOURCES
+  CHAT_SANDBOX
+  CLOUD_AGENTS
+  DEBUG_SMART_DIAGNOSIS
+  FIXED_DOMAIN_RADAR_RULES
+  HA_FOR_ALL_TEMPLATES
+  IN_DASHBOARD_SUPPORT
+  MAGIC_CONFIG
+  NEW_PEOPLE_PAGE
+  POSTGRES_MAJOR_UPGRADE
+  POSTGRES_VULN_AUTO_UPDATE
+  PRIORITY_BOARDING
+  PROJECT_SANDBOXES
+  TEMPLATE_CHANGE_SETS
+}
+
+enum ActivePlatformFlag {
+  ALERT_SUS_USERS_CRON_KILLSWITCH
+  BAN_APPEAL_FORM
+  BUILD_DEPLOY_QUEUE_V2
+  CANVAS_CROSS_ENV_GUARD_ENFORCE
+  CHAT_SANDBOX
+  CLICKHOUSE_WORKSPACE_LIMIT_ENFORCE
+  CS_MCP
+  CTRD_IMAGE_STORE_ROLLOUT
+  DEFAULT_USAGE_ALERTS
+  DEMO_PERCENTAGE_ROLLOUT
+  DEPLOYMENT_DIAGNOSIS_KILLSWITCH
+  DEPLOY_SUPERSEDE_ON_PUSH
+  DEV_STUDIO
+  DEV_STUDIO_ANON_PROVISIONS
+  FIXED_DOMAIN_RADAR_RULES
+  IN_DASHBOARD_SUPPORT
+  KAFKA_EPHEMERAL_ENVIRONMENT_UPDATES
+  LOGS_V2_READS
+  NEW_STRIPE_WEBHOOK_VERSION_ROLLOUT
+  OAUTH_DCR_KILLSWITCH
+  REMOVE_DEPLOYMENT_COMPACT
+  SERVICEINSTANCE_DATALOADER_FOR_STATIC_URL
+  SPLIT_USAGE_QUERIES
+  STRIPE_METERS_NEW_ACCOUNTS
+  STRIPE_METERS_SHADOW_ENABLED
+  UPDATED_VM_QUERIES
+  WORKSPACE_MCP_KILLSWITCH
+}
+
+enum ActiveProjectFeatureFlag {
+  PLACEHOLDER
+}
+
+enum ActiveServiceFeatureFlag {
+  COPY_VOLUME_TO_ENVIRONMENT
+  ENABLE_DOCKER_EXTENSION
+  PLACEHOLDER
+  SKIPPED_BUILDS
+  USE_EXPRESS_DEPLOY
+  USE_EXPRESS_PACKSTORE
+  USE_VM_RUNTIME
+}
+
+type AdoptionInfo implements Node {
+  adoptionLevel: Float
+  createdAt: DateTime!
+  deltaLevel: Float
+  id: ID!
+  matchedIcpEmail: String
+  monthlyEstimatedUsage: Float
+  numConfigFile: Int!
+  numCronSchedule: Int!
+  numDeploys: Int!
+  numEnvs: Int!
+  numFailedDeploys: Int!
+  numHealthcheck: Int!
+  numIconConfig: Int!
+  numRegion: Int!
+  numReplicas: Int!
+  numRootDirectory: Int!
+  numSeats: Int!
+  numServices: Int!
+  numVariables: Int!
+  numWatchPatterns: Int!
+  totalCores: Float
+  totalDisk: Float
+  totalNetwork: Float
+  updatedAt: DateTime!
+  workspace: Workspace!
+}
+
+type AgentBootstrap {
+  activeVersion: AgentBootstrapVersion
+  createdAt: DateTime!
+  environmentId: String!
+  failureReason: String
+  id: ID!
+  name: String!
+  status: AgentBootstrapStatus!
+  updatedAt: DateTime!
+}
+
+scalar AgentBootstrapManifest
+
+input AgentBootstrapSaveInput {
+  cloudAgentId: String
+  id: String
+  manifest: AgentBootstrapManifest
+  name: String
+  variables: JSON
+}
+
+enum AgentBootstrapStatus {
+  DEGRADED
+  READY
+  SAVING
+}
+
+type AgentBootstrapVersion {
+  checkpoint: CloudAgentCheckpoint!
+  createdAt: DateTime!
+  id: ID!
+  manifest: AgentBootstrapManifest
+  sourceCloudAgentId: String!
+}
+
+input AgentUsageLimitSetInput {
+  hardLimitCents: Int!
+  softLimitCents: Int
+  workspaceId: String!
+}
+
+type AgentUsageSummary {
+  billingPeriodEnd: DateTime!
+  hardLimitCents: Int
+  softLimitCents: Int
+  totalUsedCents: Int!
+  usageRemaining: Float
+}
+
+type AggregatedUsage {
+  measurement: MetricMeasurement!
+  tags: MetricTags!
+  value: Float!
+}
+
+type AllDomains {
+  customDomains: [CustomDomain!]!
+  serviceDomains: [ServiceDomain!]!
+}
+
+type ApiToken implements Node {
+  displayToken: String!
+  expiresAt: DateTime
+  id: ID!
+  name: String!
+  workspaceId: String
+}
+
+type ApiTokenContext {
+  workspaces: [ApiTokenWorkspace!]!
+}
+
+input ApiTokenCreateInput {
+  name: String!
+  workspaceId: String
+}
+
+type ApiTokenRateLimit {
+  remainingPoints: Int!
+  resetsAt: String!
+}
+
+type ApiTokenWorkspace {
+  id: String!
+  name: String!
+}
+
+type AppliedByMember {
+  avatar: String
+  email: String!
+  id: String!
+  name: String
+  username: String
+}
+
+type AuditLog implements Node {
+  context: JSON
+  createdAt: DateTime!
+  environment: Environment
+  environmentId: String
+  eventType: String!
+  id: ID!
+  payload: JSON
+  project: Project
+  projectId: String
+  workspaceId: String
+}
+
+type AuditLogEventTypeInfo {
+  description: String!
+  eventType: String!
+}
+
+input AuditLogFilterInput {
+  endDate: DateTime
+  environmentId: String
+  eventTypes: [String!]
+  projectId: String
+  startDate: DateTime
+}
+
+input BaseEnvironmentOverrideInput {
+  baseEnvironmentOverrideId: String
+}
+
+scalar BigInt
+
+type BillingPeriod {
+  end: DateTime!
+  start: DateTime!
+}
+
+type BotScopeBindingInfo {
+  canRemove: Boolean!
+  id: String!
+  platform: String!
+  scopeId: String!
+  scopeName: String
+  scopeType: String!
+  workspaceId: String!
+  workspaceName: String!
+}
+
+type Bucket implements Node {
+  createdAt: DateTime!
+  groupId: String
+  id: ID!
+  name: String!
+  project: Project!
+  projectId: String!
+  updatedAt: DateTime!
+}
+
+input BucketCreateInput {
+  environmentId: String
+  name: String
+  projectId: String!
+}
+
+type BucketInstanceDetails {
+  objectCount: BigInt!
+  sizeBytes: BigInt!
+}
+
+type BucketS3CompatibleCredentials {
+  accessKeyId: String!
+  bucketName: String!
+  createdAt: DateTime!
+  endpoint: String!
+  region: String!
+  secretAccessKey: String!
+  urlStyle: String!
+}
+
+input BucketUpdateInput {
+  name: String!
+}
+
+enum Builder {
+  HEROKU
+  NIXPACKS
+  PAKETO
+  RAILPACK
+}
+
+enum CDNProvider {
+  DETECTED_CDN_PROVIDER_CLOUDFLARE
+  DETECTED_CDN_PROVIDER_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+scalar CanvasConfig
+
+type CanvasViewMergePreview {
+  mutations: [JSON!]!
+  state: JSON!
+}
+
+enum CertificateErrorType {
+  CERTIFICATE_ERROR_TYPE_AUTHORIZATION_FAILED
+  CERTIFICATE_ERROR_TYPE_DNS_VALIDATION
+  CERTIFICATE_ERROR_TYPE_INTERNAL
+  CERTIFICATE_ERROR_TYPE_KEY_GENERATION
+  CERTIFICATE_ERROR_TYPE_ORDER_CREATION
+  CERTIFICATE_ERROR_TYPE_RATE_LIMIT
+  CERTIFICATE_ERROR_TYPE_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+type CertificatePublicData {
+  domainNames: [String!]!
+  expiresAt: DateTime
+  fingerprintSha256: String!
+  issuedAt: DateTime
+  keyType: KeyType!
+}
+
+enum CertificateStatus {
+  CERTIFICATE_STATUS_TYPE_ISSUE_FAILED
+  CERTIFICATE_STATUS_TYPE_ISSUING
+  CERTIFICATE_STATUS_TYPE_UNSPECIFIED
+  CERTIFICATE_STATUS_TYPE_VALID
+  CERTIFICATE_STATUS_TYPE_VALIDATING_OWNERSHIP
+  UNRECOGNIZED
+}
+
+enum CertificateStatusDetailed {
+  CERTIFICATE_STATUS_TYPE_DETAILED_CLEANING_UP
+  CERTIFICATE_STATUS_TYPE_DETAILED_COMPLETE
+  CERTIFICATE_STATUS_TYPE_DETAILED_CREATING_ORDER
+  CERTIFICATE_STATUS_TYPE_DETAILED_DOWNLOADING_CERTIFICATE
+  CERTIFICATE_STATUS_TYPE_DETAILED_FAILED
+  CERTIFICATE_STATUS_TYPE_DETAILED_FETCHING_AUTHORIZATIONS
+  CERTIFICATE_STATUS_TYPE_DETAILED_FINALIZING_ORDER
+  CERTIFICATE_STATUS_TYPE_DETAILED_GENERATING_KEYS
+  CERTIFICATE_STATUS_TYPE_DETAILED_INITIATING_CHALLENGES
+  CERTIFICATE_STATUS_TYPE_DETAILED_POLLING_AUTHORIZATIONS
+  CERTIFICATE_STATUS_TYPE_DETAILED_PRESENTING_CHALLENGES
+  CERTIFICATE_STATUS_TYPE_DETAILED_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+type ChangeOperationResult {
+  kind: String!
+  outputs: JSON
+  path: String
+  status: String!
+  summary: String
+}
+
+type ChangeSetApplyResult {
+  changes: [ChangeOperationResult!]!
+  deploymentId: String
+  diagnostics: JSON!
+  id: String!
+  stagedPatchId: String
+  status: String!
+}
+
+type ChangeSetPreview {
+  changeSet: JSON!
+  diagnostics: JSON!
+  effects: JSON!
+}
+
+input CliAuthEventTrackInput {
+  agentSessionId: String
+  arch: String
+  caller: String
+  cliVersion: String
+  errorMessage: String
+  installRequestId: String
+  isCi: Boolean
+  os: String
+  outcome: String!
+  sessionId: String
+  success: Boolean!
+  transport: String!
+  transportReason: String
+}
+
+input CliEventTrackInput {
+  agentSessionId: String
+  arch: String!
+  caller: String
+  cliVersion: String!
+  command: String!
+  durationMs: Int!
+  environmentId: String
+  errorClass: String
+  errorMessage: String
+  installRequestId: String
+  isCi: Boolean!
+  os: String!
+  projectId: String
+  serviceId: String
+  sessionId: String
+  subCommand: String
+  success: Boolean!
+  workspaceId: String
+}
+
+type CloudAgent {
+  agentWsUrl: String
+  consoleTargetId: String
+  createdAt: DateTime!
+  domain: String
+  domains: [CloudAgentDomain!]!
+  environmentId: String!
+  id: ID!
+  name: String!
+  projectId: String!
+  sessions: [CloudAgentSnapshot!]!
+  status: CloudAgentStatus!
+}
+
+type CloudAgentCheckpoint {
+  createdAt: DateTime!
+  environmentId: String!
+  failureReason: String
+  id: ID!
+  name: String
+  region: String!
+  status: CloudAgentCheckpointStatus!
+}
+
+enum CloudAgentCheckpointStatus {
+  FAILED
+  IN_PROGRESS
+  SUCCEEDED
+}
+
+input CloudAgentCodeEndpointInput {
+  port: Int
+}
+
+input CloudAgentCreateInput {
+  agentBootstrapId: String
+  cloudAgentCheckpointId: String
+  codeEndpoint: CloudAgentCodeEndpointInput
+  environmentId: String!
+  name: String
+  variables: JSON
+}
+
+type CloudAgentDomain {
+  domain: String!
+  port: Int!
+  prefix: String!
+}
+
+type CloudAgentSnapshot {
+  harness: String!
+  lastEventKind: String!
+  latestPrompt: String
+  prompt: String
+  sessionId: String!
+  sessionName: String
+  state: String!
+  taskId: String
+  terminal: Boolean!
+  updatedAt: String!
+}
+
+input CloudAgentSnapshotInput {
+  harness: String!
+  lastEventKind: String!
+  prompt: String
+  sessionId: String!
+  sessionName: String
+  state: String!
+  taskId: String
+  terminal: Boolean!
+  updatedAt: String!
+}
+
+input CloudAgentStateReportInput {
+  agents: [CloudAgentSnapshotInput!]!
+  cloudAgentId: String!
+  reportedAt: String!
+}
+
+enum CloudAgentStatus {
+  CRASHED
+  DELETING
+  FAILED
+  RUNNING
+  SLEEPING
+  STARTING
+}
+
+type CnameCheck {
+  link: String
+  message: String!
+  status: CnameCheckStatus!
+}
+
+enum CnameCheckStatus {
+  ERROR
+  INFO
+  INVALID
+  VALID
+  WAITING
+}
+
+type ComplianceAgreementsInfo {
+  hasBAA: Boolean!
+  hasDPA: Boolean!
+}
+
+type ConnectedServiceInstance {
+  environmentId: String!
+  projectId: String!
+  serviceId: String!
+  serviceName: String
+}
+
+type Container implements Node {
+  createdAt: DateTime!
+  deletedAt: DateTime
+  environment: Environment!
+  environmentId: String!
+  id: ID!
+  migratedAt: DateTime
+  plugin: Plugin!
+  pluginId: String!
+}
+
+input CreateNotificationRuleInput {
+  channelConfigs: [NotificationChannelConfig!]!
+  ephemeralEnvironments: Boolean
+  eventTypes: [String!]!
+  projectId: String
+  severities: [NotificationSeverity!]
+  workspaceId: String!
+}
+
+type Credit implements Node {
+  amount: Float!
+  createdAt: DateTime!
+  customerId: String!
+  id: ID!
+  memo: String
+  type: CreditType!
+  updatedAt: DateTime!
+}
+
+enum CreditType {
+  APPLIED
+  CREDIT
+  DEBIT
+  STRIPE
+  TRANSFER
+  WAIVED
+}
+
+type CustomDomain implements Domain {
+  cdnMode: String @deprecated(reason: "Removed; always null.")
+  cnameCheck: CnameCheck! @deprecated(reason: "Use the `status` field instead.")
+  createdAt: DateTime
+  deletedAt: DateTime
+  domain: String!
+  edgeId: String
+  environmentId: String!
+  id: ID!
+  isRailwayDomain: Boolean!
+  projectId: String
+  serviceId: String!
+  status: CustomDomainStatus!
+  syncStatus: CustomDomainSyncStatus!
+  targetPort: Int
+  updatedAt: DateTime
+}
+
+input CustomDomainCreateInput {
+  domain: String!
+  environmentId: String!
+  projectId: String!
+  serviceId: String!
+  targetPort: Int
+}
+
+type CustomDomainStatus {
+  cdnProvider: CDNProvider
+  certificateErrorMessage: String
+  certificateErrorType: CertificateErrorType
+  certificateRetryable: Boolean
+  certificateStatus: CertificateStatus!
+  certificateStatusDetailed: CertificateStatusDetailed
+  certificates: [CertificatePublicData!]
+  dnsRecords: [DNSRecords!]!
+  verificationDnsHost: String
+  verificationToken: String
+  verified: Boolean!
+}
+
+enum CustomDomainSyncStatus {
+  ACTIVE
+  CREATING
+  DELETED
+  DELETING
+  UNSPECIFIED
+  UPDATING
+}
+
+type Customer implements Node {
+  appliedCredits: Float!
+  billingAddress: CustomerAddress
+  billingEmail: String
+  billingPeriod: BillingPeriod!
+  creditBalance: Float!
+  credits(after: String, before: String, first: Int, last: Int): CustomerCreditsConnection!
+  currentUsage: Float!
+  defaultPaymentMethod: PaymentMethod
+  defaultPaymentMethodId: String
+  hasExhaustedFreePlan: Boolean!
+  id: ID!
+  invoices: [CustomerInvoice!]!
+  isPrepaying: Boolean!
+  isTrialing: Boolean!
+  isUsageSubscriber: Boolean!
+  isWithdrawingToCredits: Boolean!
+  planLimitOverride: PlanLimitOverride
+  remainingUsageCreditBalance: Float!
+  spendCommitment: SpendCommitment
+  state: SubscriptionState!
+  stripeCustomerId: String!
+  subscriptions: [CustomerSubscription!]!
+  supportedWithdrawalPlatforms: [WithdrawalPlatformTypes!]!
+  taxIds: [CustomerTaxId!]!
+  trialDaysRemaining: Int!
+  usageLimit: UsageLimit
+  workspace: Workspace!
+}
+
+type CustomerAddress {
+  city: String
+  country: String
+  line1: String
+  line2: String
+  name: String
+  postalCode: String
+  state: String
+}
+
+type CustomerCreditsConnection {
+  edges: [CustomerCreditsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type CustomerCreditsConnectionEdge {
+  cursor: String!
+  node: Credit!
+}
+
+type CustomerInvoice {
+  amountDue: Float!
+  amountPaid: Float!
+  hostedURL: String
+  invoiceId: String!
+  items: [SubscriptionItem!]!
+  lastPaymentError: String
+  paymentIntentStatus: String
+  pdfURL: String
+  periodEnd: String!
+  periodStart: String!
+  reissuedInvoiceFrom: String
+  reissuedInvoiceOf: String
+  spendCommitmentPrepayment: Boolean
+  status: String
+  subscriptionId: String
+  subscriptionStatus: String
+  total: Int!
+}
+
+type CustomerSubscription {
+  billingCycleAnchor: DateTime!
+  cancelAt: String
+  cancelAtPeriodEnd: Boolean!
+  couponId: String
+  discounts: [SubscriptionDiscount!]!
+  id: String!
+  items: [SubscriptionItem!]!
+  latestInvoiceId: String!
+  nextInvoiceCurrentTotal: Int!
+  nextInvoiceDate: String!
+  status: String!
+}
+
+type CustomerTaxId {
+  id: String!
+  type: String!
+  value: String!
+}
+
+enum DNSRecordPurpose {
+  DNS_RECORD_PURPOSE_ACME_DNS01_CHALLENGE
+  DNS_RECORD_PURPOSE_TRAFFIC_ROUTE
+  DNS_RECORD_PURPOSE_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+enum DNSRecordStatus {
+  DNS_RECORD_STATUS_PROPAGATED
+  DNS_RECORD_STATUS_REQUIRES_UPDATE
+  DNS_RECORD_STATUS_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+enum DNSRecordType {
+  DNS_RECORD_TYPE_A
+  DNS_RECORD_TYPE_CNAME
+  DNS_RECORD_TYPE_NS
+  DNS_RECORD_TYPE_TXT
+  DNS_RECORD_TYPE_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+type DNSRecords {
+  currentValue: String!
+  fqdn: String!
+  hostlabel: String!
+  purpose: DNSRecordPurpose!
+  recordType: DNSRecordType!
+  requiredValue: String!
+  status: DNSRecordStatus!
+  zone: String!
+}
+
+scalar DateTime
+
+type Deployment implements Node {
+  canRedeploy: Boolean!
+  canRollback: Boolean!
+  createdAt: DateTime!
+  creator: DeploymentCreator
+  deploymentStopped: Boolean!
+  diagnosis: DeploymentDiagnosis
+  environment: Environment!
+  environmentId: String!
+  id: ID!
+  instances: [DeploymentDeploymentInstance!]!
+  meta: DeploymentMeta
+  projectId: String!
+  service: Service!
+  serviceId: String
+  snapshotId: String
+  sockets: [DeploymentSocket!]!
+  staticUrl: String
+  status: DeploymentStatus!
+  statusUpdatedAt: DateTime
+  suggestAddServiceDomain: Boolean!
+  updatedAt: DateTime!
+  url: String
+}
+
+type DeploymentCreator {
+  avatar: String
+  email: String!
+  id: String!
+  name: String
+}
+
+type DeploymentDeploymentInstance {
+  id: String!
+  status: DeploymentInstanceStatus!
+}
+
+scalar DeploymentDiagnosis
+
+type DeploymentEvent implements Node {
+  completedAt: DateTime
+  createdAt: DateTime!
+  id: ID!
+  payload: DeploymentEventPayload
+  step: DeploymentEventStep!
+}
+
+type DeploymentEventPayload {
+  attempt: Int
+  detail: String
+  durationMs: Int
+  error: String
+  maxAttempts: Int
+  reason: String
+  skipped: Boolean
+}
+
+enum DeploymentEventStep {
+  BUILD_IMAGE
+  CONFIGURE_NETWORK
+  CREATE_CONTAINER
+  DRAIN_INSTANCES
+  HEALTHCHECK
+  MIGRATE_VOLUMES
+  PRE_DEPLOY_COMMAND
+  PUBLISH_IMAGE
+  SNAPSHOT_CODE
+  WAIT_FOR_DEPENDENCIES
+}
+
+type DeploymentInstanceExecution implements Node {
+  completedAt: DateTime
+  createdAt: DateTime!
+  deploymentId: String!
+  deploymentMeta: DeploymentMeta!
+  id: ID!
+  status: DeploymentInstanceStatus!
+  updatedAt: DateTime!
+}
+
+input DeploymentInstanceExecutionCreateInput {
+  serviceInstanceId: String!
+}
+
+input DeploymentInstanceExecutionInput {
+  deploymentId: String!
+}
+
+input DeploymentInstanceExecutionListInput {
+  environmentId: String!
+  serviceId: String!
+}
+
+enum DeploymentInstanceStatus {
+  CRASHED
+  CREATED
+  EXITED
+  INITIALIZING
+  REMOVED
+  REMOVING
+  RESTARTING
+  RUNNING
+  SKIPPED
+  STOPPED
+}
+
+input DeploymentListInput {
+  environmentId: String
+  includeDeleted: Boolean
+  projectId: String
+  serviceId: String
+  status: DeploymentStatusInput
+}
+
+scalar DeploymentMeta
+
+type DeploymentSnapshot implements Node {
+  createdAt: DateTime!
+  id: ID!
+  updatedAt: DateTime!
+  variables: EnvironmentVariables!
+}
+
+type DeploymentSocket {
+  ipv6: Boolean!
+  port: Int!
+  processName: String!
+  updatedAt: Int!
+}
+
+enum DeploymentStatus {
+  BUILDING
+  CRASHED
+  DEPLOYING
+  FAILED
+  INITIALIZING
+  NEEDS_APPROVAL
+  QUEUED
+  REMOVED
+  REMOVING
+  SKIPPED
+  SLEEPING
+  SUCCESS
+  WAITING
+}
+
+input DeploymentStatusInput {
+  in: [DeploymentStatus!]
+  notIn: [DeploymentStatus!]
+}
+
+type DeploymentTrigger implements Node {
+  baseEnvironmentOverrideId: String
+  branch: String!
+  checkSuites: Boolean!
+  environmentId: String!
+  id: ID!
+  projectId: String!
+  provider: String!
+  repository: String!
+  serviceId: String
+  validCheckSuites: Int!
+}
+
+input DeploymentTriggerCreateInput {
+  branch: String!
+  checkSuites: Boolean
+  environmentId: String!
+  projectId: String!
+  provider: String!
+  repository: String!
+  rootDirectory: String
+  serviceId: String!
+}
+
+input DeploymentTriggerUpdateInput {
+  branch: String
+  checkSuites: Boolean
+  repository: String
+  rootDirectory: String
+}
+
+input DisablePitrForHaClusterInput {
+  environmentId: String!
+  projectId: String!
+  rootServiceId: String!
+}
+
+input DisableServiceCdnInput {
+  environmentId: String!
+  serviceId: String!
+}
+
+scalar DisplayConfig
+
+type DnsQueryLog {
+  answers: [String!]!
+  cnameChain: [String!]!
+  deploymentId: String!
+  deploymentInstanceId: String!
+  qname: String!
+  qtype: String!
+  queriedAt: String!
+  queryZone: DnsQueryZone!
+  rcode: String!
+  serviceId: String!
+}
+
+enum DnsQueryZone {
+  external
+  internal
+}
+
+type DockerComposeImport {
+  errors: [String!]!
+  patch: EnvironmentConfig
+}
+
+interface Domain {
+  cdnMode: String @deprecated(reason: "Removed; always null.")
+  createdAt: DateTime
+  deletedAt: DateTime
+  domain: String!
+  edgeId: String
+  environmentId: String!
+  id: ID!
+  projectId: String
+  serviceId: String!
+  targetPort: Int
+  updatedAt: DateTime
+}
+
+type DomainAvailable {
+  available: Boolean!
+  message: String!
+}
+
+type DomainWithStatus {
+  cdnProvider: CDNProvider
+  certificateErrorMessage: String
+  certificateErrorType: CertificateErrorType
+  certificateRetryable: Boolean
+  certificateStatus: CertificateStatus!
+  certificateStatusDetailed: CertificateStatusDetailed
+  certificates: [CertificatePublicData!]
+  dnsRecords: [DNSRecords!]!
+  domain: Domain
+}
+
+type EdgeCachingConfig {
+  defaultTtlSeconds: Int!
+  htmlCaching: String!
+  mode: String!
+  purgeOnDeploy: PurgeOnDeploy!
+  staleWhileRevalidate: StaleWhileRevalidateConfig!
+}
+
+input EdgeCachingConfigInput {
+  defaultTtlSeconds: Int
+  htmlCaching: String
+  mode: String
+  purgeOnDeploy: PurgeOnDeploy
+  staleWhileRevalidate: StaleWhileRevalidateInput
+}
+
+type EdgeConfig {
+  caching: EdgeCachingConfig
+  edgeRules: JSON
+  enabled: Boolean!
+  id: String!
+  overrides: JSON!
+  purgeEpoch: Int!
+  purgeEpochByKind: JSON!
+  underAttackModeUntil: Int
+}
+
+input EdgeConfigInput {
+  caching: EdgeCachingConfigInput
+}
+
+type EdgeRuleDiagnostic {
+  code: String!
+  message: String!
+  path: String!
+}
+
+type EgressGateway {
+  ipv4: String!
+  region: String!
+  zone: String
+}
+
+input EgressGatewayCreateInput {
+  environmentId: String!
+  region: String
+  serviceId: String!
+}
+
+input EgressGatewayServiceTargetInput {
+  allEnvironments: Boolean
+  environmentId: String!
+  serviceId: String!
+}
+
+type EgressMigrationEnvironmentResult {
+  environmentId: String!
+  environmentName: String!
+  error: String
+  gateways: [EgressGateway!]!
+  success: Boolean!
+}
+
+type EgressMigrationResult {
+  environments: [EgressMigrationEnvironmentResult!]!
+  ips: [EgressGateway!]!
+}
+
+input EnablePitrForHaClusterInput {
+  environmentId: String!
+  projectId: String!
+  rootServiceId: String!
+}
+
+input EnableServiceCdnInput {
+  config: EdgeConfigInput
+  environmentId: String!
+  serviceId: String!
+}
+
+type Environment implements Node {
+  canAccess: Boolean!
+  canvasGroupRefs: JSON!
+  config(decryptVariables: Boolean): EnvironmentConfig!
+  configEtag: String!
+  createdAt: DateTime!
+  deletedAt: DateTime
+  deploymentTriggers(after: String, before: String, first: Int, last: Int): EnvironmentDeploymentTriggersConnection!
+  deployments(after: String, before: String, first: Int, last: Int): EnvironmentDeploymentsConnection!
+  id: ID!
+  isEphemeral: Boolean!
+  meta: EnvironmentMeta
+  name: String!
+  projectId: String!
+  serviceInstances(after: String, before: String, first: Int, last: Int): EnvironmentServiceInstancesConnection!
+  sourceEnvironment: Environment
+  unmergedChangesCount: Int
+  updatedAt: DateTime!
+  variables(after: String, before: String, first: Int, last: Int): EnvironmentVariablesConnection!
+  volumeInstances(after: String, before: String, first: Int, last: Int): EnvironmentVolumeInstancesConnection!
+}
+
+scalar EnvironmentConfig
+
+input EnvironmentCreateInput {
+  applyChangesInBackground: Boolean
+  ephemeral: Boolean
+  name: String!
+  projectId: String!
+  skipInitialDeploys: Boolean
+  sourceEnvironmentId: String
+  stageInitialChanges: Boolean
+}
+
+type EnvironmentDeploymentTriggersConnection {
+  edges: [EnvironmentDeploymentTriggersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type EnvironmentDeploymentTriggersConnectionEdge {
+  cursor: String!
+  node: DeploymentTrigger!
+}
+
+type EnvironmentDeploymentsConnection {
+  edges: [EnvironmentDeploymentsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type EnvironmentDeploymentsConnectionEdge {
+  cursor: String!
+  node: Deployment!
+}
+
+type EnvironmentMeta {
+  baseBranch: String
+  branch: String
+  latestSuccessfulGitHubDeploymentId: Int
+  prCommentId: Int
+  prNumber: Int
+  prRepo: String
+  prTitle: String
+  skippedResourceIds: SkippedResourceIds
+}
+
+type EnvironmentPatch implements Node {
+  appliedAt: DateTime
+  appliedBy: AppliedByMember
+  createdAt: DateTime!
+  environment: Environment!
+  environmentId: String!
+  id: ID!
+  lastAppliedError: String
+  message: String
+  patch(decryptVariables: Boolean): EnvironmentConfig!
+  status: EnvironmentPatchStatus!
+  updatedAt: DateTime!
+}
+
+enum EnvironmentPatchStatus {
+  APPLYING
+  COMMITTED
+  STAGED
+}
+
+input EnvironmentRenameInput {
+  name: String!
+}
+
+type EnvironmentServiceInstancesConnection {
+  edges: [EnvironmentServiceInstancesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type EnvironmentServiceInstancesConnectionEdge {
+  cursor: String!
+  node: ServiceInstance!
+}
+
+input EnvironmentTriggersDeployInput {
+  environmentId: String!
+  projectId: String!
+  serviceId: String!
+}
+
+scalar EnvironmentVariables
+
+type EnvironmentVariablesConnection {
+  edges: [EnvironmentVariablesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type EnvironmentVariablesConnectionEdge {
+  cursor: String!
+  node: Variable!
+}
+
+type EnvironmentVolumeInstancesConnection {
+  edges: [EnvironmentVolumeInstancesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type EnvironmentVolumeInstancesConnectionEdge {
+  cursor: String!
+  node: VolumeInstance!
+}
+
+type EstimatedUsage {
+  estimatedValue: Float!
+  measurement: MetricMeasurement!
+  projectId: String!
+}
+
+type Event implements Node {
+  action: String!
+  activityPayload: JSON
+  createdAt: DateTime!
+  environment: Environment
+  environmentId: String
+  id: ID!
+  object: String!
+  payload: JSON
+  project: Project!
+  projectId: String
+  severity: EventSeverity!
+}
+
+input EventFilterInput {
+  action: EventStringListFilter
+  object: EventStringListFilter
+  serviceId: EventStringListFilter
+}
+
+enum EventSeverity {
+  CRITICAL
+  INFO
+  NOTICE
+  WARNING
+}
+
+input EventStringListFilter {
+  in: [String!]
+  notIn: [String!]
+}
+
+input ExplicitOwnerInput {
+  id: String!
+  type: ResourceOwnerType
+}
+
+type ExternalWorkspace {
+  allowDeprecatedRegions: Boolean @deprecated(reason: "Deprecated regions are no longer supported.")
+  avatar: String
+  banReason: String
+  createdAt: DateTime!
+  currentSessionHasAccess: Boolean
+  customerId: String
+  customerState: SubscriptionState!
+  discordRole: String
+  has2FAEnforcement: Boolean!
+  hasAutomaticDiagnosis: Boolean!
+  hasBAA: Boolean! @deprecated(reason: "Deprecated in favour of the SpendCommitment schema.")
+  hasGuardrailsAccess: Boolean!
+  hasRBAC: Boolean! @deprecated(reason: "Deprecated in favour of the SpendCommitment schema.")
+  hasSAML: Boolean!
+  id: String!
+  isTrialing: Boolean
+  name: String!
+  plan: Plan!
+  preferredRegion: String
+  projects: [Project!]!
+  redactedDueTo2FAPending: Boolean!
+  subscriptionPlanLimit: SubscriptionPlanLimit
+  supportTierOverride: String
+  teamId: String
+}
+
+input FeatureFlagToggleInput {
+  flag: ActiveFeatureFlag!
+}
+
+type FunctionRuntime {
+  image: String!
+  latestVersion: FunctionRuntimeVersion!
+  name: FunctionRuntimeName!
+  versions: [FunctionRuntimeVersion!]!
+}
+
+enum FunctionRuntimeName {
+  bun
+}
+
+type FunctionRuntimeVersion {
+  image: String!
+  tag: String!
+}
+
+type GitHubAccess {
+  hasAccess: Boolean!
+  isPublic: Boolean!
+}
+
+type GitHubBranch {
+  name: String!
+}
+
+type GitHubCheck {
+  name: String!
+  status: String!
+}
+
+type GitHubPRInfo {
+  additions: Int!
+  author: String!
+  body: String!
+  changedFiles: Int!
+  checks: [GitHubCheck!]!
+  deletions: Int!
+  mergeable: Boolean
+  state: String!
+  title: String!
+}
+
+type GitHubPRInfoResult {
+  error: String
+  prInfo: GitHubPRInfo
+}
+
+type GitHubRepo {
+  defaultBranch: String!
+  description: String
+  fullName: String!
+  id: Int!
+  installationId: String!
+  isPrivate: Boolean!
+  name: String!
+  ownerAvatarUrl: String
+}
+
+input GitHubRepoDeployInput {
+  branch: String
+  environmentId: String
+  projectId: String!
+  repo: String!
+}
+
+input GitHubRepoUpdateInput {
+  environmentId: String!
+  projectId: String!
+  serviceId: String!
+}
+
+type GitHubRepoWithoutInstallation {
+  defaultBranch: String!
+  description: String
+  fullName: String!
+  id: Int!
+  isPrivate: Boolean!
+  name: String!
+}
+
+type GitHubSshKey {
+  id: Int!
+  key: String!
+  title: String!
+}
+
+type Group implements Node {
+  color: String
+  groupId: String
+  icon: String
+  id: ID!
+  isCollapsed: Boolean
+  name: String
+  project: Project!
+  projectId: String!
+}
+
+type HerokuApp {
+  id: String!
+  name: String!
+}
+
+input HerokuImportVariablesInput {
+  environmentId: String!
+  herokuAppId: String!
+  projectId: String!
+  serviceId: String!
+}
+
+type HttpDurationMetricsResult {
+  samples: [HttpDurationMetricsSample!]!
+}
+
+type HttpDurationMetricsSample {
+  p50: Float!
+  p90: Float!
+  p95: Float!
+  p99: Float!
+  ts: Int!
+}
+
+type HttpLog {
+  clientUa: String!
+  deploymentId: String!
+  deploymentInstanceId: String!
+  downstreamProto: String!
+  edgeRegion: String!
+  host: String!
+  httpStatus: Int!
+  method: String!
+  path: String!
+  requestId: String!
+  responseDetails: String!
+  rxBytes: Int!
+  srcIp: String!
+  timestamp: String!
+  totalDuration: Int!
+  txBytes: Int!
+  upstreamAddress: String!
+  upstreamErrors: String!
+  upstreamProto: String!
+  upstreamRqDuration: Int!
+}
+
+enum HttpMetricKind {
+  LATENCY
+  REQUESTS
+  STATUS_RATIO
+}
+
+type HttpMetricsByStatusResult {
+  samples: [HttpMetricsSample!]!
+  statusCode: Int!
+}
+
+type HttpMetricsResult {
+  samples: [HttpMetricsSample!]!
+}
+
+type HttpMetricsSample {
+  ts: Int!
+  value: Float!
+}
+
+type Incident {
+  createdAt: DateTime
+  id: String!
+  message: String!
+  status: IncidentStatus!
+  url: String!
+}
+
+enum IncidentStatus {
+  IDENTIFIED
+  INVESTIGATING
+  MONITORING
+  RESOLVED
+}
+
+type Integration implements Node {
+  config: JSON!
+  id: ID!
+  name: String!
+  projectId: String!
+}
+
+type IntegrationAuth implements Node {
+  id: ID!
+  integrations(after: String, before: String, first: Int, last: Int): IntegrationAuthIntegrationsConnection!
+  provider: String!
+  providerId: String!
+}
+
+type IntegrationAuthIntegrationsConnection {
+  edges: [IntegrationAuthIntegrationsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type IntegrationAuthIntegrationsConnectionEdge {
+  cursor: String!
+  node: Integration!
+}
+
+input IntegrationCreateInput {
+  config: JSON!
+  integrationAuthId: String
+  name: String!
+  projectId: String!
+}
+
+input IntegrationUpdateInput {
+  config: JSON!
+  integrationAuthId: String
+  name: String!
+  projectId: String!
+}
+
+type InviteCode implements Node {
+  code: String!
+  createdAt: DateTime!
+  id: ID!
+  project: Project!
+  projectId: String!
+  role: ProjectRole!
+}
+
+scalar JSON
+
+input JobApplicationCreateInput {
+  email: String!
+  jobId: String!
+  name: String!
+  why: String!
+}
+
+enum KeyType {
+  KEY_TYPE_ECDSA
+  KEY_TYPE_RSA_2048
+  KEY_TYPE_RSA_4096
+  KEY_TYPE_UNSPECIFIED
+  UNRECOGNIZED
+}
+
+type Log {
+  attributes: [LogAttribute!]!
+  message: String!
+  severity: String
+  tags: LogTags
+  timestamp: String!
+}
+
+type LogAttribute {
+  key: String!
+  value: String!
+}
+
+type LogTags {
+  deploymentId: String
+  deploymentInstanceId: String
+  environmentId: String
+  pluginId: String @deprecated(reason: "Plugins have been removed")
+  projectId: String
+  serviceId: String
+  snapshotId: String
+}
+
+input LoginSessionAuthInput {
+  code: String!
+  hostname: String
+}
+
+type MaintainerWorkspace {
+  avatar: String
+  id: String!
+  name: String!
+  partnerProfile: PartnerProfile
+}
+
+type Maintenance {
+  id: String!
+  message: String!
+  start: DateTime!
+  status: MaintenanceStatus!
+  url: String!
+}
+
+enum MaintenanceStatus {
+  COMPLETED
+  INPROGRESS
+  NOTSTARTEDYET
+}
+
+type Metric {
+  ts: Int!
+  value: Float!
+}
+
+enum MetricMeasurement {
+  BACKUP_USAGE_GB
+  CPU_LIMIT
+  CPU_USAGE
+  CPU_USAGE_2
+  DISK_USAGE_GB
+  EPHEMERAL_DISK_USAGE_GB
+  MEASUREMENT_UNSPECIFIED
+  MEMORY_LIMIT_GB
+  MEMORY_USAGE_GB
+  NETWORK_RX_GB
+  NETWORK_TX_GB
+  UNRECOGNIZED
+}
+
+enum MetricTag {
+  DEPLOYMENT_ID
+  DEPLOYMENT_INSTANCE_ID
+  ENVIRONMENT_ID
+  HOST_TYPE
+  KEY_UNSPECIFIED
+  PLUGIN_ID
+  PROJECT_ID
+  REGION
+  SERVICE_ID
+  UNRECOGNIZED
+  VOLUME_ID
+  VOLUME_INSTANCE_ID
+}
+
+type MetricTags {
+  deploymentId: String
+  deploymentInstanceId: String
+  environmentId: String
+  pluginId: String @deprecated(reason: "Plugins have been removed")
+  projectId: String
+  region: String
+  serviceId: String
+  volumeId: String
+  volumeInstanceId: String
+}
+
+type MetricsResult {
+  measurement: MetricMeasurement!
+  tags: MetricTags!
+  values: [Metric!]!
+}
+
+enum MonitorAlertResourceType {
+  SERVICE
+  VOLUME
+}
+
+enum MonitorStatus {
+  ALERT
+  OK
+}
+
+enum MonitorThresholdCondition {
+  above
+  below
+}
+
+type MonitorThresholdConfig {
+  condition: MonitorThresholdCondition!
+  measurement: MetricMeasurement
+  threshold: Float!
+  type: String!
+}
+
+type Mutation {
+  agentBootstrapDelete(id: ID!): Boolean!
+  agentBootstrapSave(input: AgentBootstrapSaveInput!): AgentBootstrap!
+  agentUsageLimitSet(input: AgentUsageLimitSetInput!): Boolean!
+  apiTokenCreate(input: ApiTokenCreateInput!): String!
+  apiTokenDelete(id: String!): Boolean!
+  baseEnvironmentOverride(id: String!, input: BaseEnvironmentOverrideInput!): Boolean!
+  botScopeBindingRemove(id: String!): Boolean!
+  bucketCreate(input: BucketCreateInput!): Bucket!
+  bucketCredentialsReset(bucketId: String!, environmentId: String!, projectId: String!, redeployDependents: Boolean): BucketS3CompatibleCredentials!
+  bucketUpdate(id: String!, input: BucketUpdateInput!): Bucket!
+  cancelPitrHaWorkflow(environmentId: String!, rootServiceId: String!): Boolean!
+  canvasViewMerge(sourceEnvironmentId: String!, targetEnvironmentId: String!): Boolean!
+  clearPitrHaWorkflowProgress(environmentId: String!, rootServiceId: String!): Boolean!
+  cliAuthEventTrack(input: CliAuthEventTrackInput!): Boolean!
+  cliEventTrack(input: CliEventTrackInput!): Boolean!
+  cloudAgentCreate(input: CloudAgentCreateInput!): CloudAgent!
+  cloudAgentDelete(id: ID!): Boolean!
+  cloudAgentHarnessToken(environmentId: String!, id: ID!): String!
+  cloudAgentSleep(id: ID!): CloudAgent!
+  cloudAgentStateReport(input: CloudAgentStateReportInput!): Boolean!
+  cloudAgentWake(id: ID!): CloudAgent!
+  customDomainCreate(input: CustomDomainCreateInput!): CustomDomain!
+  customDomainDelete(id: String!): Boolean!
+  customDomainIssueCertificate(id: String!): Boolean!
+  customDomainUpdate(environmentId: String!, id: String!, targetPort: Int): Boolean!
+  customerCreateFreePlanSubscription(id: String!): Boolean!
+  customerTogglePayoutsToCredits(customerId: String!, input: customerTogglePayoutsToCreditsInput!): Boolean!
+  deploymentApprove(id: String!): Boolean!
+  deploymentCancel(id: String!): Boolean!
+  deploymentInstanceExecutionCreate(input: DeploymentInstanceExecutionCreateInput!): Boolean!
+  deploymentRedeploy(id: String!, usePreviousImageTag: Boolean): Deployment!
+  deploymentRemove(id: String!): Boolean!
+  deploymentRestart(id: String!): Boolean!
+  deploymentRollback(id: String!): Boolean!
+  deploymentStop(id: String!): Boolean!
+  deploymentTriggerCreate(input: DeploymentTriggerCreateInput!): DeploymentTrigger!
+  deploymentTriggerDelete(id: String!): Boolean!
+  deploymentTriggerUpdate(id: String!, input: DeploymentTriggerUpdateInput!): DeploymentTrigger!
+  disablePitrForHaCluster(input: DisablePitrForHaClusterInput!): TemplateDeployPayload!
+  disableServiceCdn(input: DisableServiceCdnInput!): Boolean!
+  dockerComposeImport(environmentId: String!, projectId: String!, skipStagingPatch: Boolean, yaml: String!): DockerComposeImport!
+  egressGatewayAssociationCreate(input: EgressGatewayCreateInput!): [EgressGateway!]!
+  egressGatewayAssociationsClear(input: EgressGatewayServiceTargetInput!): Boolean!
+  egressGatewayHAMigrationPreview(input: EgressGatewayServiceTargetInput!): EgressMigrationResult!
+  egressGatewayRollbackFromHA(input: EgressGatewayServiceTargetInput!): [EgressGateway!]!
+  egressGatewayUpgradeToHA(input: EgressGatewayServiceTargetInput!): [EgressGateway!]!
+  emailChangeConfirm(nonce: String!): Boolean!
+  emailChangeInitiate(newEmail: String!): Boolean!
+  enablePitrForHaCluster(input: EnablePitrForHaClusterInput!): TemplateDeployPayload!
+  enableServiceCdn(input: EnableServiceCdnInput!): EdgeConfig!
+  environmentApplyChangeSet(baseConfigEtag: String, commitMessage: String, environmentId: String!, input: JSON!, waitForCompletion: Boolean): ChangeSetApplyResult!
+  environmentCreate(input: EnvironmentCreateInput!): Environment!
+  environmentDelete(id: String!): Boolean!
+  environmentPatchCommit(commitMessage: String, environmentId: String!, patch: EnvironmentConfig): String!
+  environmentPatchCommitStaged(commitMessage: String, environmentId: String!, skipDeploys: Boolean): String!
+  environmentPreviewChangeSet(environmentId: String!, input: JSON!): ChangeSetPreview!
+  environmentRename(id: String!, input: EnvironmentRenameInput!): Environment!
+  environmentStageChanges(environmentId: String!, input: EnvironmentConfig!, merge: Boolean): EnvironmentPatch!
+  environmentTriggersDeploy(input: EnvironmentTriggersDeployInput!): Boolean!
+  environmentUnskipService(environmentId: String!, serviceId: String!): Boolean!
+  fairUseAgree(agree: Boolean!): Boolean!
+  featureFlagAdd(input: FeatureFlagToggleInput!): Boolean!
+  featureFlagRemove(input: FeatureFlagToggleInput!): Boolean!
+  generateShellToken(input: ShellTokenInput!): String!
+  githubRepoDeploy(input: GitHubRepoDeployInput!): String!
+  githubRepoUpdate(input: GitHubRepoUpdateInput!): Boolean!
+  herokuImportVariables(input: HerokuImportVariablesInput!): Int!
+  integrationCreate(input: IntegrationCreateInput!): Integration!
+  integrationDelete(id: String!): Boolean!
+  integrationUpdate(id: String!, input: IntegrationUpdateInput!): Integration!
+  inviteCodeUse(code: String!): Project!
+  jobApplicationCreate(input: JobApplicationCreateInput!, resume: Upload!): Boolean!
+  loginSessionAuth(input: LoginSessionAuthInput!): Boolean!
+  loginSessionCancel(code: String!): Boolean!
+  loginSessionConsume(code: String!): String
+  loginSessionCreate: String!
+  loginSessionVerify(code: String!): Boolean!
+  notificationDeliveriesMarkAsRead(deliveryIds: [String!]!): Boolean!
+  notificationRuleCreate(input: CreateNotificationRuleInput!): NotificationRule!
+  notificationRuleDelete(id: String!): Boolean!
+  notificationRuleUpdate(id: String!, input: UpdateNotificationRuleInput!): NotificationRule!
+  observabilityDashboardCreate(input: ObservabilityDashboardCreateInput!): Boolean!
+  observabilityDashboardReset(id: String!): Boolean!
+  observabilityDashboardUpdate(id: String!, input: [ObservabilityDashboardUpdateInput!]!): Boolean!
+  passkeyDelete(id: String!): Boolean!
+  pluginCreate(input: PluginCreateInput!): Plugin! @deprecated(reason: "Plugins are deprecated on Railway. Use database templates instead.")
+  pluginDelete(environmentId: String, id: String!): Boolean! @deprecated(reason: "Plugins are deprecated")
+  pluginReset(id: String!, input: ResetPluginInput!): Boolean! @deprecated(reason: "Plugins are deprecated")
+  pluginResetCredentials(id: String!, input: ResetPluginCredentialsInput!): String! @deprecated(reason: "Plugins are deprecated")
+  pluginRestart(id: String!, input: PluginRestartInput!): Plugin! @deprecated(reason: "Plugins are deprecated")
+  pluginStart(id: String!, input: PluginRestartInput!): Boolean! @deprecated(reason: "Plugins are deprecated")
+  pluginUpdate(id: String!, input: PluginUpdateInput!): Plugin! @deprecated(reason: "Plugins are deprecated")
+  preferencesUpdate(input: PreferencesUpdateData!): Preferences!
+  privateNetworkCreateOrGet(input: PrivateNetworkCreateOrGetInput!): PrivateNetwork!
+  privateNetworkEndpointCreateOrGet(input: PrivateNetworkEndpointCreateOrGetInput!): PrivateNetworkEndpoint!
+  privateNetworkEndpointDelete(id: String!): Boolean!
+  privateNetworkEndpointRename(dnsName: String!, id: String!, privateNetworkId: String!): Boolean!
+  privateNetworksForEnvironmentDelete(environmentId: String!): Boolean!
+  projectClaim(id: String!, workspaceId: String!): Project!
+  projectCreate(input: ProjectCreateInput!): Project!
+  projectDelete(id: String!): Boolean!
+  projectFeatureFlagAdd(input: ProjectFeatureFlagToggleInput!): Boolean!
+  projectFeatureFlagRemove(input: ProjectFeatureFlagToggleInput!): Boolean!
+  projectInvitationAccept(code: String!): ProjectPermission!
+  projectInvitationCreate(id: String!, input: ProjectInvitee!): ProjectInvitation!
+  projectInvitationDelete(id: String!): Boolean!
+  projectInvitationResend(id: String!): ProjectInvitation!
+  projectInviteUser(id: String!, input: ProjectInviteUserInput!): Boolean!
+  projectLeave(id: String!): Boolean!
+  projectMemberAdd(input: ProjectMemberAddInput!): ProjectMember!
+  projectMemberRemove(input: ProjectMemberRemoveInput!): [ProjectMember!]!
+  projectMemberUpdate(input: ProjectMemberUpdateInput!): ProjectMember!
+  projectScheduleDelete(id: String!): Boolean!
+  projectScheduleDeleteCancel(id: String!): Boolean!
+  projectScheduleDeleteForce(id: String!): Boolean!
+  projectTokenCreate(input: ProjectTokenCreateInput!): String!
+  projectTokenDelete(id: String!): Boolean!
+  projectTransfer(input: ProjectTransferInput!, projectId: String!): Boolean!
+  projectTransferConfirm(input: ProjectTransferConfirmInput!): Boolean!
+  projectTransferInitiate(input: ProjectTransferInitiateInput!): Boolean!
+  projectTransferToTeam(id: String!, input: ProjectTransferToTeamInput!): Boolean! @deprecated(reason: "Use projectTransfer instead")
+  projectUpdate(id: String!, input: ProjectUpdateInput!): Project!
+  providerAuthRemove(id: String!): Boolean!
+  purgeServiceCache(input: PurgeServiceCacheInput!): Boolean!
+  railwayDomainDnsRecordCreate(input: RailwayDomainDnsRecordCreateInput!): RailwayDomainDnsRecord!
+  railwayDomainDnsRecordDelete(input: RailwayDomainDnsRecordDeleteInput!): Boolean!
+  railwayDomainDnsRecordUpdate(input: RailwayDomainDnsRecordUpdateInput!): RailwayDomainDnsRecord!
+  railwayDomainNameserversSet(input: RailwayDomainNameserversSetInput!): RailwayDomainNameservers!
+  railwayDomainUpdate(input: RailwayDomainUpdateInput!): RailwayDomain!
+  recoveryCodeGenerate: RecoveryCodes!
+  recoveryCodeValidate(input: RecoveryCodeValidateInput!): Boolean!
+  referralInfoUpdate(input: ReferralInfoUpdateInput!): ReferralInfo!
+  sandboxCheckpointCreate(environmentId: String!, name: String!, sandboxId: String!): SandboxCheckpoint!
+  sandboxCheckpointDelete(environmentId: String!, id: ID!): Boolean!
+  sandboxCheckpointRename(environmentId: String!, id: ID!, name: String!): SandboxCheckpoint!
+  sandboxCreate(input: SandboxCreateInput!): Sandbox!
+  sandboxDestroy(environmentId: String!, id: String!): Sandbox
+  sandboxExec(command: String!, environmentId: String!, id: String!, timeoutSec: Int): SandboxExecResult!
+  sandboxHeartbeat(environmentId: String!, id: String!): Sandbox
+  sandboxTemplateBuild(environmentId: String!, input: SandboxTemplateInput!): SandboxTemplateBuild!
+  serviceConnect(id: String!, input: ServiceConnectInput!): Service!
+  serviceCreate(input: ServiceCreateInput!): Service!
+  serviceDelete(environmentId: String, id: String!): Boolean!
+  serviceDisconnect(id: String!): Service!
+  serviceDomainCreate(input: ServiceDomainCreateInput!): ServiceDomain!
+  serviceDomainDelete(id: String!): Boolean!
+  serviceDomainUpdate(input: ServiceDomainUpdateInput!): Boolean!
+  serviceDuplicate(environmentId: String!, serviceId: String!): Service! @deprecated(reason: "This API route is used only by the CLI. We plan to remove it in a future version. Please use the UI to duplicate services.")
+  serviceFeatureFlagAdd(input: ServiceFeatureFlagToggleInput!): Boolean!
+  serviceFeatureFlagRemove(input: ServiceFeatureFlagToggleInput!): Boolean!
+  serviceInstanceAutoDeployUpdate(input: ServiceInstanceAutoDeployUpdateInput!): ServiceInstanceAutoDeployUpdateResult!
+  serviceInstanceDeploy(commitSha: String, environmentId: String!, latestCommit: Boolean, serviceId: String!): Boolean!
+  serviceInstanceDeployV2(commitSha: String, environmentId: String!, serviceId: String!): String!
+  serviceInstanceLimitsUpdate(input: ServiceInstanceLimitsUpdateInput!): Boolean!
+  serviceInstanceRedeploy(environmentId: String!, serviceId: String!): Boolean!
+  serviceInstanceUpdate(environmentId: String, input: ServiceInstanceUpdateInput!, serviceId: String!): Boolean!
+  serviceInstanceVulnRemediationDismiss(environmentId: String!, serviceId: String!): Boolean!
+  serviceInstanceVulnRemediationPatchNow(environmentId: String!, serviceId: String!): String!
+  serviceRemoveUpstreamUrl(id: String!): Service!
+  serviceUpdate(id: String!, input: ServiceUpdateInput!): Service!
+  sessionDelete(id: String!): Boolean!
+  setServiceUnderAttackMode(input: SetServiceUnderAttackModeInput!): EdgeConfig!
+  setupAgentEventTrack(input: SetupAgentEventTrackInput!): Boolean!
+  sharedVariableConfigure(input: SharedVariableConfigureInput!): Variable!
+  signalCreate(input: SignalCreateInput!): Signal!
+  signalDefaultSet(input: SignalDefaultSetInput!): Signal!
+  signalDelete(input: SignalDeleteInput!): Signal!
+  signalReplace(input: SignalReplaceInput!): Signal!
+  signalRollback(input: SignalRollbackInput!): Signal!
+  signalRuleSet(input: SignalRuleSetInput!): Signal!
+  signalRuleUnset(input: SignalRuleUnsetInput!): Signal!
+  sshPublicKeyCreate(input: SshPublicKeyCreateInput!): SshPublicKey!
+  sshPublicKeyDelete(id: String!): Boolean!
+  sshSignupApprove(code: String!): Boolean!
+  tcpProxyCreate(input: TCPProxyCreateInput!): TCPProxy! @deprecated(reason: "Use staged changes and apply them. Creating a TCP proxy with this endpoint requires you to redeploy the service for it to be active.")
+  tcpProxyDelete(id: String!): Boolean!
+  templateClone(input: TemplateCloneInput!): Template!
+  templateDelete(id: String!, input: TemplateDeleteInput!): Boolean!
+  templateDeploy(input: TemplateDeployInput!): TemplateDeployPayload! @deprecated(reason: "Deprecated in favor of templateDeployV2")
+  templateDeployV2(input: TemplateDeployV2Input!): TemplateDeployPayload!
+  templateGenerate(input: TemplateGenerateInput!): Template!
+  templatePublish(id: String!, input: TemplatePublishInput!): Template!
+  templateRevert(input: TemplateRevertInput!): TemplateDeployPayload!
+  templateServiceSourceEject(input: TemplateServiceSourceEjectInput!): Boolean!
+  templateUnpublish(id: String!): Boolean!
+  templateVolumeUpdate(serviceId: String!, sizeMB: Int, templateId: String!, volumeId: String!): Template!
+  trustedDomainCreate(input: WorkspaceTrustedDomainCreateInput!): TrustedDomain!
+  trustedDomainDelete(id: String!): Boolean!
+  trustedDomainRetriggerVerification(id: String!): TrustedDomain
+  trustedDomainUpdate(input: WorkspaceTrustedDomainUpdateInput!): TrustedDomain!
+  twoFactorInfoCreate(input: TwoFactorInfoCreateInput!): RecoveryCodes!
+  twoFactorInfoDelete: Boolean!
+  twoFactorInfoSecret: TwoFactorInfoSecret!
+  twoFactorInfoValidate(input: TwoFactorInfoValidateInput!): Boolean!
+  updateServiceEdgeConfig(input: UpdateServiceEdgeConfigInput!): EdgeConfig!
+  updateServiceEdgeRules(input: UpdateServiceEdgeRulesInput!): EdgeConfig!
+  upsertSlackChannel(workspaceId: String!): Boolean!
+  usageLimitRemove(input: UsageLimitRemoveInput!): Boolean!
+  usageLimitSet(input: UsageLimitSetInput!): Boolean!
+  userBetaLeave: Boolean!
+  userDelete: Boolean!
+  userDiscordDisconnect: Boolean!
+  userFlagsRemove(input: UserFlagsRemoveInput!): Boolean!
+  userFlagsSet(input: UserFlagsSetInput!): Boolean!
+  userProfileUpdate(input: UserProfileUpdateInput!): Boolean!
+  userTermsUpdate: User
+  variableCollectionUpsert(input: VariableCollectionUpsertInput!): Boolean!
+  variableDelete(input: VariableDeleteInput!): Boolean!
+  variableUpsert(input: VariableUpsertInput!): Boolean!
+  volumeCreate(input: VolumeCreateInput!): Volume!
+  volumeDelete(volumeId: String!): Boolean!
+  volumeInstanceBackupCreate(name: String, volumeInstanceId: String!): WorkflowId!
+  volumeInstanceBackupDelete(volumeInstanceBackupId: String!, volumeInstanceId: String!): WorkflowId!
+  volumeInstanceBackupLock(volumeInstanceBackupId: String!, volumeInstanceId: String!): Boolean!
+  volumeInstanceBackupRestore(replicaServiceIds: [String!], volumeInstanceBackupId: String!, volumeInstanceId: String!, wipeServiceIds: [String!]): WorkflowId!
+  volumeInstanceBackupScheduleUpdate(kinds: [VolumeInstanceBackupScheduleKind!]!, volumeInstanceId: String!): Boolean!
+  volumeInstancePITRRestore(newServiceName: String, sourceRepoPath: String, targetTimestamp: DateTime!, volumeInstanceId: String!): WorkflowId!
+  volumeInstanceUpdate(environmentId: String, input: VolumeInstanceUpdateInput!, volumeId: String!): Boolean!
+  volumeUpdate(input: VolumeUpdateInput!, volumeId: String!): Volume!
+  webhookTest(payload: String!, url: String!): Int!
+  workspaceDelete(id: String!): Boolean!
+  workspaceInviteCodeCreate(input: WorkspaceInviteCodeCreateInput!, workspaceId: String!): String!
+  workspaceInviteCodeUse(code: String!): Workspace!
+  workspaceLeave(id: String!): Boolean!
+  workspacePermissionChange(input: WorkspacePermissionChangeInput!): Boolean!
+  workspacePolicyDeploySourceAllowlistAdd(sourceId: String!, sourceType: WorkspacePolicyDeploySourceType!, workspaceId: String!): WorkspacePolicyDeploySourceAllowlist!
+  workspacePolicyDeploySourceAllowlistRemove(id: String!): Boolean!
+  workspacePolicyItemUpdate(enabled: Boolean, input: WorkspacePolicyItemUpdateInput, policy: WorkspacePolicyName, workspaceId: String!): Boolean!
+  workspaceTwoFactorEnforcementUpdate(enabled: Boolean!, workspaceId: String!): Boolean!
+  workspaceUpdate(id: String!, input: WorkspaceUpdateInput!): Boolean!
+  workspaceUpsertSlackChannel(id: String!): Boolean!
+  workspaceUserInvite(input: WorkspaceUserInviteInput!, workspaceId: String!): Boolean!
+  workspaceUserRemove(input: WorkspaceUserRemoveInput!, workspaceId: String!): Boolean!
+}
+
+enum NetworkFlowDirection {
+  egress
+  ingress
+}
+
+enum NetworkFlowL4Protocol {
+  icmp
+  icmpv6
+  tcp
+  udp
+  unknown
+}
+
+type NetworkFlowLog {
+  byteCount: Int!
+  captureEnd: String!
+  captureStart: String!
+  deploymentId: String!
+  deploymentInstanceId: String!
+  direction: NetworkFlowDirection!
+  dropCause: String
+  dstAddr: String!
+  dstPort: Int!
+  flowId: String!
+  flowState: NetworkFlowState!
+  l4LatencyMs: Float!
+  l4Protocol: NetworkFlowL4Protocol!
+  packetCount: Int!
+  peerKind: NetworkFlowPeerKind!
+  peerServiceId: String
+  serviceId: String!
+  srcAddr: String!
+  srcPort: Int!
+}
+
+enum NetworkFlowPeerKind {
+  edge_proxy
+  internet
+  local_dns
+  service
+  unknown
+}
+
+enum NetworkFlowState {
+  complete
+  partial
+}
+
+interface Node {
+  id: ID!
+}
+
+type NotificationChannel implements Node {
+  config: NotificationChannelConfig!
+  createdAt: DateTime!
+  id: ID!
+  updatedAt: DateTime!
+  workspaceId: String!
+}
+
+scalar NotificationChannelConfig
+
+type NotificationDelivery implements Node {
+  createdAt: DateTime!
+  id: ID!
+  notificationInstance: NotificationInstance!
+  readAt: DateTime
+  status: NotificationDeliveryStatus!
+  type: NotificationDeliveryType!
+  updatedAt: DateTime!
+  userId: String
+}
+
+type NotificationDeliveryCreated {
+  delivery: NotificationDelivery!
+  type: String!
+}
+
+input NotificationDeliveryFilterInput {
+  environmentId: String
+  onlyUnread: Boolean
+  projectId: String
+  status: NotificationStatus
+  type: NotificationDeliveryType
+  workspaceId: String
+}
+
+type NotificationDeliveryResolved {
+  deliveryIds: [String!]!
+  type: String!
+}
+
+enum NotificationDeliveryStatus {
+  FAILED
+  PENDING
+  SENT
+}
+
+enum NotificationDeliveryType {
+  EMAIL
+  INAPP
+  WEBHOOK
+}
+
+union NotificationDeliveryUpdate = NotificationDeliveryCreated | NotificationDeliveryResolved
+
+type NotificationInstance implements Node {
+  createdAt: DateTime!
+  environmentId: String
+  event: Event!
+  eventId: String!
+  eventType: String
+  id: ID!
+  payload: NotificationPayload!
+  projectId: String
+  resolvedAt: DateTime
+  resourceId: String
+  resourceType: String
+  serviceId: String
+  severity: NotificationSeverity!
+  status: NotificationStatus!
+  updatedAt: DateTime!
+  volumeId: String
+  workspaceId: String!
+}
+
+scalar NotificationPayload
+
+type NotificationRule implements Node {
+  channels: [NotificationChannel!]!
+  createdAt: DateTime!
+  environmentId: String
+  ephemeralEnvironments: Boolean
+  eventTypes: [String!]!
+  id: ID!
+  projectId: String
+  serviceId: String
+  severities: [NotificationSeverity!]!
+  updatedAt: DateTime!
+  workspaceId: String!
+}
+
+enum NotificationSeverity {
+  CRITICAL
+  INFO
+  NOTICE
+  WARNING
+}
+
+enum NotificationStatus {
+  ACTIVE
+  RESOLVED
+}
+
+type ObservabilityDashboard implements Node {
+  id: ID!
+  items: [ObservabilityDashboardItemInstance!]!
+}
+
+type ObservabilityDashboardAlert implements Node {
+  createdAt: DateTime!
+  id: ID!
+  resolvedAt: DateTime
+  resourceId: String
+  resourceType: MonitorAlertResourceType!
+  status: MonitorStatus!
+}
+
+input ObservabilityDashboardCreateInput {
+  environmentId: String!
+  items: [ObservabilityDashboardUpdateInput!]
+}
+
+type ObservabilityDashboardItem implements Node {
+  config: ObservabilityDashboardItemConfig!
+  description: String
+  id: ID!
+  monitors: [ObservabilityDashboardMonitor!]!
+  name: String!
+  type: ObservabilityDashboardItemType!
+}
+
+type ObservabilityDashboardItemConfig {
+  httpMetric: HttpMetricKind
+  logsFilter: String
+  measurements: [MetricMeasurement!]
+  projectUsageProperties: [ProjectUsageProperty!]
+  resourceIds: [String!]
+}
+
+input ObservabilityDashboardItemConfigInput {
+  httpMetric: HttpMetricKind
+  logsFilter: String
+  measurements: [MetricMeasurement!]
+  projectUsageProperties: [ProjectUsageProperty!]
+  resourceIds: [String!]
+}
+
+input ObservabilityDashboardItemCreateInput {
+  config: ObservabilityDashboardItemConfigInput!
+  description: String
+  id: String!
+  name: String!
+  type: ObservabilityDashboardItemType!
+}
+
+type ObservabilityDashboardItemInstance implements Node {
+  dashboardItem: ObservabilityDashboardItem!
+  displayConfig: DisplayConfig!
+  id: ID!
+}
+
+enum ObservabilityDashboardItemType {
+  DNS_LOGS_ITEM
+  HTTP_LOGS_ITEM
+  HTTP_METRICS_ITEM
+  NETWORK_LOGS_ITEM
+  PROJECT_USAGE_ITEM
+  SERVICE_LOGS_ITEM
+  SERVICE_METRICS_ITEM
+  VOLUME_METRICS_ITEM
+}
+
+type ObservabilityDashboardMonitor implements Node {
+  alerts(endDate: DateTime, startDate: DateTime): [ObservabilityDashboardAlert!]!
+  config: ObservabilityDashboardMonitorConfig!
+  createdAt: DateTime!
+  id: ID!
+  updatedAt: DateTime!
+}
+
+union ObservabilityDashboardMonitorConfig = MonitorThresholdConfig
+
+input ObservabilityDashboardUpdateInput {
+  dashboardItem: ObservabilityDashboardItemCreateInput!
+  displayConfig: DisplayConfig!
+  id: String!
+}
+
+type PageInfo {
+  endCursor: String
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+}
+
+type PartnerProfile {
+  category: String!
+  description: String!
+  slug: String!
+  type: PartnerProfileType!
+  website: String!
+}
+
+enum PartnerProfileType {
+  BASIC_PARTNER
+  LIMITED_PARTNER
+  TEMPLATE_MAINTAINER
+}
+
+type Passkey implements Node {
+  aaguid: String
+  backedUp: Boolean!
+  createdAt: DateTime!
+  credentialId: String!
+  deviceName: String!
+  deviceType: String!
+  displayName: String
+  id: ID!
+  lastUsedAt: DateTime
+  lastUsedDevice: String
+  transports: [String!]!
+  updatedAt: DateTime!
+}
+
+type PaymentMethod {
+  card: PaymentMethodCard
+  id: String!
+}
+
+type PaymentMethodCard {
+  brand: String!
+  country: String
+  last4: String!
+}
+
+type PitrHaClusterReplicationHealth {
+  allHealthy: Boolean!
+  checkedAt: String!
+  environmentId: String!
+  members: [PitrHaMemberReplicationHealth!]!
+  reachable: Boolean!
+  rootServiceId: String!
+}
+
+type PitrHaMemberReplicationHealth {
+  healthy: Boolean!
+  isLeader: Boolean!
+  lagMb: Int
+  patroniName: String
+  serviceId: String!
+  serviceName: String!
+  state: String
+}
+
+enum PitrHaWorkflowDirection {
+  DISABLE
+  ENABLE
+}
+
+type PitrHaWorkflowMemberProgress {
+  isLeader: Boolean!
+  serviceId: String!
+  serviceName: String!
+  status: PitrHaWorkflowMemberStatus!
+}
+
+enum PitrHaWorkflowMemberStatus {
+  HEALTHY
+  PENDING
+  RESTARTING
+  SKIPPED
+}
+
+enum PitrHaWorkflowPhase {
+  CREATING_BUCKET
+  DONE
+  FAILED
+  PATCHING_DCS
+  PLANNING
+  REMOVING_VARIABLES
+  ROLLING_EX_LEADER
+  ROLLING_REPLICAS
+  SWITCHING_OVER
+  VERIFYING
+  WRITING_VARIABLES
+}
+
+type PitrHaWorkflowProgress {
+  clusterMutated: Boolean!
+  completedAt: String
+  currentMemberServiceId: String
+  direction: PitrHaWorkflowDirection!
+  environmentId: String!
+  errorMessage: String
+  failedAtPhase: PitrHaWorkflowPhase
+  members: [PitrHaWorkflowMemberProgress!]!
+  newLeaderServiceId: String
+  phase: PitrHaWorkflowPhase!
+  projectId: String!
+  rootServiceId: String!
+  startedAt: String!
+  updatedAt: String!
+  workflowId: String!
+}
+
+enum Plan {
+  FREE
+  HOBBY
+  PRO
+}
+
+type PlanLimitOverride implements Node {
+  config: SubscriptionPlanLimit!
+  id: ID!
+}
+
+enum PlatformFeatureFlag {
+  ALERT_SUS_USERS_CRON_KILLSWITCH
+  BAN_APPEAL_FORM
+  BUILD_DEPLOY_QUEUE_V2
+  CANVAS_CROSS_ENV_GUARD_ENFORCE
+  CHAT_SANDBOX
+  CLICKHOUSE_WORKSPACE_LIMIT_ENFORCE
+  CS_MCP
+  CTRD_IMAGE_STORE_ROLLOUT
+  DEFAULT_USAGE_ALERTS
+  DEMO_PERCENTAGE_ROLLOUT
+  DEPLOYMENT_DIAGNOSIS_KILLSWITCH
+  DEPLOY_SUPERSEDE_ON_PUSH
+  DEV_STUDIO
+  DEV_STUDIO_ANON_PROVISIONS
+  FIXED_DOMAIN_RADAR_RULES
+  IN_DASHBOARD_SUPPORT
+  KAFKA_EPHEMERAL_ENVIRONMENT_UPDATES
+  LOGS_V2_READS
+  NEW_STRIPE_WEBHOOK_VERSION_ROLLOUT
+  OAUTH_DCR_KILLSWITCH
+  REMOVE_DEPLOYMENT_COMPACT
+  SERVICEINSTANCE_DATALOADER_FOR_STATIC_URL
+  SPLIT_USAGE_QUERIES
+  STRIPE_METERS_NEW_ACCOUNTS
+  STRIPE_METERS_SHADOW_ENABLED
+  UPDATED_VM_QUERIES
+  WORKSPACE_MCP_KILLSWITCH
+}
+
+type PlatformFeatureFlagStatus {
+  flag: PlatformFeatureFlag!
+  rolloutPercentage: Int!
+  status: Boolean!
+  type: PlatformFeatureFlagType!
+}
+
+enum PlatformFeatureFlagType {
+  BOOLEAN
+  PERCENTAGE
+}
+
+type PlatformStatus {
+  incident: Incident
+  isStable: Boolean!
+  maintenance: Maintenance
+}
+
+type Plugin implements Node {
+  containers(after: String, before: String, first: Int, last: Int): PluginContainersConnection!
+  createdAt: DateTime!
+  deletedAt: DateTime
+  deprecatedAt: DateTime
+  friendlyName: String!
+  id: ID!
+  logsEnabled: Boolean!
+  migrationDatabaseServiceId: String
+  name: PluginType!
+  project: Project!
+  status: PluginStatus!
+  variables(after: String, before: String, first: Int, last: Int): PluginVariablesConnection!
+}
+
+type PluginContainersConnection {
+  edges: [PluginContainersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type PluginContainersConnectionEdge {
+  cursor: String!
+  node: Container!
+}
+
+input PluginCreateInput {
+  environmentId: String
+  friendlyName: String
+  name: String!
+  projectId: String!
+}
+
+input PluginRestartInput {
+  environmentId: String
+}
+
+enum PluginStatus {
+  DEPRECATED
+  LOCKED
+  REMOVED
+  RUNNING
+  STOPPED
+}
+
+enum PluginType {
+  mongodb
+  mysql
+  postgresql
+  redis
+}
+
+input PluginUpdateInput {
+  friendlyName: String!
+}
+
+type PluginVariablesConnection {
+  edges: [PluginVariablesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type PluginVariablesConnectionEdge {
+  cursor: String!
+  node: Variable!
+}
+
+type Preferences implements Node {
+  buildFailedEmail: Boolean!
+  changelogEmail: Boolean!
+  communityEmail: Boolean!
+  deployCrashedEmail: Boolean!
+  ephemeralEnvironmentEmail: Boolean!
+  id: ID!
+  marketingEmail: Boolean!
+  subprocessorUpdatesEmail: Boolean!
+  templateQueueEmail: Boolean!
+  usageEmail: Boolean!
+}
+
+input PreferencesUpdateData {
+  buildFailedEmail: Boolean
+  changelogEmail: Boolean
+  communityEmail: Boolean
+  deployCrashedEmail: Boolean
+  ephemeralEnvironmentEmail: Boolean
+  marketingEmail: Boolean
+  subprocessorUpdatesEmail: Boolean
+  templateQueueEmail: Boolean
+  token: String
+  usageEmail: Boolean
+}
+
+type PrivateNetwork {
+  createdAt: DateTime
+  deletedAt: DateTime
+  dnsName: String!
+  environmentId: String!
+  name: String!
+  networkId: BigInt!
+  projectId: String!
+  publicId: String!
+  tags: [String!]!
+}
+
+input PrivateNetworkCreateOrGetInput {
+  environmentId: String!
+  name: String!
+  projectId: String!
+  tags: [String!]!
+}
+
+type PrivateNetworkEndpoint {
+  createdAt: DateTime
+  deletedAt: DateTime
+  dnsName: String!
+  newDnsName: String
+  privateIps: [String!]!
+  publicId: String!
+  serviceInstanceId: String!
+  syncStatus: PrivateNetworkEndpointSyncStatus!
+  tags: [String!]!
+}
+
+input PrivateNetworkEndpointCreateOrGetInput {
+  environmentId: String!
+  privateNetworkId: String!
+  serviceId: String!
+  serviceName: String!
+  tags: [String!]!
+}
+
+enum PrivateNetworkEndpointSyncStatus {
+  ACTIVE
+  CREATING
+  DELETED
+  DELETING
+  UNSPECIFIED
+  UPDATING
+}
+
+type Project implements Node {
+  baseEnvironment: Environment
+  baseEnvironmentId: String
+  botPrEnvironments: Boolean!
+  buckets(after: String, before: String, first: Int, last: Int): ProjectBucketsConnection!
+  createdAt: DateTime!
+  deletedAt: DateTime
+  deploymentTriggers(after: String, before: String, first: Int, last: Int): ProjectDeploymentTriggersConnection! @deprecated(reason: "Use environment.deploymentTriggers for properly scoped access control")
+  deployments(after: String, before: String, first: Int, last: Int): ProjectDeploymentsConnection! @deprecated(reason: "Use environment.deployments for properly scoped access control")
+  description: String
+  environments(after: String, before: String, first: Int, isEphemeral: Boolean, last: Int, sort: SortOrder): ProjectEnvironmentsConnection!
+  expiredAt: DateTime
+  featureFlags: [ActiveProjectFeatureFlag!]!
+  focusedPrEnvironments: Boolean!
+  groups(after: String, before: String, first: Int, last: Int): ProjectGroupsConnection!
+  id: ID!
+  isPublic: Boolean!
+  isTempProject: Boolean!
+  members: [ProjectMember!]!
+  name: String!
+  plugins(after: String, before: String, first: Int, last: Int): ProjectPluginsConnection! @deprecated(reason: "Plugins have been removed")
+  prDeploys: Boolean!
+  primaryEnvironmentId: String
+  projectPermissions(after: String, before: String, first: Int, last: Int): ProjectProjectPermissionsConnection!
+  services(after: String, before: String, first: Int, last: Int): ProjectServicesConnection!
+  subscriptionPlanLimit: SubscriptionPlanLimit!
+  subscriptionType: SubscriptionPlanType!
+  team: Team @deprecated(reason: "Use workspace")
+  teamId: String @deprecated(reason: "Use workspaceId")
+  updatedAt: DateTime!
+  volumes(after: String, before: String, first: Int, last: Int): ProjectVolumesConnection!
+  workspace: Workspace
+  workspaceId: String
+}
+
+type ProjectBucketsConnection {
+  edges: [ProjectBucketsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectBucketsConnectionEdge {
+  cursor: String!
+  node: Bucket!
+}
+
+type ProjectComplianceInfo {
+  memberPermissions: [ProjectMemberPermissionsInfo!]!
+  projectId: String!
+  projectName: String!
+  serviceBackups: [ServiceBackupInfo!]!
+  twoFactorMembers: [ProjectMemberTwoFactorInfo!]!
+  workspaceId: String!
+}
+
+input ProjectCreateInput {
+  defaultEnvironmentName: String
+  description: String
+  isMonorepo: Boolean
+  isPublic: Boolean
+  name: String
+  prDeploys: Boolean
+  repo: ProjectCreateRepo
+  runtime: PublicRuntime
+  workspaceId: String
+}
+
+input ProjectCreateRepo {
+  branch: String!
+  fullRepoName: String!
+}
+
+type ProjectDeploymentTriggersConnection {
+  edges: [ProjectDeploymentTriggersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectDeploymentTriggersConnectionEdge {
+  cursor: String!
+  node: DeploymentTrigger!
+}
+
+type ProjectDeploymentsConnection {
+  edges: [ProjectDeploymentsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectDeploymentsConnectionEdge {
+  cursor: String!
+  node: Deployment!
+}
+
+type ProjectEnvironmentsConnection {
+  edges: [ProjectEnvironmentsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectEnvironmentsConnectionEdge {
+  cursor: String!
+  node: Environment!
+}
+
+input ProjectFeatureFlagToggleInput {
+  flag: ActiveProjectFeatureFlag!
+  projectId: String!
+}
+
+type ProjectGroupsConnection {
+  edges: [ProjectGroupsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectGroupsConnectionEdge {
+  cursor: String!
+  node: Group!
+}
+
+type ProjectInvitation {
+  email: String!
+  expiresAt: DateTime!
+  id: ID!
+  inviter: ProjectInvitationInviter
+  isExpired: Boolean!
+  project: PublicProjectInformation!
+}
+
+type ProjectInvitationInviter {
+  email: String!
+  name: String
+}
+
+input ProjectInviteUserInput {
+  email: String!
+  link: String!
+}
+
+input ProjectInvitee {
+  email: String!
+  role: ProjectRole!
+}
+
+type ProjectMember {
+  avatar: String
+  email: String!
+  id: String!
+  name: String
+  role: ProjectRole!
+}
+
+input ProjectMemberAddInput {
+  projectId: String!
+  role: ProjectRole!
+  userId: String!
+}
+
+type ProjectMemberPermissionsInfo {
+  email: String!
+  name: String
+  role: ProjectRole!
+}
+
+input ProjectMemberRemoveInput {
+  projectId: String!
+  userId: String!
+}
+
+type ProjectMemberTwoFactorInfo {
+  email: String!
+  enabledMethods: [TwoFactorMethodCompliance!]!
+  name: String
+  twoFactorAuthEnabled: Boolean!
+}
+
+input ProjectMemberUpdateInput {
+  projectId: String!
+  role: ProjectRole!
+  userId: String!
+}
+
+type ProjectPermission implements Node {
+  id: ID!
+  projectId: String!
+  role: ProjectRole!
+  userId: String!
+}
+
+type ProjectPluginsConnection {
+  edges: [ProjectPluginsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectPluginsConnectionEdge {
+  cursor: String!
+  node: Plugin!
+}
+
+type ProjectProjectPermissionsConnection {
+  edges: [ProjectProjectPermissionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectProjectPermissionsConnectionEdge {
+  cursor: String!
+  node: ProjectPermission!
+}
+
+type ProjectResourceAccess {
+  customDomain: AccessRule!
+  databaseDeployment: AccessRule!
+  deployment: AccessRule!
+  environment: AccessRule!
+  plugin: AccessRule! @deprecated(reason: "Plugins have been removed")
+  sandbox: AccessRule!
+}
+
+enum ProjectRole {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+type ProjectServiceUsagePage {
+  pageInfo: ProjectServiceUsagePageInfo!
+  usage: [AggregatedUsage!]!
+}
+
+type ProjectServiceUsagePageInfo {
+  endCursor: String
+  hasNextPage: Boolean!
+}
+
+type ProjectServicesConnection {
+  edges: [ProjectServicesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectServicesConnectionEdge {
+  cursor: String!
+  node: Service!
+}
+
+type ProjectToken implements Node {
+  createdAt: DateTime!
+  displayToken: String!
+  environment: Environment!
+  environmentId: String!
+  id: ID!
+  name: String!
+  project: Project!
+  projectId: String!
+}
+
+input ProjectTokenCreateInput {
+  environmentId: String!
+  name: String!
+  projectId: String!
+}
+
+input ProjectTransferConfirmInput {
+  destinationWorkspaceId: String
+  ownershipTransferId: String!
+  projectId: String!
+}
+
+input ProjectTransferInitiateInput {
+  memberId: String!
+  projectId: String!
+}
+
+input ProjectTransferInput {
+  workspaceId: String!
+}
+
+input ProjectTransferToTeamInput {
+  teamId: String!
+}
+
+input ProjectUpdateInput {
+  baseEnvironmentId: String
+  botPrEnvironments: Boolean
+  description: String
+  focusedPrEnvironments: Boolean
+  isPublic: Boolean
+  name: String
+  prDeploys: Boolean
+}
+
+enum ProjectUsageProperty {
+  BACKUP_USAGE
+  CPU_USAGE
+  CURRENT_USAGE
+  DISK_USAGE
+  ESTIMATED_USAGE
+  MEMORY_USAGE
+  NETWORK_USAGE
+}
+
+type ProjectVolumesConnection {
+  edges: [ProjectVolumesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ProjectVolumesConnectionEdge {
+  cursor: String!
+  node: Volume!
+}
+
+type ProjectWorkspaceMember {
+  email: String!
+  enabledMethods: [TwoFactorMethodProjectWorkspace!]!
+  name: String
+  twoFactorAuthEnabled: Boolean!
+}
+
+type ProjectWorkspaceMembersResponse {
+  members: [ProjectWorkspaceMember!]!
+  projectId: String!
+  projectName: String!
+  workspaceId: String!
+}
+
+enum ProjectsOrderBy {
+  CREATED_AT_DESC
+  NAME_ASC
+  UPDATED_AT_DESC
+}
+
+type ProviderAuth implements Node {
+  email: String!
+  id: ID!
+  isAuthEnabled: Boolean!
+  metadata: JSON!
+  provider: String!
+  userId: String!
+}
+
+type PublicProjectInformation {
+  id: ID!
+  name: String!
+}
+
+union PublicProjectInvitation = InviteCode | ProjectInvitation
+
+enum PublicRuntime {
+  LEGACY
+  UNSPECIFIED
+  V2
+}
+
+type PublicStats {
+  totalDeploymentsLastMonth: Int!
+  totalLogsLastMonth: BigInt!
+  totalProjects: Int!
+  totalRequestsLastMonth: BigInt!
+  totalServices: Int!
+  totalUsers: Int!
+}
+
+enum PurgeCacheScope {
+  ALL
+  HTML
+}
+
+enum PurgeOnDeploy {
+  ALL
+  HTML
+  OFF
+}
+
+input PurgeServiceCacheInput {
+  environmentId: String!
+  scope: PurgeCacheScope!
+  serviceId: String!
+}
+
+type Query {
+  adminVolumeInstancesForVolume(volumeId: String!): [VolumeInstance!]!
+  agentBootstrap(id: ID!): AgentBootstrap!
+  agentBootstraps(environmentId: ID!): [AgentBootstrap!]!
+  agentUsage(workspaceId: String!): AgentUsageSummary!
+  allPlatformFeatureFlags: [PlatformFeatureFlagStatus!]!
+  apiToken: ApiTokenContext!
+  apiTokens(after: String, before: String, first: Int, last: Int): QueryApiTokensConnection!
+  auditLog(id: String!, workspaceId: String!): AuditLog!
+  auditLogEventTypeInfo: [AuditLogEventTypeInfo!]!
+  auditLogs(after: String, before: String, filter: AuditLogFilterInput, first: Int, last: Int, sort: SortOrder, workspaceId: String!): QueryAuditLogsConnection!
+  botScopeBindings: [BotScopeBindingInfo!]!
+  bucketInstanceDetails(bucketId: String!, environmentId: String!): BucketInstanceDetails
+  bucketS3Credentials(bucketId: String!, environmentId: String!, projectId: String!): [BucketS3CompatibleCredentials!]!
+  buildLogs(deploymentId: String!, endDate: DateTime, filter: String, limit: Int, startDate: DateTime): [Log!]!
+  canvasViewMergePreview(sourceEnvironmentId: String!, targetEnvironmentId: String!): CanvasViewMergePreview!
+  changelogBlockImage(id: String!): String!
+  cloudAgent(environmentId: ID!, id: ID!): CloudAgent
+  cloudAgentConsoleSessions(after: String, before: String, cloudAgentId: ID!, first: Int, last: Int): QueryCloudAgentConsoleSessionsConnection
+  cloudAgents(environmentId: ID!, mine: Boolean): [CloudAgent!]!
+  complianceAgreements(workspaceId: String!): ComplianceAgreementsInfo!
+  customDomain(id: String!, projectId: String!): CustomDomain!
+  customDomainAvailable(domain: String!): DomainAvailable!
+  deployment(id: String!): Deployment!
+  deploymentEvents(after: String, before: String, first: Int, id: String!, last: Int): QueryDeploymentEventsConnection!
+  deploymentInstanceExecutions(after: String, before: String, first: Int, input: DeploymentInstanceExecutionListInput!, last: Int): QueryDeploymentInstanceExecutionsConnection!
+  deploymentLogs(deploymentId: String!, endDate: DateTime, filter: String, limit: Int, startDate: DateTime): [Log!]!
+  deploymentSessions(after: String, before: String, deploymentId: String!, first: Int, last: Int): QueryDeploymentSessionsConnection
+  deploymentSnapshot(deploymentId: String!): DeploymentSnapshot
+  deploymentTriggers(after: String, before: String, environmentId: String!, first: Int, last: Int, projectId: String!, serviceId: String!): QueryDeploymentTriggersConnection!
+  deployments(after: String, before: String, first: Int, input: DeploymentListInput!, last: Int): QueryDeploymentsConnection!
+  dnsQueryLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, deploymentInstanceId: String, environmentId: String!, filter: String, serviceId: String): [DnsQueryLog!]!
+  domainStatus(id: String!, projectId: String!): DomainWithStatus! @deprecated(reason: "Use the `status` field within the `domain` query instead")
+  domains(environmentId: String!, projectId: String!, serviceId: String!): AllDomains!
+  egressGatewayHAPreview(environmentId: String!, serviceId: String!): [EgressGateway!]!
+  egressGatewayLegacyPreview(environmentId: String!, serviceId: String!): [EgressGateway!]!
+  egressGateways(environmentId: String!, serviceId: String!): [EgressGateway!]!
+  environment(id: String!, projectId: String): Environment!
+  environmentChangeSetApply(environmentId: String!, id: String!): ChangeSetApplyResult!
+  environmentHasLegacyStaticEgress(environmentId: String!): Boolean!
+  environmentLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, environmentId: String!, filter: String): [Log!]!
+  environmentPatch(id: String!): EnvironmentPatch!
+  environmentPatches(after: String, before: String, environmentId: String!, first: Int, last: Int): QueryEnvironmentPatchesConnection!
+  environmentStagedChanges(environmentId: String!): EnvironmentPatch!
+  environments(after: String, before: String, first: Int, isEphemeral: Boolean, last: Int, projectId: String!): QueryEnvironmentsConnection!
+  estimatedUsage(includeDeleted: Boolean, measurements: [MetricMeasurement!]!, projectId: String, workspaceId: String): [EstimatedUsage!]!
+  events(after: String, before: String, environmentId: String, filter: EventFilterInput, first: Int, last: Int, projectId: String!): QueryEventsConnection!
+  externalWorkspaces(projectId: String): [ExternalWorkspace!]!
+  functionRuntime(name: FunctionRuntimeName!): FunctionRuntime!
+  functionRuntimes: [FunctionRuntime!]!
+  gitHubRepoAccessAvailable(fullRepoName: String!): GitHubAccess!
+  gitHubSshKeys: [GitHubSshKey!]!
+  githubIsRepoNameAvailable(fullRepoName: String!): Boolean!
+  githubPRInfo(prNumber: Int!, serviceId: String!): GitHubPRInfo
+  githubPRInfoResult(prNumber: Int!, serviceId: String!): GitHubPRInfoResult!
+  githubRepo(fullRepoName: String!): GitHubRepoWithoutInstallation!
+  githubRepoBranches(owner: String!, repo: String!): [GitHubBranch!]!
+  githubRepos: [GitHubRepo!]!
+  githubWritableScopes: [String!]!
+  herokuApps: [HerokuApp!]!
+  httpDurationMetrics(endDate: DateTime!, environmentId: String!, method: String, path: String, serviceId: String!, startDate: DateTime!, statusCode: Int, stepSeconds: Int): HttpDurationMetricsResult!
+  httpLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, deploymentId: String!, filter: String, limit: Int): [HttpLog!]!
+  httpMetrics(endDate: DateTime!, environmentId: String!, method: String, path: String, serviceId: String!, startDate: DateTime!, statusCode: Int, stepSeconds: Int): HttpMetricsResult!
+  httpMetricsGroupedByStatus(endDate: DateTime!, environmentId: String!, method: String, path: String, serviceId: String!, startDate: DateTime!, stepSeconds: Int): [HttpMetricsByStatusResult!]!
+  integrationAuth(provider: String!, providerId: String!): IntegrationAuth!
+  integrationAuths(after: String, before: String, first: Int, last: Int): QueryIntegrationAuthsConnection!
+  integrations(after: String, before: String, first: Int, last: Int, projectId: String!): QueryIntegrationsConnection!
+  inviteCode(code: String!): InviteCode!
+  me: User!
+  metrics(averagingWindowSeconds: Int, endDate: DateTime, environmentId: String, groupBy: [MetricTag!], includeDeleted: Boolean, measurements: [MetricMeasurement!]!, projectId: String, sampleRateSeconds: Int, serviceId: String, startDate: DateTime!, volumeId: String, volumeInstanceExternalId: String, workspaceId: String): [MetricsResult!]!
+  myCloudAgents: [CloudAgent!]!
+  networkFlowLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, deploymentInstanceId: String, environmentId: String!, filter: String, serviceId: String): [NetworkFlowLog!]!
+  notificationDeliveries(after: String, before: String, filter: NotificationDeliveryFilterInput, first: Int, last: Int): QueryNotificationDeliveriesConnection!
+  notificationDelivery(id: String!): NotificationDelivery
+  notificationRules(projectId: String, workspaceId: String!): [NotificationRule!]!
+  observabilityDashboards(after: String, before: String, environmentId: String!, first: Int, last: Int): QueryObservabilityDashboardsConnection!
+  passkeys(after: String, before: String, first: Int, last: Int): QueryPasskeysConnection!
+  pitrHaClusterReplicationHealth(environmentId: String!, rootServiceId: String!): PitrHaClusterReplicationHealth
+  pitrHaWorkflowProgress(environmentId: String!, rootServiceId: String!): PitrHaWorkflowProgress
+  platformStatus: PlatformStatus!
+  plugin(id: String!): Plugin! @deprecated(reason: "Plugins are deprecated")
+  pluginLogs(endDate: DateTime, environmentId: String!, filter: String, limit: Int, pluginId: String!, startDate: DateTime): [Log!]! @deprecated(reason: "Plugins are deprecated")
+  preferences(token: String): Preferences!
+  privateNetworkEndpoint(environmentId: String!, privateNetworkId: String!, serviceId: String!): PrivateNetworkEndpoint
+  privateNetworkEndpointNameAvailable(environmentId: String!, prefix: String!, privateNetworkId: String!): Boolean!
+  privateNetworks(environmentId: String!): [PrivateNetwork!]!
+  project(id: String!): Project!
+  projectCompliance(projectId: String!): ProjectComplianceInfo!
+  projectFavorites(orderBy: ProjectsOrderBy, workspaceId: String!): [String!]!
+  projectInvitation(code: String!): PublicProjectInvitation!
+  projectInvitations(id: String!): [ProjectInvitation!]!
+  projectInviteCode(projectId: String!, role: ProjectRole!): InviteCode!
+  projectMembers(projectId: String!): [ProjectMember!]!
+  projectResourceAccess(projectId: String!): ProjectResourceAccess!
+  projectServiceUsage(after: String, endDate: DateTime!, first: Int, includeDeleted: Boolean, measurements: [MetricMeasurement!]!, startDate: DateTime!, workspaceId: String!): ProjectServiceUsagePage!
+  projectToken: ProjectToken!
+  projectTokens(after: String, before: String, first: Int, last: Int, projectId: String!): QueryProjectTokensConnection!
+  projectWorkspaceMembers(projectId: String!): ProjectWorkspaceMembersResponse!
+  projects(after: String, before: String, first: Int, includeDeleted: Boolean, last: Int, orderBy: ProjectsOrderBy, userId: String, workspaceId: String): QueryProjectsConnection!
+  projectsByIds(ids: [String!]!): [Project!]!
+  publicStats: PublicStats!
+  railwayDomain(id: String!): RailwayDomain!
+  railwayDomainByName(domain: String!, workspaceId: String!): RailwayDomain!
+  railwayDomainDnsRecords(domain: String!, workspaceId: String!): [RailwayDomainDnsRecord!]!
+  railwayDomains(status: RailwayDomainStatus, workspaceId: String!): [RailwayDomain!]!
+  referralInfo(workspaceId: String!): ReferralInfo!
+  regions(projectId: String): [Region!]!
+  resourceAccess(explicitResourceOwner: ExplicitOwnerInput!): ResourceAccess!
+  sandbox(environmentId: String!, id: String!): Sandbox
+  sandboxCheckpoints(environmentId: String!): [SandboxCheckpoint!]!
+  sandboxSessions(after: String, before: String, environmentId: String!, first: Int, id: String!, last: Int): QuerySandboxSessionsConnection
+  sandboxTemplateBuild(environmentId: String!, id: ID!): SandboxTemplateBuild!
+  sandboxes(after: String, before: String, environmentId: String!, first: Int, last: Int): QuerySandboxesConnection!
+  service(id: String!): Service!
+  serviceDomainAvailable(domain: String!): DomainAvailable!
+  serviceInstance(environmentId: String!, serviceId: String!): ServiceInstance!
+  serviceInstanceAutoDeployStatus(environmentId: String!, projectId: String!, serviceId: String!): ServiceInstanceAutoDeployStatus!
+  serviceInstanceIsUpdatable(environmentId: String!, serviceId: String!): Boolean!
+  serviceInstanceLimitOverride(environmentId: String!, serviceId: String!): ServiceInstanceLimit
+  serviceInstanceLimits(environmentId: String!, serviceId: String!): ServiceInstanceLimit!
+  sessions(after: String, before: String, first: Int, last: Int): QuerySessionsConnection!
+  signal(name: String!, owner: String): Signal
+  signalChanges(limit: Int = 50, name: String!, owner: String): [SignalChange!]!
+  signalEvaluate(context: JSON!, name: String!, owner: String): SignalEvaluation!
+  signals(owner: String): [Signal!]!
+  sshPublicKeys(after: String, before: String, first: Int, last: Int, workspaceId: String): QuerySshPublicKeysConnection!
+  sshSignupInfo(code: String!): SSHSignupInfo!
+  tcpProxies(environmentId: String!, serviceId: String!): [TCPProxy!]!
+  team(id: String!): Team! @deprecated(reason: "Teams are now workspaces. Use the workspace query instead.")
+  teamTemplates(after: String, before: String, first: Int, last: Int, teamId: String!): QueryTeamTemplatesConnection! @deprecated(reason: "Use templates instead - teams are now workspaces")
+  template(code: String, id: String, owner: String, repo: String): Template!
+  templateMetrics(id: String!): TemplateMetrics!
+  templateSearch(after: String, before: String, category: String, first: Int, last: Int, query: String!, verified: Boolean): QueryTemplateSearchConnection!
+  templateSourceForProject(projectId: String!): Template
+  templates(after: String, before: String, first: Int, last: Int, recommended: Boolean, verified: Boolean): QueryTemplatesConnection!
+  templatesCount: Int!
+  trustedDomains(after: String, before: String, first: Int, last: Int, workspaceId: String!): QueryTrustedDomainsConnection!
+  twoFactorInfo: TwoFactorInfo!
+  usage(endDate: DateTime, groupBy: [MetricTag!], includeDeleted: Boolean, measurements: [MetricMeasurement!]!, projectId: String, startDate: DateTime, workspaceId: String): [AggregatedUsage!]!
+  userKickbackEarnings(userId: String!): UserKickbackEarnings! @deprecated(reason: "This field is deprecated and will be removed in future versions.")
+  userProfile(username: String!): UserProfileResponse!
+  userTemplates(after: String, before: String, first: Int, last: Int): QueryUserTemplatesConnection! @deprecated(reason: "Users don't have personal templates anymore, they belong to their team now")
+  validateServiceEdgeRules(input: ValidateServiceEdgeRulesInput!): [EdgeRuleDiagnostic!]!
+  variables(environmentId: String!, projectId: String!, serviceId: String, unrendered: Boolean): EnvironmentVariables!
+  variablesForServiceDeployment(environmentId: String!, projectId: String!, serviceId: String!): EnvironmentVariables!
+  vercelInfo: VercelInfo!
+  volumeInstance(id: String!): VolumeInstance!
+  volumeInstanceBackupList(volumeInstanceId: String!): [VolumeInstanceBackup!]!
+  volumeInstanceBackupScheduleList(volumeInstanceId: String!): [VolumeInstanceBackupSchedule!]!
+  workflowStatus(workflowId: String!): WorkflowResult!
+  workspace(workspaceId: String!): Workspace!
+  workspaceByCode(code: String!): Workspace!
+  workspaceIdentityProviders(after: String, before: String, first: Int, last: Int, workspaceId: String!): QueryWorkspaceIdentityProvidersConnection!
+  workspacePolicy(workspaceId: String!): WorkspacePolicy
+  workspacePolicySelectableDeploySources(sourceType: WorkspacePolicyDeploySourceType!, workspaceId: String!): [WorkspacePolicySelectableDeploySource!]!
+  workspaceTemplates(after: String, before: String, first: Int, last: Int, workspaceId: String!): QueryWorkspaceTemplatesConnection!
+}
+
+type QueryApiTokensConnection {
+  edges: [QueryApiTokensConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryApiTokensConnectionEdge {
+  cursor: String!
+  node: ApiToken!
+}
+
+type QueryAuditLogsConnection {
+  edges: [QueryAuditLogsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryAuditLogsConnectionEdge {
+  cursor: String!
+  node: AuditLog!
+}
+
+type QueryCloudAgentConsoleSessionsConnection {
+  edges: [QueryCloudAgentConsoleSessionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryCloudAgentConsoleSessionsConnectionEdge {
+  cursor: String!
+  node: SandboxSession!
+}
+
+type QueryDeploymentEventsConnection {
+  edges: [QueryDeploymentEventsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryDeploymentEventsConnectionEdge {
+  cursor: String!
+  node: DeploymentEvent!
+}
+
+type QueryDeploymentInstanceExecutionsConnection {
+  edges: [QueryDeploymentInstanceExecutionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryDeploymentInstanceExecutionsConnectionEdge {
+  cursor: String!
+  node: DeploymentInstanceExecution!
+}
+
+type QueryDeploymentSessionsConnection {
+  edges: [QueryDeploymentSessionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryDeploymentSessionsConnectionEdge {
+  cursor: String!
+  node: SandboxSession!
+}
+
+type QueryDeploymentTriggersConnection {
+  edges: [QueryDeploymentTriggersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryDeploymentTriggersConnectionEdge {
+  cursor: String!
+  node: DeploymentTrigger!
+}
+
+type QueryDeploymentsConnection {
+  edges: [QueryDeploymentsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryDeploymentsConnectionEdge {
+  cursor: String!
+  node: Deployment!
+}
+
+type QueryEnvironmentPatchesConnection {
+  edges: [QueryEnvironmentPatchesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryEnvironmentPatchesConnectionEdge {
+  cursor: String!
+  node: EnvironmentPatch!
+}
+
+type QueryEnvironmentsConnection {
+  edges: [QueryEnvironmentsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryEnvironmentsConnectionEdge {
+  cursor: String!
+  node: Environment!
+}
+
+type QueryEventsConnection {
+  edges: [QueryEventsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryEventsConnectionEdge {
+  cursor: String!
+  node: Event!
+}
+
+type QueryIntegrationAuthsConnection {
+  edges: [QueryIntegrationAuthsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryIntegrationAuthsConnectionEdge {
+  cursor: String!
+  node: IntegrationAuth!
+}
+
+type QueryIntegrationsConnection {
+  edges: [QueryIntegrationsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryIntegrationsConnectionEdge {
+  cursor: String!
+  node: Integration!
+}
+
+type QueryNotificationDeliveriesConnection {
+  edges: [QueryNotificationDeliveriesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryNotificationDeliveriesConnectionEdge {
+  cursor: String!
+  node: NotificationDelivery!
+}
+
+type QueryObservabilityDashboardsConnection {
+  edges: [QueryObservabilityDashboardsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryObservabilityDashboardsConnectionEdge {
+  cursor: String!
+  node: ObservabilityDashboard!
+}
+
+type QueryPasskeysConnection {
+  edges: [QueryPasskeysConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryPasskeysConnectionEdge {
+  cursor: String!
+  node: Passkey!
+}
+
+type QueryProjectTokensConnection {
+  edges: [QueryProjectTokensConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryProjectTokensConnectionEdge {
+  cursor: String!
+  node: ProjectToken!
+}
+
+type QueryProjectsConnection {
+  edges: [QueryProjectsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryProjectsConnectionEdge {
+  cursor: String!
+  node: Project!
+}
+
+type QuerySandboxSessionsConnection {
+  edges: [QuerySandboxSessionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QuerySandboxSessionsConnectionEdge {
+  cursor: String!
+  node: SandboxSession!
+}
+
+type QuerySandboxesConnection {
+  edges: [QuerySandboxesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QuerySandboxesConnectionEdge {
+  cursor: String!
+  node: Sandbox!
+}
+
+type QuerySessionsConnection {
+  edges: [QuerySessionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QuerySessionsConnectionEdge {
+  cursor: String!
+  node: Session!
+}
+
+type QuerySshPublicKeysConnection {
+  edges: [QuerySshPublicKeysConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QuerySshPublicKeysConnectionEdge {
+  cursor: String!
+  node: SshPublicKey!
+}
+
+type QueryTeamTemplatesConnection {
+  edges: [QueryTeamTemplatesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryTeamTemplatesConnectionEdge {
+  cursor: String!
+  node: Template!
+}
+
+type QueryTemplateSearchConnection {
+  edges: [QueryTemplateSearchConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryTemplateSearchConnectionEdge {
+  cursor: String!
+  node: TemplateSearchResult!
+}
+
+type QueryTemplatesConnection {
+  edges: [QueryTemplatesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryTemplatesConnectionEdge {
+  cursor: String!
+  node: Template!
+}
+
+type QueryTrustedDomainsConnection {
+  edges: [QueryTrustedDomainsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryTrustedDomainsConnectionEdge {
+  cursor: String!
+  node: TrustedDomain!
+}
+
+type QueryUserTemplatesConnection {
+  edges: [QueryUserTemplatesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryUserTemplatesConnectionEdge {
+  cursor: String!
+  node: Template!
+}
+
+type QueryWorkspaceIdentityProvidersConnection {
+  edges: [QueryWorkspaceIdentityProvidersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryWorkspaceIdentityProvidersConnectionEdge {
+  cursor: String!
+  node: WorkspaceIdentityProvider!
+}
+
+type QueryWorkspaceTemplatesConnection {
+  edges: [QueryWorkspaceTemplatesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type QueryWorkspaceTemplatesConnectionEdge {
+  cursor: String!
+  node: Template!
+}
+
+scalar RailpackInfo
+
+type RailwayDomain {
+  autoRenewEnabled: Boolean!
+  connectedServiceInstances: [ConnectedServiceInstance!]!
+  createdAt: DateTime!
+  domain: String!
+  id: ID!
+  nameservers: RailwayDomainNameservers!
+  nextBillingDate: DateTime
+  purchasePrice: Int!
+  registrationYears: Int!
+  renewalPrice: Int!
+  status: RailwayDomainStatus!
+  workspaceId: String!
+  workspaceName: String
+}
+
+type RailwayDomainDnsRecord {
+  answer: String!
+  domainName: String!
+  fqdn: String!
+  host: String!
+  id: Int!
+  priority: Int
+  ttl: Int!
+  type: RailwayDomainDnsRecordType!
+}
+
+input RailwayDomainDnsRecordCreateInput {
+  answer: String!
+  domain: String!
+  host: String!
+  priority: Int
+  ttl: Int
+  type: RailwayDomainDnsRecordType!
+  workspaceId: String!
+}
+
+input RailwayDomainDnsRecordDeleteInput {
+  domain: String!
+  recordId: Int!
+  workspaceId: String!
+}
+
+enum RailwayDomainDnsRecordType {
+  A
+  AAAA
+  ANAME
+  CNAME
+  MX
+  NS
+  SRV
+  TXT
+}
+
+input RailwayDomainDnsRecordUpdateInput {
+  answer: String!
+  domain: String!
+  host: String!
+  priority: Int
+  recordId: Int!
+  ttl: Int
+  type: RailwayDomainDnsRecordType!
+  workspaceId: String!
+}
+
+type RailwayDomainNameservers {
+  isDefault: Boolean!
+  nameservers: [String!]!
+}
+
+input RailwayDomainNameserversSetInput {
+  id: String!
+  nameservers: [String!]!
+}
+
+enum RailwayDomainStatus {
+  ACTIVE
+  EXPIRED
+  PURCHASING
+  REFUNDED
+}
+
+input RailwayDomainUpdateInput {
+  autoRenewEnabled: Boolean
+  id: String!
+}
+
+input RecoveryCodeValidateInput {
+  code: String!
+  twoFactorLinkingKey: String
+}
+
+type RecoveryCodes {
+  recoveryCodes: [String!]!
+}
+
+type ReferralInfo implements Node {
+  code: String!
+  id: ID!
+  referralStats: ReferralStats!
+  status: String!
+}
+
+input ReferralInfoUpdateInput {
+  code: String!
+  workspaceId: String!
+}
+
+type ReferralStats {
+  credited: Int!
+  pending: Int!
+}
+
+enum ReferralStatus {
+  REFEREE_CREDITED
+  REFERRER_CREDITED
+  REGISTERED
+}
+
+type ReferralUser {
+  code: String!
+  id: String!
+  status: ReferralStatus!
+}
+
+type Region {
+  country: String!
+  deploymentConstraints: RegionDeploymentConstraints
+  id: String
+  location: String!
+  name: String!
+  region: String
+  workspaceId: String
+}
+
+type RegionDeploymentConstraints {
+  deprecationInfo: RegionDeprecationInfo
+}
+
+type RegionDeprecationInfo {
+  isDeprecated: Boolean!
+  replacementRegion: String!
+}
+
+enum RegistrationStatus {
+  ONBOARDED
+  REGISTERED
+  WAITLISTED
+}
+
+input RegistryCredentialsInput {
+  password: String!
+  username: String!
+}
+
+enum ReplicateVolumeInstanceSnapshotStatus {
+  COMPLETED
+  FAILED
+  INITIATED
+  TRANSFERRING
+  UNRECOGNIZED
+}
+
+enum ReplicateVolumeInstanceStatus {
+  COMPLETED
+  ERROR
+  QUEUED
+  TRANSFERRING_OFFLINE
+  TRANSFERRING_ONLINE
+}
+
+input ResetPluginCredentialsInput {
+  environmentId: String!
+}
+
+input ResetPluginInput {
+  environmentId: String!
+}
+
+type ResourceAccess {
+  deployment: AccessRule!
+  project: AccessRule!
+}
+
+enum ResourceOwnerType {
+  WORKSPACE
+}
+
+enum RestartPolicyType {
+  ALWAYS
+  NEVER
+  ON_FAILURE
+}
+
+type SSHSignupInfo {
+  fingerprint: String!
+}
+
+type Sandbox {
+  createdAt: DateTime!
+  domains: [SandboxDomain!]!
+  environmentId: String!
+  id: ID!
+  idleTimeoutMinutes: Int
+  networkIsolation: SandboxNetworkIsolation!
+  region: String!
+  status: SandboxStatus!
+}
+
+type SandboxCheckpoint {
+  createdAt: DateTime!
+  environmentId: String!
+  id: ID!
+  key: String!
+}
+
+input SandboxCreateInput {
+  environmentId: String!
+  idleTimeoutMinutes: Int
+  networkIsolation: SandboxNetworkIsolation
+  publicDomains: [SandboxDomainInput!]
+  region: String
+  sourceSandboxId: String
+  template: SandboxTemplateInput
+  variables: EnvironmentVariables
+}
+
+type SandboxDomain {
+  domain: String!
+  port: Int!
+  prefix: String!
+}
+
+input SandboxDomainInput {
+  port: Int!
+  prefix: String
+}
+
+type SandboxExecResult {
+  exitCode: Int!
+  stderr: String!
+  stdout: String!
+  timedOut: Boolean!
+  truncated: Boolean!
+}
+
+enum SandboxNetworkIsolation {
+  ISOLATED
+  PRIVATE
+}
+
+type SandboxSession {
+  attached: Boolean!
+  command: String!
+  createdAt: DateTime
+  foregroundActive: Boolean
+  kind: SandboxSessionKind!
+  name: String!
+  runState: SandboxSessionRunState!
+}
+
+enum SandboxSessionKind {
+  EXEC
+  SHELL
+}
+
+type SandboxSessionRunState {
+  exitCode: Int!
+  exitedAt: DateTime
+  running: Boolean!
+}
+
+enum SandboxStatus {
+  CREATING
+  DESTROYED
+  DESTROYING
+  FAILED
+  RUNNING
+}
+
+type SandboxTemplateBuild {
+  environmentId: String!
+  id: ID!
+  status: SandboxTemplateBuildStatus!
+}
+
+enum SandboxTemplateBuildStatus {
+  BUILDING
+  FAILED
+  PENDING
+  READY
+}
+
+input SandboxTemplateInput {
+  baseImageDigest: String
+  instructions: [String!]
+  name: String
+  variables: EnvironmentVariables
+}
+
+scalar SerializedTemplateConfig
+
+type Service implements Node {
+  createdAt: DateTime!
+  deletedAt: DateTime
+  deployments(after: String, before: String, first: Int, last: Int): ServiceDeploymentsConnection! @deprecated(reason: "Use environment.deployments for properly scoped access control")
+  featureFlags: [ActiveServiceFeatureFlag!]!
+  groupId: String
+  hasHiddenRegistryCredentialsFromTemplate: Boolean!
+  icon: String
+  id: ID!
+  isRestricted: Boolean!
+  name: String!
+  project: Project!
+  projectId: String!
+  repoTriggers(after: String, before: String, first: Int, last: Int): ServiceRepoTriggersConnection!
+  serviceInstances(after: String, before: String, first: Int, last: Int): ServiceServiceInstancesConnection! @deprecated(reason: "Use environment.serviceInstances for properly scoped access control")
+  templateId: String
+  templateServiceId: String
+  templateThreadSlug: String
+  updatedAt: DateTime!
+}
+
+type ServiceBackupInfo {
+  schedules: [VolumeInstanceBackupScheduleKind!]!
+  serviceId: String!
+  serviceName: String!
+}
+
+input ServiceConnectInput {
+  branch: String
+  image: String
+  repo: String
+}
+
+input ServiceCreateInput {
+  branch: String
+  environmentId: String
+  icon: String
+  name: String
+  projectId: String!
+  registryCredentials: RegistryCredentialsInput
+  source: ServiceSourceInput
+  templateId: String
+  templateServiceId: String
+  variables: EnvironmentVariables
+}
+
+type ServiceDeploymentsConnection {
+  edges: [ServiceDeploymentsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ServiceDeploymentsConnectionEdge {
+  cursor: String!
+  node: Deployment!
+}
+
+type ServiceDomain implements Domain {
+  cdnMode: String @deprecated(reason: "Removed; always null.")
+  createdAt: DateTime
+  deletedAt: DateTime
+  domain: String!
+  edgeId: String
+  environmentId: String!
+  id: ID!
+  newDomainName: String
+  newHostLabel: String
+  projectId: String
+  serviceId: String!
+  suffix: String
+  syncStatus: ServiceDomainSyncStatus!
+  targetPort: Int
+  updatedAt: DateTime
+}
+
+input ServiceDomainCreateInput {
+  environmentId: String!
+  serviceId: String!
+  targetPort: Int
+}
+
+enum ServiceDomainSyncStatus {
+  ACTIVE
+  CREATING
+  DELETED
+  DELETING
+  UNSPECIFIED
+  UPDATING
+}
+
+input ServiceDomainUpdateInput {
+  domain: String!
+  environmentId: String!
+  serviceDomainId: String!
+  serviceId: String!
+  targetPort: Int
+}
+
+input ServiceFeatureFlagToggleInput {
+  flag: ActiveServiceFeatureFlag!
+  serviceId: String!
+}
+
+type ServiceInstance implements Node {
+  activeDeployments: [Deployment!]!
+  buildCommand: String
+  builder: Builder!
+  createdAt: DateTime!
+  cronSchedule: String
+  deletedAt: DateTime
+  dockerfilePath: String
+  domains: AllDomains!
+  drainingSeconds: Int
+  edgeConfig: EdgeConfig
+  environmentId: String!
+  healthcheckPath: String
+  healthcheckTimeout: Int
+  id: ID!
+  ipv6EgressEnabled: Boolean
+  isUpdatable: Boolean!
+  latestDeployment: Deployment
+  nextCronRunAt: DateTime
+  nixpacksPlan: JSON
+  numReplicas: Int
+  overlapSeconds: Int
+  preDeployCommand: JSON
+  railpackInfo: RailpackInfo
+  railwayConfigFile: String
+  region: String
+  restartPolicyMaxRetries: Int!
+  restartPolicyType: RestartPolicyType!
+  rootDirectory: String
+  service: Service!
+  serviceId: String!
+  serviceName: String!
+  sleepApplication: Boolean
+  source: ServiceSource
+  startCommand: String
+  updatedAt: DateTime!
+  upstreamUrl: String
+  watchPatterns: [String!]!
+}
+
+type ServiceInstanceAutoDeployStatus {
+  canEnable: Boolean!
+  enabled: Boolean!
+  reason: String
+}
+
+input ServiceInstanceAutoDeployUpdateInput {
+  enabled: Boolean!
+  environmentId: String!
+  projectId: String!
+  serviceId: String!
+}
+
+type ServiceInstanceAutoDeployUpdateResult {
+  enabled: Boolean!
+}
+
+scalar ServiceInstanceLimit
+
+input ServiceInstanceLimitsUpdateInput {
+  environmentId: String!
+  memoryGB: Float
+  serviceId: String!
+  vCPUs: Float
+}
+
+input ServiceInstanceUpdateInput {
+  buildCommand: String
+  builder: Builder
+  cronSchedule: String
+  dockerfilePath: String
+  drainingSeconds: Int
+  healthcheckPath: String
+  healthcheckTimeout: Int
+  ipv6EgressEnabled: Boolean
+  multiRegionConfig: JSON
+  nixpacksPlan: JSON
+  numReplicas: Int
+  overlapSeconds: Int
+  preDeployCommand: [String!]
+  railwayConfigFile: String
+  region: String
+  registryCredentials: RegistryCredentialsInput
+  restartPolicyMaxRetries: Int
+  restartPolicyType: RestartPolicyType
+  rootDirectory: String
+  sleepApplication: Boolean
+  source: ServiceSourceInput
+  startCommand: String
+  watchPatterns: [String!]
+}
+
+type ServiceRepoTriggersConnection {
+  edges: [ServiceRepoTriggersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ServiceRepoTriggersConnectionEdge {
+  cursor: String!
+  node: DeploymentTrigger!
+}
+
+type ServiceServiceInstancesConnection {
+  edges: [ServiceServiceInstancesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ServiceServiceInstancesConnectionEdge {
+  cursor: String!
+  node: ServiceInstance!
+}
+
+type ServiceSource {
+  image: String
+  repo: String
+}
+
+input ServiceSourceInput {
+  image: String
+  repo: String
+}
+
+input ServiceUpdateInput {
+  icon: String
+  name: String
+}
+
+type Session implements Node {
+  createdAt: DateTime!
+  expiredAt: DateTime!
+  id: ID!
+  isCurrent: Boolean!
+  name: String!
+  type: SessionType!
+  updatedAt: DateTime!
+}
+
+enum SessionType {
+  BROWSER
+  CLI
+  FORUMS
+}
+
+input SetServiceUnderAttackModeInput {
+  durationSeconds: Int
+  enabled: Boolean!
+  environmentId: String!
+  serviceId: String!
+}
+
+input SetupAgentEventTrackInput {
+  agentSessionId: String
+  arch: String
+  caller: String
+  cliVersion: String
+  configuredClients: [String!]
+  errorMessage: String
+  installRequestId: String
+  isCi: Boolean
+  os: String
+  phase: String!
+  sessionId: String
+  success: Boolean
+}
+
+input SharedVariableConfigureInput {
+  disabledServiceIds: [String!]!
+  enabledServiceIds: [String!]!
+  environmentId: String!
+  name: String!
+  projectId: String!
+}
+
+input ShellTokenInput {
+  environmentId: String!
+  instanceId: String!
+  kind: String
+  port: Int
+  scope: String!
+  serviceId: String
+}
+
+type Signal implements Node {
+  createdAt: DateTime!
+  createdBy: String
+  default: JSON!
+  id: ID!
+  name: String!
+  owner: String!
+  rules: JSON!
+  type: SignalType!
+  updatedAt: DateTime!
+  version: BigInt!
+  writableBy: [String!]!
+}
+
+type SignalChange implements Node {
+  authorId: String
+  createdAt: DateTime!
+  id: ID!
+  kind: SignalChangeKind!
+  payload: JSON!
+  prevState: JSON!
+  seq: BigInt!
+  signalId: String!
+}
+
+enum SignalChangeKind {
+  default_changed
+  replaced
+  rollback
+  set
+  unset
+}
+
+input SignalCreateInput {
+  default: JSON!
+  name: String!
+  owner: String!
+  type: SignalType!
+  writableBy: [String!]
+}
+
+input SignalDefaultSetInput {
+  default: JSON!
+  name: String!
+  owner: String!
+}
+
+input SignalDeleteInput {
+  name: String!
+  owner: String!
+}
+
+type SignalEvaluation {
+  reason: SignalEvaluationReason!
+  trace: JSON!
+  value: JSON!
+}
+
+enum SignalEvaluationReason {
+  DEFAULT
+  SPLIT
+  TARGETING_MATCH
+}
+
+input SignalReplaceInput {
+  default: JSON!
+  name: String!
+  owner: String!
+  type: SignalType!
+}
+
+input SignalRollbackInput {
+  name: String!
+  owner: String!
+  seq: BigInt!
+}
+
+input SignalRuleSetInput {
+  expression: JSON!
+  name: String!
+  owner: String!
+  ruleId: String!
+  value: JSON!
+}
+
+input SignalRuleUnsetInput {
+  name: String!
+  owner: String!
+  ruleId: String!
+}
+
+enum SignalType {
+  bool
+  json
+  number
+  string
+}
+
+type SimilarTemplate {
+  code: String!
+  createdAt: DateTime!
+  creator: TemplateCreator
+  deploys: Int!
+  description: String
+  health: Float
+  image: String
+  name: String!
+  teamId: String @deprecated(reason: "Use workspaceId")
+  userId: String
+  workspaceId: String
+}
+
+scalar SkippedResourceIds
+
+enum SortOrder {
+  asc
+  desc
+}
+
+type SpendCommitment implements Node {
+  features: [SpendCommitmentFeatureId!]!
+  id: ID!
+  minSpendAmountCents: Int!
+}
+
+scalar SpendCommitmentFeatureId
+
+type SshPublicKey implements Node {
+  createdAt: DateTime!
+  fingerprint: String!
+  id: ID!
+  name: String!
+  publicKey: String!
+  updatedAt: DateTime!
+  userId: String
+  workspaceId: String
+}
+
+input SshPublicKeyCreateInput {
+  name: String!
+  publicKey: String!
+  workspaceId: String
+}
+
+type StaleWhileRevalidateConfig {
+  enabled: Boolean!
+}
+
+input StaleWhileRevalidateInput {
+  enabled: Boolean!
+}
+
+type Subscription {
+  buildLogs(deploymentId: String!, filter: String, limit: Int): [Log!]!
+  deployment(id: String!): Deployment!
+  deploymentEvents(id: String!): DeploymentEvent!
+  deploymentInstanceExecutions(input: DeploymentInstanceExecutionInput!): DeploymentInstanceExecution!
+  deploymentLogs(deploymentId: String!, filter: String, limit: Int): [Log!]!
+  dnsQueryLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, deploymentInstanceId: String, environmentId: String!, filter: String, serviceId: String): [DnsQueryLog!]!
+  environmentLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, environmentId: String!, filter: String): [Log!]!
+  environmentStagedPatch(environmentId: String!): EnvironmentPatch!
+  httpLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, deploymentId: String!, filter: String): [HttpLog!]!
+  networkFlowLogs(afterDate: String, afterLimit: Int, anchorDate: String, beforeDate: String, beforeLimit: Int, deploymentInstanceId: String, environmentId: String!, filter: String, serviceId: String): [NetworkFlowLog!]!
+  notificationDeliveryUpdated: NotificationDeliveryUpdate!
+  pluginLogs(environmentId: String!, filter: String, limit: Int, pluginId: String!): [Log!]! @deprecated(reason: "Plugins are deprecated")
+  replicationProgress(volumeInstanceId: String!): VolumeReplicationProgressUpdate!
+}
+
+type SubscriptionDiscount {
+  couponId: String!
+  couponName: String!
+}
+
+type SubscriptionItem {
+  itemId: String!
+  priceDollars: Float
+  priceId: String!
+  productId: String!
+  quantity: BigInt
+}
+
+enum SubscriptionModel {
+  FREE
+  TEAM
+  USER
+}
+
+scalar SubscriptionPlanLimit
+
+enum SubscriptionPlanType {
+  free
+  hobby
+  pro
+  trial
+}
+
+enum SubscriptionState {
+  ACTIVE
+  CANCELLED
+  INACTIVE
+  PAST_DUE
+  UNPAID
+}
+
+scalar SupportHealthMetrics
+
+enum SupportTierOverride {
+  BUSINESS_CLASS
+  BUSINESS_CLASS_TRIAL
+}
+
+type TCPProxy {
+  applicationPort: Int!
+  createdAt: DateTime
+  deletedAt: DateTime
+  domain: String!
+  environmentId: String!
+  id: ID!
+  proxyPort: Int!
+  serviceId: String!
+  syncStatus: TCPProxySyncStatus!
+  updatedAt: DateTime
+}
+
+input TCPProxyCreateInput {
+  applicationPort: Int!
+  environmentId: String!
+  serviceId: String!
+}
+
+enum TCPProxySyncStatus {
+  ACTIVE
+  CREATING
+  DELETED
+  DELETING
+  UNSPECIFIED
+  UPDATING
+}
+
+type Team implements Node {
+  adoptionHistory: [AdoptionInfo!]! @deprecated(reason: "Use workspace object instead")
+  adoptionLevel: Float! @deprecated(reason: "Use workspace object instead")
+  apiTokenRateLimit: ApiTokenRateLimit @deprecated(reason: "Use workspace object instead")
+  avatar: String @deprecated(reason: "Use workspace object instead")
+  createdAt: DateTime! @deprecated(reason: "Use workspace object instead")
+  customer: Customer! @deprecated(reason: "Use workspace object instead")
+  id: ID! @deprecated(reason: "Use workspace object instead")
+  members: [TeamMember!]! @deprecated(reason: "Use workspace object instead")
+  name: String! @deprecated(reason: "Use workspace object instead")
+  preferredRegion: String @deprecated(reason: "Use workspace object instead")
+  projects(after: String, before: String, first: Int, last: Int): TeamProjectsConnection! @deprecated(reason: "Use workspace object instead")
+  slackChannelId: String @deprecated(reason: "Use workspace object instead")
+  supportTierOverride: SupportTierOverride @deprecated(reason: "Use workspace object instead")
+  teamPermissions: [TeamPermission!]! @deprecated(reason: "Use workspace object instead")
+  updatedAt: DateTime! @deprecated(reason: "Use workspace object instead")
+  workspace: Workspace! @deprecated(reason: "Use workspace object instead")
+}
+
+type TeamMember {
+  avatar: String
+  email: String!
+  featureFlags: [ActiveFeatureFlag!]
+  id: String!
+  name: String
+  role: TeamRole!
+}
+
+type TeamPermission implements Node {
+  createdAt: DateTime!
+  id: ID!
+  role: TeamRole!
+  updatedAt: DateTime!
+  userId: String!
+  workspaceId: String!
+}
+
+type TeamProjectsConnection {
+  edges: [TeamProjectsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type TeamProjectsConnectionEdge {
+  cursor: String!
+  node: Project!
+}
+
+enum TeamRole {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+type Template implements Node {
+  activeProjects: Int!
+  canvasConfig: CanvasConfig
+  category: String
+  code: String!
+  communityThreadSlug: String
+  config: TemplateConfig! @deprecated(reason: "Use serializedConfig instead")
+  createdAt: DateTime!
+  creator: TemplateCreator
+  demoProjectId: String
+  description: String
+  guides: TemplateGuide
+  health: Float
+  id: ID!
+  image: String
+  isApproved: Boolean!
+  isV2Template: Boolean!
+  isVerified: Boolean!
+  languages: [String!]
+  maintainer: MaintainerWorkspace
+  metadata: TemplateMetadata! @deprecated(reason: "Deprecated in favor of listing the fields individually.")
+  name: String!
+  projects: Int!
+  readme: String
+  recentProjects: Int!
+  serializedConfig: SerializedTemplateConfig
+  services(after: String, before: String, first: Int, last: Int): TemplateServicesConnection!
+  similarTemplates: [SimilarTemplate!]!
+  status: TemplateStatus!
+  supportHealthMetrics: SupportHealthMetrics
+  tags: [String!]
+  teamId: String @deprecated(reason: "Use workspaceId")
+  totalPayout: Float!
+  updatedAt: DateTime!
+  workspaceId: String
+}
+
+input TemplateCloneInput {
+  code: String!
+  workspaceId: String
+}
+
+scalar TemplateConfig
+
+type TemplateCreator {
+  avatar: String
+  hasPublicProfile: Boolean!
+  name: String
+  username: String
+}
+
+input TemplateDeleteInput {
+  workspaceId: String
+}
+
+input TemplateDeployInput {
+  environmentId: String
+  projectId: String
+  services: [TemplateDeployService!]!
+  templateCode: String
+  workspaceId: String
+}
+
+type TemplateDeployPayload {
+  projectId: String!
+  workflowId: String
+}
+
+input TemplateDeployService {
+  commit: String
+  hasDomain: Boolean
+  healthcheckPath: String
+  id: String!
+  isPrivate: Boolean
+  name: String
+  owner: String
+  preDeployCommand: [String!]
+  rootDirectory: String
+  serviceDomainPorts: [Int!]
+  serviceIcon: String
+  serviceName: String!
+  startCommand: String
+  tcpProxyApplicationPort: Int
+  tcpProxyApplicationPorts: [Int!]
+  template: String!
+  variables: EnvironmentVariables
+  volumes: [TemplateVolume!]
+}
+
+input TemplateDeployV2Input {
+  environmentId: String
+  existingRootServiceId: String
+  projectId: String
+  serializedConfig: SerializedTemplateConfig!
+  stageOnly: Boolean
+  templateId: String!
+  workspaceId: String
+}
+
+input TemplateGenerateInput {
+  environmentId: String
+  projectId: String!
+}
+
+type TemplateGuide {
+  post: String
+  video: String
+}
+
+scalar TemplateMetadata
+
+type TemplateMetrics {
+  activeDeployments: Int!
+  deploymentsLast90Days: Int!
+  earningsLast30Days: Float!
+  earningsLast90Days: Float!
+  eligibleForSupportBonus: Boolean!
+  supportHealth: Float!
+  templateHealth: Float!
+  totalDeployments: Int!
+  totalEarnings: Float!
+}
+
+input TemplatePublishInput {
+  category: String!
+  demoProjectId: String
+  description: String!
+  image: String
+  readme: String!
+  workspaceId: String
+}
+
+input TemplateRevertInput {
+  environmentId: String!
+  groupId: String
+  projectId: String!
+  rootServiceId: String!
+  stageOnly: Boolean
+  templateCode: String!
+}
+
+type TemplateSearchResult {
+  code: String!
+  creatorName: String
+  deploymentCount: Int!
+  description: String
+  healthScore: Float
+  id: String!
+  image: String
+  isVerified: Boolean!
+  name: String!
+}
+
+type TemplateService implements Node {
+  config: TemplateServiceConfig!
+  createdAt: DateTime!
+  id: ID!
+  templateId: String!
+  updatedAt: DateTime!
+}
+
+scalar TemplateServiceConfig
+
+input TemplateServiceSourceEjectInput {
+  projectId: String!
+  repoName: String!
+  repoOwner: String!
+  serviceIds: [String!]!
+  upstreamUrl: String!
+}
+
+type TemplateServicesConnection {
+  edges: [TemplateServicesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type TemplateServicesConnectionEdge {
+  cursor: String!
+  node: TemplateService!
+}
+
+enum TemplateStatus {
+  HIDDEN
+  PUBLISHED
+  UNPUBLISHED
+}
+
+scalar TemplateVolume
+
+type TrustedDomain {
+  domainName: String!
+  id: ID!
+  role: String!
+  status: TrustedDomainStatus!
+  verificationData: TrustedDomainVerificationData!
+  verificationType: String!
+  workspaceId: String!
+}
+
+enum TrustedDomainStatus {
+  FAILED
+  PENDING
+  VERIFIED
+}
+
+type TrustedDomainVerificationData {
+  dnsHost: String
+  domainMatch: Domain
+  domainStatus: CustomDomainStatus
+  token: String
+}
+
+type TwoFactorInfo {
+  hasRecoveryCodes: Boolean!
+  isVerified: Boolean!
+}
+
+input TwoFactorInfoCreateInput {
+  token: String!
+}
+
+type TwoFactorInfoSecret {
+  secret: String!
+  uri: String!
+}
+
+input TwoFactorInfoValidateInput {
+  token: String!
+  twoFactorLinkingKey: String
+}
+
+enum TwoFactorMethodCompliance {
+  AUTHENTICATOR
+  PASSKEY
+}
+
+enum TwoFactorMethodProjectWorkspace {
+  AUTHENTICATOR
+  PASSKEY
+}
+
+input UpdateNotificationRuleInput {
+  channelConfigs: [NotificationChannelConfig!]
+  ephemeralEnvironments: Boolean
+  eventTypes: [String!]
+  severities: [NotificationSeverity!]
+}
+
+input UpdateServiceEdgeConfigInput {
+  config: EdgeConfigInput!
+  environmentId: String!
+  serviceId: String!
+}
+
+input UpdateServiceEdgeRulesInput {
+  edgeRules: JSON
+  environmentId: String!
+  serviceId: String!
+}
+
+scalar Upload
+
+type UsageLimit implements Node {
+  agentHardLimitCents: Int
+  agentSoftLimitCents: Int
+  customerId: String!
+  hardLimit: Int
+  id: ID!
+  isOverLimit: Boolean!
+  softLimit: Int!
+}
+
+input UsageLimitRemoveInput {
+  customerId: String!
+}
+
+input UsageLimitSetInput {
+  customerId: String!
+  hardLimitDollars: Int
+  softLimitDollars: Int!
+}
+
+type User implements Node {
+  agreedFairUse: Boolean!
+  apiTokenRateLimit: ApiTokenRateLimit
+  avatar: String
+  banReason: String @deprecated(reason: "Resolve via the user's workspaces and check for an active BAN restriction. This field will be removed after the WorkspaceRestriction migration completes.")
+  createdAt: DateTime!
+  email: String!
+  featureFlags: [ActiveFeatureFlag!]!
+  flags: [UserFlag!]!
+  githubProviderId: String
+  githubUsername: String
+  has2FA: Boolean!
+  hasPasskeys: Boolean!
+  id: ID!
+  isAdmin: Boolean!
+  isConductor: Boolean!
+  isVerified: Boolean!
+  lastLogin: DateTime!
+  name: String
+  platformFeatureFlags: [ActivePlatformFlag!]!
+  profile: UserProfile
+  projects(after: String, before: String, first: Int, last: Int): UserProjectsConnection! @deprecated(reason: "This field will not return anything anymore, go through the workspace's projects")
+  providerAuths(after: String, before: String, first: Int, last: Int): UserProviderAuthsConnection!
+  registrationStatus: RegistrationStatus!
+  riskLevel: Float
+  termsAgreedOn: DateTime
+  username: String
+  workspace: Workspace @deprecated(reason: "Use user.workspaces instead, no user are associated to a workspace")
+  workspaces: [Workspace!]!
+}
+
+enum UserFlag {
+  BETA
+}
+
+input UserFlagsRemoveInput {
+  flags: [UserFlag!]!
+  userId: String
+}
+
+input UserFlagsSetInput {
+  flags: [UserFlag!]!
+  userId: String
+}
+
+type UserKickbackEarnings {
+  total_amount: Float!
+}
+
+type UserProfile {
+  bio: String
+  isPublic: Boolean!
+  website: String
+}
+
+type UserProfileResponse {
+  avatar: String
+  createdAt: DateTime!
+  customerId: String
+  id: String!
+  isTrialing: Boolean
+  name: String
+  profile: UserProfile!
+  publicProjects(after: String, before: String, first: Int, last: Int): UserProfileResponsePublicProjectsConnection!
+  publishedTemplates: [SimilarTemplate!]! @deprecated(reason: "There are no personal templates anymore, they all belong to a workspace")
+  state: String
+  totalDeploys: Int!
+  username: String
+}
+
+type UserProfileResponsePublicProjectsConnection {
+  edges: [UserProfileResponsePublicProjectsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type UserProfileResponsePublicProjectsConnectionEdge {
+  cursor: String!
+  node: Project!
+}
+
+input UserProfileUpdateInput {
+  bio: String
+  isPublic: Boolean!
+  website: String
+}
+
+type UserProjectsConnection {
+  edges: [UserProjectsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type UserProjectsConnectionEdge {
+  cursor: String!
+  node: Project!
+}
+
+type UserProviderAuthsConnection {
+  edges: [UserProviderAuthsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type UserProviderAuthsConnectionEdge {
+  cursor: String!
+  node: ProviderAuth!
+}
+
+input ValidateServiceEdgeRulesInput {
+  edgeRules: JSON!
+  environmentId: String!
+  serviceId: String!
+}
+
+type Variable implements Node {
+  createdAt: DateTime!
+  environment: Environment!
+  environmentId: String
+  id: ID!
+  isSealed: Boolean!
+  name: String!
+  plugin: Plugin!
+  pluginId: String @deprecated(reason: "Plugins have been removed")
+  references: [String!]!
+  service: Service!
+  serviceId: String
+  updatedAt: DateTime!
+}
+
+input VariableCollectionUpsertInput {
+  environmentId: String!
+  projectId: String!
+  replace: Boolean = false
+  serviceId: String
+  skipDeploys: Boolean = false
+  variables: EnvironmentVariables!
+}
+
+input VariableDeleteInput {
+  environmentId: String!
+  name: String!
+  projectId: String!
+  serviceId: String
+}
+
+input VariableUpsertInput {
+  environmentId: String!
+  name: String!
+  projectId: String!
+  serviceId: String
+  skipDeploys: Boolean = false
+  value: String!
+}
+
+type VercelAccount {
+  id: String!
+  integrationAuthId: String!
+  isUser: Boolean!
+  name: String
+  projects: [VercelProject!]!
+  slug: String
+}
+
+type VercelInfo {
+  accounts: [VercelAccount!]!
+}
+
+type VercelProject {
+  accountId: String!
+  id: String!
+  name: String!
+}
+
+type Volume implements Node {
+  createdAt: DateTime!
+  id: ID!
+  name: String!
+  project: Project!
+  projectId: String!
+  volumeInstances(after: String, before: String, first: Int, last: Int): VolumeVolumeInstancesConnection! @deprecated(reason: "Use environment.volumeInstances for properly scoped access control")
+}
+
+input VolumeCreateInput {
+  environmentId: String
+  mountPath: String!
+  projectId: String!
+  region: String
+  serviceId: String
+}
+
+type VolumeInstance implements Node {
+  createdAt: DateTime!
+  currentSizeMB: Float!
+  deletedAt: DateTime
+  environment: Environment!
+  environmentId: String!
+  externalId: String
+  id: ID!
+  isPendingDeletion: Boolean!
+  mountPath: String!
+  region: String
+  service: Service!
+  serviceId: String
+  sizeMB: Int!
+  state: VolumeState
+  volume: Volume!
+  volumeId: String!
+}
+
+type VolumeInstanceBackup {
+  createdAt: DateTime!
+  creatorId: String
+  expiresAt: DateTime
+  externalId: String!
+  id: String!
+  name: String
+  referencedMB: Int
+  scheduleId: String
+  usedMB: Int
+  volumeInstanceSizeMB: Int
+}
+
+type VolumeInstanceBackupSchedule implements Node {
+  createdAt: DateTime!
+  cron: String!
+  id: ID!
+  kind: VolumeInstanceBackupScheduleKind!
+  name: String!
+  retentionSeconds: Int
+}
+
+enum VolumeInstanceBackupScheduleKind {
+  DAILY
+  MONTHLY
+  WEEKLY
+}
+
+type VolumeInstanceReplicationProgress {
+  bytesTransferred: BigInt!
+  percentComplete: Float!
+  timestamp: DateTime!
+  transferRateMbps: Float
+}
+
+input VolumeInstanceUpdateInput {
+  mountPath: String
+  serviceId: String
+  state: VolumeState
+}
+
+type VolumeReplicationProgressUpdate {
+  currentSnapshot: VolumeSnapshotReplicationProgressUpdate!
+  destExternalId: String!
+  destRegion: String
+  destStackerId: String
+  error: String
+  estimatedTimeRemainingMs: BigInt
+  history: [VolumeInstanceReplicationProgress!]!
+  nbSnapshots: Int!
+  offlineBytesTransferred: BigInt!
+  offlineTotalBytes: BigInt!
+  onlineBytesTransferred: BigInt!
+  onlineTotalBytes: BigInt!
+  percentComplete: Float!
+  snapshotsSizes: [BigInt!]!
+  srcExternalId: String!
+  srcRegion: String
+  srcStackerId: String
+  status: ReplicateVolumeInstanceStatus!
+  transferRateMbps: Float
+}
+
+type VolumeSnapshotReplicationProgressUpdate {
+  bytesTransferred: BigInt!
+  compressedBytesTransferred: BigInt!
+  compressedTransferRateMbps: Float
+  elapsedMs: Int!
+  error: String
+  estimatedTimeRemainingMs: BigInt
+  index: Int!
+  percentComplete: Float!
+  startedAt: DateTime
+  status: ReplicateVolumeInstanceSnapshotStatus!
+  totalBytes: BigInt!
+  transferRateMbps: Float
+}
+
+enum VolumeState {
+  DELETED
+  DELETING
+  ERROR
+  MIGRATING
+  MIGRATION_PENDING
+  READY
+  RESTORING
+  UPDATING
+}
+
+input VolumeUpdateInput {
+  name: String
+}
+
+type VolumeVolumeInstancesConnection {
+  edges: [VolumeVolumeInstancesConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type VolumeVolumeInstancesConnectionEdge {
+  cursor: String!
+  node: VolumeInstance!
+}
+
+enum WithdrawalPlatformTypes {
+  BMAC
+  GITHUB
+  PAYPAL
+  STRIPE_CONNECT
+}
+
+type WorkflowId {
+  workflowId: String
+}
+
+type WorkflowResult {
+  error: String
+  status: WorkflowStatus!
+}
+
+enum WorkflowStatus {
+  Complete
+  Error
+  NotFound
+  Running
+}
+
+type Workspace implements Node {
+  adoptionHistory: [AdoptionInfo!]!
+  adoptionLevel: Float!
+  allowDeprecatedRegions: Boolean @deprecated(reason: "Deprecated regions are no longer supported.")
+  apiTokenRateLimit: ApiTokenRateLimit
+  avatar: String
+  banReason: String @deprecated(reason: "Use `workspace.restriction` and check for an active BAN restriction. This field will be removed after the WorkspaceRestriction migration completes.")
+  createdAt: DateTime!
+  customer: Customer!
+  discordRole: String
+  has2FAEnforcement: Boolean!
+  hasAutomaticDiagnosis: Boolean!
+  hasGuardrailsAccess: Boolean!
+  hasHipaaBAA: Boolean!
+  hasSAML: Boolean!
+  id: ID!
+  identityProviders(after: String, before: String, first: Int, last: Int): WorkspaceIdentityProvidersConnection!
+  members: [WorkspaceMember!]!
+  name: String!
+  partnerProfile: PartnerProfile
+  plan: Plan!
+  preferredRegion: String
+  projectCount(includeDeleted: Boolean): Int!
+  projects(after: String, before: String, first: Int, last: Int): WorkspaceProjectsConnection!
+  redactedDueTo2FAPending: Boolean!
+  referredUsers: [ReferralUser!]!
+  slackChannelId: String
+  subscriptionModel: SubscriptionModel! @deprecated(reason: "Use plan field instead")
+  subscriptionPlanLimit: SubscriptionPlanLimit
+  supportTierOverride: SupportTierOverride
+  team: Team @deprecated(reason: "Teams are being removed from the system, don't use it")
+  updatedAt: DateTime!
+  usersWithout2FA: [String!]!
+}
+
+type WorkspaceIdPConnection {
+  createdAt: DateTime
+  provider: String
+  status: WorkspaceIdPConnectionStatus!
+  updatedAt: DateTime
+}
+
+enum WorkspaceIdPConnectionStatus {
+  ACTIVE
+  DRAFT
+  INACTIVE
+  PENDING
+  VALIDATING
+}
+
+type WorkspaceIdentityProvider implements Node {
+  connection: WorkspaceIdPConnection!
+  createdAt: DateTime!
+  enforcementEnabledAt: DateTime
+  id: ID!
+  updatedAt: DateTime!
+  workspace: Workspace!
+  workspaceId: String!
+}
+
+type WorkspaceIdentityProvidersConnection {
+  edges: [WorkspaceIdentityProvidersConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type WorkspaceIdentityProvidersConnectionEdge {
+  cursor: String!
+  node: WorkspaceIdentityProvider!
+}
+
+input WorkspaceInviteCodeCreateInput {
+  role: String!
+}
+
+type WorkspaceMember {
+  avatar: String
+  email: String!
+  featureFlags: [ActiveFeatureFlag!]
+  id: String!
+  name: String
+  role: TeamRole!
+  twoFactorAuthEnabled: Boolean
+}
+
+input WorkspacePermissionChangeInput {
+  role: TeamRole!
+  userId: String!
+  workspaceId: String!
+}
+
+type WorkspacePolicy implements Node {
+  deploySourceAllowlist(after: String, before: String, first: Int, last: Int): WorkspacePolicyDeploySourceAllowlistConnection!
+  id: ID!
+  restrictDeploysToAllowedSources: Boolean!
+  restrictPublicTcpProxies: Boolean!
+  restrictRailwayDomainGeneration: Boolean!
+}
+
+type WorkspacePolicyDeploySourceAllowlist implements Node {
+  addedBy: User
+  createdAt: DateTime!
+  id: ID!
+  sourceIcon: String
+  sourceId: String!
+  sourceName: String!
+  sourceType: WorkspacePolicyDeploySourceType!
+}
+
+type WorkspacePolicyDeploySourceAllowlistConnection {
+  edges: [WorkspacePolicyDeploySourceAllowlistConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type WorkspacePolicyDeploySourceAllowlistConnectionEdge {
+  cursor: String!
+  node: WorkspacePolicyDeploySourceAllowlist!
+}
+
+enum WorkspacePolicyDeploySourceType {
+  GITHUB_ORG
+}
+
+input WorkspacePolicyItemUpdateInput {
+  enabled: Boolean!
+  policy: WorkspacePolicyName!
+}
+
+enum WorkspacePolicyName {
+  RESTRICT_DEPLOYS_TO_ALLOWED_SOURCES
+  RESTRICT_PUBLIC_TCP_PROXIES
+  RESTRICT_RAILWAY_DOMAIN_GENERATION
+}
+
+type WorkspacePolicySelectableDeploySource {
+  sourceIcon: String
+  sourceId: String!
+  sourceName: String!
+  sourceType: WorkspacePolicyDeploySourceType!
+}
+
+type WorkspaceProjectsConnection {
+  edges: [WorkspaceProjectsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type WorkspaceProjectsConnectionEdge {
+  cursor: String!
+  node: Project!
+}
+
+input WorkspaceTrustedDomainCreateInput {
+  domainName: String!
+  role: String!
+  workspaceId: String!
+}
+
+input WorkspaceTrustedDomainUpdateInput {
+  id: String!
+  role: String!
+}
+
+input WorkspaceUpdateInput {
+  avatar: String
+  name: String
+  preferredRegion: String
+}
+
+input WorkspaceUserInviteInput {
+  code: String!
+  email: String!
+}
+
+input WorkspaceUserRemoveInput {
+  userId: String!
+}
+
+input customerTogglePayoutsToCreditsInput {
+  isWithdrawingToCredits: Boolean!
+}

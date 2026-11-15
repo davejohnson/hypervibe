@@ -1,6 +1,7 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type { Component, ComponentType } from '../entities/component.entity.js';
+import type { EnvironmentTaskOptions } from './hosting.port.js';
 
 export interface Receipt {
   success: boolean;
@@ -17,6 +18,25 @@ export interface DeploymentMutationOptions {
    * against the currently deployed image.
    */
   deferDeployment?: boolean;
+  /** Secret-only maintenance authority. Requires deferDeployment and
+   * supportsDeferredSecretUpdates; forbid target discovery/adoption, resource
+   * creation, unrelated configuration changes and workload restarts. */
+  requireDeferredSecretUpdate?: boolean;
+  /** Reviewed credential-only update of an exact bound workload. Native
+   * configuration rollout effects must be declared in the reviewed plan. */
+  requireCredentialUpdate?: boolean;
+  /** Reviewed identity-only stage: create an app namespace, not its workload. */
+  deferWorkload?: boolean;
+  /** Creation-only admission, distinct from ordinary deferred reconfiguration.
+   * Requires supportsCreateOnlyDeploy and deferDeployment. The provider must
+   * reject an existing workload before any environment/configuration write. */
+  requireNewWorkload?: boolean;
+  /** Exact acknowledged filesystem, provisioned by a separate volume action. */
+  serviceVolume?: {
+    externalId: string;
+    mountPath: string;
+    target: import('./service-volume.port.js').ServiceVolumeTarget;
+  };
 
   /** Exact commit authorized for a provider-built first managed-CI release. */
   expectedSourceCommitSha?: string;
@@ -38,6 +58,20 @@ export type HostingServiceDeleteScope = Readonly<
 export interface HostingServiceDeleteOptions {
   /** False requires an observation-only idempotency check and forbids mutation. */
   allowMutation: boolean;
+}
+
+/** Non-secret provider-proven workload principal; never a deployment credential. */
+export interface ProviderRuntimeIdentity {
+  provider: string;
+  principal: string;
+  scope: Record<string, string>;
+  source: 'observed' | 'configured';
+}
+
+export interface ScheduleActivationOptions {
+  expectedImage: string;
+  expectedJobUid: string;
+  sourceCommitSha: string;
 }
 
 /** Non-secret desired hosting placement selected by the spec, not credentials. */
@@ -85,6 +119,19 @@ export interface ProviderCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+  /** Selected-key writes to exact bound services without creates or workload restarts. */
+  supportsDeferredSecretUpdates?: boolean;
+  /** Native activation behavior of the exact selected-key credential writer. */
+  credentialUpdateActivation?: 'deferred' | 'provider-rollout';
+  /** Readback equality and write acknowledgement are distinct evidence. */
+  credentialValueEvidence?: 'readback' | 'acknowledgement';
+  /** Platforms that consume native registry identity or build inputs have no runtime password-copy destination. */
+  registryCredentialModel?: 'native-workload-identity' | 'build-input';
+  registryCredentialGuidance?: string;
+  /** Enforces creation-only admission at the final provider mutation boundary. */
+  supportsCreateOnlyDeploy?: boolean;
+  /** Prepare an untriggered cron workload, then activate only its verified release. */
+  supportsDeferredCronActivation?: boolean;
 
   /** Whether bounded operations can temporarily expose an internal database. */
   supportsTemporaryDatabaseAccess?: boolean;
@@ -107,6 +154,10 @@ export interface DeployResult {
 }
 
 export interface JobResult {
+  /** False proves execution stopped before provider mutation; omission is unknown. */
+  mutationAttempted?: boolean;
+  /** Closed, value-free recovery failure evidence; never raw provider output. */
+  diagnostic?: import('./recovery-diagnostics.port.js').RecoveryDiagnostic;
   jobId: string;
   status: 'running' | 'completed' | 'failed' | 'timeout';
   /** Log tail from the task container. */
@@ -147,7 +198,10 @@ export interface VerifyResult {
   warning?: string;
 }
 
+/** Authentication, inspection and operational access do not imply infrastructure ownership. */
 export interface IProviderAdapter {
+  readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
+  readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
   /** Platform capabilities - describes what features this provider supports */
@@ -160,35 +214,17 @@ export interface IProviderAdapter {
   /** Configure non-secret desired placement before observation or mutation. */
   configureTarget?(target: HostingTargetOptions): void | Promise<void>;
 
-  ensureProject(
-    projectName: string,
-    environment: Environment
-  ): Promise<Receipt>;
+  /** Read the exact workload identity; configured is allowed only after confirmed absence. */
+  resolveRuntimeIdentity?(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity>;
+
+  /** Grants exact Job invocation and creates its trigger after fresh workload/UID/image verification. */
+  activateSchedule?(service: Service, environment: Environment, options: ScheduleActivationOptions): Promise<DeployResult>;
 
   /**
    * Ensure a distinct provider environment exists inside an already-bound
    * provider project. This method must never create or replace the project.
    */
   ensureEnvironment?(environment: Environment): Promise<Receipt>;
-
-  ensureComponent(
-    type: ComponentType,
-    environment: Environment
-  ): Promise<ComponentResult>;
-
-  deploy(
-    service: Service,
-    environment: Environment,
-    envVars: Record<string, string>,
-    options?: DeploymentMutationOptions
-  ): Promise<DeployResult>;
-
-  setEnvVars(
-    environment: Environment,
-    service: Service,
-    vars: Record<string, string>,
-    options?: DeploymentMutationOptions
-  ): Promise<Receipt>;
 
   /** Delete only explicitly retired environment variable names. */
   deleteEnvVars?(
@@ -201,7 +237,7 @@ export interface IProviderAdapter {
    * Disconnect a provider-native repository source so pushes cannot bypass
    * manual promotion or a Hypervibe-owned CI deployment workflow.
    */
-  disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
+  disconnectDeploySource?(params: { serviceId: string; projectId?: string; environmentId?: string }): Promise<Receipt>;
 
   getDeployStatus?(
     environment: Environment,
@@ -216,7 +252,8 @@ export interface IProviderAdapter {
   runJob?(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult>;
 
   /**
@@ -260,5 +297,13 @@ export interface IProviderAdapter {
    * Read back live state for an environment (services, config, env var
    * hashes, databases). Implemented when capabilities.supportsObserve is true.
    */
-  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
+  observe?(environment: Environment, context?: import('./observe.port.js').HostingObservationContext): Promise<import('./observe.port.js').ObservedState>;
+}
+
+/** The retained imperative lifecycle, used by Railway. New cloud lifecycle belongs to OpenTofu. */
+export interface IProviderLifecycleAdapter extends IProviderAdapter {
+  ensureProject(projectName: string, environment: Environment): Promise<Receipt>;
+  ensureComponent(type: ComponentType, environment: Environment): Promise<ComponentResult>;
+  deploy(service: Service, environment: Environment, envVars: Record<string, string>, options?: DeploymentMutationOptions): Promise<DeployResult>;
+  setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options?: DeploymentMutationOptions): Promise<Receipt>;
 }

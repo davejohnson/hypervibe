@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { buildGcpBootstrapConfiguration } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { hasGcpProjectSetup, runGcpProjectSetup } from './gcp-project-setup.service.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import {
@@ -25,6 +27,7 @@ import {
   getDefaultAdminAccessToken,
   isMissingDefaultCredentialsError,
   runCloudPrepare,
+  verifyAndRecordBootstrapPreparation,
 } from './cloud-prepare.execute.js';
 
 export {
@@ -47,15 +50,10 @@ type BootstrapStepState = 'not-started' | 'created' | 'reused';
 
 export type GcpBootstrapClientPort = Pick<GcpBootstrapClient,
   | 'getProject'
-  | 'createProject'
-  | 'waitForProjectOperation'
   | 'listOpenBillingAccounts'
   | 'getProjectBillingInfo'
-  | 'updateProjectBillingInfo'
   | 'getServiceState'
-  | 'enableService'
   | 'getServiceAccount'
-  | 'createServiceAccount'
   | 'createServiceAccountKey'
   | 'getServiceAccountKey'
   | 'deleteServiceAccountKey'
@@ -72,6 +70,8 @@ export interface GcpBootstrapDependencies {
   getDefaultAdminAccessToken: () => Promise<string>;
   createClient: (accessToken: string) => GcpBootstrapClientPort;
   prepareCloud: typeof runCloudPrepare;
+  setupProject: typeof runGcpProjectSetup;
+  verifyPreparation: typeof verifyAndRecordBootstrapPreparation;
   verifyProvider: (
     provider: BootstrapProvider,
     credentials: Record<string, unknown>
@@ -133,6 +133,8 @@ const defaultDependencies: GcpBootstrapDependencies = {
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   }),
   prepareCloud: runCloudPrepare,
+  setupProject: runGcpProjectSetup,
+  verifyPreparation: verifyAndRecordBootstrapPreparation,
   verifyProvider: verifyProviderConnection,
 };
 
@@ -146,6 +148,7 @@ export async function runGcpBootstrap(
     gcpProjectId?: string;
     scope?: string;
     billingAccountName?: string;
+    region?: string;
     confirm?: boolean;
   },
   dependencyOverrides: Partial<GcpBootstrapDependencies> = {}
@@ -231,6 +234,26 @@ export async function runGcpBootstrap(
       runtimeServiceAccountEmail
     );
 
+    let infrastructure: Awaited<ReturnType<typeof runGcpProjectSetup>> | undefined;
+    if (params.billingAccountName) {
+      if (!observation.billingAccounts.some((account) => account.open && account.name === params.billingAccountName!.trim())) {
+        throw new Error('The selected billingAccountName is not an open billing account visible to Application Default Credentials.');
+      }
+      if (observation.project && !hasGcpProjectSetup(params.project.id, projectId.value)) {
+        throw new Error('This existing Google project is not owned by the project setup state. Hypervibe will not adopt it or replace its resources through bootstrap.');
+      }
+      if (observation.project) assertActiveProject(observation.project, projectId.value);
+      if (observation.serviceAccount) assertActiveServiceAccount(observation.serviceAccount, projectId.value, serviceAccountEmail);
+      if (observation.runtimeServiceAccount) assertActiveServiceAccount(observation.runtimeServiceAccount, projectId.value, runtimeServiceAccountEmail);
+      const configuration = buildGcpBootstrapConfiguration({ projectId: projectId.value,
+        billingAccountName: params.billingAccountName.trim(), deployServiceAccountEmail: serviceAccountEmail,
+        runtimeServiceAccountEmail, region: params.region });
+      infrastructure = await dependencies.setupProject({ projectId: params.project.id, gcpProjectId: projectId.value,
+        auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: accessToken, GOOGLE_PROJECT: projectId.value }, redact: [accessToken] },
+        contribution: { id: 'bootstrap', configuration }, confirm: mode === 'confirm' });
+      if (!infrastructure.success) throw new Error(infrastructure.error ?? 'Google project setup did not converge.');
+    }
+
     if (mode === 'preview') {
       const result: GcpBootstrapResult = {
         success: true,
@@ -245,6 +268,7 @@ export async function runGcpBootstrap(
             ...(displayName ? { displayName } : {}),
           })),
         plannedSteps: plannedBootstrapSteps(observation),
+        ...(infrastructure ? { planId: infrastructure.planId, actions: infrastructure.actions } : { needsBillingSelection: true }),
         requiresConfirmation: true,
       };
       recordBootstrapAudit(params.project, 'gcp.bootstrap.previewed', {
@@ -266,108 +290,24 @@ export async function runGcpBootstrap(
       throw new Error('The selected billingAccountName is not an open billing account visible to Application Default Credentials.');
     }
 
-    let serviceAccount = observation.serviceAccount;
-    let runtimeServiceAccount = observation.runtimeServiceAccount;
-    if (observation.project !== null) {
-      assertActiveProject(observation.project, projectId.value);
-    }
-    if (serviceAccount !== null && serviceAccount !== undefined) {
-      assertActiveServiceAccount(serviceAccount, projectId.value, serviceAccountEmail);
-    }
-    if (runtimeServiceAccount !== null && runtimeServiceAccount !== undefined) {
-      assertActiveServiceAccount(
-        runtimeServiceAccount,
-        projectId.value,
-        runtimeServiceAccountEmail
-      );
-    }
-
-    if (observation.project === null) {
-      const operation = await client.createProject({
-        projectId: projectId.value,
-        displayName: 'Hypervibe',
-      });
-      const created = await client.waitForProjectOperation(operation.name, {
-        projectId: projectId.value,
-      });
-      assertActiveProject(created, projectId.value);
-      progress.project = 'created';
-    } else {
-      progress.project = 'reused';
-    }
-
-    let iamPrepared = false;
-    if (observation.project !== null && observation.iamServiceState !== 'ENABLED') {
-      const status = await client.enableService(projectId.value, GCP_IAM_SERVICE);
-      progress.iamService = status === 'already_enabled' ? 'already-enabled' : 'enabled';
-      iamPrepared = true;
-      [serviceAccount, runtimeServiceAccount] = await Promise.all([
-        client.getServiceAccount(projectId.value, GCP_BOOTSTRAP_ACCOUNT_ID),
-        client.getServiceAccount(projectId.value, GCP_BOOTSTRAP_RUNTIME_ACCOUNT_ID),
-      ]);
-      if (serviceAccount !== null) {
-        assertActiveServiceAccount(serviceAccount, projectId.value, serviceAccountEmail);
-      }
-      if (runtimeServiceAccount !== null) {
-        assertActiveServiceAccount(
-          runtimeServiceAccount,
-          projectId.value,
-          runtimeServiceAccountEmail
-        );
-      }
-    }
-
-    if (observation.billing?.billingEnabled === true
-      && observation.billing.billingAccountName === billingAccountName) {
-      progress.billing = 'already-linked';
-    } else {
-      const linked = await client.updateProjectBillingInfo(projectId.value, billingAccountName);
-      if (linked.projectId !== projectId.value
-        || linked.billingAccountName !== billingAccountName
-        || linked.billingEnabled !== true) {
-        throw new Error('GCP returned a different project billing identity after linking.');
-      }
-      progress.billing = 'linked';
-    }
-
-    if (observation.project === null) {
-      const status = await client.enableService(projectId.value, GCP_IAM_SERVICE);
-      progress.iamService = status === 'already_enabled' ? 'already-enabled' : 'enabled';
-      iamPrepared = true;
-    }
-    if (!iamPrepared) {
-      progress.iamService = 'not-needed';
-    }
-
-    if (serviceAccount === undefined || runtimeServiceAccount === undefined) {
-      throw new Error('GCP bootstrap could not verify fixed identity state after enabling IAM.');
-    }
-
-    if (serviceAccount === null) {
-      const created = await client.createServiceAccount({
-        projectId: projectId.value,
-        accountId: GCP_BOOTSTRAP_ACCOUNT_ID,
-        displayName: 'Hypervibe deploy',
-        description: 'Repository-scoped deployment identity managed by Hypervibe.',
-      });
-      assertActiveServiceAccount(created, projectId.value, serviceAccountEmail);
-      progress.serviceAccount = 'created';
-    } else {
-      progress.serviceAccount = 'reused';
-    }
-
-    if (runtimeServiceAccount === null) {
-      const created = await client.createServiceAccount({
-        projectId: projectId.value,
-        accountId: GCP_BOOTSTRAP_RUNTIME_ACCOUNT_ID,
-        displayName: 'Hypervibe runtime',
-        description: 'Least-privilege workload identity managed by Hypervibe.',
-      });
-      assertActiveServiceAccount(created, projectId.value, runtimeServiceAccountEmail);
-      progress.runtimeServiceAccount = 'created';
-    } else {
-      progress.runtimeServiceAccount = 'reused';
-    }
+    if (!infrastructure?.success) throw new Error('Preview the exact Google project setup with a billing account before confirming.');
+    const [verifiedProject, verifiedBilling, serviceAccount, runtimeServiceAccount] = await Promise.all([
+      client.getProject(projectId.value), client.getProjectBillingInfo(projectId.value),
+      client.getServiceAccount(projectId.value, GCP_BOOTSTRAP_ACCOUNT_ID),
+      client.getServiceAccount(projectId.value, GCP_BOOTSTRAP_RUNTIME_ACCOUNT_ID),
+    ]);
+    if (!verifiedProject || !serviceAccount || !runtimeServiceAccount) throw new Error('Google project setup identities could not be verified after OpenTofu apply.');
+    assertActiveProject(verifiedProject, projectId.value);
+    assertActiveServiceAccount(serviceAccount, projectId.value, serviceAccountEmail);
+    assertActiveServiceAccount(runtimeServiceAccount, projectId.value, runtimeServiceAccountEmail);
+    if (verifiedBilling?.billingAccountName !== billingAccountName || !verifiedBilling.billingEnabled) throw new Error('Google project billing did not converge after OpenTofu apply.');
+    progress.project = observation.project ? 'reused' : 'created';
+    progress.billing = observation.billing?.billingAccountName === billingAccountName ? 'already-linked' : 'linked';
+    progress.iamService = observation.iamServiceState === 'ENABLED' ? 'already-enabled' : 'enabled';
+    progress.serviceAccount = observation.serviceAccount ? 'reused' : 'created';
+    progress.runtimeServiceAccount = observation.runtimeServiceAccount ? 'reused' : 'created';
+    await dependencies.verifyPreparation(params.project, accessToken, projectId.value, serviceAccountEmail, runtimeServiceAccountEmail, params.region);
+    progress.cloudPreparation = 'succeeded';
 
     let credentialJson: string;
     if (observation.reusableCredential) {
@@ -401,24 +341,6 @@ export async function runGcpBootstrap(
       );
       progress.credential = 'created';
     }
-
-    const prepared = await dependencies.prepareCloud({
-      project: params.project,
-      provider: 'cloudrun',
-      gcpProjectId: projectId.value,
-      deployServiceAccountEmail: serviceAccountEmail,
-      runtimeServiceAccountEmail,
-      adminAccessToken: accessToken,
-      adminCredentialSource: 'application-default',
-      confirm: true,
-    });
-    if (!prepared.success) {
-      progress.cloudPreparation = 'failed';
-      throw new Error(typeof prepared.error === 'string'
-        ? prepared.error
-        : 'GCP cloud preparation failed.');
-    }
-    progress.cloudPreparation = 'succeeded';
 
     const rawCredentials: Record<BootstrapProvider, Record<string, unknown>> = {
       cloudrun: {

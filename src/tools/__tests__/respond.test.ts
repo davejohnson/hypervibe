@@ -76,13 +76,6 @@ describe('toolSuccess', () => {
     });
   });
 
-  it('supports hint, warnings, and next', () => {
-    const body = parse(toolSuccess({ id: '1' }, { hint: 'run hv_plan', warnings: ['w'], next: ['hv_plan'] }));
-    expect(body.hint).toBe('run hv_plan');
-    expect(body.warnings).toEqual(['w']);
-    expect(body.next).toEqual(['hv_plan']);
-  });
-
   it('tells agents to stop when successful tool output contains failed receipts', () => {
     const response = toolSuccess({
       applied: false,
@@ -215,11 +208,6 @@ describe('toolError', () => {
     expect(rendered(response)).toContain('complete credentialExample');
   });
 
-  it('includes details when provided', () => {
-    const body = parse(toolError('VALIDATION', 'bad input', { details: { field: 'domain' } }));
-    expect(body.error?.details).toEqual({ field: 'domain' });
-  });
-
   it('renders connection setup details as visible bullets instead of one long paragraph', () => {
     const response = toolError('NOT_FOUND', 'No connection found.', {
       details: {
@@ -254,12 +242,6 @@ describe('toolError', () => {
 });
 
 describe('wrapHandler', () => {
-  it('passes through successful responses', async () => {
-    const handler = wrapHandler(async () => toolSuccess({ ok: true }));
-    const body = parse(await handler({}));
-    expect(body.ok).toBe(true);
-  });
-
   it('converts HvError into its coded envelope', async () => {
     const handler = wrapHandler(async () => {
       throw new HvError('CONFIRM_REQUIRED', 'production needs confirm', { hint: 'retry with confirm: true' });

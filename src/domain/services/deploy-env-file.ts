@@ -4,6 +4,7 @@ import { parseEnvFile } from '../../utils/env-parser.js';
 import { findRepoRoot } from '../spec/repo-spec-file.js';
 import { ensureRepoEnvFilesIgnored } from '../spec/repo-env-file.js';
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
+import { isReservedRuntimeEnvKey } from './runtime-env-policy.js';
 
 export interface DeployEnvFileResult {
   path: string;
@@ -32,6 +33,8 @@ interface DeployEnvSyncPolicy {
   excludedKeys: Set<string>;
 }
 
+// Management credentials stay out of app runtime imports even when Hypervibe
+// has no integration for the service that issued them.
 const PROVIDER_ONLY_EXACT_KEYS = new Set([
   'AWS_ACCESS_KEY_ID',
   'AWS_PROFILE',
@@ -85,7 +88,6 @@ const PROVIDER_ONLY_EXACT_KEYS = new Set([
 ]);
 
 const PROVIDER_ONLY_PREFIXES = [
-  'HYPERVIBE_',
   'RAILWAY_',
 ];
 
@@ -130,7 +132,7 @@ function isValidEnvKey(key: string): boolean {
 }
 
 export function isProviderOnlyDeployEnvKey(key: string): boolean {
-  return PROVIDER_ONLY_EXACT_KEYS.has(key)
+  return isReservedRuntimeEnvKey(key) || PROVIDER_ONLY_EXACT_KEYS.has(key)
     || PROVIDER_ONLY_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 

@@ -6,15 +6,16 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
+import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'
   | 'cache'
   | 'storage'
   | 'queue'
-  | 'load-balancer';
+  | 'dns';
 export type ProviderImplementationStatus = 'supported' | 'ready-for-live' | 'planned';
 
 export interface ProviderLiveEvidence {
@@ -129,10 +130,11 @@ export const standardDatabaseRuntimeProjection: ProviderDatabaseRuntimeProjectio
 };
 
 function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
-  let current = schema;
+  let current: z.core.$ZodType = schema;
   while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      // Refinements and brands retain their schema in v4; transforms use pipes.
+      current = current.in instanceof z.ZodTransform ? current.out : current.in;
       continue;
     }
     if (
@@ -140,12 +142,10 @@ function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
       || current instanceof z.ZodCatch
+      || current instanceof z.ZodPrefault
+      || current instanceof z.ZodReadonly
     ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
+      current = current.unwrap();
       continue;
     }
     break;
@@ -163,6 +163,10 @@ export interface ProviderMetadata {
   setupHelpUrl?: string;
   credentials?: {
     defaultScalarKey?: string;
+    /** Explicit control-plane credential mapping for managed automation; not a deploy capability. */
+    automationSecretKeys?: Record<string, string>;
+    /** Exact hosted monitoring credential role compatible with a saved local connection. */
+    hostedMonitoring?: { credentialKind: string; credentialKey: string; scope: 'project' };
     /** Credential values supplied by an opinionated Hypervibe workflow, not user-facing forms. */
     agentManagedKeys?: string[];
     /** The adapter can authenticate through the provider's native local CLI/default chain. */
@@ -185,22 +189,56 @@ export interface ProviderMetadata {
   };
   /** Existing provider connections whose authentication shape this adapter can reuse. */
   connectionAliases?: string[];
+  /** Versioned provider-owned runtime projection; changes require reviewed per-consumer rewiring. */
+  storageRuntimeContract?: string;
   maturity?: {
     /** Evidence status for each lifecycle slice implemented by this registration. */
     lifecycle?: Partial<Record<ProviderLifecycleCapability, ProviderCapabilityMaturity>>;
   };
   orchestration?: ProviderOrchestrationMetadata;
   lifecycle?: {
+    /** DNS records are managed independently from cloud infrastructure hosting. */
+    dns?: { engine: 'opentofu'; records: readonly ('A' | 'AAAA' | 'CNAME' | 'TXT' | 'CAA' | 'MX')[] };
     /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
     hosting?: {
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
       workloadKinds: readonly WorkloadKind[];
+      /** Explicit, retain-only filesystem mounts; never implicit service provisioning. */
+      serviceVolumes?: {
+        workloadKinds: readonly WorkloadKind[];
+        retention: 'retain-only';
+        /** Workload-create mounts bind storage before first workload creation, never by implicit replacement. */
+        attachmentTiming?: 'service-update' | 'workload-create';
+      };
+      /** Native product limitation, distinct from an unimplemented Hypervibe capability. */
+      serviceVolumesUnsupported?: { reason: string; documentationUrl: string };
       /** Environment custom domains are either fully managed or explicitly unsupported. */
       customDomains: 'managed' | 'unsupported';
       /** Whether traffic DNS may be proxied or must remain directly resolvable. */
       domainTrafficProxy?: 'supported' | 'dns-only';
       /** Provider-owned direct-origin and background-workload suspension. */
       maintenance?: 'managed' | 'unsupported';
+      /** Named CI tasks with provider-resolved variables; live evidence remains separate. */
+      environmentTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+      };
+      /** A separate immutable recovery helper with exact private source references. */
+      recoveryTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+        /** Native database references the private helper can actually resolve. */
+        databaseProviders: readonly string[];
+      };
+      /** Fresh-generation SQL verification and reviewed schema bootstrap only. */
+      databaseInitializationTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+        databaseProviders: readonly string[];
+      };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';
     };
@@ -230,13 +268,16 @@ export interface ProviderMetadata {
       /** Whether the provider owns external queue resources or only wiring. */
       resources: 'managed' | 'application-managed';
     };
-    /** Provider-managed edge load-balancer topology exposed by its adapter. */
-    loadBalancer?: {
-      topology: 'monitor-pool-balancer';
-      minimumOrigins: number;
-    };
+    /**
+     * Complete daily policy observation/configuration ports implemented by the adapter.
+     * Omitted flags mean unimplemented Hypervibe capability, not missing native backups.
+     * Policy support never certifies a recovery point or a tested restore.
+     */
+    dailyBackups?: { database?: true; volume?: true; storage?: true };
     /** Declarative database resilience features implemented by the adapter. */
     databaseResilience?: {
+      /** Named one-use provider snapshots with durable uncertain-write recovery. */
+      checkpoints?: boolean;
       availabilityModes?: Array<'zonal' | 'regional'>;
       backups?: {
         maxRetainedBackups: number;
@@ -301,13 +342,29 @@ export interface ProviderOrchestrationMetadata {
   };
 }
 
+export interface ProviderCredentialUpdateCapability {
+  /** Existing private fields to scrub; public identity metadata is not secret material. */
+  secretKeys: readonly string[];
+  /** Recognize a narrow secondary-role payload; primary payloads retain replacement semantics. */
+  matches(supplied: Record<string, unknown>): boolean;
+  /** Read-only verification and private merge. Called only for a verified exact-scope connection. */
+  prepare(input: { existing: Record<string, unknown>; supplied: Record<string, unknown>; scope: string | null }): Promise<
+    | { success: true; credentials: Record<string, unknown>; credentialKeys: string[]; message: string }
+    | { success: false; error: string }
+  >;
+}
+
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
+  /** Optional narrow update which preserves an existing primary credential. */
+  credentialUpdate?: ProviderCredentialUpdateCapability;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
   inspection?: ProviderInspectionCapability;
+  /** Bounded, exact-scope observation without local CLI state or provider mutations. */
+  hostedObservation?: HostedObservationCapability;
   /** Provider-owned deletion driver for explicitly retained non-lifecycle resources. */
   retainedCleanup?: ProviderRetainedCleanupCapability;
   /** Provider-owned projection from database bindings to workload runtime variables. */
@@ -318,7 +375,7 @@ export interface RegisteredProvider {
   };
   /** Provider-owned adapters derived from the connected primary adapter. */
   derivedAdapters?: {
-    database?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
+    database?: (adapter: unknown, context: { project?: Project; environment?: Environment }) => Promise<unknown> | unknown;
     cache?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
     storage?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
   };
@@ -398,7 +455,7 @@ export class ProviderRegistry {
         `Provider "${provider.metadata.name}" declares database lifecycle support without a database runtime projection.`
       );
     }
-    if (!supportsDatabase && provider.databaseRuntime) {
+    if (!supportsDatabase && provider.databaseRuntime && provider.metadata.category !== 'database') {
       throw new Error(
         `Provider "${provider.metadata.name}" declares a database runtime projection without a database lifecycle.`
       );
@@ -407,6 +464,7 @@ export class ProviderRegistry {
 
   private declaredLifecycleCapabilities(provider: RegisteredProvider): ProviderLifecycleCapability[] {
     const capabilities: ProviderLifecycleCapability[] = [];
+    if (provider.metadata.lifecycle?.dns) capabilities.push('dns');
     if (
       provider.metadata.category === 'deployment'
       && provider.metadata.lifecycle?.hosting !== undefined
@@ -440,9 +498,6 @@ export class ProviderRegistry {
     if (provider.metadata.lifecycle?.queue) {
       capabilities.push('queue');
     }
-    if (provider.metadata.lifecycle?.loadBalancer) {
-      capabilities.push('load-balancer');
-    }
     return capabilities;
   }
 
@@ -462,6 +517,25 @@ export class ProviderRegistry {
         throw new Error(
           `Provider "${provider.metadata.name}" hosting workloadKinds must contain one or more unique supported workload kinds.`
         );
+      }
+      const volumes = hostingLifecycle.serviceVolumes;
+      const unsupportedVolumes = hostingLifecycle.serviceVolumesUnsupported;
+      if (volumes !== undefined && unsupportedVolumes !== undefined) {
+        throw new Error(`Provider "${provider.metadata.name}" serviceVolumes and serviceVolumesUnsupported are mutually exclusive.`);
+      }
+      if (volumes !== undefined && (!volumes || volumes.retention !== 'retain-only'
+        || (volumes.attachmentTiming !== undefined && !['service-update', 'workload-create'].includes(volumes.attachmentTiming))
+        || !Array.isArray(volumes.workloadKinds) || volumes.workloadKinds.length === 0
+        || new Set(volumes.workloadKinds).size !== volumes.workloadKinds.length
+        || volumes.workloadKinds.some((kind) => !workloadKinds.includes(kind)))) {
+        throw new Error(`Provider "${provider.metadata.name}" serviceVolumes must declare retain-only storage for unique implemented hosting workload kinds.`);
+      }
+      if (unsupportedVolumes !== undefined) {
+        const documentation = z.string().url().safeParse(unsupportedVolumes?.documentationUrl);
+        if (!unsupportedVolumes || typeof unsupportedVolumes.reason !== 'string' || !unsupportedVolumes.reason.trim()
+          || !documentation.success || new URL(documentation.data).protocol !== 'https:') {
+          throw new Error(`Provider "${provider.metadata.name}" serviceVolumesUnsupported must declare a non-empty reason and an HTTPS documentation URL.`);
+        }
       }
     }
     const connectivity = [
@@ -513,7 +587,7 @@ export class ProviderRegistry {
       }
     }
     for (const capability of Object.keys(maturity) as ProviderLifecycleCapability[]) {
-      if (!declared.has(capability)) {
+      if (!declared.has(capability) && maturity[capability]?.status !== 'planned') {
         throw new Error(
           `Provider "${provider.metadata.name}" declares ${capability} maturity without an implemented lifecycle capability.`
         );
@@ -744,10 +818,10 @@ export class ProviderRegistry {
       return provider.metadata.category === 'storage'
         || typeof provider.derivedAdapters?.storage === 'function';
     }
-    if (capability === 'queue') {
-      return provider.metadata.lifecycle?.queue !== undefined;
+    if (capability === 'dns') {
+      return provider.metadata.lifecycle?.dns !== undefined;
     }
-    return provider.metadata.lifecycle?.loadBalancer !== undefined;
+    return provider.metadata.lifecycle?.queue !== undefined;
   }
 
   namesFor(capability: ProviderLifecycleCapability): string[] {
@@ -758,12 +832,12 @@ export class ProviderRegistry {
     name: string,
     capability: ProviderLifecycleCapability
   ): ProviderCapabilityMaturity | undefined {
-    if (!this.supports(name, capability)) return undefined;
     return this.providers.get(name)?.metadata.maturity?.lifecycle?.[capability];
   }
 
   /** Planned capabilities remain discoverable/readable but cannot authorize mutation. */
   supportsMutation(name: string, capability: ProviderLifecycleCapability): boolean {
+    if (!this.supports(name, capability)) return false;
     const maturity = this.lifecycleMaturity(name, capability);
     return maturity?.status === 'ready-for-live' || maturity?.status === 'supported';
   }

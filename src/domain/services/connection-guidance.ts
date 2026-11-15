@@ -1,10 +1,15 @@
 import { z } from 'zod';
+import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import { redactSensitiveString } from '../../utils/redact-sensitive-string.js';
 
 const CLOUDFLARE_DNS_TOKEN_PERMISSIONS = [
   { key: 'zone', type: 'read' },
   { key: 'zone_settings', type: 'read' },
   { key: 'dns', type: 'edit' },
   { key: 'account_settings', type: 'read' },
+  // Maintenance pages and migration cutovers run as a Cloudflare Worker on the app's hostname.
+  { key: 'workers_routes', type: 'edit' },
+  { key: 'workers_scripts', type: 'edit' },
 ];
 const CLOUDFLARE_DNS_PERMISSION_QUERY = encodeURIComponent(JSON.stringify(CLOUDFLARE_DNS_TOKEN_PERMISSIONS));
 
@@ -28,14 +33,6 @@ export const GITHUB_TOKEN_URLS = {
   railwayAppScope: 'https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope',
 } as const;
 
-/** GitLab documents these query parameters for pre-filled personal tokens. */
-export const GITLAB_TOKEN_URLS = {
-  api: 'https://gitlab.com/-/user_settings/personal_access_tokens?name=Hypervibe&description=Manage+GitLab+repository+and+CI+with+Hypervibe&scopes=api',
-  personalTokenDocs: 'https://docs.gitlab.com/user/profile/personal_access_tokens/',
-  projectTokenDocs: 'https://docs.gitlab.com/user/project/settings/project_access_tokens/',
-  deployTokenDocs: 'https://docs.gitlab.com/user/project/deploy_tokens/',
-} as const;
-
 export interface ConnectionGuidance {
   provider: string;
   displayName: string;
@@ -45,6 +42,15 @@ export interface ConnectionGuidance {
   permissions: string[];
   credentialExample: string;
   notes?: string[];
+}
+
+/** Non-secret context only; repository identity is a label, not an access grant. */
+export interface ConnectionGuidanceContext {
+  scope?: string;
+  project?: string;
+  repositoryUrl?: string;
+  /** Provider-native non-secret account identity, when independently known. */
+  accountId?: string;
 }
 
 export interface ConnectionSetupDetails {
@@ -76,11 +82,12 @@ export interface CredentialFieldDescriptor {
   description?: string;
 }
 
-function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+function unwrapSchema(schema: z.core.$ZodType): z.core.$ZodType {
   let current = schema;
   while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      // Refinements and brands retain their schema in v4; transforms use pipes.
+      current = current.in instanceof z.ZodTransform ? current.out : current.in;
       continue;
     }
     if (
@@ -88,12 +95,10 @@ function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
       || current instanceof z.ZodCatch
+      || current instanceof z.ZodPrefault
+      || current instanceof z.ZodReadonly
     ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
+      current = current.unwrap();
       continue;
     }
     return current;
@@ -127,13 +132,9 @@ function isSensitiveCredentialField(name: string): boolean {
   return /(token|key|secret|password|credential|private|connection(?:url|string))/i.test(name);
 }
 
-function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
+function enumOptions(schema: z.core.$ZodType): string[] | undefined {
   if (schema instanceof z.ZodEnum) {
-    return [...schema.options];
-  }
-  if (schema instanceof z.ZodNativeEnum) {
-    const options = Object.values(schema.enum).filter((value): value is string => typeof value === 'string');
-    return [...new Set(options)];
+    return [...new Set(schema.options.filter((value): value is string => typeof value === 'string'))];
   }
   return undefined;
 }
@@ -154,7 +155,7 @@ export function credentialFieldsFromSchema(
 
   const excluded = new Set(options.exclude ?? []);
   return Object.entries(objectSchema.shape).filter(([name]) => !excluded.has(name)).map(([name, rawField]) => {
-    const field = rawField as z.ZodTypeAny;
+    const field = rawField as z.core.$ZodType;
     const unwrapped = unwrapSchema(field);
     const options = enumOptions(unwrapped);
     const sensitive = isSensitiveCredentialField(name);
@@ -165,12 +166,12 @@ export function credentialFieldsFromSchema(
         : sensitive
           ? 'secret'
           : 'text';
-    const description = field.description ?? unwrapped.description;
+    const description = z.globalRegistry.get(field)?.description ?? z.globalRegistry.get(unwrapped)?.description;
 
     return {
       name,
       label: credentialFieldLabel(name),
-      required: !field.safeParse(undefined).success,
+      required: !z.safeParse(field, undefined).success,
       sensitive,
       inputKind,
       ...(options ? { options } : {}),
@@ -180,14 +181,29 @@ export function credentialFieldsFromSchema(
 }
 
 const GUIDANCE: Record<string, ConnectionGuidance> = {
-  '1password': {
-    provider: '1password',
-    displayName: '1Password',
-    tokenType: '1Password service account token',
-    setupUrl: 'https://www.1password.dev/service-accounts/',
-    permissions: ['Grant the service account access only to the vaults Hypervibe should read.'],
-    credentialExample: 'hv_connections provider="1password" credentialsRef="env:OP_SERVICE_ACCOUNT_TOKEN"',
-    notes: ['The token usually starts with ops_.'],
+  'gcp-dns': {
+    provider: 'gcp-dns', displayName: 'Google Cloud DNS', tokenType: 'A verified Google connection or application default credentials for the exact DNS project',
+    setupUrl: 'https://docs.cloud.google.com/dns/docs/access-control',
+    permissions: ['Read the selected managed zone and its record sets; create and read DNS changes; create, update and delete record sets only in the selected zone. Connection verification also lists managed zones.'],
+    credentialExample: 'hv_connections provider="gcp-dns" action="connect" scope="owner/repository" credentialsRef=".env#HYPERVIBE_GCP_DNS_CREDENTIALS"',
+    notes: ['Prefer an existing verified scoped Google connection. Hypervibe resolves available default credentials privately; no separate OpenTofu or cloud CLI operation is required.',
+      'Select the exact DNS project and managed-zone name in environment.dns. DNS changes require a saved approved OpenTofu plan. Zone creation and DNSSEC changes are unavailable.'],
+  },
+  route53: {
+    provider: 'route53', displayName: 'Amazon Route 53', tokenType: 'An AWS default credential chain or scoped IAM access credentials, including a session token when required',
+    setupUrl: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/access-control-managing-permissions.html',
+    permissions: ['Verify the account with sts:GetCallerIdentity. Allow route53:GetHostedZone, ListResourceRecordSets, GetDNSSEC and ChangeResourceRecordSets for the exact hosted zone, plus GetChange for its changes.'],
+    credentialExample: 'hv_connections provider="route53" action="connect" scope="owner/repository" credentialsRef=".env#HYPERVIBE_ROUTE53_CREDENTIALS"',
+    notes: ['An existing compatible verified AWS connection can be reused after its native account matches. Hosting can use another provider.',
+      'Select the exact hosted-zone ID and account in environment.dns; Hypervibe manages the pinned OpenTofu runtime.'],
+  },
+  'azure-dns': {
+    provider: 'azure-dns', displayName: 'Azure DNS', tokenType: 'A saved service principal with subscriptionId, tenantId, clientId and clientSecret',
+    setupUrl: 'https://learn.microsoft.com/en-us/azure/dns/dns-protect-zones-recordsets',
+    permissions: ['Read the subscription identity and exact public DNS zone; grant record management permissions scoped to that zone, for example the DNS Zone Contributor role.'],
+    credentialExample: 'hv_connections provider="azure-dns" action="connect" scope="owner/repository" credentialsRef=".env#HYPERVIBE_AZURE_DNS_CREDENTIALS"',
+    notes: ['Azure DNS currently requires a service principal that works with both observation and the engine. Generic default-chain authentication is unavailable.',
+      'Select the full zone ARM ID, subscription and resource group in environment.dns. Hypervibe does not automatically register resource providers or create zones.'],
   },
   appstoreconnect: {
     provider: 'appstoreconnect',
@@ -273,42 +289,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
     ],
   },
-  'azure-managed-redis': {
-    provider: 'azure-managed-redis',
-    displayName: 'Azure Managed Redis',
-    tokenType: 'Microsoft Entra application service principal (tenantId, clientId, and clientSecret) for one Azure subscription',
-    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-    setupUrls: [
-      {
-        label: 'Create or review the Microsoft Entra application',
-        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-      },
-      {
-        label: 'Microsoft Entra service-principal setup guide',
-        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
-      },
-      {
-        label: 'Azure Managed Redis built-in role',
-        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/databases',
-      },
-      {
-        label: 'Azure Managed Redis REST operations',
-        url: 'https://learn.microsoft.com/en-us/rest/api/redis/redisenterprisecache/',
-      },
-    ],
-    permissions: [
-      'At the exact resource-group scope, assign Azure Managed Redis Contributor (role ID 3015e5ed-6856-4ab3-b2f0-b8492aa30ca6). It creates/manages Managed Redis resources without granting cache data access.',
-      'The service principal must be allowed to invoke the database listKeys action so Hypervibe can wire the generated TLS endpoint; confirm that a custom deny assignment does not remove this action.',
-      'Also grant Microsoft.Resources/subscriptions/resourceGroups/read at the same scope when it is not already included by the role assignment.',
-    ],
-    credentialExample: 'hv_connections provider="azure-managed-redis" credentialsRef="file:/absolute/path/azure-managed-redis.json"',
-    notes: [
-      'The JSON file contains only tenantId, subscriptionId, clientId, and clientSecret. Reuse the verified azure-container-apps connection when possible; resource-group identity and placement are lifecycle state, never credentials.',
-      'Hypervibe creates one public-network-enabled, TLS-only Azure Managed Redis cluster in the exact resource group owned by the same Azure Container Apps environment. The default database uses encrypted client protocol and access-key authentication; non-Azure hosting is rejected.',
-      'Set cache.region and cache.size in desired state when the documented defaults are unsuitable. Azure Managed Redis network, subnetwork, and tier fields are rejected by this public-endpoint lifecycle instead of being ignored.',
-      'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
-    ],
-  },
   azureblob: {
     provider: 'azureblob',
     displayName: 'Azure Blob Storage',
@@ -376,37 +356,27 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Client secrets expire. Store the JSON outside the repository, rotate it before expiry, and reconnect from a file, dotenv mapping, or secret-manager reference.',
     ],
   },
-  bitwarden: {
-    provider: 'bitwarden',
-    displayName: 'Bitwarden Secrets Manager',
-    tokenType: 'Bitwarden Secrets Manager machine account access token',
-    setupUrl: 'https://bitwarden.com/help/access-tokens/',
-    permissions: ['Grant the machine account read access to the projects/secrets Hypervibe should resolve.'],
-    credentialExample: 'hv_connections provider="bitwarden" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accessToken":"BITWARDEN_ACCESS_TOKEN","organizationId":"BITWARDEN_ORGANIZATION_ID"}',
-  },
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
-    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, load balancing, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, load balancing, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
+    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
     setupUrl: CLOUDFLARE_TOKEN_URLS.user,
     setupUrls: [
       {
-        label: 'Create pre-filled User API Token for DNS/custom domains; add optional Registrar, email, or load-balancer permissions below',
+        label: 'Create pre-filled User API Token for DNS/custom domains; add optional Registrar or email permissions below',
         url: CLOUDFLARE_TOKEN_URLS.user,
       },
       {
-        label: 'Create pre-filled Account API Token for durable DNS/custom-domain automation; add optional email or load-balancer permissions below',
+        label: 'Create pre-filled Account API Token for durable DNS/custom-domain automation; add optional email permissions below',
         url: CLOUDFLARE_TOKEN_URLS.account,
       },
     ],
     permissions: [
-      `For the simplest setup, create a Cloudflare User API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.user} and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS and custom domains; add the optional permissions below for email routing, load balancing, or Registrar.`,
+      `For the simplest setup, create a Cloudflare User API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.user} and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS and custom domains; add the optional permissions below for email routing or Registrar.`,
       `For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.account} and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.`,
       'For DNS/custom domains with either token type: grant Zone -> Zone -> Read.',
       'For DNS/custom domains with either token type: grant Zone -> DNS -> Edit.',
       'For Railway/custom-domain verification and some zone lookups: grant Zone -> Zone Settings -> Read or Edit.',
-      'For environments declaring loadBalancer: grant the Cloudflare API token Load Balancers Read and Load Balancers Write on the target zone.',
-      'For environments declaring loadBalancer: grant Load Balancing: Monitors and Pools Read and Load Balancing: Monitors and Pools Write on the owning account.',
       'For DNS/custom domains with either token type: Zone Resources must be Include -> Specific zone -> the target domain, for example hlspropertycare.com.',
       'For account-scoped permissions: Account Resources must be Include -> Specific account -> the target account. The user-token template initially selects all accounts/zones because Cloudflare template URLs accept ids, not domain names; narrow both selectors before creating the token.',
       'For email routing only: grant Zone -> Email Routing Rules -> Edit.',
@@ -439,7 +409,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Grant roles/cloudscheduler.admin when using cron jobs.',
       'Grant roles/pubsub.editor when using queues.',
       'For read-only GCS inventory, explicitly prepare gcsAccess="inspect" to enable storage.googleapis.com and grant roles/storage.viewer.',
-      'For GCS create, object transfer, or teardown, explicitly prepare gcsAccess="lifecycle" to grant roles/storage.admin after reviewing that broader project-scoped access.',
+      'For GCS create, object transfer, or teardown, explicitly prepare gcsAccess="lifecycle" to grant roles/storage.admin to the deploy identity and, when configured, roles/storage.objectUser to the distinct runtime identity. Both grants are project-scoped; runtime object access spans every bucket in that GCP project, not just one bucket.',
       'For read-only Memorystore inventory, explicitly prepare memorystoreAccess="inspect" to enable Redis/Compute APIs and grant roles/redis.viewer plus roles/compute.networkViewer.',
       'For Memorystore create or teardown, explicitly prepare memorystoreAccess="lifecycle" to grant roles/redis.admin, roles/compute.networkViewer, and roles/compute.networkUser after reviewing that broader project-scoped access.',
       'For Pub/Sub queue lifecycle, explicitly prepare queueAccess="lifecycle" to enable pubsub.googleapis.com and grant roles/pubsub.editor. Other preparation modes never add that role.',
@@ -497,75 +467,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: ['Use a database user with the least privileges required for the intended hv_db query or migration operation.'],
     credentialExample: 'hv_connections provider="database" credentialsRef="dotenv:/absolute/path/.env#DATABASE_URL"',
   },
-  digitalocean: {
-    provider: 'digitalocean',
-    displayName: 'DigitalOcean',
-    tokenType: 'DigitalOcean personal access token (PAT, normally prefixed dop_v1_)',
-    setupUrl: 'https://cloud.digitalocean.com/account/api/tokens',
-    permissions: [
-      'For Managed PostgreSQL and Valkey observation, grant database:read and database:view_credentials on the DigitalOcean team that owns the clusters.',
-      'For Managed PostgreSQL and Valkey lifecycle through hv_plan/hv_apply, also grant database:create, database:update, and database:delete.',
-      'DigitalOcean requires regions:read, sizes:read, and actions:read alongside non-read database scopes so Hypervibe can validate regions/sizes and observe asynchronous actions.',
-      'When DigitalOcean App Platform hosting is enabled, also grant app:read, app:create, app:update, and app:delete; omit those app scopes for a database/cache-only connection.',
-      'For exact-SHA App Platform CI deploys, grant registry:read and registry:update. Also grant registry:create plus account:read so the reviewed project action can create a stable free Starter registry when the team has none.',
-      'App Platform custom-domain attach, observation, certificate status, and detach use the same app:read/app:update permissions; Hypervibe preserves the rest of the current App Spec.',
-    ],
-    credentialExample: 'hv_connections provider="digitalocean" credentialsRef="file:/absolute/path/digitalocean.json"',
-    notes: [
-      'Create the PAT at https://cloud.digitalocean.com/account/api/tokens with Custom Scopes for least privilege. Full Access is a broader fallback, not the recommended default.',
-      'The JSON credential file needs only apiToken for ordinary App Platform use. Hypervibe deterministically reuses an existing team registry, or creates a free Starter registry during the reviewed project action when none exists; CI only reads and uses that registry.',
-      'App placement is desired state, not authentication. Hypervibe uses nyc when environments.<name>.hosting.region is omitted; an agent may declare another App Platform region in the spec.',
-      'DigitalOcean shows a PAT only once. Store it in a dotenv file or secret manager instead of chat; Hypervibe accepts DIGITALOCEAN_TOKEN and HYPERVIBE_DIGITALOCEAN_TOKEN.',
-      'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
-    ],
-  },
-  fly: {
-    provider: 'fly',
-    displayName: 'Fly.io',
-    tokenType: 'Fly.io organization-scoped access token plus the exact organization slug',
-    setupUrl: 'https://fly.io/dashboard',
-    setupUrls: [
-      {
-        label: 'Open the Fly.io dashboard, select the organization, then open Tokens',
-        url: 'https://fly.io/dashboard',
-      },
-      {
-        label: 'Review Fly.io token types and organization-token guidance',
-        url: 'https://fly.io/docs/security/tokens/',
-      },
-    ],
-    permissions: [
-      'Create an organization-scoped token for the one Fly.io organization Hypervibe should manage. Hypervibe needs organization access to list/create/delete Apps, create/update Machines, reconcile app secrets and public IPs, manage TLS certificates, push exact-image digests to registry.fly.io, create/observe/delete Managed Postgres clusters, databases, and users, and create/list/remove operation-scoped WireGuard peers for bounded private database access.',
-      'Do not use fly auth token: Fly.io documents that command as a short-lived user token intended for local use.',
-      'Do not use an app deploy token: it is restricted to one existing App and cannot authorize Hypervibe to create the per-service Apps or Managed Postgres clusters declared in desired state.',
-      'Keep organizationSlug scoped to the same organization that issued the token. Hypervibe records the non-secret organization slug beside every durable App and database identity and refuses cross-organization bindings.',
-    ],
-    credentialExample: 'hv_connections provider="fly" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"FLY_API_TOKEN","organizationSlug":"FLY_ORGANIZATION_SLUG"}',
-    notes: [
-      'Fly.io does not publish a documented pre-filled token-template URL. In the dashboard, select the intended organization, open Tokens, create an organization token, and copy its value once into a dotenv file or secret manager.',
-      'The credential contains only apiToken and organizationSlug. App and Managed Postgres placement belongs in environments.<name>.hosting.region; Hypervibe defaults to iad when it is omitted.',
-      'Hypervibe uses the Machines and Managed Postgres HTTP APIs directly. It does not install or invoke flyctl for infrastructure lifecycle operations.',
-      'Fly Managed Postgres endpoints remain private to Fly networking. For each bounded local query, seed, or migration operation, Hypervibe creates a uniquely named WireGuard peer, starts its packaged userspace connector, verifies PostgreSQL through the tunnel, and removes that exact peer afterward. A matching pre-existing peer blocks for manual inspection instead of being silently deleted.',
-    ],
-  },
-  elasticache: {
-    provider: 'elasticache',
-    displayName: 'Amazon ElastiCache',
-    tokenType: 'the verified AWS IAM access key pair used by ECS (accessKeyId/secretAccessKey) and scoped to one account',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    permissions: [
-      'Reuse the verified ecs connection; do not create a separate placement credential. For verification and observation add elasticache:DescribeServerlessCaches plus ec2:DescribeVpcs, ec2:DescribeSubnets, and ec2:DescribeSecurityGroups to that IAM principal.',
-      'For lifecycle management through hv_plan/hv_apply: elasticache:CreateServerlessCache, elasticache:DeleteServerlessCache, elasticache:AddTagsToResource, ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress, ec2:DeleteSecurityGroup, and ec2:CreateTags.',
-      'If the account has never used ElastiCache, allow iam:CreateServiceLinkedRole only when iam:AWSServiceName equals elasticache.amazonaws.com, or have an administrator create that service-linked role first.',
-    ],
-    credentialExample: 'hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
-    notes: [
-      'The JSON needs only accessKeyId and secretAccessKey. Region and size belong in environments.<name>.cache; network, subnet, and security-group IDs are never connection credentials.',
-      'The ECS project action creates and binds a tagged workload security group in the region\'s exact default VPC. ElastiCache re-observes that binding read-only, creates a dedicated managed security group accepting TCP 6379 only from the workload group, and creates TLS-only serverless Valkey in the exact default subnets.',
-      'Deletion waits for provider-confirmed cache absence before removing the managed security group. Cache deletion is data-bearing and exact-action confirmation remains required.',
-      'Scope mutation permissions to the intended account, region, default VPC, and Hypervibe-tagged resources where AWS supports resource-level conditions.',
-    ],
-  },
   ecs: {
     provider: 'ecs',
     displayName: 'AWS ECS Express Mode',
@@ -602,20 +503,39 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'AWS shows a new secret access key only once. Store it outside the repository and rotate it regularly.',
     ],
   },
-  doppler: {
-    provider: 'doppler',
-    displayName: 'Doppler',
-    tokenType: 'Doppler read-only service token',
-    setupUrl: 'https://dashboard.doppler.com/',
-    setupUrls: [
-      { label: 'Open the Doppler dashboard and select the project config Access tab', url: 'https://dashboard.doppler.com/' },
-      { label: 'Follow the official service-token guide', url: 'https://docs.doppler.com/docs/service-tokens' },
-    ],
+  aws: {
+    provider: 'aws',
+    displayName: 'Amazon Web Services',
+    tokenType: 'One browser sign-in to AWS (any administrator, including the root user); Hypervibe then creates and stores its own limited deploy access',
+    setupUrl: 'https://signin.aws.amazon.com/',
+    setupUrls: [{ label: 'AWS sign-in (Hypervibe opens it for you with hv_connections provider="aws" action="connect")', url: 'https://signin.aws.amazon.com/' }],
     permissions: [
-      'Create a service token scoped to the project/config Hypervibe should read.',
+      'One-time setup, approved on Hypervibe\'s page right after sign-in: a hypervibe-deploy policy and hypervibe-deploy-<project> role, a hypervibe-app-boundary policy capping every app role, GitHub OIDC for keyless CI, and a hypervibe-local user that can only assume deploy roles.',
+      'The deploy role manages Lambda, ECS/Fargate, Aurora/RDS, S3, EventBridge Scheduler, Step Functions, CodeBuild and Parameter Store under /hypervibe/*; it creates IAM roles only under /hypervibe/app/ with the boundary and cannot change the boundary.',
     ],
-    credentialExample: 'hv_connections provider="doppler" credentialsRef="env:DOPPLER_TOKEN"',
-    notes: ['Service tokens start with dp.st. and are scoped to a single config.'],
+    credentialExample: 'hv_connections provider="aws" action="connect"',
+    notes: [
+      'No AWS CLI or access keys to create: the sign-in session stays in memory and is used once. The local key is created by setup, stored encrypted and never shown.',
+      'If AWS shows "400 Bad Request" after "Continue with an active session", the browser holds an expired AWS session: click "Sign out of AWS" on Hypervibe\'s page, then sign in again.',
+      'Hypervibe chooses the region from the app\'s other environments (us-east-1 otherwise) and states it.',
+    ],
+  },
+  azure: {
+    provider: 'azure',
+    displayName: 'Microsoft Azure',
+    tokenType: 'One browser sign-in to Azure (an Owner of the subscription); Hypervibe then creates and stores its own limited deploy access',
+    setupUrl: 'https://login.microsoftonline.com/',
+    setupUrls: [{ label: 'Microsoft sign-in (Hypervibe opens it for you with hv_connections provider="azure" action="connect")', url: 'https://login.microsoftonline.com/' }],
+    permissions: [
+      'One-time setup, approved on Hypervibe\'s page right after sign-in: registers the Azure services the app uses, creates resource group hv-<project> with the project Key Vault, and app hypervibe-deploy-<project> with GitHub sign-in for keyless CI and a client secret for this computer.',
+      'The deploy identity gets roles on hv-<project> only, never the subscription: Contributor, Key Vault Secrets Officer, Storage Blob Data Contributor, and Role Based Access Control Administrator limited to AcrPull, Key Vault Secrets User and Storage Blob Data Contributor for service principals.',
+    ],
+    credentialExample: 'hv_connections provider="azure" action="connect"',
+    notes: [
+      'No Azure CLI to install: Microsoft\'s page names the sign-in "Microsoft Azure CLI" because Hypervibe uses that public sign-in. The session stays in memory and is used once.',
+      'With several subscriptions, Hypervibe asks which one the app runs in (and is billed to); with one, it uses it.',
+      'Hypervibe chooses the region from the app\'s other environments (East US 2 otherwise) and states it. The client secret lasts a year; running connect again renews it.',
+    ],
   },
   gcs: {
     provider: 'gcs',
@@ -665,56 +585,15 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"',
     notes: [
+      'The fine-grained creation link pre-fills the token name, description, 90-day expiry, core repository permissions, and the resource owner when its exact scope is known. Review the owner and select the repositories manually; GitHub does not document a repository-selection URL parameter. For a classic PAT, select expiration manually; its description does not restrict repository access.',
       'Save the repository-management PAT as HYPERVIBE_GITHUB_TOKEN in an existing gitignored .env file, replace /absolute/path in the Connect command with that file\'s directory, and let the agent call hv_connections.',
       'Keep a read:packages-only NODE_AUTH_TOKEN separate from HYPERVIBE_GITHUB_TOKEN. When both roles are needed, map apiToken to HYPERVIBE_GITHUB_TOKEN and packageReadToken to NODE_AUTH_TOKEN.',
+      'To add or replace only package-read access on an existing verified connection, use that exact scope with credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN" and credentialsKey="packageReadToken". Hypervibe privately preserves its existing API credential and verifies both tokens belong to the same account before saving the package role.',
       'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN remain accepted as aliases for compatibility when one explicitly referenced value supplies the requested scalar credential.',
       'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
-      'The fine-grained creation link pre-fills the token name, 90-day expiry, and core repository permissions. You must still choose the resource owner and only the repositories Hypervibe should manage.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
-    ],
-  },
-  gitlab: {
-    provider: 'gitlab',
-    displayName: 'GitLab',
-    tokenType: 'GitLab project access token for an existing project, or a personal access token with api for managed project lifecycle; Railway also needs a separate read_registry project deploy token',
-    setupUrl: GITLAB_TOKEN_URLS.api,
-    setupUrls: [
-      { label: 'Create pre-filled GitLab.com personal access token', url: GITLAB_TOKEN_URLS.api },
-      { label: 'GitLab personal access token guide', url: GITLAB_TOKEN_URLS.personalTokenDocs },
-      { label: 'GitLab project access token guide', url: GITLAB_TOKEN_URLS.projectTokenDocs },
-      { label: 'GitLab deploy token guide', url: GITLAB_TOKEN_URLS.deployTokenDocs },
-    ],
-    permissions: [
-      'For an existing project, grant api and give the token principal Maintainer access. Managed project creation/deletion instead requires a personal access token whose user owns the exact parent namespace (Owner for a group); Hypervibe verifies this before planning either mutation.',
-      'For managed rollback, GitLab Premium or Ultimate must protect each hypervibe-rollback-<environment>-* wildcard so only the exact authenticated token user can create it. Role-wide Maintainer access is rejected because it would let another Maintainer manufacture a privileged rollback ref.',
-      'For Railway private-image pulls, create a project deploy token in the exact project with read_registry only. Store its generated username as registryUsername and token as registryReadToken.',
-    ],
-    credentialExample: 'hv_connections provider="gitlab" scope="https://gitlab.com/group/project" credentialsRef="file:/absolute/path/gitlab-connection.json"',
-    notes: [
-      'The JSON contains apiToken, optional instanceUrl for self-managed GitLab, and registryUsername/registryReadToken for Railway. Keep it outside the repository.',
-      'Choose explicit expiries for both tokens and rotate them before expiry. A GitLab deploy token value is shown only when created.',
-      'For self-managed GitLab, use the same officially documented personal-token path on the declared HTTPS instance and set instanceUrl; do not use the GitLab.com creation link.',
-      'GitLab.com 18.1+ can use the observed hosted Linux runner. Self-managed deploys require one exact locked project runner id, one exact online linux/amd64 manager system id, a dedicated tag, protected-ref-only jobs, and the exact hypervibe-capabilities maintenance-note attestation declared in devops.ci.runner.',
-      'GitLab does not expose executor type or Docker privileged mode through these project APIs. The docker-privileged capability is therefore an operator attestation, not provider proof; protect runner administration and verify its config.toml out of band.',
-      'The exact project deploy-token page is <project web URL>/-/settings/repository under Deploy tokens; availability and placement can vary by GitLab version.',
-    ],
-  },
-  openai: {
-    provider: 'openai',
-    displayName: 'OpenAI API',
-    tokenType: 'OpenAI project API key stored as apiKey (not a ChatGPT subscription or browser session)',
-    setupUrl: 'https://platform.openai.com/api-keys',
-    permissions: [
-      'Create the key in the OpenAI project that should pay for and audit Hypervibe coding automation.',
-      'The project must have access to gpt-5.6-sol and the key must allow model reads plus Responses API writes.',
-      'Scope the key to this project and keep it out of the repository; Hypervibe syncs it only as the OPENAI_API_KEY Actions secret.',
-    ],
-    credentialExample: 'hv_connections provider="openai" scope="owner/repository" credentialsRef="env:OPENAI_API_KEY"',
-    notes: [
-      'OpenAI API billing is separate from ChatGPT plans. Set project budgets and usage limits in the OpenAI Platform before enabling scheduled AI automation.',
-      'The key is never included in specs, plans, logs, snapshots, or workflow files.',
     ],
   },
   local: {
@@ -787,98 +666,22 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'If multiple workspaces are visible, include workspaceId: credentialsMap={"apiToken":"HYPERVIBE_RAILWAY_TOKEN","workspaceId":"RAILWAY_WORKSPACE_ID"} so projects are created in the right workspace.',
     ],
   },
-  vercel: {
-    provider: 'vercel',
-    displayName: 'Vercel',
-    tokenType: 'Vercel personal access token created under the Personal Account and scoped to the intended personal account or Team (new tokens normally use the vcp_ prefix)',
-    setupUrl: 'https://vercel.com/account/settings/tokens',
-    setupUrls: [
-      {
-        label: 'Create or review Vercel personal access tokens',
-        url: 'https://vercel.com/account/settings/tokens',
-      },
-      {
-        label: 'Vercel access-token and Team-scope guidance',
-        url: 'https://vercel.com/kb/guide/how-do-i-use-a-vercel-api-access-token',
-      },
-      {
-        label: 'Vercel roles and extended permissions',
-        url: 'https://vercel.com/docs/rbac/access-roles',
-      },
-    ],
-    permissions: [
-      'For a Team scope, use an Owner or Member token identity, or a Developer/Contributor identity granted Create Project, Full Production Deployment, and Environment Variable Manager permissions for the intended Team.',
-      'Hypervibe needs REST access to read/create/delete Projects, read and upsert/delete Project environment variables, upload deployment files, and create/read production Deployments.',
-      'Declared custom domains additionally require REST access to add, inspect/verify, and remove domains on the exact Project.',
-      'Scope the token to only the intended Vercel Team when possible and include that immutable teamId in the connection JSON; omit teamId only for a personal-account deployment scope.',
-    ],
-    credentialExample: 'hv_connections provider="vercel" credentialsRef="file:/absolute/path/vercel.json"',
-    notes: [
-      'The JSON must contain accessToken and may contain teamId. Find the immutable Team ID under Team Settings -> General; Hypervibe records only a non-secret team:<id> or user:<id> binding.',
-      'VERCEL_ACCESS_TOKEN, VERCEL_TOKEN, and HYPERVIBE_VERCEL_ACCESS_TOKEN are accepted aliases when resolving a scalar accessToken. Use a JSON file or credentialsMap when teamId is required.',
-      'Hypervibe creates source-less Vercel Projects and deploys exact checked-out Git files through the REST API. If a bound Project has a Vercel-native Git link, CI reconciliation blocks until that link is manually disconnected.',
-      'The Vercel hosting slice supports public web projects built by Vercel framework/static auto-detection. It rejects workers, cron jobs, release commands, arbitrary long-lived start commands, and build/Dockerfile overrides it cannot honestly apply.',
-      'Project creation and production deployments may consume metered build/function resources. Hypervibe confirmation-gates service creation and never creates Projects from the managed CI workflow.',
-    ],
-  },
   sendgrid: {
     provider: 'sendgrid',
     displayName: 'SendGrid',
-    tokenType: 'SendGrid API key (Restricted Access for least privilege; Full Access is the reliable choice during setup)',
+    tokenType: 'SendGrid management API key (Restricted Access for domain authentication; separate from the application sending key)',
     setupUrl: 'https://app.sendgrid.com/settings/api_keys',
     permissions: [
-      'Grant mail.send so Hypervibe can sync a runtime SENDGRID_API_KEY that can send transactional email.',
       'For domain authentication: whitelabel.read, whitelabel.create, whitelabel.update (SendGrid still names these scopes "whitelabel" even though the UI says Sender Authentication).',
       'For single-sender verification: SendGrid publishes no restricted scope for the /verified_senders API — use a Full Access key for this path; hypervibe checks user.email.* as a best-effort signal.',
       'For event webhook setup: user.webhooks.event.settings.read and user.webhooks.event.settings.update.',
       'For SendGrid Inbound Parse: user.webhooks.parse.settings read/create/delete.',
     ],
-    credentialExample: 'hv_connections provider="sendgrid" credentialsRef="dotenv:/absolute/path/.env#SENDGRID_API_KEY"',
+    credentialExample: 'hv_connections provider="sendgrid" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_SENDGRID_API_KEY"',
     notes: [
-      'Setup needs mail.send plus EITHER domain authentication OR sender verification — not necessarily all scopes.',
-      'Full Access is acceptable during setup; rotate to a narrower runtime key after sender/domain authorization if desired. Note some restricted keys cannot call GET /v3/scopes, which fails verification even for usable keys.',
-    ],
-  },
-  twilio: {
-    provider: 'twilio',
-    displayName: 'Twilio',
-    tokenType: 'four values from the same Twilio account or subaccount: Account SID (AC...), Restricted API Key SID (SK...), its one-time API Key Secret, and the primary Account Auth Token',
-    setupUrl: 'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-    setupUrls: [
-      {
-        label: 'Account SID and primary Auth Token (Console Dashboard -> Account Info)',
-        url: 'https://console.twilio.com/',
-      },
-      {
-        label: 'Restricted API Key SID and one-time secret (Settings -> Account settings -> API keys & auth tokens)',
-        url: 'https://console.twilio.com/us1/account/keys-credentials/api-keys',
-      },
-      {
-        label: 'Existing phone numbers and PN... SIDs (Products & Services -> Numbers & Senders -> Phone Numbers)',
-        url: 'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
-      },
-      {
-        label: 'Messaging Services and MG... SIDs (Hypervibe normally creates or adopts these)',
-        url: 'https://console.twilio.com/us1/develop/sms/services',
-      },
-    ],
-    permissions: [
-      'On the Restricted key Permissions screen enable twilio/messaging/services/list, twilio/messaging/services/read, twilio/messaging/services/create, and twilio/messaging/services/update.',
-      'Enable twilio/messaging/services.phonenumbers/list, twilio/messaging/services.phonenumbers/create, and twilio/messaging/services.phonenumbers/delete so Hypervibe can observe, attach, and confirmation-gate moves of an existing number.',
-      'Enable twilio/messaging/messages/create so the application can send through the Messaging Service after Hypervibe projects the same restricted key at runtime.',
-      'The primary Account Auth Token has no restricted scopes. It is required at runtime because Twilio signs inbound and delivery-status webhooks with that token in X-Twilio-Signature.',
-    ],
-    credentialExample: 'hv_connections provider="twilio" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accountSid":"TWILIO_ACCOUNT_SID","apiKeySid":"TWILIO_API_KEY_SID","apiKeySecret":"TWILIO_API_KEY_SECRET","authToken":"TWILIO_AUTH_TOKEN"}',
-    notes: [
-      'First switch the Twilio Console to the exact parent account or subaccount that owns the phone number. The AC..., SK..., Auth Token, and optional PN... SID must all belong to that same account.',
-      'Copy TWILIO_ACCOUNT_SID from Console Dashboard -> Account Info. It is 34 characters and starts with AC.',
-      'Create a Restricted API key under Settings -> Account settings -> API keys & auth tokens. Copy its SK... SID and secret immediately: Twilio displays the secret only once. A Standard key also works but is broader than necessary.',
-      'Reveal the primary Auth Token under Console Dashboard -> Account Info (or the Auth Tokens section on API keys & auth tokens). Do not substitute the API Key Secret or a test credential; webhook validation requires the matching primary account Auth Token.',
-      'Put only the four connection values in the local dotenv file: TWILIO_ACCOUNT_SID=AC..., TWILIO_API_KEY_SID=SK..., TWILIO_API_KEY_SECRET=..., and TWILIO_AUTH_TOKEN=.... Keep that file out of git.',
-      'To attach a sender, open Products & Services -> Numbers & Senders -> Phone Numbers, select an existing SMS-capable number, and copy its 34-character PN... SID into messaging.sender.phoneNumberSid. Use the SID, not the +E.164 phone number.',
-      'Do not add TWILIO_MESSAGING_SERVICE_SID to the connection or spec. Hypervibe creates or explicitly adopts the Messaging Service by service.name, records the resulting MG... SID, and projects it at apply time.',
-      'The sender block is optional. Hypervibe does not buy phone numbers or complete A2P 10DLC, toll-free verification, or other regulatory registration; complete any required registration in Twilio before production sending.',
-      'The Auth Token is a high-privilege account credential. Hypervibe encrypts it locally and projects it only to services explicitly named by messaging.services.',
+      'Save the management credential as HYPERVIBE_SENDGRID_API_KEY. Setup needs either domain authentication or sender verification; it does not need Mail Send.',
+      'Save a separate application key as SENDGRID_API_KEY and declare it as a delegated runtime secret. Use Restricted/Custom Access, Mail Send > Mail Send > Full Access (mail.send), and every other permission No Access. Use separate keys per project/environment.',
+      'Never install the management credential into application runtime or widen the sending key for setup or readiness checks. Note some restricted keys cannot call GET /v3/scopes, which fails connection verification even for usable keys.',
     ],
   },
   stripe: {
@@ -927,48 +730,74 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'The Stripe-managed output must be a regular, non-symlink file inside the linked repository and owner-only on POSIX systems (chmod 600).',
     ],
   },
-  supabase: {
-    provider: 'supabase',
-    displayName: 'Supabase',
-    tokenType: 'Supabase personal access token',
-    setupUrl: 'https://supabase.com/dashboard/account/tokens',
-    permissions: [
-      'Personal access tokens are not permission-scoped: they carry your full account privileges. Your account must be an Owner or Administrator of the target organization to create projects (Developer/Read-only roles cannot).',
-      'Include organizationId when multiple organizations are visible.',
-    ],
-    credentialExample: 'hv_connections provider="supabase" credentialsRef="dotenv:/absolute/path/.env#SUPABASE_ACCESS_TOKEN"',
-  },
-  neon: {
-    provider: 'neon',
-    displayName: 'Neon',
-    tokenType: 'Neon personal API key or organization API key with project create/read/delete access (not a project-scoped organization key)',
-    setupUrl: 'https://console.neon.tech/app/settings/api-keys',
-    permissions: [
-      'Use a personal API key for personal projects, or a personal API key with organizationId / an organization API key for organization projects; the identity must be allowed to create, read, and delete projects in the target account or organization.',
-      'Do not use a project-scoped organization API key: Neon limits it to one existing project and explicitly prevents destructive project operations such as project deletion.',
-    ],
-    credentialExample: 'hv_connections provider="neon" credentialsRef="dotenv:/absolute/path/.env#NEON_API_KEY"',
-    notes: [
-      'organizationId is required when a personal API key should manage organization-owned projects; use credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiKey":"NEON_API_KEY","organizationId":"NEON_ORGANIZATION_ID"} in that case. Omit it for personal projects or when an organization API key already infers the organization.',
-      'regionId is optional and uses Neon region IDs such as aws-us-west-2. The API key token is shown only when created, so store it in a dotenv file or secret manager instead of chat.',
-    ],
-  },
-  vault: {
-    provider: 'vault',
-    displayName: 'HashiCorp Vault',
-    tokenType: 'Vault token or AppRole role_id/secret_id',
-    setupUrl: 'https://developer.hashicorp.com/vault/docs/secrets/kv/kv-v2',
-    permissions: [
-      'read on <mount>/data/<path> and list on <mount>/metadata/<path> for the KV v2 secrets Hypervibe should resolve.',
-      'Add create/update on <mount>/data/<path> if Hypervibe should write secrets, and delete on <mount>/metadata/<path> if it should delete them (deletion removes all versions).',
-      "auth/token/lookup-self is used for verification; it is included in Vault's default policy.",
-    ],
-    credentialExample: 'hv_connections provider="vault" credentialsRef="file:/absolute/path/vault.json"',
-  },
 };
 
-export function getConnectionGuidance(provider: string): ConnectionGuidance | undefined {
-  return GUIDANCE[provider];
+function formLabel(value?: string): string | undefined {
+  if (!value || value.length > 2048 || /[\u0000-\u001f\u007f]/.test(value)
+    || redactSensitiveString(value) !== value) return undefined;
+  return value.trim() || undefined;
+}
+
+function limitLabel(value: string, length: number): string {
+  return Array.from(value).slice(0, length).join('');
+}
+
+function githubFormScope(options: ConnectionGuidanceContext): string | undefined {
+  const scope = formLabel(options.scope ?? parseGitHubRepoFromRemote(options.repositoryUrl) ?? undefined);
+  return scope && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?:[A-Za-z0-9_.-]{1,100}|\*)$/.test(scope)
+    ? scope : undefined;
+}
+
+/** Resolve only our reviewed form templates; never add guessed provider fields. */
+export function connectionSetupUrl(
+  template: string,
+  options: ConnectionGuidanceContext = {}
+): string {
+  const project = formLabel(options.project);
+  if ((Object.values(GITHUB_TOKEN_URLS) as string[]).includes(template)) {
+    const scope = githubFormScope(options);
+    const context = scope ?? project;
+    if (!context) return template;
+    const url = new URL(template);
+    const fineGrained = template === GITHUB_TOKEN_URLS.fineGrained;
+    const purpose = fineGrained ? 'Hypervibe repository management' : url.searchParams.get('description')!;
+    url.searchParams.set('description', limitLabel(`${purpose} for ${context}`, fineGrained ? 1024 : 255));
+    if (fineGrained) {
+      url.searchParams.set('name', limitLabel(`Hypervibe repository: ${context}`, 40));
+      if (scope) url.searchParams.set('target_name', scope.split('/')[0]);
+    }
+    return url.href;
+  }
+  if ((Object.values(CLOUDFLARE_TOKEN_URLS) as string[]).includes(template)) {
+    const scope = formLabel(options.scope);
+    const context = scope && /^[A-Za-z0-9*.-]{1,253}$/.test(scope) ? scope : project;
+    const accountId = options.accountId && /^[a-f0-9]{32}$/i.test(options.accountId) ? options.accountId : undefined;
+    if (!context && !accountId) return template;
+    const url = new URL(template);
+    if (context) url.searchParams.set('name', limitLabel(`Hypervibe DNS and domains: ${context}`, 120));
+    if (accountId && template === CLOUDFLARE_TOKEN_URLS.user) url.searchParams.set('accountId', accountId);
+    return url.href;
+  }
+  return template;
+}
+
+export function getConnectionGuidance(
+  provider: string,
+  options: ConnectionGuidanceContext = {}
+): ConnectionGuidance | undefined {
+  const guidance = GUIDANCE[provider];
+  if (!guidance || !options.scope && !options.project && !options.repositoryUrl && !options.accountId) return guidance;
+  const templates = provider === 'github' ? Object.values(GITHUB_TOKEN_URLS)
+    : provider === 'cloudflare' ? Object.values(CLOUDFLARE_TOKEN_URLS) : [];
+  const replacements = templates.map(template => [template, connectionSetupUrl(template, options)] as const);
+  const resolve = (text: string) => replacements.reduce((result, [template, url]) => result.replaceAll(template, url), text);
+  return {
+    ...guidance,
+    ...(guidance.setupUrl ? { setupUrl: resolve(guidance.setupUrl) } : {}),
+    ...(guidance.setupUrls ? { setupUrls: guidance.setupUrls.map(entry => ({ ...entry, url: resolve(entry.url) })) } : {}),
+    permissions: guidance.permissions.map(resolve),
+    ...(guidance.notes ? { notes: guidance.notes.map(resolve) } : {}),
+  };
 }
 
 function credentialExample(
@@ -1009,9 +838,6 @@ function credentialExample(
     case 'stripe':
       if (options.scope) example = example.replace('scope="development"', `scope="${options.scope}"`);
       break;
-    case 'elasticache':
-      if (options.scope) example = example.replace('provider="ecs"', `provider="ecs" scope="${options.scope}"`);
-      break;
   }
   if (options.scope && !example.includes(`scope="${options.scope}"`)) {
     example = example.replace(
@@ -1026,9 +852,9 @@ function credentialExample(
 
 export function connectionSetupDetails(
   provider: string,
-  options: { scope?: string; project?: string; requiredCredentialKeys?: string[] } = {}
+  options: ConnectionGuidanceContext & { requiredCredentialKeys?: string[] } = {}
 ): ConnectionSetupDetails {
-  const guidance = getConnectionGuidance(provider);
+  const guidance = getConnectionGuidance(provider, options);
   if (!guidance) {
     return {
       provider,
@@ -1049,9 +875,9 @@ export function connectionSetupDetails(
     : guidance.setupUrl ? [guidance.setupUrl] : [];
 
   const recommendedSetupUrl = provider === 'github'
-    ? options.requiredCredentialKeys?.includes('packageReadToken')
+    ? connectionSetupUrl(options.requiredCredentialKeys?.includes('packageReadToken')
       ? GITHUB_TOKEN_URLS.combined
-      : GITHUB_TOKEN_URLS.api
+      : GITHUB_TOKEN_URLS.api, options)
     : guidance.setupUrl ?? guidance.setupUrls?.[0]?.url;
 
   return {
@@ -1073,20 +899,20 @@ export function connectionSetupDetails(
 /** Shared application-boundary payload for one unavailable provider connection. */
 export function connectionSetupOptions(
   provider: string,
-  options: { scope?: string; project?: string } = {}
+  options: ConnectionGuidanceContext = {}
 ) {
   return {
     details: { connectionSetup: connectionSetupDetails(provider, options) },
-    hint: formatConnectionGuidance(provider, { scope: options.scope }),
+    hint: formatConnectionGuidance(provider, options),
     next: ['hv_connections'],
   };
 }
 
 export function formatConnectionGuidance(
   provider: string,
-  options: { scope?: string; intro?: string } = {}
+  options: ConnectionGuidanceContext & { intro?: string } = {}
 ): string {
-  const guidance = getConnectionGuidance(provider);
+  const guidance = getConnectionGuidance(provider, options);
   const scopeText = options.scope ? ` for ${options.scope}` : '';
   if (!guidance) {
     return [
@@ -1103,7 +929,7 @@ export function formatConnectionGuidance(
       : guidance.setupUrl ? `Create or review it here: ${guidance.setupUrl}.` : undefined,
     `Required permissions: ${guidance.permissions.join(' ')}`,
     guidance.notes?.length ? `Notes: ${guidance.notes.join(' ')}` : undefined,
-    `Connect with: ${credentialExample(guidance, { scope: options.scope })}.`,
+    `Connect with: ${credentialExample(guidance, { scope: options.scope, project: options.project })}.`,
   ].filter(Boolean);
   return parts.join(' ');
 }

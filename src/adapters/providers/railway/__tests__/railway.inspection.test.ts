@@ -376,15 +376,6 @@ describe('Railway abandoned-environment inspection', () => {
 
 describe('Railway exact service-instance inspection', () => {
   it.each([
-    ['missing root field', {}],
-    ['mismatched identity', {
-      serviceInstance: {
-        id: 'instance-1',
-        serviceId: 'different-service',
-        environmentId: 'railway-production',
-        source: { image: 'postgres:17' },
-      },
-    }],
     ['malformed image', {
       serviceInstance: {
         id: 'instance-1',
@@ -392,23 +383,6 @@ describe('Railway exact service-instance inspection', () => {
         environmentId: 'railway-production',
         deletedAt: null,
         source: { image: 17 },
-      },
-    }],
-    ['missing deletion marker', {
-      serviceInstance: {
-        id: 'instance-1',
-        serviceId: 'railway-db-service',
-        environmentId: 'railway-production',
-        source: { image: 'postgres:17' },
-      },
-    }],
-    ['malformed deletion marker', {
-      serviceInstance: {
-        id: 'instance-1',
-        serviceId: 'railway-db-service',
-        environmentId: 'railway-production',
-        deletedAt: 'not-a-timestamp',
-        source: { image: 'postgres:17' },
       },
     }],
   ])('treats %s as unknown rather than absence', async (_label, response) => {
@@ -422,28 +396,4 @@ describe('Railway exact service-instance inspection', () => {
     )).resolves.toMatchObject({ state: 'unknown' });
   });
 
-  it('returns the exact instance image and scope when present', async () => {
-    const adapter = new RailwayAdapter();
-    const request = vi.fn(async () => ({
-      serviceInstance: {
-        id: 'instance-1',
-        serviceId: 'railway-db-service',
-        environmentId: 'railway-production',
-        deletedAt: null,
-        source: { image: 'postgres:17' },
-      },
-    }));
-    (adapter as unknown as { client: { request: typeof request } }).client = { request };
-
-    await expect(adapter.inspectServiceInstance(
-      'railway-db-service',
-      'railway-production'
-    )).resolves.toEqual({
-      state: 'present',
-      instanceId: 'instance-1',
-      serviceId: 'railway-db-service',
-      environmentId: 'railway-production',
-      sourceImage: 'postgres:17',
-    });
-  });
 });

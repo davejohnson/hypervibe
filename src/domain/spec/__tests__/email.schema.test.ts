@@ -16,6 +16,21 @@ describe('declarative email schema', () => {
     expect(parsed.email).toEqual({ enabled: true });
   });
 
+  it('allows a delegated sending key alongside managed sender authentication', () => {
+    const parsed = projectSpecSchema.parse({
+      version: 1,
+      project: 'email-app',
+      secrets: {
+        SENDGRID_API_KEY: {
+          ownership: 'delegated', principal: 'github:owner', environments: ['production'],
+        },
+      },
+      environments: { production: environment({ email: { enabled: true } }) },
+    });
+    expect(parsed.secrets.SENDGRID_API_KEY.environments).toEqual(['production']);
+    expect(parsed.environments.production!.email.enabled).toBe(true);
+  });
+
   it('declares a sender and one service-targeted inbound parse route', () => {
     const parsed = environmentSpecSchema.parse(environment({
       email: {
@@ -78,7 +93,7 @@ describe('declarative email schema', () => {
           aliases: ['Support', 'support'],
         },
       },
-      envVars: { SENDGRID_API_KEY: 'not-owned-here' },
+      envVars: { SENDGRID_FROM_EMAIL: 'not-owned-here' },
     }));
     expect(result.success).toBe(false);
     if (!result.success) {

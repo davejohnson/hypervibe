@@ -3,6 +3,46 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it('labels rollback evidence inspection as a preview, never a completed restore', () => {
+    for (const status of ['evidence-compatible', 'blocked']) {
+      const output = formatCommandResult('hv_rollback', commandSuccess({ mode: 'preview', status, restoreVerified: false,
+        mutationCounts: { providerWrites: 0, ciDispatches: 0 } }));
+      expect(output).toContain('ROLLBACK PREVIEW');
+      expect(output).not.toContain('ROLLBACK COMPLETE');
+    }
+  });
+
+  it('surfaces pending or blocked API policy even when provider resources have no drift', () => {
+    const output = formatCommandResult('hv_status', commandSuccess({ inSync: false, verified: true, drift: [], apiReleasePolicy: { status: 'drift' } }));
+    expect(output).toContain('API POLICY NEEDS REVIEW');
+    expect(formatCommandResult('hv_status', commandSuccess({ inSync: false, verified: true, drift: [], apiReleasePolicy: { status: 'blocked', reason: 'Retain v1' } }))).toContain('STATUS BLOCKED');
+  });
+
+  it.each(['hv_plan', 'hv_status'])('surfaces webhook uncertainty even when infrastructure is in sync: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [], webhookReadiness: { status: 'unknown' } }));
+    expect(output).toContain('WEBHOOKS NEED REVIEW');
+    expect(output).not.toContain('HYPERVIBE · IN SYNC');
+  });
+
+  it.each(['hv_plan', 'hv_status'])('surfaces domain security uncertainty even when infrastructure is in sync: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [], domainSecurity: { status: 'unknown' } }));
+    expect(output).toContain('DOMAIN SECURITY NEEDS REVIEW');
+    expect(output).not.toContain('HYPERVIBE · IN SYNC');
+  });
+  it.each(['hv_plan', 'hv_status'])('surfaces DNS readiness separately from verified senders: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({ inSync: true, verified: true, actions: [], drift: [],
+      emailSenderReadiness: { status: 'verified', dns: { status: 'needs_attention' } },
+    }));
+    expect(output).toContain('EMAIL NOT READY');
+  });
+  it.each(['hv_plan', 'hv_status'])('surfaces unverified email even when infrastructure is in sync: %s', command => {
+    const output = formatCommandResult(command, commandSuccess({
+      environment: 'staging', inSync: true, verified: true, actions: [], drift: [],
+      emailSenderReadiness: { status: 'unverified', senders: [{ key: 'EMAIL_FROM', status: 'verified' }], replyTo: [{ key: 'EMAIL_REPLY_TO', status: 'unverified' }] },
+    }));
+    expect(output).toContain('EMAIL NOT READY');
+    expect(output).not.toContain('HYPERVIBE · IN SYNC');
+  });
   it('renders a plan as a compact review without changing its envelope', () => {
     const envelope = commandSuccess({
       planId: 'plan-1234567890-abcdef',
@@ -192,15 +232,23 @@ describe('command presentation', () => {
     expect(output).toContain('HTTP 200 · 84 ms · deployments healthy');
   });
 
+  it.each([['verified', 'VERIFIED'], ['failed', 'FAILED'], ['unknown', 'UNVERIFIED']])('renders credential operation %s without pretending it is an HTTP homepage check', (state, label) => {
+    const output = formatCommandResult('hv_health', commandSuccess({ role: 'document-extraction', state, reason: 'Declared invoice extraction receipt evidence.',
+      checks: [{ environment: 'production', service: 'web', state, counts: { invoiceExtracted: 1 } }] }));
+    expect(output).toContain(`APPLICATION OPERATION ${label}`);
+    expect(output).toContain('document-extraction');
+    expect(output).not.toContain('No HTTP result');
+  });
+
   it('gives every command a command-aware shared success presentation', () => {
     const output = formatCommandResult('hv_inspect', commandSuccess({
-      provider: 'gitlab',
+      provider: 'github',
       resources: [{ id: '1', name: 'web', status: 'success', url: 'https://example.com/web' }],
     }));
 
     expect(output).toContain('✅  HYPERVIBE · INSPECT COMPLETE');
     expect(output).toContain('📦  RESULT');
-    expect(output).toContain('gitlab');
+    expect(output).toContain('github');
     expect(output).toContain('Resources: 1');
     expect(output).toMatch(/RESULT\s+NAME\s+URL\s+ID/);
     expect(output).toMatch(/✅\s+web\s+https:\/\/example\.com\/web\s+1/);
@@ -326,17 +374,17 @@ describe('command presentation', () => {
     const output = formatCommandResult('hv_ci_status', commandSuccess({
       repository: { scope: 'group/project' },
       runs: [{
-        id: 'pipeline-42',
-        name: 'GitLab pipeline',
+        id: '42',
+        name: 'GitHub workflow',
         phase: 'succeeded',
         nativeStatus: 'success',
-        webUrl: 'https://gitlab.example.com/group/project/-/pipelines/42',
+        webUrl: 'https://github.com/group/project/actions/runs/42',
       }],
     }));
 
-    expect(output).toContain('1 run · GitLab pipeline');
+    expect(output).toContain('1 run · GitHub workflow');
     expect(output).toMatch(/OUTCOME\s+URL\s+RUN ID/);
-    expect(output).toMatch(/✅ succeeded\s+https:\/\/gitlab\.example\.com\/group\/project\/-\/pipelines\/42\s+pipeline-42/);
+    expect(output).toMatch(/✅ succeeded\s+https:\/\/github\.com\/group\/project\/actions\/runs\/42\s+42/);
     expect(output).not.toMatch(/^OUTCOME\s+PHASE/m);
   });
 
@@ -419,7 +467,10 @@ describe('command presentation', () => {
       'hv_appstore_submit',
       'hv_ci_status',
       'hv_ci_trigger',
+      'hv_cloud_connections',
       'hv_cloud_pair',
+      'hv_cloud_requests',
+      'hv_cloud_secrets',
       'hv_connections',
       'hv_db_query',
       'hv_deploy',
@@ -427,7 +478,9 @@ describe('command presentation', () => {
       'hv_health',
       'hv_import',
       'hv_inspect',
+      'hv_launch',
       'hv_logs',
+      'hv_migrate',
       'hv_plan',
       'hv_rollback',
       'hv_runs',

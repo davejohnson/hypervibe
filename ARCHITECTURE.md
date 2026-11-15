@@ -1,1599 +1,373 @@
 # Hypervibe Architecture
 
-Hypervibe is an infrastructure creation, migration, and destruction orchestrator.
-It is not a loose collection of imperative provider functions.
+Hypervibe helps vibe coders deploy and operate apps on Google Cloud, AWS and Azure.
+It owns the DevOps journey; OpenTofu is the chosen infrastructure lifecycle engine.
+This document defines the target architecture and the boundaries that implementation
+must preserve. GCP selects the managed OpenTofu engine automatically. No legacy
+GCP infrastructure writer or opt-in engine choice is supported. Implementation
+and local checks alone do not establish a verified live cloud journey.
+
+Existing Railway apps, integrations and operations follow the same safety
+boundaries. Focused rules cover [lifecycle](docs/development/lifecycle.md),
+[connections](docs/development/connections.md), [CI](docs/development/ci.md) and
+[recovery](docs/development/recovery.md); they do not prescribe a second cloud
+infrastructure engine.
 
 ## Product Model
 
-Treat the desired-state loop as the product center:
+The [common cloud user journey](docs/development/user-journey.md) defines the
+GCP/AWS/Azure milestone, build order and observable acceptance. This architecture
+defines its technical and safety boundaries. Backend implementation notes and
+historical evidence do not add requirements to that milestone or prove it complete.
 
-1. `hv_spec` defines infrastructure intent.
-2. `hv_plan` observes live provider state, checks required connections, computes drift, orders dependencies, and surfaces warnings or blocked work.
-3. `hv_apply` converges from a specific plan, rejects stale plans, records receipts, and confirm-gates destructive or billable actions.
-4. `hv_status` verifies convergence and reports drift.
+A user describes the app they want to run. Hypervibe inspects the repository,
+chooses sensible infrastructure, connects the authorized account, explains the
+proposal and cost implications, then delivers a verified running app. Deployment,
+rollback, recovery, observability, secrets and third-party integrations belong in
+that same experience. Ask for access and meaningful decisions, not a DevOps setup
+checklist. Follow the [product rules](docs/development/product.md).
 
-Fresh repositories enter that loop through `hv_spec`. A read in a git
-repository with no matching local or repo-backed project returns a successful,
-explicit `initialized: false` bootstrap contract so an agent can inspect the
-application and submit its initial desired state. The read performs no writes;
-only the following `hv_spec` call with `spec` creates the project and committed
-`.hypervibe/spec.json`. Other commands continue to reject uninitialized
-projects as `NOT_FOUND` and point back to this flow. An unknown explicit project
-selector is treated as a possible typo: the error returns the requested name,
-the current-repository candidate, and a bounded registered-project list so an
-agent can retry an unambiguous correction and a CLI user can check the name.
+The central loop remains:
 
-When adding capabilities that create, mutate, purchase, migrate, deploy, schedule, or destroy infrastructure, default to modeling them in the spec and plan/apply flow. Use separate imperative tools only for read-only inspection, explicit operational actions, or narrow escape hatches; they should not become the primary path for lifecycle-managed infrastructure.
+1. `hv_spec` records the intended app and infrastructure.
+2. `hv_plan` observes current state, resolves dependencies and produces an exact
+   proposal, including changes, costs, risks and blockers.
+3. `hv_apply` executes only the approved, current plan and records partial outcomes.
+4. Verification proves the intended infrastructure and application behavior.
 
-Domain, DNS, registrar, hosting, load balancers, database, object storage, queues, deploy-source, CI deploy, and recurring job changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
+A fresh repository can be inspected without writes. Only explicit desired-state
+submission initializes managed project state. Unknown project selectors, missing
+provider choices or ambiguous account scope must not silently choose a destination.
+Read-only inspection is distinct from explicit, mapping-based adoption.
 
-Read-only provider forensics belong in `hv_inspect`. Adoption of already-existing provider infrastructure into Hypervibe local/repo state belongs in `hv_import` and must be explicit, mapping-driven, and confirmation-gated. Do not use `hv_import` as a generic read tool.
+## Provider Scope
 
-## State Ownership
+New cloud development targets GCP, AWS and Azure. Prove one complete cloud journey
+before extending it; neither a registry entry nor a mocked test makes a provider
+supported. Record implemented capabilities, verified paths and remaining gaps in the
+[support matrix](docs/development/support-matrix.md), the single statement of scope.
 
-Desired infrastructure state is repo-backed when Hypervibe runs inside a git worktree:
+Preserve Railway for existing applications, including established state, bindings,
+data and working workflows. A change to the cloud engine does not authorize moving
+an existing application or discarding its data.
 
-- `.hypervibe/spec.json` is the committed source of truth for infrastructure shape.
-- `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources. Managed-secret acceptance metadata stays local because even a value hash is an offline verifier for a low-entropy delegated value.
-- Scoped storage identity is the composite of the provider resource id and its
-  provider-native context. Keep `externalId` provider-native and present the
-  opaque, non-secret `instanceScope` beside it. Railway uses project and
-  environment ids; cloud adapters may use account/project, region, resource
-  group, storage-account, or similar coordinates. Matching unscoped ids alone
-  do not prove that two environments share one data instance.
-- Local SQLite is a cache/history/secrets store for revisions, runs, receipts, and local credentials.
-- Provider APIs are observed live state.
-
-Do not treat cached local state as proof of convergence when live observation is available.
-
-Unreadable local state is not empty state. Non-empty corrupt or schema-invalid
-JSON in bindings, plans, receipts, service configuration, or policies blocks
-the operation; repositories must never replace it with `{}`/`[]` and continue
-reconciliation. Empty legacy columns may still decode to their declared empty
-shape.
-
-A local project with no environment/provider decision uses the non-provider
-sentinel `unconfigured`. Project creation, adapter lookup, health/log routing,
-and legacy bootstrap must never turn a missing choice into Cloud Run, Railway,
-or another real provider. The first reviewed environment spec establishes the
-project's hosting provider before plan/apply can mutate infrastructure.
-
-## Project Runtime Desired State
-
-The top-level `runtime` field declares the project runtime used by
-Hypervibe-generated build and automation paths. It is a typed contract such as
-`{ "kind": "node", "version": "24", "installCommand": "npm install --global npm@11.19.0 && npm ci", "buildCommand": "npm run build" }`
-or `{ "kind": "python", "version": "3.13", "installCommand": "python -m pip install -r requirements.txt" }`;
-it is not the runtime used to execute Hypervibe itself.
-
-- A repository-owned Dockerfile remains authoritative and is never rewritten
-  from `runtime`. When no Dockerfile exists, generated CI/provider builds use
-  the declared runtime image and only the commands persisted in desired state.
-- Migration setup, project build jobs, and managed checks with no explicit
-  same-kind version/install command inherit the reviewed project runtime. A
-  check-level version or install command remains an intentional override.
-- Generated containers never invent a package manager, dependency install,
-  build, or service start command. Fresh-project analysis may derive commands
-  from one consistent lockfile, an exact `packageManager` declaration,
-  and named package scripts. Those commands become desired state and are
-  reviewable. Missing or conflicting evidence blocks generated builds; a
-  repository Dockerfile remains the escape hatch for custom build systems.
-- Shared-image builds use an unambiguous explicit web command as the image's
-  default, or a common explicit runtime-service command when no web workload
-  exists. This does not replace per-workload provider start commands; web and
-  worker commands may differ. Missing or ambiguous defaults remain blocked.
-- Cron workloads always declare `startCommand`. Provider adapters must not
-  substitute an application command while creating or updating a scheduled job.
-- Hypervibe-owned isolated helpers, such as App Store releases, restore drills,
-  provider bootstrap images, and portable deploy gates, share one explicit
-  managed runtime contract and must not inherit project language settings. Its
-  version is regression-checked against Hypervibe's own `.node-version`; exact
-  helper dependencies are checked against the application lockfile.
-- Runtime changes are part of each environment's deployment contract and are
-  projected into local service build state during apply. Because hosting APIs
-  generally cannot observe the base runtime directly, that drift is reported
-  as unverified rather than falsely presented as provider-confirmed.
-- On fresh-project discovery Hypervibe inspects repository-native evidence
-  (`.node-version`, `.nvmrc`, `.python-version`, `.tool-versions`, Volta, and
-  language manifests). A single concrete Node or Python selection is proposed
-  to the agent and persisted in the initial spec; conflicting, unversioned,
-  polyglot, and custom-language projects require an explicit decision or a
-  repository Dockerfile.
-- Specs that omit `runtime` never imply a Node or Python version. A
-  repository-owned Dockerfile can build without this field; generated builds,
-  migrations, and checks that need language tooling stop with runtime guidance
-  instead of silently selecting a compatibility default.
-- Repository evidence is rechecked by `hv_spec`. A changed native version is
-  returned as a suggested desired-state patch, not applied invisibly. Major or
-  language changes therefore remain plan/apply reviewed, while declared major
-  or minor selectors use the latest compatible patch in generated CI and
-  pulled runtime images.
-
-## Code Map
-
-- `src/application/`: the transport-neutral command registry, command context, result envelope, provider bootstrap, and shared orchestration entrypoint.
-- `src/application/hosted/`: side-effect-free inspection contracts for a trusted hosting process. They validate exact source bytes and return bounded, value-free receipts without opening local state or contacting providers.
-- `src/interfaces/mcp/`: the MCP registration/response adapter. It exposes the canonical `hv_*` ids without owning command behavior.
-- `src/interfaces/cli/`: the human and JSON CLI adapter. It parses friendly command paths into the same registry used by MCP.
-- `src/tools/`: transport-neutral command group declarations retained under their historical filenames while they are moved incrementally; they must not import MCP.
-- `src/domain/spec/`: the desired-state document (`ProjectSpec`), revisioned in the `project_specs` table through `SpecStore`.
-- `src/domain/plan/`: the reconciliation engine: observe live state, pure `diffEnvironment`, `ConvergeExecutor`, and the planId handshake.
-- `src/adapters/providers/`: provider-owned API integrations and provider-specific lifecycle behavior.
-- `src/domain/services/`: orchestration services that sequence capabilities without owning provider API quirks.
-- `src/adapters/db/repositories/`: SQLite data access; JSON columns should be validated through `parseJsonColumn`.
-
-Legacy `*.tools.ts` files that are not included by `createCommandRegistry` are internal helper libraries pending extraction. Do not expose them through an interface.
-
-## Interface Boundary
-
-MCP and CLI are adapters over one command application layer:
-
-```text
-CLI ─┐
-     ├─ command registry/context/results ─ domain plan/services ─ providers
-MCP ─┘
-```
-
-- Define a command once with its canonical id, CLI path, description, Zod input schema, safety metadata, and handler.
-- Interface code may parse, render, prompt, and translate protocol envelopes. It must not contain provider calls or infrastructure orchestration.
-- The command runner owns validation, error conversion, redaction, and the structured result envelope. Secrets must be redacted before any interface sees a result.
-- MCP `structuredContent` and CLI `--json` expose the same redacted command envelope.
-- MCP resolves repository-backed project state from the client's declared file roots for each request, never from the long-running server process's launch directory. Multiple project identities, unavailable roots, and roots with unmatched repository identities fail closed instead of selecting unrelated single-project state.
-- The `hypervibe` no-argument entrypoint remains MCP-compatible. Human CLI commands use explicit arguments; `hypervibe mcp` and `hypervibe-mcp` are explicit MCP entrypoints.
-- A future HTTP adapter may use this boundary, but remote auth, locking, state ownership, and secret custody are separate product decisions. Do not introduce an unauthenticated remote interface.
-- `@hypervibe/hypervibe/hosted` is a library boundary, not an HTTP interface. Its versioned committed-spec inspector accepts bytes only with a provider-verified repository identity, exact full revision, and matching SHA-256. The trusted host owns account authorization, code-host installation tokens, exact-revision reads, pairing, and tenancy; the inspector owns the existing project schema, repository-claim consistency, secret-shaped-content rejection, and a deterministic import receipt.
-- Hosted inspection never reads a checkout, opens SQLite, observes infrastructure, plans, applies, or manufactures provider endpoints. It returns only declared environments, services, provider capabilities, and HTTPS endpoints that are explicit safe domains in desired state. A missing spec repository claim remains visible as unverified; a present mismatched claim fails closed.
-
-
-## Repository Collaboration
-
-Repository collaboration setup is lifecycle development infrastructure. GitHub issue labels, issue templates, PR templates, branch protection, and deploy-promotion guardrails should be expressed in the project spec and converged through `hv_plan`/`hv_apply`. Do not add one-off setup tools for these paths unless they are read-only inspection or explicit repair operations.
-
-Collaborator invitations are guidance-only by default. If Hypervibe ever mutates repository access, that must be confirm-gated, permission-audited, and represented as desired state rather than hidden inside a helper tool.
-
-Do not model collaborators as permanent Hypervibe operator/contributor roles.
-The current chat task determines the required capability. Any checkout can
-read committed desired topology and non-secret bindings, and may check public
-bound endpoints without provider credentials. Exact drift, private logs, and
-provider mutations require a verified connection on the machine performing
-that operation.
-
-Missing provider access is a task boundary, not a reason to grant membership
-automatically. Offer either to connect credentials the user already controls
-or to prepare a value-free handoff naming the provider, scope, environment,
-and blocked task for the person who manages that access. A project owner can
-keep provider control and execute the resulting plan; add a collaborator to a
-provider only when they truly need independent mutation authority.
-
-This access model does not require a hosted Hypervibe control plane, shared
-drift service, or secret relay. API-key transfer is initially an external human
-workflow: the key owner may supply it out of band for the infrastructure owner
-to store through a safe local reference, or both may use an existing shared
-secret manager such as 1Password. Hypervibe records only the delegated slot
-and value-free handoff metadata.
+Retain useful authentication, cloud bootstrap, image build, registry, log,
+deployment inspection and data-operation clients. Replace custom cloud resource
+create/read/update/delete reconciliation with the OpenTofu integration. Do not
+recreate the full cloud provider schema or lifecycle inside Hypervibe.
 
 ## Provider Boundary
 
-Keep provider behavior behind the provider boundary. Generic orchestration code in `src/domain/plan`, shared `src/domain/services`, and shared command modules must not grow provider-name branches or direct imports from `src/adapters/providers/<provider>` just to express hosting behavior.
+Hypervibe owns application intent, user choices, authorization, dependency policy,
+secret custody, workflow coordination and evidence. OpenTofu and its pinned provider
+plugins own the new cloud infrastructure graph, resource diff, execution and state.
+Provider-specific modules translate supported intent into engine configuration and
+expose narrow operational capabilities where the engine is not the right owner.
 
-Provider-specific logic belongs under `src/adapters/providers/<provider>/...` and should be exposed through:
+| Responsibility | Owner |
+| --- | --- |
+| Desired app, environment policy, exact approval and result reporting | Hypervibe application layer |
+| New cloud resource lifecycle and native resource state | OpenTofu with pinned provider plugins |
+| Records in an explicitly selected existing Cloudflare, Cloud DNS, Route 53 or Azure DNS zone | Shared saved OpenTofu DNS plan and encrypted state; Hypervibe owns scoped observation, consumer dependencies and exact adoption approval |
+| DNS security policy and certificate readiness | Hypervibe observation and blockers; zone creation, DNSSEC/registrar changes and automatic CAA policy mutations are unavailable |
+| Account discovery, sign-in and credential refresh | Hypervibe connection capabilities |
+| GCP project setup, billing attachment, APIs, identities, IAM and build resources | Project-shared OpenTofu state with exact setup approval |
+| Source build, immutable release, rollout, logs and app checks | Hypervibe deployment and operations capabilities |
+| SQL tasks, backup/restore execution and third-party APIs | Explicit Hypervibe operational/integration capabilities |
+| Existing Railway lifecycle | Retained Railway capability until explicitly replaced |
 
-- adapter capabilities,
-- provider registry metadata,
-- provider-owned helper modules,
-- or a narrow provider-owned service.
+GCP bootstrap discovers access through read-only APIs and delegates infrastructure
+prerequisites to saved OpenTofu plans. Billing selection and infrastructure/access
+approvals are distinct. Builds and operational helpers may not create missing
+repositories, buckets, job runners or permissions. Missing prerequisites block
+until the reviewed engine workflow creates them.
+Engine and API operations share exact scope, redaction, approvals and result stages.
+Generic orchestration routes by capability, not provider-name branches. New plugins
+must declare supported work and fail explicitly for unsupported work.
 
-Provider adapters own provider quirks:
+DNS selection is independent of hosting. The four existing-zone DNS backends
+have ordinary CI configuration checks with their actual pinned providers; their
+installed live lifecycle remains unverified. See the
+[DNS evidence record](docs/development/provider-evidence.md#existing-zone-dns-evidence)
+for the precise coverage. Historical direct DNS adapter methods are not invoked
+by managed domain, Pages or email record workflows; writes use saved engine plans.
 
-- API endpoints and API-specific request shapes,
-- generated provider CI steps,
-- credential-to-secret mapping,
-- log/build/deploy semantics,
-- polling and terminal-state rules,
-- verification DNS record shapes,
-- retry behavior,
-- provider-specific error enrichment.
+## Engine Runtime And Installation
 
-Generic orchestration owns sequencing and policy:
+Hypervibe must provision a pinned, private OpenTofu runtime automatically for the
+supported OS and architecture. Verify the downloaded artifact against its trusted
+release metadata and checksum before execution. Install atomically into a private
+cache, use the verified absolute path and fail safely on unavailable or invalid
+artifacts. Do not execute an arbitrary engine found on `PATH` as a fallback.
 
-- ordering dependencies,
-- enforcing confirmations,
-- freezing encrypted plan inputs,
-- routing actions by capability,
-- producing provider-neutral receipts,
-- and preserving the spec/plan/apply contract.
+Pin provider versions and dependency lock data with the generated configuration.
+Use controlled plugin resolution and verify integrity before executing plugins;
+unreviewed executable downloads are not an implementation detail to hide in apply.
+Engine upgrades are reviewed product changes with compatibility evidence, not
+implicit latest-version resolution during a deployment.
 
-Every registered hosting lifecycle declares the exact `workloadKinds` its
-adapter can reconcile end to end (`web`, `worker`, and/or `cron`). Registry
-registration rejects missing, empty, duplicate, or unknown claims. Spec
-validation checks every declared service against that provider-owned metadata
-before a new project is persisted and before plan/apply can observe or mutate a
-provider project or environment. Do not infer worker support from deployment
-category, cron support from a vendor's general product surface, or either from
-an adapter's unrelated feature flags. A provider is listed for a workload kind
-only after its create, update, CI/deploy, observation, and teardown paths handle
-that kind; any limits on exact kind observation remain separately declared.
+Users should not separately install OpenTofu, Terraform, cloud CLIs or Docker to
+deploy an app. Remote image builds and supported SDK/browser authentication belong
+inside the managed journey. The current npm installation still requires Node.js
+and npm; a packaged path removing those requirements remains to be proven.
+Never restart or kill a user's MCP/client process to activate a build or update.
 
-Product-specific surfaces such as SendGrid email setup or Stripe payments may stay opinionated when they are not part of generic infrastructure reconciliation.
+## State Ownership
+
+Keep desired intent, execution state, credentials and evidence distinct:
+
+- The repository spec records reviewed application and infrastructure intent.
+- Generated engine configuration is derived from that spec and pinned component
+  versions. The exact configuration used for a plan is frozen with that plan.
+- OpenTofu state records the engine's cloud resource identities and dependencies.
+  It may contain secrets; never commit it or expose raw state through MCP/CLI.
+- Non-secret bindings connect logical app resources to exact engine/provider
+  identities and scope. They are references, not a competing lifecycle state store.
+- Hypervibe local storage retains encrypted credentials and sensitive operation
+  data, plus revisions, receipts and recovery metadata as appropriate.
+- Live provider and application observations establish current reality. Cached
+  state, an engine exit code or a prior receipt alone does not prove health.
+
+Missing, unreadable, corrupt or incompatible state is not an empty deployment.
+Block rather than replacing it with empty objects or creating replacement resources.
+Keep state storage, encryption and locking explicit; do not introduce a remote
+backend or credential-sharing service without defining ownership and authorization.
 
 ## Platform Bindings
 
-Environments store provider bindings in `platformBindings` using generic keys only:
+Preserve native identity together with account/project, region and any required
+resource scope. A name is a search hint, never proof of ownership or authority.
+Map engine outputs to exact declared consumers through a bounded, validated binding
+contract. Do not accept arbitrary output keys as app environment variables.
 
-```json
-{
-  "provider": "<registered-hosting-provider>",
-  "projectId": "<provider-project-id>",
-  "environmentId": "<provider-environment-id>",
-  "services": {
-    "api": {
-      "serviceId": "...",
-      "url": "...",
-      "customDomains": ["..."]
-    }
-  }
-}
-```
-
-Provider-specific legacy binding names such as `railwayProjectId` and `railwayEnvironmentId` were migrated away in SQLite migration 7.
-
-Custom-domain traffic proxying is explicit desired state through the optional
-`environment.domainProxy` boolean (default `true`). Verification records always
-remain unproxied. A successful DNS write records the domain name and effective
-proxy state in `platformBindings.domainDns`, so changing the setting plans a
-domain update instead of hiding an imperative Cloudflare toggle. This supports
-the reversible certificate-validation workflow where a traffic CNAME is made
-DNS-only until the hosting provider verifies the domain, then proxied again.
-Environment custom domains always require a successful provider-side attachment
-before Hypervibe writes DNS. Hosting providers declare `lifecycle.hosting` and
-their custom-domain support in registry metadata; generic orchestration must not
-infer support from a provider name or deployment category. There is no generic
-CNAME-to-service fallback. Cloud Run, DigitalOcean App Platform, Railway, and
-Vercel implement provider-owned attach, observation, and exact detach contracts.
-Each successful attachment persists the provider
-domain id, service and environment ids, Cloudflare zone id, and every managed
-DNS record id before it may converge. An observed provider attachment without
-that durable binding is normally an adoption candidate and blocks with
-`hv_import` guidance; it is never silently adopted. The compatibility exception
-requires exact local project, environment, and service bindings plus one live,
-provider-verified attachment of the desired domain to that same service. A
-legacy service binding may omit the hostname because the reviewed spec and
-provider observation supply that evidence; a matching hostname alone is never
-identity. Planning emits an explicit local-only adoption action carrying every
-durable provider id. Apply re-observes those identities before recording the
-provider domain id and makes no provider or DNS mutation. It does not claim
-unrecorded DNS identities, so a later detach still blocks until the exact DNS
-binding is restored. Missing ownership evidence, duplicate attachments,
-partial observation, or conflicting bindings continue to block. Removing `environment.domain` plans a
-confirmation-gated detach of only those exact identities, with provider absence
-verified before DNS deletion. A provider attachment accepted before its DNS
-requirements are available is persisted with a known-empty record set so a
-later plan can continue or safely detach it.
-
-Provider certificate flows remain provider-owned. Cloud Run uses native domain
-mappings only in regions where Google exposes that API. DigitalOcean preserves
-the full App Spec while reconciling its domain collection. Vercel uses the exact
-Project-domain identity. Cloud Run declares DNS-only traffic in provider
-metadata, so generic apply forces its Cloudflare traffic records unproxied even
-if `domainProxy` was requested. GitHub Pages remains the separate project-level
-lifecycle described below.
-
-AWS ECS Express Mode and Azure Container Apps use authentication-only
-connections. Infrastructure identities must never return to their credential
-schemas.
-
-Hosting geography is desired state, never authentication. An environment may
-set `hosting.region`; when it does not, the provider adapter uses its documented
-Hypervibe default. Agents should normally omit the field unless latency, data
-residency, provider availability, or existing infrastructure gives them a
-reason to choose it. Connection forms and credential files must not ask users
-for region or location.
-
-- The `ecs` connection contains only an AWS access-key pair. Its explicit
-  per-environment project action ensures the selected account/region
-  default-VPC prerequisite and owns one tagged ECR repository, the two
-  AWS-documented Express Mode IAM roles, and one ECS cluster. The shared default
-  VPC is never treated as an environment-owned deletion target. Each service
-  action owns one ECS Express
-  Gateway service; AWS owns the Fargate, load-balancer, security-group,
-  autoscaling, monitoring, and generated-HTTPS resources inside that service.
-  Managed CI may only push to the bound repository and update already-bound
-  Express service ARNs.
-- The `azure-container-apps` connection contains only a Microsoft Entra service
-  principal and subscription. Its explicit per-environment
-  project action owns one tagged resource group, Basic ACR registry, ACR push
-  assignment, and Container Apps managed environment. Each service action owns
-  one system-identity Container App and its exact ACR pull assignment. Managed
-  CI may only push to the deterministic bound registry and update already-bound
-  Container App ARM ids.
-- These provider projects deliberately do not share across Hypervibe
-  environments. That makes the existing project action the complete ownership
-  and teardown boundary without hiding an environment deletion inside another
-  resource action.
-- AWS custom domains are phased through a Hypervibe-tagged ACM certificate and
-  the exact Express-managed ALB listener rule/certificate attachment. Azure
-  custom domains first return the provider's direct DNS and verification
-  requirements, then create and bind the managed certificate only after those
-  records resolve publicly. Both providers require DNS-only traffic during
-  certificate issuance and renewal. Domain detach removes only the exact
-  reviewed binding and Hypervibe-owned certificate before DNS deletion.
-
-The removed hand-built ECS and pre-provisioned Container Apps implementations
-must not be revived. AWS and Azure datastore and secret providers remain
-independent capabilities.
-
-DigitalOcean Container Registry is an account-level hosting prerequisite, not
-a credential field. The explicit DigitalOcean project action reuses the
-deterministically selected existing registry or creates a free Starter registry
-when the account has none. Provider CI only discovers and uses that reviewed
-registry; it must never create registry infrastructure. Environment teardown
-does not delete the shared account registry.
-
-Hosting-provider migrations retain the abandoned provider identity until
-cleanup is provider-confirmed. Every hosting adapter declares its smallest
-complete teardown boundary: Cloud Run and Vercel own individual services,
-Railway owns one environment inside a shared project, and ECS Express, Azure
-Container Apps, and DigitalOcean App Platform own one project/app boundary per
-Hypervibe environment. Planning must use that declaration; generic code must
-never infer deletion scope from a provider name. Project-boundary cleanup
-deletes exact services first and then the owned project. Railway cleanup deletes
-the exact environment and must not delete shared Railway services. Every action
-is confirmation-gated, provider absence must be verified before the retained
-binding is cleared, and a second provider switch is blocked while an earlier
-cleanup identity remains.
-
-Individual hosting-service cleanup carries the reviewed operation, external
-service id, provider project/environment scope, and a fingerprint of the local
-binding identity. Apply revalidates that the service is still omitted from the
-spec and that the provider, scope, logical name, external id, and fingerprint
-still match before resolving a deletion adapter. For Railway, aggregate
-environment observation is never sufficient deletion evidence: the adapter
-checks the exact `serviceInstance(serviceId, environmentId)` before and after
-the mutation. A present target may be deleted only when no other current or
-retained local binding refers to the id and a complete paginated provider
-inventory proves that no sibling environment instance exists. The mutation is
-scoped with `serviceDelete(id, environmentId)`. An exact already-absent result
-removes only the selected local binding. A valid non-null `deletedAt` on the
-exact Railway service instance is provider-confirmed tombstone evidence and
-likewise removes only the selected local binding without another provider
-mutation. A missing or malformed deletion marker, a live exact instance whose
-parent service is absent, unknown parent evidence, or a complete parent
-inventory that omits the target environment keeps all local state for a safe
-retry. Before any retained hosting boundary is destroyed, apply scans every
-local Hypervibe project and environment for an exact or ambiguously scoped
-reference to that provider boundary; any other reference blocks cleanup,
-including a database or cache provider identity
-nested in a component's retained previous binding. Retained hosting cleanup is
-not planned without its required project/environment scope. If rollout rollback
-cannot remove a newly created service, snapshot restoration persists an
-identified recovery marker with the provider-returned resource name so the next
-plan blocks until that exact provider resource is reviewed and cleaned up.
-
-`hv_inspect` environment forensics are provider-scoped. When the selected host
-is not the current host, the selected adapter receives only its own retained
-binding (when present), logical project/environment context, and bounded
-service-name hints. It must never receive another provider's platform binding.
-All hosting adapters expose this read-only inventory contract. For migrations
-that predate retained bindings, `hv_import mode="retained-cleanup"` reruns that
-inventory, rejects partial, ambiguous, or explicitly unowned results, and
-confirmation-gates recording the exact cleanup target. It never mutates the
-provider; deletion remains a separately reviewed `hv_plan`/`hv_apply` action.
-`hv_plan scope="retained-cleanup"` persists an isolated plan containing only
-those previous-host destroy actions. The same isolated scope may include one
-exact abandoned PostgreSQL identity recorded through
-`hv_import mode="retained-database-cleanup"` after provider-owned inventory.
-It may likewise include one exact Redis-compatible cache identity recorded
-through `hv_import mode="retained-cache-cleanup"`. These bindings carry the
-durable provider id and provider-native account/project and region/organization
-scope, never connection material. Planning and apply
-re-observe that exact scoped identity; deletion is data-bearing and
-confirmation-gated, and the binding is cleared only after provider-confirmed
-terminal absence. If a provider inventory returns the same durable service id
-in multiple environments, import selects a candidate only when exactly one
-complete compatible scope is established by the current hosting binding, the
-retained previous-host binding, or an explicit unresolved-create marker;
-otherwise it remains ambiguous. A retained Railway service-backed database
-must include both its project and environment ids; legacy project-only
-identities must be re-imported before Hypervibe can authorize
-environment-scoped deletion, and its binding records that the provider resource
-is a service rather than a legacy plugin. Cleanup verifies that exact
-environment instance is PostgreSQL. It also
-reconstructs and removes an attached Railway volume when one remains after the
-service is already absent, so a retry can finish dependent cleanup without
-reissuing an unsafe service mutation. Retained database and cache cleanup scan
-all local projects and environments for another exact or ambiguously scoped
-reference to the same provider id before mutation. It
-observes the current host for the usual stale-plan
-fingerprint, preflights only the current and retained hosting, database, or cache
-providers, and neither loads deploy env files nor resolves unrelated
-integrations. `hv_apply` derives that isolation from the persisted plan scope,
-not caller input.
-This migration-recovery lifecycle is distinct from the future general
-environment desired-absent lifecycle.
-
-Provider inventory is provider-owned and mandatory. Registering hosting
-lifecycle support fails without bounded provider-owned environment forensics.
-Registering any
-database, cache, or storage lifecycle capability fails unless the same provider
-declares a provider-resource inspector with exact durable-id and exact-name
-selectors, a bounded `limit` selector, mutual exclusion between id and name,
-and non-empty provider-native scope keys. Every returned identity carries those
-non-secret scope values. This registry invariant prevents lifecycle support and
-forensic inventory from drifting apart as providers are added or extended.
-When an environment has no durable database binding, `hv_inspect` may return
-bounded account-level candidates but must label them as unattributed inventory;
-it must not collapse a successful inventory containing differently named
-instances into `null`, select one by convention, or silently adopt it. Exact
-adoption or retained cleanup is a separate explicit `hv_import` decision.
-
-When an attached Railway domain remains provider-unverified, the reviewed
-domain update first calls Railway's non-destructive `customDomainUpdate` for
-the same environment to refresh provider verification before rewriting DNS.
-Verified domains remain read-only on this path.
-For a provider adapter that exposes the repair capability, setting a new
-`environment.domainRecreateRevision` plans a one-time, confirmation-gated
-domain replacement. Apply deletes only the observed custom-domain id, recreates
-the same hostname on the same service and environment only after the provider
-confirms the old attachment is absent, and writes the provider's fresh DNS
-requirements. Duplicate matching attachments block before deletion. The
-consumed revision is stored in
-`platformBindings.domainDns.recreateRevision` after DNS is written so later
-plans cannot repeat the deletion. Keep `domainProxy` disabled until provider
-ownership and certificate issuance are verified, then enable it in a separate
-reviewed plan.
-Cloudflare DNS mutations resolve durable zone and record identities before
-writing. Ambiguous same-name zones or same-name/type records block instead of
-selecting the first result. Record deletion treats already-absent as success but
-must verify terminal absence before reporting success. Multi-value record sets,
-including Cloud Run A/AAAA answers, are reconciled as a set and persist every
-exact record id without pruning unrelated values Hypervibe did not create.
-When that binding confirms the desired traffic record is proxied, provider-side
-CNAME comparison is intentionally opaque: a verified domain with a ready
-provider certificate may converge even if the origin reports its DNS comparison
-as false. Missing bindings, unproxied intent, unverified ownership, and pending
-or failed certificates must still plan repair.
-
-Provider-managed edge load balancers use a separate generic
-`platformBindings.loadBalancer` topology. The public hostname, provider scope,
-and each monitor/pool/load-balancer provider id are durable identities. The
-monitor, pool, and public hostname are distinct plan actions with explicit
-dependencies; apply must never create all three from a single convenience
-handler. A load-balancer hostname owns routing for `environment.domain`, so the
-ordinary single-service domain/DNS action is mutually exclusive while the
-load-balancer spec is present. Teardown reverses the dependency order and must
-confirm terminal absence before clearing each binding.
-Provider-internal ingress created as part of a hosting lifecycle, such as the
-ECS Express ALB, remains owned by that hosting action and is not advertised as
-a generic edge load-balancer provider. The generic contract is for redundant
-public origins and requires the explicit monitor/pool/hostname lifecycle above.
-
-Opt-in live load-balancer conformance exercises that same desired-state path
-against disposable provider resources. Test cleanup removes the public
-hostname, then pool, then monitor before deleting origins. A failed cleanup
-preserves Hypervibe state and reports only non-secret durable identities; it
-must not fall back to direct provider deletion.
+Repository exports contain only safe topology and identity metadata. Credentials,
+connection strings, secret hashes and sensitive engine outputs stay inside the
+protected boundary. Existing Railway bindings remain readable and authoritative
+for their established resources; they do not dictate the new cloud state model.
 
 ## Plan Honesty
 
-Plan honesty beats optimistic UX. `hv_apply`, `hv_deploy`, CI helpers, and provider task runners must not report success unless provider receipts, health checks, logs, or a follow-up observe prove the intended state.
+Persist the exact saved engine plan and the Hypervibe actions it participates in.
+Bind approval to the project/environment, account scope, spec/configuration revision,
+engine and provider versions, relevant state revision and exact external actions.
+The human summary must cover the complete mutation set, including replacement,
+deletion and costs; a friendly summary cannot authorize hidden engine actions.
 
-Partial progress should be returned as explicit `succeeded`, `failed`, `skipped`, `pending`, or `blocked` receipts with the actionable next step. Do not hide provider errors behind generic "bootstrap failed" or "problem processing request" messages when logs, trace ids, or step details are available.
+Apply the reviewed artifact, never silently generate and execute a new plan after
+approval. Reject stale inputs, conflicting state or a different dependency set.
+Do not downgrade an unsupported plan shape to an apparently safe summary.
+A noop plan has no writes, including bootstrap, repair and secret synchronization.
 
-Hypervibe should be stage-gated by default. A failed, blocked, pending, or confirmation-required stage is a stop point for autonomous agents: report which stages worked, which stage stopped progress, and what user decision or credential is needed next. Do not encourage agents to keep trying alternate tools, direct provider calls, or one-off workaround paths unless the user explicitly asks for broad investigation or repeated retries.
-
-The shared tool response envelope supports this with `agentInstruction`. Use it to tell agents when to `stop_and_report` or `ask_user`, especially for missing connections, failed receipts, provider errors, pending seed/deploy steps, and confirm-gated actions.
+Show `succeeded`, `failed`, `skipped`, `pending` and `blocked` honestly. Distinguish
+missing access from unmet prerequisites. A successful sign-in, accepted request,
+workflow dispatch or engine run is not a verified deployment.
 
 ## Reconciliation Safety Invariants
 
-A persisted plan is an authorization boundary, not just a progress preview.
-Every provider mutation during `hv_apply` must be attributable to one reviewed,
-non-noop action:
+- Every mutation belongs to an exact reviewed action and its declared dependencies.
+  Helpers may not ensure unrelated resources from the wider spec.
+- Billable and data-bearing actions require exact action confirmation. Account,
+  billing, invitations, secret import and apply approvals stay distinct; reuse
+  unchanged authorization within its scope.
+- Observation is present, absent or unknown. Only provider-confirmed absence proves
+  absence. Permission errors, partial reads, malformed responses, timeouts and
+  ambiguous identities remain unknown and block dependent mutation.
+- Verify prerequisite convergence before dependent effects. Do not remove bindings
+  until deletion is confirmed; teardown follows dependencies and stops on failure
+  or uncertainty. An attempted request does not establish cleanup ownership.
+- Persist uncertain writes and operation identities before retry. Re-observe exact
+  targets; do not replay, recreate or compensate from a guess.
+- Lock the affected environment and engine state for mutations. Coordinate deploy,
+  rollback, secret rotation and data operations with the same ownership boundary;
+  overlapping operations must not invalidate each other's reviewed inputs.
+- Failed, pending, blocked or confirmation-required stages stop dependent work
+  unless an explicit bounded continuation applies. Read-only diagnosis does not
+  authorize alternate provider writes or manual state/credential edits.
 
-- An action handler may mutate only the resource and operation named by that
-  action. Shared helpers must not create, repair, attach, deploy, or destroy
-  unrelated resources from the wider spec.
-- A noop action must cause zero provider mutations. If live state exists but
-  Hypervibe lacks its local identity binding, plan an explicit adoption or
-  binding-reconciliation action; do not call it noop and do not create a
-  replacement during another action.
-- Dependencies must be explicit plan edges. If service configuration requires a
-  database, queue, storage bucket, domain, or secret first, plan that action and
-  make the service action depend on it instead of ensuring the prerequisite
-  imperatively.
-- Receipts are action-scoped evidence. Do not reuse a whole-environment
-  bootstrap result as proof that several distinct actions succeeded.
+### Resource naming boundary
 
-Observation is tri-state: present, absent, or unknown. Only provider-confirmed
-absence may authorize a create based on observed state:
-
-- Permission errors, timeouts, rate limits, server failures, unsupported reads,
-  and partial observation are unknown, not absent.
-- Never swallow a non-not-found provider error and return `null`, an empty list,
-  or `false` that the diff engine will interpret as absence.
-- Track observation completeness per capability. Successful hosting observation
-  does not prove database, storage, queue, App Store, DNS, or repository-setting
-  observation succeeded.
-- Match existing resources by durable provider id first. Name matching may
-  produce adoption candidates, but multiple matches are ambiguity that must be
-  reported and blocked.
-
-Creates, updates, and destroys must be retry-safe:
-
-- Billable and data-bearing actions require exact action-id confirmation.
-- Provider deletes must treat already-absent resources as converged, wait for
-  realistic asynchronous deletion, and verify terminal absence before removing
-  local bindings.
-- Provider writes followed by a read must tolerate bounded eventual consistency
-  and verify the exact expected identity or revision; exhausting the observation
-  window remains a blocked or failed action, never inferred success.
-- Multi-resource destruction follows dependency order and stops on failed or
-  unknown deletion. Do not delete dependent data, storage, networking, or
-  credentials until the owning resource is confirmed absent.
-- A failed prerequisite is a stop point inside an orchestration stage. Do not
-  keep issuing dependent provider mutations and hope rollback will reconstruct
-  the prior state.
-
-Lifecycle changes require contract tests for noop mutation freedom,
-action-scoped mutation authority, observation-error preservation, duplicate
-identity handling, import round trips, confirmation gating, and idempotent
-delete retry. The current audit and repair queue is tracked in
-[`docs/reconciliation-safety-backlog.md`](docs/reconciliation-safety-backlog.md).
+Keep logical names simple and provider identifiers valid. Generated uniqueness
+must remain stable after binding. Never rename or adopt a durably bound resource
+merely because a newly chosen default differs.
 
 ## Connections And Secrets
 
-Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs; raw credentials in chat are still accepted when the user intentionally chooses that path.
+Discover required access early. Prefer verified scoped connections, supported
+browser sign-in and safe credential references. Cloud login, billing attachment,
+secret import and runtime credential delivery are different authorities.
+Control-plane access does not authorize copying administrator credentials into an
+app. Prefer supported workload identities with the least required permissions.
 
-`project` on `hv_connections` and `hv_secrets` selects and validates command context; it does not redefine provider credential scope or make locally stored credentials project-owned. Provider `scope` remains the durable resource boundary. A project-only `hv_connections` call lists connections in that explicit context, and an unknown explicit project must fail instead of being silently ignored.
+Secret values must not reach specs, repository bindings, public plans, logs,
+receipts, error messages or interface output. Treat engine configuration, saved
+plans, state, process environment and diagnostics as potentially sensitive.
+Encrypt sensitive artifacts at rest, restrict filesystem access and process
+inheritance, and redact before an interface or diagnostic sees content.
 
-Umbrella command modes must stay unambiguous in the registry description,
-field schemas, validation hints, generated CLI help, and MCP instructions. A
-project-only `hv_secrets` call lists sources just like `hv_connections`; masked
-hosting-variable reads require an explicit `env`. Only parameterless
-`hv_inspect({})` performs provider discovery. Every bounded inspection requires
-`provider`, and full environment observation additionally requires `project`
-and `env`. Discovery returns every inspection mode's required, optional,
-one-of, and mutually-exclusive selectors plus whether that mode accepts the
-bounded `limit` selector. Provider-owned resource inspectors declare this
-contract beside their driver. A recoverable selector mismatch returns one safe
-machine-readable corrected call and permits exactly that retry; it does not
-instruct an agent to stop merely for removing a field the selected mode cannot
-consume.
-
-Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
-
-Stripe Projects is supported only as a narrow local credential source. A
-`stripe-projects://<environment>/<provider>/<service>` reference must match the
-currently active environment. Hypervibe may invoke only the read-only,
-redacted `stripe projects env show --json` and
-`stripe projects env --service <provider>/<service> --json` metadata paths,
-then select those declared keys from the already-existing Stripe-managed output
-file. That file must resolve inside the linked repository, must be a regular
-non-symlink file, and must be owner-only on POSIX systems. Duplicate matching
-service configurations, absent keys, a different active environment, missing
-output, or unknown CLI output all block without returning a value.
-
-This credential source does not transfer infrastructure or rotation ownership
-to Hypervibe. Resolution must never call Stripe Projects pull, refresh,
-environment use/create/update/delete, provider link, service add/remove, or
-credential rotation paths: pull may rotate expiring provider access behind the
-command. The operator selects and pulls an environment explicitly, then calls
-`hv_connections` with `credentialsMap`; Hypervibe snapshots the mapped provider
-credentials into its encrypted verified connection. After an intentional pull
-or rotation, the operator reruns that destination `hv_connections` call. This
-read-only local credential-source exception does not weaken the provider-CLI
-prohibition for infrastructure operations.
-
-Provider-declared environment-variable aliases may simplify explicit local
-credential references without duplicating secret values. Exact requested names
-win. When an exact name is absent, all populated aliases must contain one
-distinct value or resolution blocks without returning any value. Generated
-placeholders are stricter: each credential role has one canonical slot, and
-compatibility aliases never become extra fields. GitHub uses
-`HYPERVIBE_GITHUB_TOKEN` for repository/workflow API access and
-`NODE_AUTH_TOKEN` for package reads because npm consumes that name;
-`HYPERVIBE_GITHUB_PACKAGES_TOKEN` remains accepted only as a compatibility
-alias when explicitly referenced.
-
-Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
-
-Missing-connection results must be directly actionable in both MCP and CLI.
-Return the exact prefilled setup links, identify one `recommendedSetupUrl`, and
-include a project/scoped `credentialExample` using a safe local reference. The
-human renderer keeps clickable links and that command ahead of long permission
-details. Agents reproduce the links, offer to open the recommended page, tell
-the user exactly where to save the credential, and then call `hv_connections`
-themselves. Never hide those steps behind the phrase "credential flow."
-
-GCP cloud preparation uses a credential-free preview followed by explicit
-confirmation. It accepts `adminAuth: "default"` so an operator's existing
-Google Application Default Credentials can perform the one-time API/IAM work
-without manufacturing or exporting another credential. Explicit access-token
-and service-account references remain supported when a distinct automation
-identity is intentional; none of these admin credentials are stored. Connection
-creation audit events retain only the non-secret credential source kind, and
-cloud preparation audit events retain only the authentication source kind,
-target project/service account, requested capability, and safe outcome
-category. When local ADC is absent, the result must distinguish it from the
-stored deploy service-account credential and return Google's official ADC URL,
-the exact `gcloud auth application-default` commands, project-scoped roles and
-permissions, the official Cloud CLI installation path when `gcloud` is absent,
-caveats, and the complete safe retry call. Do not recommend a third-party
-package-manager wrapper when Google provides a first-party installer or archive;
-package-manager runtime coupling can fail independently of Google credentials.
-
-The opinionated GCP `hv_connections action="bootstrap"` flow is a narrow
-account-and-credential prerequisite exception, not an imperative application
-lifecycle path. It requires an explicit Hypervibe project, exact repository
-scope, and `adminAuth="default"`. When its GCP project ID is omitted, preview
-reuses verified repository-scoped connections or derives a stable project name;
-unreadable or conflicting scoped connections block that default. Confirmation
-requires the exact GCP project ID returned by preview. Preview is read-only and
-lists the open billing accounts visible to that Google identity. Confirmation
-requires the user-selected exact billing account, and may create the GCP
-project, link billing, create the fixed repository deploy identity and its
-one-time key, create a distinct keyless least-privilege runtime identity,
-prepare base Cloud Run/Cloud SQL access, verify both provider
-connections, and store them atomically. Generated key material never crosses
-the output boundary and is deleted on any pre-persistence failure. This flow
-must not create workloads, databases, domains, runtime secrets, or environments;
-all application infrastructure and separate staging/production lifecycle
-changes remain in spec, plan, and apply.
-
-The deploy identity remains control-plane-only; Cloud Run services, release
-jobs, and scheduled jobs use the distinct runtime identity. Base runtime access
-contains only Cloud SQL client and Secret Manager secret-access roles. Queue
-preparation grants publisher/subscriber to that runtime identity while keeping
-queue lifecycle administration on the deploy identity. Neither principal may
-silently replace the other. When a distinct runtime identity exists, the deploy
-identity receives Service Account User only on that exact runtime service
-account, never at project scope; preparation records the runtime account's
-immutable numeric identity and the scoped grant as `gcp-cloudrun-v2` evidence.
-The project-scoped grant remains compatible only for explicit legacy
-preparation without a runtime identity.
-
-Cloud Run authentication is compatible with GCS and Memorystore and its
-connection is reused through provider registry metadata; operators must not
-create redundant Google service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
-preparation are explicit independent capabilities. A capability preparation
-must reconcile only its selected APIs and roles; it must not repair base Cloud
-Run permissions or grant another capability's role. Base Cloud Run preparation
-remains a separate provider-only prepare call. Successive preparations preserve
-other previously reviewed capability evidence. Explicit queue-role removal is a standalone,
-removal-only operation; it removes the reviewed lifecycle role from the deploy
-identity and the reviewed use roles from the runtime identity, including those
-members' conditional bindings. It never disables the Pub/Sub API, grants other
-access, or edits another principal.
-
-When adding or changing token guidance, include all of these details:
-
-- The exact credential kind, including distinctions that matter operationally, such as user token vs account token, classic PAT vs fine-grained PAT, service account JSON vs access token, or read token vs API-management token.
-- The official URL where the user creates or reviews that credential. If there are multiple valid token types, include the URL for each and say which use case needs which token.
-- GitHub PAT creation URLs must be role-specific and pre-filled with the token name/description plus the required classic scopes or fine-grained permissions. A generic GitHub token settings URL is not actionable connection guidance.
-- When a provider officially supports credential-template URLs, guidance must use them with the known required name and least-privilege permissions pre-filled. Do not depend on undocumented dashboard parameters; identify optional permissions that the supported template cannot represent.
-- The exact scopes, roles, IAM permissions, or product permission toggles required, including resource scoping such as repo, zone, project, account, team, or organization.
-- The expected shape, prefix, or caveats when helpful, such as token prefixes, one-time-download keys, required companion ids like `accountId`, package-read tokens, or credentials that cannot support a feature.
-- A safe `hv_connections` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, a secret-manager ref, or the constrained Stripe Projects credential source above). Use `credentialsMap` when a provider needs multiple fields.
-
-Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
+Keep source credentials separate from deployed app secrets. Scope every consumer
+to its project, environment, service and purpose. Missing credentials are not
+permission to widen access or silently create a new identity. See the
+[connection rules](docs/development/connections.md).
 
 ## Runtime Secrets
 
-`ProjectSpec.secrets` has two explicit ownership modes. Use Hypervibe ownership
-for opaque application values a human should not choose; use delegated
-ownership only for a value issued or controlled outside Hypervibe.
+Generate app-owned secrets within the encrypted lifecycle; request values only
+when an external party owns them. Freeze approved replacements, preserve accepted
+values across retries and verify delivery to the exact declared consumers.
+Rotation with session, encryption or data consequences requires its own approval.
+Write acknowledgement, value acceptance, activation and app health are distinct.
 
-Hypervibe-owned secrets declare a versioned generator, generation, and runtime
-environments. Planning derives strong, stable material from SecretStore's
-private root key with project/environment/key/generator/generation domain
-separation, then stores the provider-ready value only in the existing encrypted
-plan override. The value is excluded from `secretRefs`, ordinary `envVars`,
-deploy-env loading, `.env`, `.env.example`, previews, status, logs, receipts,
-and repository bindings. One value is sent to every declared service. A
-successful action records only its SHA-256 hash and generator/generation
-provenance in local SQLite, and binding persistence is part of action success
-rather than a post-apply best effort.
+Do not expose secret-bearing engine output as a convenience API. Derive only the
+needed runtime bindings privately and preserve provenance without secret values
+or low-entropy hashes. See the
+[runtime-secret rules](docs/development/connections.md#managed-runtime-secrets).
 
-Provider-confirmed absence is an automatic initial install. Replacing an
-existing random secret requires exact action confirmation. Unknown or masked
-live state without a matching accepted binding blocks mutation. A mismatch
-between an accepted generation's hash and newly derived material means the
-local root key changed; block and restore the original key instead of rotating.
-For providers with a distinct environment resource, confirmed absence of the
-unbound target environment also proves its future service secret destinations
-are initially absent. The plan orders those secret actions after service
-convergence; environment creation still returns pending and requires a fresh
-plan before the dependent service and secret actions can run.
-Apply recomputes whether the reviewed action is still a replacement from fresh
-provider and binding evidence. A replacement needs both its persisted
-`requiresConfirm` marker and exact caller confirmation before any provider
-write, so stripping confirmation metadata cannot turn a rotation into an
-automatic install.
+## Recovery Of Hypervibe State
 
-A Hypervibe-owned slot may opt into `replacementPolicy: "immutable"` when its
-value cannot safely rotate in place. Its first write requires the exact target
-key and every declared `conflictsWith` key to be provider-confirmed absent with
-no conflicting prior binding. A matching value may remain a noop, and a
-verified partial write may be repaired only with the identical derived value.
-Changed generator/generation/policy/conflicts, mismatching binding metadata,
-conflicting live values, masked or unknown observation, and any present or
-unobservable conflicting key block without a confirmation override. Plans pin
-the normalized policy, conflict names, and value fingerprint; apply compares
-them with the current spec, freshly observed live evidence, encrypted value,
-and non-secret binding before authorizing a write. A write is not accepted or
-bound until bounded post-write observation proves the exact value on every
-target and proves every conflict still absent. Immutable conflict names are
-excluded from deploy env inputs, cannot simultaneously be desired runtime
-keys, and cannot be retired through `removeEnvVars`; replacing a legacy
-encryption key requires an explicit credential rewrap workflow.
+Recovery must restore the managed system's identity, not infer a new deployment
+from resource names. Define a versioned, encrypted recovery package containing
+required Hypervibe metadata, engine state, pinned dependency information and
+operation records. Keep the decryption key recoverable through an explicit,
+separate custody path; never commit it or put it beside an unprotected export.
 
-### Delegated secrets
+Retain the existing local encryption key when updating or restoring local state.
+A missing key must produce a recovery blocker, not silent key regeneration over
+existing ciphertext. Verify package integrity, schema and exact destination before
+restoring; do not overwrite newer state or active locks. A recovery design is
+unproven until a fresh installation can recover the same bindings and observe the
+same resources without creating replacements. Infrastructure state recovery does
+not itself restore application data.
 
-Delegated secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:
+## Project Runtime Desired State
 
-- `ProjectSpec.secrets` declares the name, responsible principal, runtime environments and/or GitHub Actions destinations, required/optional behavior, and preserve-only drift policy. It never contains a value.
-- `hv_plan secretRefs={...}` is the only write input. References are resolved locally, values are encrypted into that specific plan, and the plan action/preview contains only key names and non-secret metadata.
-- Declared keys are excluded from deploy env files and rejected from ordinary `envVars` overrides. An owner's local `.env` must never silently become the desired value for a delegated slot.
-- Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
-- A successful provider receipt records binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub) in authoritative local SQLite: key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in bindings or receipts. The complete binding collections are omitted from `.hypervibe/bindings.json`; a hash must not become a repository-visible offline verifier for a low-entropy delegated value.
-- Live observation compares provider hashes against the accepted hash. Matching values are preserved without needing the secret locally. Drift is reported and preserved until a new explicit plan input is supplied.
+Record runtime versions, build inputs, app commands and necessary environment
+configuration in reviewed desired state. Infer sensible defaults from the repo;
+preserve explicit user choices. Build reproducibly without requiring local Docker
+or cloud tools. Do not promote a runtime or build change without fresh evidence.
 
-`.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make desired state and non-secret provider identities reconstructible after a local database or checkout is lost. Accepted managed-secret fingerprints, provider connections, and encrypted in-flight plans remain local and must be recreated. A fresh machine therefore needs explicit delegated secret input before it can accept or replace a managed slot; it must never trust a verifier recovered from the repository.
-
-In the no-service model, `principal` is declarative attribution, not authenticated authorization. Git review/branch protection and provider-scoped membership enforce who may change the spec and mutate infrastructure. A local principal or collaborator edit cannot grant a hosting, cloud, or code-host role, but a caller who already holds provider mutation credentials can still change provider state. Do not treat delegated metadata as a centralized ACL or automatically apply unreviewed changes with privileged credentials; authenticated principal enforcement would require a trusted service or signed attestation.
-
-## Deploy Env Files
-
-Local `.env` files are deploy input candidates, not a raw publish list. Every
-plan for a declared environment prepares and maintains the exact private
-`.env.<environment>` file, including when deploy-env loading is disabled. When
-the environment policy permits deploy-env loading, Hypervibe copies only
-policy-selected portable values from `.env`; it never clones the base file as a
-whole. Existing environment-specific assignments always win, while newly added
-eligible base keys are appended without overwriting that divergence.
-
-Spec writes in the matching checkout use one shared, non-destructive updater for
-the private `.env` and value-free `.env.example`. It derives exact project input
-names from delegated `secrets` and `envFile.include`, so names such as
-`RECAPTCHA_V3_SITE_KEY` and `RECAPTCHA_V3_SECRET_KEY` come from the spec rather
-than a hard-coded product list. It never copies values or turns ordinary
-`envVars`, generated database/queue/storage outputs, or every possible provider
-credential into local inputs. Each managed assignment has an immediately
-preceding purpose comment; missing assignments are empty, existing values and
-ordering are preserved, and an empty commented placeholder may be activated in
-the private `.env` without activating a commented example value.
-
-`hv_spec` and `hv_plan` also add value-free connection inputs only for providers
-that are actually blocked. Provider-owned registry metadata maps each dotenv
-name to an exact credential role, so GitHub API, GitHub package-read, and Railway
-tokens remain distinct and aliases are not modeled as separate requirements.
-For an environment plan, Hypervibe adds value-free placeholders for delegated
-inputs consumed by that environment to the prepared `.env.<environment>` file.
-This file remains a safe input surface for `secretRefs`, not an instruction to
-publish its contents. Values from the base `.env` are never copied into those
-delegated slots. Generated secrets never become local placeholders, and
-connection or control-plane requirements remain in the base `.env` rather than
-being added by this environment scaffolding. `envFile.mode: "off"` and
-`includeEnvFile: false` suppress ordinary base-value synchronization without
-suppressing the safe environment-file scaffold.
-Before any repo-backed write, Hypervibe proves the checkout belongs to the
-selected project from its committed spec or normalized repository identity.
-It then refuses each tracked or non-regular private env path, proves an exact
-repository ignore rule (or appends one for `.env` and the selected
-`.env.<environment>`), and creates secret-bearing files with mode `0600` while
-removing group/world access from existing default files. It adds an
-`.env.example` exception only after proving every existing assignment there is
-empty. Spec mutations prepare these derived files first, atomically replace the
-repo spec, and append its revision journal last; a journal-only failure is
-recovered by adopting the authoritative repo file on the next read.
-
-Keep env-file handling policy-driven through the environment spec (`envFile.mode`, `include`, `exclude`):
-
-- default to high-confidence runtime keys,
-- treat blank selected assignments as missing rather than deployable values,
-- skip provider/control-plane credentials, including all `HYPERVIBE_*` connection inputs, when creating or syncing `.env.<environment>`,
-- skip local-looking values such as `localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, and `.internal`,
-- warn with key names for missing, ignored, excluded, or skipped keys,
-- surface the env file path in plan previews,
-- never let stale local values override Hypervibe-managed infrastructure env vars such as database or queue URLs.
-
-## Runtime Environment Rollouts
-
-Environment-variable desired state is additive/preserve-only by default.
-Omission never means deletion because provider observation may be partial and
-live variables may be intentionally managed outside ordinary `envVars`.
-
-Managed database compatibility aliases are per-service desired state through
-`services.<name>.databaseEnvAliases`. The spec stores only an alias name and
-canonical source (`DATABASE_URL` or `DIRECT_URL`); the resolved
-value is derived from the managed component inside plan/apply and never written
-to the spec, plan preview, status, receipt, or bindings. Alias keys cannot
-collide with ordinary env vars, env-file includes, removal tombstones,
-delegated secrets, Stripe-managed keys, or canonical database variables.
-Planning and status must diff each alias only on its target service, and
-provider reference values may use presence-only comparison where the provider
-returns a resolved value instead of the reference expression.
-
-Deletion uses `EnvironmentSpec.removeEnvVars` as an explicit durable tombstone:
-
-- validate names and reject collisions with `envVars`, env-file includes,
-  delegated secret slots, overrides, and Hypervibe-managed database, queue,
-  storage, or source-integration keys;
-- plan only keys observed live (or locally bound keys when observation is
-  unavailable);
-- emit key names and presence/absence only, never values;
-- require per-action confirmation;
-- route apply through the provider adapter's `deleteEnvVars` capability;
-- keep the applied-spec hash dependent on successful removal.
-
-Renames are two-release operations. First add the replacement and deploy
-compatible code while preserving the old key. Only a later spec may tombstone
-the old key. Planning must reject removals while ordinary service
-configuration is not converged; provider-side variable deletion can create a
-revision or redeploy the current image even when exact-SHA CI owns the next
-code release.
-
-For `deploy.strategy: "branch"` with `trigger: "ci"`, generic orchestration
-passes a deployment-deferral option only to adapters that declare the
-capability. It means provider configuration may converge, but the adapter must
-not independently source or build new application code for an already-bound
-service:
-
-- Railway stages variable writes with deploys skipped and suppresses its
-  explicit service redeploy.
-- Cloud Run uses the existing service/job image while reconciling its
-  revision-scoped configuration. The exact-SHA workflow remains the next code
-  release boundary.
-
-Do not run deploy-status or HTTP health checks against the configuration pass;
-the later CI run and `hv_health` own that verification. New resources with no
-existing image may still require provider bootstrap before CI can target them,
-and receipts must report that honestly.
-
-`deploymentDeferred` means only that Hypervibe did not release new application
-code. It must not imply stale runtime configuration: Cloud Run, Fly.io, ECS
-Express, Azure Container Apps, and DigitalOcean can activate configuration with
-the current image, while providers such as Railway and Vercel can leave the
-currently selected deployment unchanged. An adapter sets
-`runtimeRolloutRequired` only when its successful mutation has left runtime
-configuration waiting for a later deployment. Generic orchestration must
-preserve this provider-owned evidence and must never derive it from the provider
-name or from `deploymentDeferred`.
-
-When a provider confirms `runtimeRolloutRequired`, apply persists the affected
-service and the exact deployment identity observed immediately after the
-configuration write as non-secret rollout evidence.
-`hv_status` must report `restart_required` and must not report the environment
-in sync while that same deployment is still active. A later provider-observed
-successful deployment with a different exact
-identity satisfies the rollout; an absent, failed, or unobservable deployment
-does not. For CI-triggered environments, the status guidance points back to the
-managed CI trigger/status path instead of bypassing that release authority with
-a provider redeploy.
-
-### Environment Variable Coverage
-
-Desired state prevents new cross-environment configuration gaps before they
-reach providers. A runtime key introduced through ordinary `envVars`, an
-`envFile.include` slot, or a delegated secret must be represented in every
-non-local environment that shares a desired service with a declaring
-environment. Each environment supplies its own value or secret reference;
-Hypervibe never copies values between environments.
-
-An environment may list a key in `envVarExceptions` only to document that the
-shared key intentionally does not apply there. Retirement tombstones also make
-absence explicit. Mixed ordinary/delegated handling for the same key is
-invalid. `hv_spec` blocks newly introduced gaps and gaps created by adding
-a matching environment or service. Pre-existing gaps remain readable and do
-not block unrelated spec changes, but are reported until repaired or explicitly
-excepted. Provider observation and AI are not required for this guardrail;
-`hv_plan` and `hv_apply` continue to own convergence of the accepted spec.
-
-## Stripe Desired State
-
-Stripe sandboxes are isolated environments with their own API keys and object
-ids. Model the relationship explicitly through
-`environments.<name>.payments.stripe`:
-
-- `payments.stripe.environment` selects a Stripe connection scope and defaults
-  to the Hypervibe environment name, so development, staging, and production
-  can use distinct Stripe sandboxes/live mode.
-- Scoped Stripe connections use `secretKey` plus optional `publishableKey`.
-  The server-side field accepts a least-privilege restricted `rk_` key or an
-  unrestricted `sk_` key and derives sandbox/live mode from its prefix. Legacy
-  global sandbox/live credentials remain a compatibility fallback, but cannot
-  represent distinct development and staging sandboxes.
-- Creating and deleting the named Stripe sandbox and issuing its keys remain
-  Stripe Dashboard operations. Replacing the verified connection at the same
-  Hypervibe scope intentionally retargets that environment; the next plan must
-  observe the empty/new target and review explicit catalog and webhook
-  recreation. It never mutates the old sandbox through the new connection.
-- Runtime credential projection is explicit through
-  `payments.stripe.credentials`. Hypervibe-owned products and recurring prices
-  are declared under `payments.stripe.catalog.products`; each price declares
-  the hosting env key that receives its provider id.
-- Named webhook endpoints are declared through `payments.stripe.webhooks`.
-  Each webhook owns one HTTPS URL, event set, target service, and hosting env
-  key. The Stripe endpoint and its creation-only signing value projection are
-  one plan/apply lifecycle action; there is no imperative webhook setup tool.
-- Catalog identity resolves by durable provider id first. An unbound exact
-  metadata/name/config match is an explicit confirm-gated adoption candidate;
-  multiple candidates block instead of choosing one. Unmanaged products and
-  prices are untouched.
-- Product display fields and an explicitly declared Stripe tax code are mutable. Recurring price amount, currency, and
-  interval are immutable: changing them plans a replacement, makes hosting
-  consume the replacement, and only then permits confirm-gated archival of the
-  previous price. Removal follows the same hosting-before-archive order.
-- `hv_plan` observes Stripe catalog values and webhook endpoints internally and
-  compares only hashes against hosting observation. Webhook identity resolves
-  by a durable bound endpoint id first. URL matches are adoption candidates;
-  zero, one, and multiple matches remain distinct plan outcomes.
-- Plans, warnings, bindings, receipts, and tool output contain managed key
-  names, provider ids, catalog diagnostics, and one-way hashes, never Stripe
-  keys, webhook signing values, or resolved runtime values.
-- `hv_apply` resolves the Stripe connection again and routes runtime changes
-  through the hosting adapter. Webhook creation syncs the returned signing
-  value before recording the binding. A failed hosting sync deletes and
-  verifies the new endpoint; if rollback cannot be verified, the provider id
-  is recorded so the next plan cannot orphan or duplicate it.
-- Webhook adoption, replacement/rotation, and deletion require exact action-id
-  confirmation. Deletion verifies provider absence before removing the hosting
-  variable and local binding. Noop actions make no Stripe or hosting calls.
-- For CI-triggered branch deploys, supported adapters defer code deployment so
-  the exact-SHA workflow remains the release boundary.
-- Stripe customers, subscriptions, subscription items, personas, entitlements,
-  and test-clock scenarios are application fixture/data state, not Hypervibe
-  infrastructure resources. A versioned `database.seedCommand` may reconcile
-  both sides after catalog, credential, webhook, and deployment prerequisites
-  converge. Stored provider ids and metadata are durable identity; Stripe
-  idempotency keys provide retry safety only.
-- A non-noop database seed in a managed-CI environment depends on the reviewed
-  integration actions and applied-spec marker, then on one explicit exact-SHA
-  release action. Apply dispatches and verifies that release before starting
-  the provider-neutral seed task, so a seed command introduced by the desired
-  commit cannot run in the previously deployed image.
-
-Stripe-managed runtime keys cannot also come from ordinary `envVars`, env-file
-includes, delegated secret slots, overrides, or removal tombstones. Removing
-or renaming a catalog key is part of its reviewed catalog lifecycle; ordinary
-unrelated runtime variables continue to use the two-release retirement process.
-
-## Email Desired State
-
-SendGrid email configuration lives under each environment's `email` desired
-state. It owns one optional sender identity and one optional Inbound Parse route
-per environment. The inbound route names a public web service and relative path;
-its provider URL is derived from that service's durable hosting binding. Alias
-local parts are application routing intent because SendGrid delivers all mail
-for one parse hostname to one endpoint.
-
-Email reconciliation uses separate action authorities for hosting runtime
-variables, SendGrid sender/domain authorization, Cloudflare DNS records,
-SendGrid inbound parsing and delivery events, Cloudflare mailbox forwarding,
-and final domain validation. A service or deploy
-bootstrap must never configure email as a side effect. Inbound route replacement
-is confirmation-gated because SendGrid replaces it through delete/create.
-Matching unmanaged provider identities are explicit adoption actions;
-duplicates and observation failures block instead of selecting or creating.
-
-Domain authentication is preferred when `environment.domain` exists. A sender
-declared without a domain uses single-sender verification and returns a pending
-receipt until the external verification email is accepted. Inbound parsing owns
-the `mx.sendgrid.net` MX record for its declared subdomain. The account-level
-SendGrid delivery-event webhook can be declared by only one environment.
-Cloudflare forwarding destinations, routing DNS, aliases, and the catch-all are
-explicit actions with destination-verification dependencies; provider-global
-destination addresses are never deleted implicitly.
-
-A SendGrid-backed CI email journey reuses this lifecycle rather than adding a
-Hypervibe-hosted inbox. The desired state declares a dedicated staging Inbound
-Parse hostname and may intentionally use `aliases: []`; dynamic local parts for
-individual test runs are application data and must not become desired-state
-aliases. Hypervibe owns SendGrid authorization and route reconciliation,
-Cloudflare MX records, and the existing runtime-variable projection. The
-application owns issuing and expiring recipient capabilities, validating and
-storing inbound messages, and exposing a protected polling API. It may issue a
-recipient through an API or let CI derive one from an application canary secret;
-CI never receives provider credentials.
-
-Inbound Parse delivery semantics are part of the application boundary. A
-permanently invalid or over-limit message is acknowledged with `2xx` and
-dropped, while retryable storage failures may return `5xx`. Rate limits should
-key valid recipient capabilities independently so unrelated SendGrid delivery
-traffic cannot exhaust one shared provider-IP bucket.
-
-A recipient capability is application-level staging hardening, not provider
-origin authentication. SendGrid signature verification requires preserving the
-exact raw multipart request for verification before parsing, while OAuth adds an
-application token endpoint and token lifecycle. Both policies remain explicit
-application concerns until Hypervibe can model their credentials, provider
-configuration, runtime projection, observation, and rotation through the full
-spec -> plan -> apply lifecycle. Hypervibe does not store CI messages,
-verification links, or receipt state.
-
-## Messaging Desired State
-
-Twilio messaging configuration lives under each environment's `messaging`
-desired state. It owns one Messaging Service, optional inbound-message and
-delivery-status callbacks, an explicit list of application services receiving
-the runtime contract, and optionally one existing Twilio phone-number SID.
-Callback URLs are derived from durable public hosting bindings; webhook targets
-must also receive the runtime contract so they can validate Twilio signatures.
-
-Messaging reconciliation separates Messaging Service configuration, sender-pool
-attachment, and hosting runtime variables into distinct reviewed actions. It
-resolves the persisted Messaging Service SID before considering exact-name
-adoption, blocks duplicate names and unknown observations, and verifies provider
-read-back before recording a binding. Moving an existing phone number between
-sender pools is confirmation-gated. A noop action performs no Twilio or hosting
-mutation.
-
-Hypervibe does not purchase or release phone numbers, synthesize webhook
-handlers, or manage Voice, Verify, WhatsApp, A2P registration, campaigns, or
-message sending. Those concerns remain application/account setup until their
-lifecycle can be modeled without weakening the plan authorization boundary.
-Twilio credentials are accepted only through the connection boundary and are
-projected solely to services named by `messaging.services`; secrets and runtime
-values never enter specs, plans, bindings, receipts, or tool output.
-
-## iOS Release Desired State
-
-Bundle IDs, capabilities, TestFlight groups/testers, and release workflows live
-under each environment's `ios` desired state. There are no imperative bundle-ID,
-TestFlight upload, or TestFlight distribution commands.
-
-- `ios.release` requires a CI-triggered branch deploy. It names the server
-  services that gate the mobile release, the repository-relative build command
-  and IPA path, build-only GitHub environment secret names, signing provider,
-  TestFlight groups, export-compliance answer, and optional beta-review
-  submission.
-- Hypervibe manages the server deploy workflow, iOS release workflow, and App
-  Store Connect credentials through plan/apply. TestFlight upload, processing,
-  compliance, declared-group distribution, optional beta review, and release
-  evidence use a Hypervibe-owned runtime embedded into the managed workflow;
-  the app does not supply submission code. The legacy default `scriptPath` is
-  accepted only while existing specs migrate and custom values are rejected.
-- Signing is an explicit provider contract. `provider: "project"` preserves the
-  compatibility path where the app build owns signing. `provider: "match"`
-  makes Hypervibe install existing Match assets read-only into an ephemeral
-  keychain before invoking the app-defined build command. Match credentials are
-  scoped to that preparation step and cannot also be declared as build-command
-  secrets. Certificate/profile creation, rotation, and revocation never happen
-  during deploys; they require a separate explicit lifecycle design.
-- A successful server deploy writes an artifact whose name and JSON body carry
-  the environment, repository, exact full Git SHA, and deployed service set.
-  The artifact is emitted only after provider deployment steps succeed.
-- The macOS iOS workflow shares the server deploy concurrency key and uses two
-  isolated jobs. The build job consumes a specific successful server run,
-  validates its evidence, checks out that exact SHA, prepares signing, invokes
-  the app-defined build command, validates the IPA identity, and uploads a
-  short-lived artifact. A fresh release job receives App Store credentials,
-  downloads and revalidates the IPA and server evidence, then runs the managed
-  release runtime. It never checks out or executes project code. This job
-  boundary prevents an arbitrary build command from modifying the submission
-  runtime or inheriting App Store Connect credentials.
-- The iOS artifact records separate `mobile.repository`/`mobile.sha` and
-  `server.repository`/`server.sha` fields. V1 is monorepo-first and therefore
-  requires those repositories and SHAs to match at the workflow gate, while the
-  evidence shape leaves a future explicit multi-repo policy possible.
-- `hv_ci_status` is the read-only path for workflows, runs, logs, and release
-  artifact provenance. `hv_appstore_submit` requires successful managed server
-  and iOS evidence artifacts for the same SHA before final review submission.
-- Xcode projects, schemes, entitlements, build/test commands, artifact paths,
-  App Store metadata/screenshots, and local device operations remain
-  project-owned. Hypervibe owns the release envelope around the resulting IPA.
+A repository Dockerfile remains authoritative; do not replace it with a generated
+build to bypass unsupported requirements. Generated builds must reject missing
+or conflicting runtime and build commands. Scheduled jobs use their declared
+command, never a substituted web or worker command. Isolated Hypervibe helpers
+must not inherit application runtime settings.
 
 ## CI And Push Deploys
 
-For push deploys, `deploy.trigger: "ci"` is the portable default. The canonical
-`devops.code` and optional `devops.ci` blocks select independently registered
-code-host and CI providers. Legacy top-level `github` desired state remains
-readable through one lossless compatibility normalization to `github` plus
-`github-actions`; new providers must not add parallel top-level blocks.
+Keep one explicit deployment authority for an app environment. Provider-native
+sources and managed CI must not race. Changing that authority is a planned change;
+unknown source state cannot be treated as disconnected.
 
-Code-host and CI provider ids are open registry values. Generic plan/apply,
-hosting, tool, CLI, and MCP code routes through provider capabilities and does
-not branch on GitHub, GitLab, or provider-native API fields. Code identity and
-CI execution identity are separate durable bindings even when one vendor
-supplies both. A CI provider must prove compatibility with the exact bound code
-repository before any configuration, variable, dispatch, or evidence action.
+Build an immutable release from an exact repository revision. Record image digest,
+build provenance, target environment, configuration contract and resulting native
+deployment identity. Promote the verified artifact rather than rebuilding a mutable
+branch. Required checks must cover the actual revision being deployed. Serialize
+promotion and rollback with other environment mutations and reject stale evidence.
 
-`devops.ci` names one primary application release authority. Project features
-such as GitHub Pages may use a separate feature-scoped executor, but that
-executor has disjoint files and secrets and cannot own application deploy
-variables, release evidence, promotion, or rollback. Pages retains separate
-content-source, static-hosting-target, and optional publication-executor
-bindings; its target need not be the application repository.
+A dispatch is pending until observed completion and app checks prove the outcome.
+Preserve repository-owned checks and user-selected review policy; another person's
+merge approval is opt-in. See the [CI rules](docs/development/ci.md).
 
-Hosting providers emit provider-neutral, versioned deploy recipes. CI adapters
-render those recipes and operate definitions/runs; hosting code never emits
-GitHub Actions or GitLab CI syntax. The neutral program has typed triggers,
-runner requirements, logical variables/secrets, semantic steps, concurrency,
-and release evidence. It has no raw provider-YAML or privileged free-form-shell
-escape hatch. An unknown program/step version or unsupported semantic returns
-`UNSUPPORTED` before mutation.
+## Rollback And Observability
 
-CI configuration is an observed authority graph, not just a file hash. The CI
-adapter owns whole-root, provider-proven composable-include, or provider-managed
-configuration semantics and must observe all import and transformation layers
-that can alter privileged jobs. Unknown effective configuration blocks secret
-sync, dispatch, and release evidence. The initial GitLab MVP supports only a
-Hypervibe-owned root `.gitlab-ci.yml`; a pre-existing unmanaged root is
-preserved and blocks with review guidance.
+Rollback selects a known immutable release, verifies its provenance and current
+compatibility, freezes the exact action, and checks the restored app afterward.
+Do not redeploy the current checkout and call it restoration. Rollback does not
+reverse database migrations or restore data; expose those limits before execution.
 
-CI variables are observed with provider-native scope, precedence, protection,
-and value visibility (`plaintext`, `redacted`, `omitted`, or `unknown`). Raw
-values are fingerprinted, if available, and erased inside the adapter response
-boundary. Every higher-precedence value or dispatch input that can shadow a
-commit, applied-spec, promotion, or renderer control value must be proven safe;
-unknown or overrideable gates block privileged work. Dispatch may reference
-only the bound reviewed definition and exact provider-observed revision. APIs
-that accept replacement configuration at dispatch time are never used.
+Give users scoped health, logs, deployment status and useful next actions. Keep
+infrastructure convergence, deployment completion and endpoint health separate.
+A healthy staging endpoint does not prove production or an integration is healthy.
+Partial or unavailable evidence stays visible rather than becoming a green status.
 
-Run, job, pipeline, artifact, and attempt ids are bounded opaque strings scoped
-by provider instance and execution identity. Native queue/pause/cancel behavior
-is normalized but never trusted as the only concurrency gate: every privileged
-job rejects a stale/superseded run immediately before provider mutation. The
-GitLab renderer does this with the short-lived job token and the environment's
-provider deployment history, proving the exact current job/pipeline/SHA and
-that no newer deployment exists before exposing provider credentials to its
-runtime.
-Artifact size and retention are observed capabilities, and release evidence
-includes the exact run, job, attempt, SHA, program fingerprint, and provider
-revision.
+## Database Provisioning And Persistence
 
-GitLab Cloud/self-managed code hosting and GitLab CI are separate registered
-capability sets that may share one verified connection. Self-managed instances
-require an explicit non-secret instance URL and tested version/capability
-range. GitLab projects bind by durable numeric project id first; project path
-and clone URLs are current display/location data. Repository lifecycle is
-explicit under `devops.code.repository`: external is the compatibility default,
-while managed create/delete uses isolated confirmation-gated actions, verifies
-the exact parent namespace or project authority, never adopts a name match, and
-retains the durable binding until exact provider absence is proven. GitLab.com
-scheduled deletion retains that binding through the provider's 30-day
-retention window; self-managed permanent deletion is re-observed before local
-state is removed. Deletion intent is persisted before the first provider call;
-if self-managed GitLab schedules deletion but permanent removal fails, the
-binding is retained and the next separately confirmed destroy retries the exact
-numeric id and full path. Managed creation initializes the declared default branch;
-the resulting default branch and visibility are observed and must converge. If
-GitLab acknowledges the exact project but those settings or clone identities do
-not converge, Hypervibe retains the durable id for recovery and blocks instead
-of retrying creation. In-place repository-setting updates are not part of this
-slice, so later drift blocks explicitly rather than being reported as a noop.
-moving existing local history into that new remote remains separate source
-coordination, not an implicit infrastructure side effect.
-
-GitLab CI renders the registered provider-neutral recipes for Azure Container
-Apps, Cloud Run, DigitalOcean App Platform, ECS Express, Railway, and Vercel.
-CI may build and copy an exact-SHA image, but it mutates only pre-existing bound
-hosting resources and registries; it never bootstraps hosting infrastructure.
-Cloud Run, Azure Container Apps, and ECS Express deploy the registry-returned
-image digest, while provider APIs that accept a tag are pinned to the full Git
-SHA and re-observed with release markers.
-GitLab-hosted runners are accepted only on GitLab.com under the dedicated
-hosted tag, and a project/group runner that can claim that tag blocks secret
-sync. Self-managed execution requires one exact locked project runner id, one
-exact online linux/amd64 manager system id, a dedicated uncontested tag,
-protected-ref-only jobs, and a provider-observed maintenance-note capability
-attestation. GitLab does not expose executor type or privileged-Docker mode in
-these project APIs, so `docker-privileged` remains an explicit operator
-attestation and must not be described as provider-proven.
-
-GitLab rollback selects only an unexpired successful managed release artifact,
-creates a deterministic exact-SHA protected tag, and dispatches a new typed-
-input pipeline. The tag wildcard must allow only the exact authenticated GitLab
-user—not the Maintainer role generally—so another Maintainer cannot manufacture
-a privileged rollback ref. Per-environment `resource_group` serialization,
-forward-deployment protection, disabled rollback retries, and fresh evidence
-observation close deploy races. Teardown first removes managed jobs through one
-reviewed merge request, proves them absent and no relevant job active, deletes
-one exact owned variable per confirmation-gated action, and only then removes
-the local CI binding. These paths remain `ready-for-live`, not `supported`,
-until recent live lifecycle evidence exists for the exact GitLab offering,
-version, runner mode, and hosting recipe. Collaboration, Pages, and advanced
-GitLab features remain separate capabilities.
-
-Deployment ownership is exclusive. Only an explicit `deploy.strategy: "branch"`
-with `deploy.trigger: "native"` may retain a provider-native repository source.
-Manual promotion and Hypervibe-managed CI both require every service source to
-be provider-confirmed disconnected. A confirmed native source is explicit
-drift: providers that expose a safe disconnect capability plan a
-provider-source disconnect action, while providers without one block with
-manual guidance. Unknown source observation also blocks; it must never be
-interpreted as disconnected. Source reconciliation is an isolated plan stage:
-no billable resource, environment-variable, workflow, release, or unrelated
-mutation is included until a later plan confirms that every source is
-disconnected. A noop action performs no provider mutation.
-
-Post-deploy endpoint success does not hide failures elsewhere in the project.
-When provider connections are available, `hv_health` also observes the latest
-bound deployment for every declared environment and service through the hosting
-adapter. Failed deployments are surfaced with their environment, provider,
-service, and status; permission failures, unsupported reads, missing bindings,
-and pending states remain `unknown`, never healthy. The requested endpoint and
-target environment retain their own result, so an unrelated production failure
-is reported without falsifying a successful staging HTTP check.
-
-The standard team workflow is:
-
-1. short-lived feature branches,
-2. pull request into `main`,
-3. checks on the pull request,
-4. merge to `main` auto-deploys staging,
-5. production is manually promoted from `main`, ideally by passing the exact commit SHA that already passed staging.
-
-Do not default to a long-lived `staging` branch. `main` is the accepted-code branch, staging is the deployed preview of `main`, and production is a deliberate manual promotion. Generated production deploy workflows must not run from push events by default; they should use `workflow_dispatch` and support a `commit_sha` input.
-
-Managed CI rollback is an explicit operational action over that same exact-SHA
-release boundary. `hv_rollback` must select only unexpired server-release
-evidence emitted by a successful run of the exact managed environment workflow.
-When a provider exposes immutable image evidence (currently Railway), the
-release record includes the exact registry digest; rollback downloads and
-validates it, skips source checkout and image rebuilding, and deploys the
-recorded immutable image URI.
-After a failed promotion it restores the latest known-good release; after a
-successful promotion it selects the previous distinct successful release unless
-the caller names another previously verified full SHA. The repository, workflow,
-ref, target SHA, source artifact id, source run id, and latest observed workflow
-run id are frozen into a persisted rollback plan and re-observed immediately
-before dispatch. Any workflow drift, unknown observation, ambiguous evidence,
-newer run, or in-progress deployment blocks without mutation. Dispatch is a
-pending receipt until `hv_ci_status` proves the workflow succeeded and
-`hv_health` proves the endpoint. Rollback never reverses database migrations or
-provider-side manual configuration; tool-mode migration steps are skipped during
-rollback, while startup/release-command migrations must remain backward-compatible.
-Rollback reads the selected immutable commit's raw spec through the code-host API
-and validates release provenance against that historical contract. It retains
-current program and resource-identity compatibility checks, skips checkout/build,
-and records the historical source contract in the resulting release evidence.
-
-
-Direct-provider deploy runs do not currently persist a provider-neutral,
-immutable release identity that can be restored and re-observed. Their service
-receipts and historical spec revision are not proof of the deployed source or
-image. `hv_rollback` therefore fails closed for direct-provider environments,
-including when given a historical `toRunId`; it must never redeploy the current
-spec or checkout and describe that mutation as restoration. Direct-provider
-rollback may be added only through an adapter capability that persists the exact
-immutable release identity, freezes it into action-scoped authority, and
-re-verifies it immediately before and after mutation.
-
-Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, package, or image credentials. That changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
-
-Generated provider CI workflow steps belong under provider-owned modules and are exposed through provider registry metadata. Generic GitHub orchestration should assemble workflows, sync files/secrets, inspect runs/logs, and diagnose failures without owning provider API scripts.
-
-Managed deployment credentials, including migration database URLs and provider
-credentials, are synchronized into the exact GitHub environment. Repository-owned
-build secrets remain in the repository-secret lifecycle. Existing repository-scoped
-deployment bindings require an explicit sync into the environment; they do not
-prove that environment's secret state. Legacy repository secrets are not deleted
-because other workflows may still consume them.
-
-Auto-deploy workflows use a small environment-bound readiness job to admit pushes only after the applied
-marker exists. Its runner step reads the environment variable; the deploy job
-consumes its boolean output. Manual dispatch still reaches the normal contract
-gate, and a nonempty stale marker remains a hard failure. Manual-only workflows
-omit this extra job, preserving their single environment approval.
-
-Generated workflows must gate image deployment on the environment-scoped
-`HYPERVIBE_APPLIED_SPEC_HASH` GitHub Actions variable. The desired hash covers
-only that environment plus its applicable delegated-secret declarations.
-`hv_plan` models updating this marker after the infrastructure actions that
-affect a release, and `hv_apply` updates it only after those actions complete.
-A non-noop database seed is excluded from the marker's own dependencies to
-avoid a cycle; in a managed-CI environment, an explicit exact-SHA release
-depends on the marker and the seed depends on that verified release. This preserves
-automatic code-only staging deploys while preventing a changed desired-state
-contract from deploying before reconciliation. Missing, failed, pending, or
-unconfirmed dependencies must leave the previous marker intact.
-
-The environment contract and the generated workflow are separate desired-state
-boundaries. Environment values are enforced by the runtime gate above; they do
-not make the repository workflow a different program. A managed GitHub Actions
-binding records both the exact accepted file-content hash and a canonical hash
-of the inputs that affect workflow behavior. If the live files still match the
-accepted content and those inputs have not changed, a newer Hypervibe renderer
-does not create drift. Intentional renderer migrations increment the renderer
-revision included in the input hash. A real workflow input change renders the
-latest template and requires review.
-
-Generated deployment workflow files use a dedicated per-environment managed-CI
-branch and reviewable pull request, so unrelated repository infrastructure
-cannot enter the same publication stage. The configured deploy branch must be
-the repository's provider-observed default branch because GitHub registers
-`workflow_dispatch` workflows there. Applying file drift returns a pending
-receipt and must defer workflow secrets, bindings, and the applied-spec marker
-until the reviewed file is present on that branch.
-For already-bound provider identities, workflow publication is a plan stage of
-its own and precedes every provider mutation. If publication returns pending or
-blocked, that plan authorizes zero hosting changes. New or replaced identities
-remain a separate prerequisite stage because the workflow cannot name them
-until the provider has created and Hypervibe has recorded them.
-
-Release evidence keeps its exact provider scope, logical resource identities,
-program fingerprint, repository, commit, and immutable image checks. The
-generated workflow materializes that reviewed validator once before checkout
-and reuses it for preflight, promotion, rollback, and evidence writing, so the
-rollback path remains independent of repository contents without copying the
-validator into every step. Workload kind and provider resource type are
-orthogonal: for example, Railway schedules a cron workload on a service, while
-Cloud Run may bind one to a job.
-
-The deterministic branch must be reusable after merge commits, squash merges,
-and rebase merges. A retained branch may be reset to the current default-branch
-head only when GitHub proves its exact current SHA was the head of a merged
-Hypervibe infrastructure pull request with the canonical title, body marker,
-head ref, and base ref. Re-observe the branch immediately before resetting it
-and verify the reset before writing files. Closed-unmerged pull requests,
-post-merge commits, duplicate open pull requests, ambiguous provenance, and
-observation failures must block without branch or file mutations.
-New branch creation uses bounded read-after-write polling for the exact requested
-SHA before any files are written. A successful create response alone is not
-proof that the branch is ready, and an observation that never converges still
-blocks the infrastructure action.
-
-GitHub desired state uses capability-level opt-in with exclusive ownership.
-Once a capability is enabled, Hypervibe owns and reconciles every generated
-file and setting for that capability; individual managed files cannot be
-delegated back to the repository. Requiring pull requests therefore owns the
-canonical lowercase `.github/pull_request_template.md`. `externalWorkflows`
-remains a read-only integration surface because it names workflows Hypervibe
-observes but does not manage.
-
-Managed checks default to `changeScope: "application"`. On pull requests they
-must keep the workflow and required check alive, classify changed paths through
-the read-only GitHub pull-request API, and skip checkout, runtime setup,
-dependency installation, application commands, and failure upload only when
-every changed path is narrow Hypervibe-owned infrastructure. Empty,
-unrecognized, mixed, or renamed-from-application path sets run the full check.
-Checks that validate repository infrastructure declare `changeScope: "all"`.
-Do not implement this policy with workflow-level `paths-ignore` or commit skip
-markers: skipped required workflows can remain pending and block merges, while
-selectively skipped job steps preserve the required check result.
-
-Broad code audits may declare two or more non-overlapping `shards`. Each shard
-runs as an independent read-only agent job with the same reviewed rules and a
-bounded scope. Hypervibe combines reports only after every expected artifact is
-present and structurally valid. Missing or failed shards block aggregation;
-partial reports preserve their findings but must keep the publishing job failed
-so stale issues are never closed from incomplete evidence.
-
-Every external workflow consumed by autofix declares a narrow evidence artifact
-name/pattern separately from its required paths. The generated consumer filters
-the source run by that pattern and treats absent or incomplete required evidence
-as non-actionable: it must not invoke the repair agent or publish a patch. A
-legacy spec without the artifact pattern remains parseable so it can be repaired,
-but GitHub infrastructure reconciliation blocks and the compiled workflow uses a
-non-matching sentinel. Unexpected artifact transport or authorization failures
-remain errors. Repair summaries and patch files are written outside the checkout
-so diagnostic output cannot be included in the proposed source patch.
-
-When a canonical environment has both deployment-workflow drift and other
-managed GitHub file drift, apply must combine all known repository files and
-the manifest into the same infrastructure pull request. Dependent secrets,
-bindings, repository settings, and the applied-spec marker remain deferred
-until the reviewed commit is present on the default branch.
-
-Static GitHub Pages publishing is project-level desired state under
-`github.pages`; it is not a synthetic hosting environment. A GitHub-only
-project uses the reserved canonical environment name `repository`. The Pages
-Actions workflow is a managed repository file and must merge through the same
-reviewable infrastructure pull request before any provider settings change.
-After merge, planning emits separate GitHub Pages and Cloudflare DNS actions,
-with explicit dependency order, provider snapshots, and confirmation for DNS
-replacement or teardown. Apply may mutate only the reviewed provider action.
-Certificate provisioning is asynchronous. Apply requests HTTPS enforcement
-after the reviewed domain configuration is visible; a GitHub
-certificate/HTTPS rejection returns pending, while every other provider error
-fails. When GitHub reports the exact combination of valid unproxied DNS, a site
-served by Pages, HTTPS eligibility, no certificate, and
-`peer_failed_verification`, planning may authorize one same-domain detach and
-reattach to restart GitHub's certificate job. Apply re-observes that signature,
-verifies both transitions, leaves DNS untouched, and records a 24-hour attempt
-cooldown in the GitHub environment binding. GitHub's DNS health observation is
-asynchronous, so planning polls its documented `202` response and blocks rather
-than silently falling back when health remains unknown. Valid apex address
-records and the valid alternate `www` CNAME are both accepted as Pages routes.
-A later apply verifies the enabled
-setting. Disabling Pages removes the
-reviewed workflow first, then confirm-gates
-site deletion and removal of only the exact Pages address records Hypervibe
-recognizes. Mail, verification, and unrelated DNS records are never part of
-the Pages mutation boundary.
-
-`hv_ci_trigger` is the only supported dispatch path and `hv_ci_status` is the
-authoritative observation path for Hypervibe-managed CI deploys. A request to
-deploy or promote an environment must use those tools for the reviewed
-definition, followed by `hv_health` after a successful run. Agents must not
-dispatch, monitor, or inspect managed runs with `gh`, code-host connectors/apps,
-browser/UI inspection, or direct CI/provider APIs; a blocked `hv_ci_trigger` or
-`hv_ci_status` result should surface its connection/error guidance and stop the
-stage.
+Cloud database resources belong to the engine lifecycle. Keep SQL authentication,
+connectivity, migrations and data operations in explicit operational capabilities.
+Treat persistence, backup coverage and teardown dependencies as data-bearing
+boundaries. Do not open public database access to bypass missing private access.
+Preserve exact-identity cleanup of previously recorded access.
 
 ## Database Resilience
 
-Provider-managed database resilience is optional desired state under
-`database.resilience`. Omitting the block preserves backward compatibility and
-means Hypervibe does not manage resilience settings. Within a declared block:
+Report recovery protection separately from deployment health. Optional backup
+setup or a new archive destination must not block ordinary deployment. Preserve
+existing native protection; changing retention, replacing a datastore or creating
+billable recovery resources requires a concrete approved action.
 
-- `availability` owns the provider's zonal/regional HA mode;
-- `backups` owns automated-backup count and PITR log retention; and
-- `replicas` owns named provider read replicas; and
-- `restoreDrill` owns a scheduled isolated point-in-time restore verification.
-  Removing a named replica is an
-  explicit, confirm-gated deletion. Removing the whole resilience block stops
-  management and does not silently reduce protection or delete replicas.
-
-Resilience planning is provider-neutral and capability-driven. Unsupported
-providers and incomplete observations produce blocked actions, not fallback
-provider branches or inferred absence. A regional-HA action depends on backup
-and PITR enablement when those settings are not already live. Cost-increasing
-HA, retention, and replica creates are billable actions; retention/HA
-reductions and replica deletion require exact action-id confirmation.
-
-Read replicas are provider resources, not backups. Their exact provider ids are
-stored in encrypted component bindings with connection material, while the
-sanitized environment topology stores only provider ids, regions, and tiers so
-repo-backed recovery remains possible. Runtime wiring uses
-`DATABASE_READ_URL_<NAME>` and, only when one replica exists,
-`DATABASE_READ_URL`. Replica deletion must first remove those variables from
-every bound service, then verify provider-terminal absence before pruning the
-binding. A noop action performs no provider mutation, and immutable replica
-region/tier drift blocks until an explicit replacement lifecycle is supported.
-
-A restore drill is repository-managed operational infrastructure, not a restore
-of the primary in place. V1 supports one drill on the GitHub canonical
-environment. Hypervibe compiles a provider-owned scheduled workflow and runtime
-through the existing review-gated GitHub infrastructure plan action. Initial or
-changed drill workflow publication is billable and requires exact action-id
-confirmation because each future run creates a temporary database instance.
-The workflow is not proposed until the declared repository credential secret is
-provider-observed by name; the credential value never enters specs, plans,
-bindings, workflow files, receipts, or output.
-
-Each run freezes the bound primary provider id in non-secret workflow config,
-clones that exact primary to a unique `hv-drill-*` instance at the declared PITR
-offset, applies source-specific ownership labels, changes only the clone's
-temporary `postgres` password, and executes one declared query inside a
-read-only transaction. Application services are never repointed. Successful
-runs delete the labeled clone, wait for provider-confirmed terminal absence,
-and publish evidence to the GitHub step summary. Failed labeled clones remain
-inspectable for the declared short retention period; later runs garbage collect
-only instances with the generated prefix and matching drill/source labels. A
-failure before ownership labeling may delete only the exact unique target
-created by that same run. Workflow runs are observed through `hv_ci_status`.
-
-Opt-in live recovery conformance provisions backup policy and a read replica
-through ordinary plan/apply, publishes the drill workflow through reviewed
-GitHub infrastructure, dispatches it through Hypervibe, and requires explicit
-non-secret evidence for generated-target creation and provider-terminal
-deletion. If a run is non-terminal, a failed clone is retained, or terminal
-cleanup evidence is missing, teardown stops before removing the workflow, replica, or
-primary so the recorded lifecycle remains recoverable.
-
-Cloud SQL is the first resilience adapter. It observes and verifies HA,
-backup/PITR policy, and replica topology through the SQL Admin API. Its restore
-drill uses `instances.clone` with an explicit point-in-time to create a new
-instance, never a destructive restore onto the primary. Provider-to-provider
-replica promotion/failover, replica replacement, and multi-environment
-restore-drill scheduling are separate future lifecycle slices.
-
-Environment data moves are explicit one-use desired state under the target
-environment's `dataMigration`. V1 copies only whole PostgreSQL databases and
-named object buckets from another declared environment. Plan isolates pending
-copy actions from ordinary convergence, apply restores into fresh unreachable
-targets, verifies non-secret manifests, and only then records active bindings.
-The next plan performs service/CI cutover; a later fully converged plan may
-offer separate confirm-gated deletion of retained rollback targets. Provider
-adapters own provisioning and bounded/native data-plane access while generic
-transfer engines own PostgreSQL snapshot and object streaming semantics. See
-`docs/data-migration.md` for the operator contract.
-
-Environment maintenance is a provider-neutral desired-state boundary under
-`environments.<name>.maintenance.enabled`. Entry is ordered and verified:
-Cloudflare publishes a bound static 503 Worker route, cron/worker/web workloads
-are suspended in that order with exact restoration snapshots, PostgreSQL sets
-`default_transaction_read_only` for the bound role and database, and a final
-fresh observation records the active state. Exit reverses the database and
-workload changes before removing the exact bound edge route. Every stage stores
-only durable provider identity and non-secret restoration state, and a failed
-or unknown observation blocks the next mutation. Migration copy actions carry
-fresh source and target maintenance fingerprints and re-observe both immediately
-before provisioning a candidate target.
-
-The workload port is implemented by Azure Container Apps, DigitalOcean App
-Platform, GCP Cloud Run, Railway, and Vercel. DigitalOcean archives and restores
-only the exact bound app, preserves the complete live App Spec on both writes,
-and verifies a terminal archived state with zero running instances before entry
-succeeds. Every component restoration snapshot is durable before that atomic
-app-level mutation. Vercel pauses and unpauses only the exact bound Project,
-preserves a Project that was already paused, and verifies provider pause state
-on its direct production origins before entry succeeds. Cloudflare supplies the
-common public edge and PostgreSQL supplies the provider-independent write
-fence. ECS Express explicitly declares maintenance unsupported until it can
-prove all background and direct-origin workloads are reversibly stopped.
-Generic planning must fail closed for unsupported providers; capability
-presence is never inferred from a provider name.
-
-Object-storage lifecycle is implemented for Amazon S3, Azure Blob Storage,
-Google Cloud Storage, and Railway. Each adapter owns provider-native private
-resource creation, ownership metadata, live usage observation, runtime-secret
-wiring, streaming transfer, and confirmed teardown. Azure uses one dedicated
-storage account per declared bucket so its account key and deletion boundary do
-not span unrelated Hypervibe storage resources. Generic orchestration must not
-pretend that accepting a provider id is equivalent to implementing this full
-contract.
-
-Storage connections reuse compatible primary cloud authentication (`ecs` for
-S3, `cloudrun` for GCS, and `azure-container-apps` for Blob Storage) when it is
-already verified. Standalone storage connections accept the same authentication
-shape, not a second storage-specific key. For local operation they also use the
-provider-native credential path: the AWS SDK default profile/SSO chain, Google
-Application Default Credentials, or the Azure default credential chain. Explicit
-credentials remain available for unattended automation. Region/location remains in the spec;
-first-use observation resolves account/project/subscription scope through an
-explicitly read-only adapter method, while provider registration, resource-group
-creation, and credential derivation remain inside the reviewed apply action.
-Temporary CLI sessions may provision, observe, and migrate storage, but are not
-projected into deployed workloads as long-lived secrets.
-
-An ambiguous bucket-create outcome is retained as scoped recovery evidence and
-blocks retries. If complete provider observation later proves that an unresolved
-requested name is absent, planning may emit a separately confirmation-gated
-recovery-clear action followed by the normal billable create. Apply must
-re-observe the exact provider scope immediately before clearing the marker and
-must preserve it if a matching bucket appears or observation becomes unknown.
-Known preflight failures must report that no mutation was attempted and must not
-create recovery state. Identified or mismatched provider ids still require
-explicit adoption or cleanup; absence recovery is never deletion authority.
+A successful backup request is not a recoverable backup. Verify artifact integrity,
+source identity and usable restore evidence. Restore into isolated destinations
+when supported, verify the restored data and app, and require explicit approval
+before repointing consumers or overwriting live data. Unknown restore or cleanup
+results stop dependent actions. See [recovery rules](docs/development/recovery.md).
 
 ## Database Tasks And Seed Data
 
-Do not use temporary release-command changes to run one-off data operations. Release commands are durable deploy-time schema configuration.
+Execute reviewed tasks against the exact environment and immutable application
+release. Preserve acknowledged operation identities, bounded retries and scoped
+secret delivery. Lock against conflicting deployment/data work. A seed command
+must not silently become a recurring deploy hook or a production data reset.
 
-Schema migrations are not an imperative Hypervibe operation. Application
-containers should converge schema during startup, or the spec may declare a
-durable provider predeploy/release command when startup migration is not
-appropriate.
+## Third-Party Integrations
 
-Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. In a managed-CI environment, a non-noop seed has an explicit dependency on a verified exact-SHA release of the desired commit. If that release remains in progress, apply stops pending before the seed; it never runs the older image or races newly issued integration credentials.
+Retain integrations such as GitHub, DNS, Stripe and email behind explicit
+capabilities. Integrations that only need an external API key or callback should
+use declared secrets and webhooks rather than a new generic cloud lifecycle.
+Keep management credentials separate from runtime keys; prove the exact account,
+endpoint and required permissions before mutation. Engine adoption is not a reason
+to rewrite useful integration clients.
 
-`hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
-Provider-to-provider data moves are lifecycle operations modeled as explicit
-`dataMigration` spec/plan/apply actions with dependency edges, data-bearing
-confirmation, isolated copy and cutover stages, and verification receipts.
-Database resets likewise belong to desired-state destruction, not an
-imperative shortcut. Re-running or repairing seed or migrated data requires a
-new reviewable desired-state id; Hypervibe does not expose a generic seed or
-copy command runner.
+See the [integration rules](docs/development/lifecycle.md#integration-action-ownership)
+and [mobile release contract](docs/api-mobile-releases.md). Optional integrations
+do not become onboarding prerequisites merely because they are available.
+
+## Interface Boundary
+
+MCP and CLI are thin adapters over `src/application`. Define command metadata,
+validation, handling, redaction and results once; expose the same structured result
+and safety contract through both. Interface code may parse, prompt and render,
+but it must not call cloud APIs or invoke the engine independently.
+
+Resolve repository and environment context per request. Ambiguous roots or a
+mismatched repository identity fail closed. The agent installer remains a CLI-only
+bootstrap exception: it installs the skill and matching MCP registration before
+opening infrastructure state. It does not authenticate clouds, approve tools or
+start/restart the user's client. See [installation](docs/agent-installation.md).
+
+## Code Map
+
+- `src/application/`: shared commands, context, results and application entrypoints.
+- `src/interfaces/mcp/` and `src/interfaces/cli/`: transport adapters.
+- `src/domain/spec/`, `src/domain/plan/` and `src/domain/services/`: intent, policy
+  and orchestration; refactor cloud execution around the engine boundary.
+- `src/adapters/providers/`: retained connection, operational and integration
+  clients plus existing Railway behavior; avoid a parallel cloud CRUD framework.
+- `src/adapters/db/repositories/`: protected local persistence and validated reads.
+
+The code layout alone does not prove a complete cloud journey. Verify the managed
+engine through the installed interfaces and the intended running application.
 
 ## New Provider Checklist
 
-New provider support needs a full contract, not a name in an enum. Add or confirm:
+Prove one integrated path first: clean installation, authorized connection,
+real generated configuration, pinned engine execution, an exact reviewed plan,
+apply and a working app. Include the meaningful update, failure and recovery cases
+for that path before expanding the supported surface.
 
-- provider registry metadata,
-- credential schema,
-- connection guidance with exact token type, URL, permissions, and examples,
-- adapter capability flags,
-- observe behavior and partial-observe semantics,
-- diff/apply behavior,
-- CI workflow behavior if supported,
-- log/build/deploy inspection behavior if supported,
-- domain attach behavior if supported,
-- database/env-var wiring behavior if supported,
-- tests that prove unsupported features fail with clear guidance.
+Validate generated engine configuration with the real pinned binary/provider
+versions. Keep boundary regressions in required CI: noop freedom, action scope,
+stale plans, unknown reads, secret redaction, concurrency and confirmed teardown.
+Use official provider evidence for retained API clients. Do not require bespoke
+cloud CRUD/schema implementations or live support on every provider before one
+usable path can ship. See [provider evidence](docs/development/provider-evidence.md).
 
 ## Tool And CLI Policy
 
-The Hypervibe CLI is a supported interface to the same command registry, state store, plan/apply engine, provider adapters, and audit history as MCP. It is not a provider-CLI bypass.
+Use supported Hypervibe commands for managed infrastructure. MCP agents call
+available `hv_*` tools; the CLI reaches the same application and state. Neither
+interface may bypass a blocked plan using direct provider writes, ad hoc scripts,
+credential edits or resource recreation. Read-only diagnostics remain available.
 
-Generic command ids are provider-neutral contracts. A command such as
-`hv_inspect` or `hv_import` must accept registered provider names and dispatch
-through provider capabilities or provider-owned drivers; it must not default to
-one provider, narrow its schema to one provider, expose provider-prefixed ids,
-or contain provider API/mapping logic in the command module. Providers without
-the requested capability return explicit `UNSUPPORTED`. Contract tests scan the
-registered command surface for these regressions.
-
-Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent. When an MCP client already has Hypervibe tools, agents should call them directly rather than spawning the Hypervibe CLI.
+Internally managed OpenTofu and its pinned plugins are allowed engine dependencies.
+A separately user-installed provider CLI is not a deployment prerequisite. The
+explicitly authorized Railway private SSH diagnostic exception remains narrow;
+it does not authorize infrastructure changes or an automatic fallback.

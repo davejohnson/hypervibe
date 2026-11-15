@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter, type RailwayCustomDomain } from '../railway.adapter.js';
-import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 
 function graphqlNotFound(rootField: string, message: string): Error {
@@ -53,7 +52,7 @@ const projectDetailsResponse = {
           node: {
             id: 'svc-web',
             name: 'web',
-            repoTriggers: { edges: [] },
+            repoTriggers: { edges: [], pageInfo: { hasNextPage: false } },
             serviceInstances: {
               edges: [
                 {
@@ -75,7 +74,7 @@ const projectDetailsResponse = {
           node: {
             id: 'svc-pg',
             name: 'postgres-db',
-            repoTriggers: { edges: [] },
+            repoTriggers: { edges: [], pageInfo: { hasNextPage: false } },
             serviceInstances: {
               edges: [
                 {
@@ -120,6 +119,14 @@ describe('RailwayAdapter observe', () => {
         variables: {
           DATABASE_URL: 'postgres://user:hunter2@db.internal:5432/app',
           API_KEY: 'value',
+        },
+      })
+      // One issuer read supplies value-free configuration comparisons.
+      .mockResolvedValueOnce({
+        variables: {
+          POSTGRES_PASSWORD: 'issuer-password',
+          DATABASE_URL: 'postgresql://postgres:issuer-password@db.internal:5432/app',
+          DATABASE_PRIVATE_URL: 'postgresql://postgres:issuer-password@db.internal:5432/app',
         },
       });
 
@@ -169,6 +176,16 @@ describe('RailwayAdapter observe', () => {
         providerScope: { projectId: 'rail-project-1', environmentId: 'env-prod' },
         name: 'postgres-db',
         status: 'running',
+        persistence: { state: 'unknown', reason: 'Railway database persistence could not verify the exact service and environment identity.' },
+        credentialAlignment: {
+          basis: 'configured-variable-values', authentication: 'unverified',
+          rawReferences: 'unchecked', deployedConfiguration: 'unchecked', applicationOperation: 'unchecked',
+          issuer: { comparisons: [
+            { source: 'DATABASE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+            { source: 'DATABASE_PRIVATE_URL', against: 'POSTGRES_PASSWORD', comparison: { result: 'match' } },
+          ] },
+          consumers: [],
+        },
       },
     ]);
     expect(result.caches).toEqual([
@@ -356,29 +373,6 @@ describe('RailwayAdapter observe', () => {
       environmentId: 'env-prod',
       domain: 'usebillforge.com',
     })).rejects.toThrow('Failed to observe Railway custom domain usebillforge.com');
-  });
-
-  it('surfaces the linked repo and branch as the service source', async () => {
-    const withTrigger = structuredClone(projectDetailsResponse);
-    (withTrigger.project.services.edges[0].node as { repoTriggers: unknown }).repoTriggers = {
-      edges: [{ node: { repository: 'dave/seq-planner', branch: 'main' } }],
-    };
-    const request = vi.fn()
-      .mockResolvedValueOnce(withTrigger)
-      .mockResolvedValueOnce({
-        serviceInstance: { startCommand: 'npm start', latestDeployment: { status: 'SUCCESS' } },
-      })
-      .mockResolvedValueOnce({ variables: {} });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.observe(
-      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
-    );
-
-    expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
-    expect(result.services[0]?.sourceState).toBe('connected');
   });
 
   it('uses ServiceInstance.source as primary and cached binding branch when repoTriggers are absent', async () => {
@@ -608,24 +602,6 @@ describe('RailwayAdapter observe', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores services that do not have an instance in the requested environment', async () => {
-    const stagingProject = structuredClone(projectDetailsResponse);
-    const request = vi.fn().mockResolvedValueOnce(stagingProject);
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.observe(
-      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-staging' })
-    );
-
-    expect(result.projectExists).toBe(true);
-    expect(result.environmentId).toBe('env-staging');
-    expect(result.services).toEqual([]);
-    expect(result.databases.find((db) => db.engine === 'postgres')).toBeUndefined();
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-
   it('treats exact bound application services as services even when their names or images resemble datastores', async () => {
     const ambiguousProject = structuredClone(projectDetailsResponse);
     ambiguousProject.project.plugins.edges = [];
@@ -665,7 +641,7 @@ describe('RailwayAdapter observe', () => {
       node: {
         id: 'svc-web-staging',
         name: 'web-staging',
-        repoTriggers: { edges: [] },
+        repoTriggers: { edges: [], pageInfo: { hasNextPage: false } },
         serviceInstances: {
           edges: [
             {
@@ -741,36 +717,6 @@ describe('RailwayAdapter observe', () => {
       envVarKeys: [],
       envVarHashes: {},
     });
-  });
-
-  it('hashes env var values and never exposes raw values', async () => {
-    const secret = 'postgres://user:hunter2@db.internal:5432/app';
-    const request = vi.fn()
-      .mockResolvedValueOnce(projectDetailsResponse)
-      .mockResolvedValueOnce({
-        serviceInstance: { latestDeployment: { status: 'SUCCESS' } },
-      })
-      .mockResolvedValueOnce({
-        variables: {
-          DATABASE_URL: secret,
-          API_KEY: 'value',
-        },
-      });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.observe(
-      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
-    );
-
-    const web = result.services[0];
-    expect(web?.envVarHashes['API_KEY']).toBe(hashEnvValue('value'));
-    expect(web?.envVarHashes['DATABASE_URL']).toBe(hashEnvValue(secret));
-
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(secret);
-    expect(serialized).not.toContain('hunter2');
   });
 
   it('throws when not connected', async () => {

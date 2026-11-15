@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
-import { environmentVariableCoverage } from '../environment-variable-coverage.service.js';
+import { environmentVariableCoverage, introducedEnvironmentVariableCoverageIssues } from '../environment-variable-coverage.service.js';
 
 function spec(input: Record<string, unknown>) {
   return projectSpecSchema.parse({ version: 1, project: 'coverage-app', ...input });
@@ -9,6 +9,25 @@ function spec(input: Record<string, unknown>) {
 const web = { web: { startCommand: 'npm start' } };
 
 describe('environmentVariableCoverage', () => {
+  it.each(['new input', 'changed config', 'additional service', 'new environment'])(
+    'does not grandfather %s submitted alongside a rename', (change) => {
+      const previous = spec({ environments: {
+        production: { hosting: { provider: 'railway' }, services: web },
+        staging: { hosting: { provider: 'railway' }, services: { preview: { startCommand: 'npm start' } }, envVars: { CONTACT_EMAIL: 'owner@example.test' } },
+      } });
+      const next = structuredClone(previous);
+      next.environments.staging.services = { web: next.environments.staging.services.preview };
+      if (change === 'new input') next.environments.staging.envVars.NEW_INPUT = 'new-value';
+      if (change === 'changed config') next.environments.staging.services.web.startCommand = 'npm run other';
+      if (change === 'additional service') next.environments.staging.services.extra = structuredClone(next.environments.staging.services.web);
+      if (change === 'new environment') next.environments.review = structuredClone(next.environments.production);
+      const issues = introducedEnvironmentVariableCoverageIssues(previous, next);
+      expect(issues.length).toBeGreaterThan(0);
+      if (change === 'new input') expect(issues.map(({ key }) => key)).toEqual(['NEW_INPUT']);
+      if (change === 'new environment') expect(issues.map(({ environment }) => environment)).toEqual(['review']);
+    }
+  );
+
   it('requires new ordinary keys in every non-local environment with matching services', () => {
     const report = environmentVariableCoverage(spec({
       environments: {

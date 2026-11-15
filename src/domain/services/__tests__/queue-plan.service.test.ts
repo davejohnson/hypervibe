@@ -145,6 +145,7 @@ describe('queue-plan.service', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -179,6 +180,7 @@ describe('queue-plan.service', () => {
   }
 
   describe('pubsub backend', () => {
+
     it('plans a verified create when the subscription does not exist', async () => {
       const { project, environment } = seedProject();
       const adapter = stubAdapter({ queues: { backend: 'pubsub' } });

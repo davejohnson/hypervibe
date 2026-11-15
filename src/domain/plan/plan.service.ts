@@ -1,16 +1,39 @@
+import { engineSelectionProblem, isEngineManaged } from '../services/infrastructure-engine-selection.js';
+import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
+import { planServiceInstances } from '../services/service-instance.service.js';
+import { pendingRepositoryVariableEnvironment, planRepositoryVariables } from '../services/repository-variables.service.js';
+import { hasDatabaseBootstrapObservationOrCleanup, hasPendingDatabaseBootstrap } from './database-bootstrap.contract.js';
+import { planDatabaseBootstrap } from '../services/database-bootstrap.service.js';
+import { credentialSourceInputKeys } from '../services/accepted-credential-inputs.js';
+import { databaseConsumerReadiness, type DatabaseConsumerReadiness } from '../services/database-consumer-readiness.service.js';
+import { planCredentialLifecycle, pendingCredentialUpdate } from '../services/credential-lifecycle.service.js';
+import { planDatabaseCredentialAliases } from '../services/database-credential-aliases.service.js';
+import { planDatabaseFreshInitialization } from '../services/database-fresh-initialization.service.js';
+import { planScheduleActivations, SCHEDULE_ACTIVATION_OPERATION } from '../services/schedule-activation.service.js';
+import { scopedSecretObservation } from './scoped-secrets.js';
+import { planApiPolicy } from '../services/api-policy.js';
 import path from 'path';
+import { observeServiceVolumes, planServiceVolumes, retainedVolumeHostingBlock, wireServiceVolumeActions } from '../services/service-volume.service.js';
+import { runtimeRolloutConfigurationKeys } from '../services/runtime-rollout.service.js';
+import { environmentResourceName } from '../services/resource-names.js';
+import { parseUnresolvedDatastoreMutation } from '../ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../services/adapter.factory.js';
+import { planDatabaseScopeBinding } from '../services/database-scope-binding.service.js';
+import { observeBackupPolicy, resolveBackupPolicies } from '../services/backup-policy.service.js';
+import { planBackupPolicy } from '../services/backup-policy-plan.service.js';
+import { observeBackupHealth } from '../services/backup-health.service.js';
+import { assessBackupReadiness, backupEvidenceSummary, type BackupReadiness } from '../services/backup-readiness.js';
+import { resolveBackupStrategy, withBackupStorageDefaults } from '../services/backup-strategy.service.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { firstProviderSpecValidationFailure } from '../services/provider-spec-validation.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
 import {
   EMAIL_MANAGED_ENV_KEYS,
-  MESSAGING_MANAGED_ENV_KEYS,
   type ProjectSpec,
   type EnvironmentSpec,
 } from '../spec/spec.schema.js';
@@ -30,11 +53,15 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment, diffRetainedHostingCleanup } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
+import type { PlanBlock } from './plan-block.js';
+import { isManagedCiCredentialAction } from './plan-stage.js';
 import {
   actionDependencyClosure,
   fingerprintObservedState,
   isManagedCiBindingAction,
   isManagedCiBindingRoot,
+  isBackupProvisioningAction,
+  isBackupProgramPublicationAction,
   orderActions,
   type PlanRunDocument,
 } from './converge.executor.js';
@@ -45,6 +72,7 @@ import {
 import { buildCacheEnvVarsFromComponent, CACHE_ENV_KEYS } from '../services/cache-env.js';
 import { CACHE_OPERATIONS, planCache } from '../services/cache-plan.service.js';
 import { planDatabaseResilience, DATABASE_RESILIENCE_OPERATIONS } from '../services/database-resilience-plan.service.js';
+import { supportsDatabaseCheckpoint } from '../ports/database-checkpoint.port.js';
 import {
   addDomainRegistrationDependency,
   cloudflareRegistrarCredentialRequirement,
@@ -58,7 +86,6 @@ import {
   planManagedCiAppliedSpecHash,
   planManagedCiDeploy,
 } from '../services/managed-ci.service.js';
-import { planManagedCodeRepository } from '../services/managed-code-repository.service.js';
 import { environmentUsesManagedCi, resolveDevOpsSelection } from '../spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 import { planIos } from '../services/appstore-plan.service.js';
@@ -99,25 +126,27 @@ import {
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
 import { planEmail } from '../services/email-plan.service.js';
-import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
+import { inspectDomainSecurity, type DomainSecurityReadiness } from '../services/domain-security.service.js';
+import { inspectWebhookReadiness, type WebhookReadiness } from '../services/webhook-readiness.service.js';
+import { reservedRuntimeEnvError } from '../services/runtime-env-policy.js';
+import { inspectEmailSenderReadiness, type EmailSenderReadiness } from '../services/email-sender-readiness.service.js';
 import {
   isProviderNativeDeploySourceAction,
   planProviderNativeDeploySources,
 } from '../services/provider-native-deploy-source.service.js';
-import {
-  LOAD_BALANCER_OPERATIONS,
-  planLoadBalancer,
-} from '../services/load-balancer-plan.service.js';
 import { planDataMigration } from '../services/data-migration-plan.service.js';
 import { planMaintenance } from '../services/maintenance-plan.service.js';
 import {
   observeEnvironmentMaintenance,
+  maintenanceMode,
   parseEnvironmentMaintenanceBinding,
 } from '../services/environment-maintenance.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
-  scope?: 'full' | 'retained-cleanup';
+  credential?: string;
+  intent?: 'adopt' | 'rotate';
+  scope?: 'full' | 'credentials' | 'retained-cleanup' | 'secrets' | 'database-credential-aliases' | 'backups';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -131,8 +160,17 @@ export interface PlanOptions {
 }
 
 export interface EnvironmentPlan {
+  databaseConsumers?: DatabaseConsumerReadiness[];
+  credentialReview?: { role: string; label: string; purpose: string; intent: 'adopt' | 'rotate'; source?: string; identity?: Record<string, unknown>; validation: import('../registry/credential-validation.registry.js').CredentialValidation; targets: Array<Record<string, unknown>> };
+  backupCoverage?: Awaited<ReturnType<typeof observeBackupPolicy>> & {
+    complete: boolean;
+  } & ReturnType<typeof backupEvidenceSummary>;
+  domainSecurity?: DomainSecurityReadiness;
+  webhookReadiness?: WebhookReadiness;
+  emailSenderReadiness?: EmailSenderReadiness;
   planRunId: string;
-  scope: 'full' | 'retained-cleanup' | 'managed-ci-bindings' | 'managed-ci-publication';
+  scope: 'full' | 'credentials' | 'secrets' | 'database-credential-aliases' | 'retained-cleanup' | 'managed-ci-bindings' | 'hosting-bindings' | 'service-volumes' | 'database-checkpoint' | 'database-bindings' | 'database-initialization' | 'database-bootstrap' | 'backup-policy' | 'backup-provisioning' | 'backup-readiness' | 'backup-program-publication' | 'managed-ci-publication' | 'managed-ci-credentials' | 'api-policy';
+  backupReadiness?: BackupReadiness;
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
@@ -144,8 +182,8 @@ export interface EnvironmentPlan {
   warnings: string[];
   /** Delegated values that must be supplied in a new hv_plan call before apply. */
   inputRequired: DelegatedSecretInputRequirement[];
-  /** Missing/unverified provider connections that block apply. */
-  blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; actionIds?: string[]; requiredCredentialKeys?: string[] }>;
+  /** Missing provider connections or unmet safety prerequisites that block apply. */
+  blocked: Array<PlanBlock & { reason: string }>;
 }
 
 export const HOSTING_ENVIRONMENT_ENSURE_OPERATION = 'hostingEnvironmentEnsure';
@@ -246,6 +284,31 @@ export class PlanService {
     return this.specStore.get(project);
   }
 
+  private async observeDatastoreNames<T extends { provider: string; externalId: string; providerScope?: Record<string, string> }>(
+    project: Project,
+    environment: Environment,
+    engine: string,
+    component: Component | null | undefined,
+    observe: (name: string) => Promise<T | null>
+  ): Promise<T | null> {
+    const recovery = parseUnresolvedDatastoreMutation(component?.bindings, engine === 'redis' ? 'cache' : 'database');
+    const names = recovery ? [recovery.resourceName] : [
+      environmentResourceName(engine, environment),
+      ...(!component?.externalId ? [`${project.name}-${environment.name}-${engine}`] : []),
+    ];
+    // Legacy names are read-only candidates. Unknown or ambiguous inventory
+    // must not authorize a second resource under the new naming convention.
+    const candidates = new Map<string, T>();
+    for (const name of names) {
+      const observed = await observe(name);
+      if (observed) candidates.set(JSON.stringify([
+        observed.provider, observed.externalId, Object.entries(observed.providerScope ?? {}).sort(),
+      ]), observed);
+    }
+    if (candidates.size > 1) throw new Error(`Multiple ${engine} resources match current/legacy names; explicitly import the intended scoped identity.`);
+    return candidates.values().next().value ?? null;
+  }
+
   async observeEnvironment(
     project: Project,
     environment: Environment | null,
@@ -315,7 +378,10 @@ export class PlanService {
     }
 
     try {
-      const observed = await adapter.observe(environment);
+      const runtimeConfigurationKeys = runtimeRolloutConfigurationKeys(environment, provider);
+      const observed = await adapter.observe(environment, { databaseEnvAliases: Object.fromEntries(
+        Object.entries(environmentSpec.services).map(([name, service]) => [name, service.databaseEnvAliases ?? {}])
+      ), ...(Object.keys(runtimeConfigurationKeys).length ? { runtimeConfigurationKeys } : {}) });
       const reportedCompleteness = observed.completeness;
       const providerHasSeparateEnvironment = providerRegistry
         .getMetadata(provider)
@@ -331,6 +397,7 @@ export class PlanService {
               : 'unknown'
             : 'complete'),
         services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
+        ...(reportedCompleteness?.serviceIdentities ? { serviceIdentities: reportedCompleteness.serviceIdentities } : {}),
         databases: observed.completeness?.databases ?? 'complete',
         caches: observed.completeness?.caches ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',
@@ -399,6 +466,9 @@ export class PlanService {
           dbProvider !== provider
           || observed.completeness.databases !== 'complete'
           || observedBoundDatabaseServices.length === 1
+          // A service-backed database's aggregate storage configuration must
+          // also agree with its durable provider-owned storage binding.
+          || observed.databases.some(database => database.externalId === localDatabaseExternalId && database.persistence !== undefined)
           || (
             databaseSharesHostingScope
             && Boolean(localDatabaseExternalId)
@@ -432,9 +502,8 @@ export class PlanService {
               && !component.externalId
                 ? { ...component, externalId: localDatabaseExternalId }
                 : component;
-            const db = await dbAdapter.observeDatabase(environment, observationComponent, {
-              resourceName: `${project.name}-${environment.name}-${engine}`,
-            });
+            const db = await this.observeDatastoreNames(project, environment, engine, observationComponent,
+              (resourceName) => dbAdapter.observeDatabase!(environment, observationComponent, { resourceName }));
             if (
               observedBoundDatabaseServices.length === 1
               && (
@@ -479,6 +548,25 @@ export class PlanService {
         }
       }
 
+      if (environmentSpec.database?.resilience?.checkpoint && localDatabase && dbProvider
+        && observed.completeness.databases === 'complete') {
+        const database = observed.databases.find(candidate =>
+          candidate.provider === dbProvider && candidate.externalId === localDatabaseExternalId);
+        if (database) {
+          try {
+            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+            if (!result.success || !supportsDatabaseCheckpoint(result.adapter)) {
+              throw new Error('The database adapter cannot observe recovery checkpoints.');
+            }
+            const checkpointSource = await result.adapter.observeCheckpointSource(environment, localDatabase);
+            database.resilience = { ...database.resilience, checkpointSource };
+          } catch {
+            observed.partial = true;
+            observed.warnings.push('Database checkpoint observation is unavailable; checkpoint creation is blocked until its exact source and inventory can be verified.');
+          }
+        }
+      }
+
       const localCache = localComponents.find(
         (component) => component.type === 'redis'
       );
@@ -520,10 +608,8 @@ export class PlanService {
                 ?? (typeof cacheBindings?.size === 'string' ? cacheBindings.size : undefined),
             };
             await cacheResult.adapter.configureTarget?.(target);
-            const cache = await cacheResult.adapter.observeCache(environment, localCache, {
-              resourceName: `${project.name}-${environment.name}-redis`,
-              ...target,
-            });
+            const cache = await this.observeDatastoreNames(project, environment, 'redis', localCache,
+              (resourceName) => cacheResult.adapter!.observeCache!(environment, localCache, { resourceName, ...target }));
             observed.caches = [
               ...(observed.caches ?? []).filter((item) =>
                 item.provider !== cacheProvider
@@ -680,6 +766,19 @@ export class PlanService {
         }
       }
 
+      observed.serviceVolumes = await observeServiceVolumes({ environment, environmentSpec, volumes: adapter.serviceVolumes });
+      if (Object.values(observed.serviceVolumes).some((v) => v.observation.state === 'unknown')) {
+        observed.partial = true;
+        observed.warnings.push('Service-volume attachment observation is incomplete; volume actions are blocked.');
+      }
+      if (observed.databases.some(database => database.persistence?.state === 'unknown')) {
+        observed.partial = true;
+        observed.warnings.push('Database persistent storage could not be verified; database and dependent service changes are blocked.');
+      }
+      if (observed.databases.some(database => database.runtimeReferenceBinding?.state === 'unknown')) {
+        observed.partial = true;
+        observed.warnings.push('Database runtime URL reference observation is incomplete; dependent changes are blocked.');
+      }
       return { observed, warnings };
     } catch (error) {
       const message = `Observation failed (${provider}): ${error instanceof Error ? error.message : String(error)}. Mutations that require proof of absence are blocked.`;
@@ -788,12 +887,10 @@ export class PlanService {
     if (environmentSpec.database) required.push({ provider: environmentSpec.database.provider });
     if (environmentSpec.cache) required.push({ provider: environmentSpec.cache.provider });
     for (const storage of Object.values(environmentSpec.storage ?? {})) required.push({ provider: storage.provider });
-    if (environmentSpec.loadBalancer) required.push({ provider: environmentSpec.loadBalancer.provider });
     if (environmentSpec.domain) {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
-    if (environmentSpec.messaging) required.push({ provider: 'twilio' });
     if (environmentSpec.deploy?.strategy === 'branch' && environmentSpec.deploy.trigger !== 'native') {
       const selection = projectSpec ? resolveDevOpsSelection(projectSpec) : null;
       if (selection?.ci) {
@@ -962,6 +1059,29 @@ export class PlanService {
       ];
     }
     return [];
+  }
+
+  private async planRepositoryVariableStage(project: Project, environmentName: string, specResult: SpecResult,
+    options?: PlanOptions): Promise<EnvironmentPlan | { error: string } | null> {
+    const variables = await planRepositoryVariables({ project, spec: specResult.spec, environmentName });
+    if (variables.error) return { error: variables.error };
+    if (!variables.stageRequired) return null;
+    if (options?.serviceFilter?.length || Object.keys(options?.envVarOverrides ?? {}).length
+      || options?.envFile || Object.keys(options?.secretRefs ?? {}).length) {
+      return { error: 'Repository variables are an isolated plan stage; remove deployment inputs.' };
+    }
+    const actions = variables.actions;
+    const warnings = ['Repository variables are non-secret configuration. Readback proves configuration, not workflow execution. Omitted variables are preserved.'];
+    const document: PlanRunDocument = { kind: 'hv_plan', scope: 'full', environmentName,
+      specRevision: specResult.revision, observedFingerprint: null, actions, unmanaged: [], warnings };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
+      ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+    const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: document as unknown as Record<string, unknown> });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, scope: 'full', specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' }, environmentName, verified: true, observed: null,
+      actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
   }
 
   private async planRepositoryInfrastructure(
@@ -1511,20 +1631,149 @@ export class PlanService {
     };
   }
 
+  private async planSecrets(project: Project, environmentName: string, specResult: SpecResult, options: PlanOptions): Promise<EnvironmentPlan | { error: string }> {
+    const spec = specResult.spec;
+    const environmentSpec = spec.environments[environmentName];
+    const keys = Object.keys(options.secretRefs ?? {}).sort();
+    if (!keys.length || options.serviceFilter !== undefined || options.envVarOverrides !== undefined
+      || options.envFile !== undefined || options.includeEnvFile === true) {
+      return { error: 'scope="secrets" requires nonempty secretRefs and accepts no services, envVars, envFile or bulk env-file input.' };
+    }
+    if (!environmentSpec || environmentSpec.deploy?.strategy !== 'branch' || environmentSpec.deploy.trigger !== 'ci') {
+      return { error: 'scope="secrets" requires an existing environment deployed through managed CI.' };
+    }
+    const invalid = keys.filter(key => spec.secrets[key]?.ownership !== 'delegated'
+      || !spec.secrets[key]?.environments.includes(environmentName));
+    if (invalid.length) return { error: `These keys are not delegated runtime secrets for ${environmentName}: ${invalid.join(', ')}.` };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    if (!environment) return { error: `Environment ${environmentName} has no existing hosting bindings. Review initial setup with a full plan.` };
+    const blocked = this.providerPreflight([environmentSpec.hosting.provider]);
+    if (blocked.length) return { error: blocked.map(block => block.reason).join(' ') };
+    const adapter = await adapterFactory.getProviderAdapter(environmentSpec.hosting.provider, project);
+    if (!adapter.success || adapter.adapter?.capabilities.supportsDeferredSecretUpdates !== true) {
+      return { error: `${environmentSpec.hosting.provider} does not yet support verified secret-only updates without restarting workloads.` };
+    }
+    const { observed, warnings } = await this.observeEnvironment(project, environment, environmentSpec, { hostingOnly: true });
+    let evidence: ReturnType<typeof scopedSecretObservation>;
+    try { evidence = scopedSecretObservation(environment, environmentSpec, observed, keys); }
+    catch (error) { return { error: error instanceof Error ? error.message : 'Secret destinations could not be verified.' }; }
+    const values: Record<string, string> = {};
+    try {
+      for (const key of keys) {
+        const value = await resolveSecretValueRef(options.secretRefs![key], { projectId: project.id, environmentName });
+        if (!value) return { error: `secretRefs["${key}"] resolved to an empty value.` };
+        values[key] = value;
+      }
+    } catch {
+      return { error: 'Could not read the selected secret reference. Check the local input and retry; no plan was saved.' };
+    }
+    const selectedSpec = { ...spec, secrets: Object.fromEntries(keys.map(key => [key, spec.secrets[key]])) };
+    const planned = planDelegatedSecrets({ spec: selectedSpec, environmentName, environment,
+      hostingProvider: environmentSpec.hosting.provider, observed, suppliedValues: values });
+    const actions = planned.actions.map(action => ({ ...action,
+      metadata: { ...action.metadata, deferDeployment: true, targetFingerprint: evidence.targetFingerprint } }));
+    warnings.push('This plan updates only the selected secrets. Services keep running with their current configuration until the managed CI deployment completes.');
+    const document: PlanRunDocument = { kind: 'hv_plan', scope: 'secrets', environmentName, specRevision: specResult.revision,
+      observedFingerprint: evidence.fingerprint, actions, warnings,
+      overrides: { delegatedSecretKeys: keys, delegatedSecretVarsEncrypted: getSecretStore().encryptObject(values) } };
+    const run = this.runRepo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+    return { planRunId: run.id, scope: 'secrets', specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' }, environmentName, verified: true,
+      observed, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
+  }
+
   async plan(
     project: Project,
     environmentName: string,
     options?: PlanOptions
   ): Promise<EnvironmentPlan | { error: string }> {
+    const reservedError = reservedRuntimeEnvError(options?.envVarOverrides);
+    if (reservedError) return { error: reservedError };
     const specResult = this.specStore.get(project);
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
-    const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
-    if (providerValidation) {
-      return { error: providerValidation.message };
-    }
     const scope = options?.scope ?? 'full';
+    const selectedEnvironment = specResult.spec.environments[environmentName];
+    const selectionProblem = selectedEnvironment && engineSelectionProblem(selectedEnvironment);
+    if (selectionProblem) return { error: selectionProblem };
+    const retainedEnvironment = scope === 'full' ? this.envRepo.findByProjectAndName(project.id, environmentName) : undefined;
+    const retainedExecutionRecovery = Boolean(retainedEnvironment && this.componentRepo.findByEnvironmentId(retainedEnvironment.id)
+      .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+    // Existing credential values and already acknowledged task observation are
+    // separate from infrastructure ownership. Their isolated planners validate
+    // exact targets and cannot admit a service create/update as a side effect.
+    if (isEngineManaged(selectedEnvironment) && scope !== 'credentials' && !retainedExecutionRecovery) {
+      return { error: `Environment "${environmentName}" is managed by the OpenTofu engine. Plan infrastructure with hv_plan and release code with hv_deploy.` };
+    }
+    if (scope === 'backups') {
+      if (options?.serviceFilter !== undefined || options?.envVarOverrides !== undefined || options?.envFile !== undefined
+        || options?.secretRefs !== undefined || options?.includeEnvFile === true) {
+        return { error: 'scope="backups" does not accept deployment inputs. Review backup setup separately from application deployment.' };
+      }
+      if (!specResult.spec.environments[environmentName]?.backups) {
+        return { error: 'scope="backups" requires explicit backup intent in this environment. Review backups.mode="daily" or "disabled" with hv_spec first.' };
+      }
+      options = { ...options, includeEnvFile: false };
+    }
+    try {
+      const pendingVariables = pendingRepositoryVariableEnvironment(project.id);
+      if (pendingVariables) {
+        if (scope !== 'full' || environmentName !== pendingVariables) return { error: 'Reconcile the pending repository-variable write in its canonical full plan before other work.' };
+        return await this.planRepositoryVariableStage(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options)
+          ?? { error: 'The pending repository-variable write could not be reconciled.' };
+      }
+    } catch { return { error: 'Retained repository-variable ownership is malformed or ambiguous; no new plan is authorized.' }; }
+    const lifecycleEnvironments = this.envRepo.findByProjectId(project.id)
+      .filter(environment => scope === 'credentials' || environment.name === environmentName);
+    const observationOrCleanup = scope === 'full' && lifecycleEnvironments.some(environment =>
+      this.componentRepo.findByEnvironmentId(environment.id).some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
+    // Existing credential operations have their own exact-target capability checks;
+    // they do not require permission to create the desired infrastructure.
+    const providerValidation = observationOrCleanup || scope === 'credentials'
+      ? undefined : firstProviderSpecValidationFailure(specResult.spec, environmentName);
+    if (providerValidation) return { error: providerValidation.message };
+    const pendingBootstrap = lifecycleEnvironments.some(environment =>
+      this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseBootstrap(component.bindings)));
+    if (scope !== 'full' && pendingBootstrap) {
+      return { error: 'Recover the pending private database bootstrap through its isolated plan before other lifecycle changes.' };
+    }
+    if (scope !== 'full' && lifecycleEnvironments.some(environment =>
+      this.componentRepo.findByEnvironmentId(environment.id).some(component => hasPendingDatabaseInitialization(component.bindings)))) {
+      return { error: 'Recover pending database initialization through its full-plan isolated stage before reviewing other changes.' };
+    }
+    if (scope === 'credentials') return planCredentialLifecycle(projectWithSpecGitRemoteUrl(project, specResult.spec), specResult.spec, specResult.revision, environmentName, options!);
+    if (options?.credential || options?.intent) return { error: 'Credential review inputs require scope=credentials.' };
+    if (Object.keys(options?.secretRefs ?? {}).some(key => specResult.spec.secrets[key]?.credential)) return { error: 'Tracked credentials require a reviewed credential adoption or rotation plan.' };
+    // Retained executions must remain observable/cleanable when current source
+    // configuration drifts. New initialization or alias repairs cannot preempt
+    // the isolated recovery that apply requires before those mutations.
+    if (scope === 'full' && pendingBootstrap) {
+      return await planDatabaseBootstrap({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options })
+        ?? { error: 'The retained private database bootstrap could not be reconciled.' };
+    }
+    const pendingCredential = pendingCredentialUpdate(project.id);
+    if (pendingCredential && scope !== 'database-credential-aliases' && scope !== 'full') return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
+    if (scope === 'full' && !pendingCredential) {
+      const initialization = await planDatabaseFreshInitialization({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options });
+      if (initialization) return initialization;
+    }
+    if (scope === 'database-credential-aliases' || scope === 'full') {
+      const aliases = await planDatabaseCredentialAliases({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName,
+        ...(scope === 'full' ? { onlyIfNeeded: true } : { options }) });
+      if (aliases && (!pendingCredential || !('actions' in aliases) || aliases.actions.length === 0)) return aliases;
+    }
+    if (pendingCredential) return { error: `Credential synchronization is incomplete. Recover hv_apply planId="${pendingCredential}" before planning deployment.` };
+    if (scope === 'full') {
+      const bootstrap = await planDatabaseBootstrap({ project: projectWithSpecGitRemoteUrl(project, specResult.spec),
+        spec: specResult.spec, revision: specResult.revision, environmentName, options });
+      if (bootstrap) return bootstrap;
+    }
+    if (scope === 'secrets') return this.planSecrets(projectWithSpecGitRemoteUrl(project, specResult.spec), environmentName, specResult, options!);
     if (scope === 'retained-cleanup') {
       const incompatibleInputs = [
         options && Object.prototype.hasOwnProperty.call(options, 'serviceFilter') ? 'services' : null,
@@ -1540,69 +1789,52 @@ export class PlanService {
       }
     }
     const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
-    if (scope !== 'retained-cleanup') {
-      const codeRepository = await planManagedCodeRepository({
-        project: projectForPlan,
-        spec: specResult.spec,
-        environmentName,
-      });
-      if (codeRepository.error) return { error: codeRepository.error };
-      if (codeRepository.stageRequired && codeRepository.action) {
-        const incompatibleInputs = [
-          options?.serviceFilter?.length ? 'services' : null,
-          Object.keys(options?.envVarOverrides ?? {}).length > 0 ? 'envVars' : null,
-          options?.envFile ? 'envFile' : null,
-          options?.includeEnvFile === false ? 'includeEnvFile' : null,
-          Object.keys(options?.secretRefs ?? {}).length > 0 ? 'secretRefs' : null,
-        ].filter((name): name is string => Boolean(name));
-        if (incompatibleInputs.length > 0) {
-          return {
-            error: `Repository lifecycle is an isolated plan stage and does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
-          };
+    let scopedBackupProgram: Awaited<ReturnType<typeof planGitHubInfrastructure>> | undefined;
+    if (scope === 'backups') {
+      const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+      const components = environment ? this.componentRepo.findByEnvironmentId(environment.id) : [];
+      const policy = resolveBackupPolicies(specResult.spec, environment ? [environment] : [], components)[environmentName];
+      if (policy.resources.some(resource => resource.bindingState === 'unknown' || resource.retained)
+        || components.some(component => component.bindings.unresolvedMutation !== undefined)) {
+        return { error: 'Resolve retained or uncertain data-resource identities through the full lifecycle before changing backup programs.' };
+      }
+      scopedBackupProgram = await planGitHubInfrastructure({ project: projectForPlan, spec: specResult.spec,
+        environmentName, backupEnvironment: environmentName });
+      const publications = scopedBackupProgram.actions.filter(isBackupProgramPublicationAction);
+      const disabled = specResult.spec.environments[environmentName].backups?.mode === 'disabled';
+      // Exact, independently observed backup programs have their own repository
+      // authority. App API policy, source detachment and release-workflow drift
+      // cannot authorize or obstruct this repository-only operation.
+      if (publications.length === 1 || disabled) {
+        const blocked: EnvironmentPlan['blocked'] = [...scopedBackupProgram.blocked, ...this.providerPreflight(publications.map(action => action.resource.provider))];
+        for (const action of scopedBackupProgram.actions) {
+          if (action.metadata?.blockedReason) blocked.push({ category: 'prerequisite', provider: action.resource.provider,
+            reason: action.reason });
         }
-        const actions = [codeRepository.action];
-        const warnings = [
-          ...(specResult.adopted && specResult.source?.kind === 'repo'
-            ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
-            : []),
-          ...(codeRepository.warning ? [codeRepository.warning] : []),
-        ];
-        const document: PlanRunDocument = {
-          kind: 'hv_plan',
-          scope: 'full',
-          environmentName,
-          specRevision: specResult.revision,
-          observedFingerprint: null,
-          actions,
-          unmanaged: [],
-          warnings,
-        };
-        const lifecycleEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName)
-          ?? this.envRepo.create({ projectId: project.id, name: environmentName });
-        const run = this.runRepo.create({
-          projectId: project.id,
-          environmentId: lifecycleEnvironment.id,
-          type: 'plan',
-          plan: document as unknown as Record<string, unknown>,
-        });
+        const selectedScope = publications.length ? 'backup-program-publication' as const : 'backup-readiness' as const;
+        const readiness = { ready: blocked.length === 0, policyReady: disabled, recoveryPointReady: disabled,
+          restoreReady: disabled, resources: [], gaps: blocked.map(block => block.reason) };
+        const actions = publications.map(action => ({ ...action, dependsOn: undefined }));
+        const document: PlanRunDocument = { kind: 'hv_plan', scope: selectedScope, environmentName,
+          specRevision: specResult.revision, observedFingerprint: null, actions, unmanaged: [],
+          warnings: scopedBackupProgram.warnings, ...(selectedScope === 'backup-readiness' ? { backupReadiness: readiness } : {}) };
+        const record = environment ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+        const run = this.runRepo.create({ projectId: project.id, environmentId: record.id, type: 'plan',
+          plan: document as unknown as Record<string, unknown> });
         this.runRepo.updateStatus(run.id, 'succeeded');
-        return {
-          planRunId: run.id,
-          scope: 'full',
-          specRevision: specResult.revision,
-          specSource: specResult.source ?? { kind: 'local' },
-          environmentName,
-          verified: codeRepository.action.verified,
-          observed: null,
-          actions,
-          unmanaged: [],
-          warnings,
-          inputRequired: [],
-          blocked: [],
-        };
+        return { planRunId: run.id, scope: selectedScope, environmentName, specRevision: specResult.revision,
+          specSource: specResult.source ?? { kind: 'local' }, observed: null, verified: blocked.length === 0,
+          actions, unmanaged: [], warnings: scopedBackupProgram.warnings, inputRequired: [], blocked,
+          ...(selectedScope === 'backup-readiness' ? { backupReadiness: readiness } : {}) };
       }
     }
-    const environmentSpec = specResult.spec.environments[environmentName];
+    if (scope === 'full') {
+      const variables = await this.planRepositoryVariableStage(projectForPlan, environmentName, specResult, options);
+      if (variables) return variables;
+    }
+    const declaredEnvironmentSpec = specResult.spec.environments[environmentName];
+    const environmentSpec = scope === 'backups' && declaredEnvironmentSpec
+      ? withBackupStorageDefaults(declaredEnvironmentSpec) : declaredEnvironmentSpec;
     if (!environmentSpec) {
       if (scope === 'retained-cleanup') {
         return {
@@ -1622,6 +1854,23 @@ export class PlanService {
     }
     if (scope === 'retained-cleanup') {
       return this.planRetainedHostingCleanup(project, environmentName, specResult, environmentSpec);
+    }
+    const policyEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    const apiPolicy = planApiPolicy(environmentName, policyEnvironment?.platformBindings.apiPolicy, environmentSpec.api);
+    if (apiPolicy.error) return { error: apiPolicy.error };
+    if (apiPolicy.action) {
+      if (options?.serviceFilter?.length || Object.keys(options?.envVarOverrides ?? {}).length || options?.envFile || Object.keys(options?.secretRefs ?? {}).length) {
+        return { error: 'API policy is an isolated plan stage; remove deploy overrides and re-run hv_plan.' };
+      }
+      const actions = [apiPolicy.action];
+      const warnings = ['API routes and compatibility tests remain application-owned. Recording this policy does not deploy code or retire a route.'];
+      const document: PlanRunDocument = { kind: 'hv_plan', scope: 'api-policy', environmentName, specRevision: specResult.revision,
+        observedFingerprint: null, actions, unmanaged: [], warnings };
+      const record = policyEnvironment ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+      const run = this.runRepo.create({ projectId: project.id, environmentId: record.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+      this.runRepo.updateStatus(run.id, 'succeeded');
+      return { planRunId: run.id, scope: 'api-policy', specRevision: specResult.revision, specSource: specResult.source ?? { kind: 'local' },
+        environmentName, verified: false, observed: null, actions, unmanaged: [], warnings, inputRequired: [], blocked: [] };
     }
     const sourceCommitSha = environmentSpec.deploy?.strategy === 'branch'
       && environmentSpec.deploy.trigger !== 'native'
@@ -1661,6 +1910,7 @@ export class PlanService {
       )
     )).sort();
     const reservedSecretKeys = new Set([
+      ...credentialSourceInputKeys(specResult.spec),
       ...managedSecretSlots.keys(),
       ...delegatedSecretSlots.keys(),
       ...immutableConflictKeys,
@@ -1708,15 +1958,6 @@ export class PlanService {
         error: `Email-managed keys cannot be passed through envVars: ${emailOverrideCollisions.join(', ')}. Configure environments.${environmentName}.email instead.`,
       };
     }
-    const messagingOverrideCollisions = environmentSpec.messaging
-      ? Object.keys(envVarOverrides ?? {})
-        .filter((key) => (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key))
-      : [];
-    if (messagingOverrideCollisions.length > 0) {
-      return {
-        error: `Messaging-managed keys cannot be passed through envVars: ${messagingOverrideCollisions.join(', ')}. Configure environments.${environmentName}.messaging instead.`,
-      };
-    }
     const managedSecretOverrideCollisions = Object.keys(envVarOverrides ?? {})
       .filter((key) => reservedSecretKeys.has(key));
     if (managedSecretOverrideCollisions.length > 0) {
@@ -1762,7 +2003,6 @@ export class PlanService {
         .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
       ...stripeManagedEnvKeys(environmentSpec),
       ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
-      ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
       ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
       ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
       ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
@@ -1885,6 +2125,8 @@ export class PlanService {
       }
     }
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environmentForObserve, environmentSpec);
+    const databaseConsumers = databaseConsumerReadiness({ spec: environmentSpec, environment: environmentForObserve, observed });
+    for (const consumer of databaseConsumers) if (consumer.reason) observeWarnings.push(`Database consumer ${consumer.service}: ${consumer.reason} SQL authentication and application operation remain unchecked.`);
     const hostingMetadata = providerRegistry.getMetadata(environmentSpec.hosting.provider);
     const boundEnvironmentId = recordValue(effectiveBindingRecord, 'environmentId');
     const destinationsAreKnownAbsent = Boolean(
@@ -1907,7 +2149,10 @@ export class PlanService {
           providers: [],
           warnings: [],
         };
-    if (maintenance.pending && serviceFilter) {
+    const applicationMaintenanceActive = environmentSpec.maintenance?.enabled === true
+      && maintenanceMode(environmentSpec, parseEnvironmentMaintenanceBinding(environmentForObserve)) === 'application';
+    const maintenanceStageActive = maintenance.pending || applicationMaintenanceActive;
+    if (maintenanceStageActive && serviceFilter) {
       return {
         error: 'Environment maintenance must use a full environment plan. Remove services= and re-run hv_plan.',
       };
@@ -2094,13 +2339,46 @@ export class PlanService {
       capabilities: providerRegistry.getMetadata(environmentSpec.database?.provider ?? '')
         ?.lifecycle?.databaseResilience,
     });
+    const checkpointActions = databaseResilience.actions.filter(action =>
+      action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.checkpointCreate && action.type !== 'noop');
+    const checkpointStageActive = checkpointActions.length > 0;
+    const backupObservation = scope === 'backups' ? await observeBackupPolicy({ spec: environmentSpec, environment,
+      components: local.components, project: projectForPlan, adapterFactory }) : undefined;
+    const databaseScopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
+      components: local.components, project: projectForPlan, adapterFactory });
+    const backupPolicy = backupObservation ? planBackupPolicy(backupObservation, {
+      explicitDatabaseBackups: Boolean(environmentSpec.database?.resilience?.backups),
+      attempts: environment?.platformBindings.backupPolicyAttempts,
+    }) : undefined;
+    const backupHealth = scope === 'backups' ? await observeBackupHealth({ spec: environmentSpec, environment,
+      components: local.components, project: projectForPlan, adapterFactory }) : undefined;
+    const backupReadiness = backupObservation && backupHealth ? assessBackupReadiness(backupObservation, backupHealth) : undefined;
+    const backupCoverage = backupObservation && backupPolicy && backupReadiness
+      ? { ...backupObservation, complete: backupPolicy.complete, ...backupEvidenceSummary(backupReadiness) } : undefined;
+    if (checkpointStageActive && serviceFilter) {
+      return { error: 'A service-filtered plan cannot skip a pending database checkpoint. Run hv_plan without services to complete the isolated backup stage first.' };
+    }
     const nativeDeploySources = planProviderNativeDeploySources({
       environmentSpec,
       observed,
       providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
       nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
     });
-    const blocked: EnvironmentPlan['blocked'] = maintenance.pending
+    const providerSafetyStageActive = checkpointStageActive || maintenanceStageActive
+      || dataMigration.pending
+      || nativeDeploySources.actions.length > 0;
+    if (scope === 'backups' && providerSafetyStageActive) {
+      return { error: 'Complete the pending provider safety stage through hv_plan scope="full" before reviewing backup setup.' };
+    }
+    const backupPolicyStageActive = !providerSafetyStageActive && Boolean(backupPolicy?.actions.length);
+    const databaseBindingStageActive = !providerSafetyStageActive && !backupPolicyStageActive && databaseScopeBinding.actions.length > 0;
+    if (databaseBindingStageActive && serviceFilter) {
+      return { error: 'A service-filtered plan cannot skip database binding reconciliation. Run hv_plan without services to review the local scope repair.' };
+    }
+    if (backupPolicyStageActive && serviceFilter) {
+      return { error: 'A service-filtered plan cannot skip pending daily backup policy configuration. Run hv_plan without services to review the isolated backup policy stage.' };
+    }
+    const blocked: EnvironmentPlan['blocked'] = maintenanceStageActive
       ? this.providerPreflight(maintenance.providers)
       : dataMigration.pending
       ? this.providerPreflight(dataMigration.providers)
@@ -2117,6 +2395,7 @@ export class PlanService {
       ...diff.actions,
       ...maintenance.actions,
     ];
+    await planServiceInstances({ project: projectForPlan, environment, actions });
     if (databaseResilience.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
       if (firstServiceIndex === -1) actions.push(...databaseResilience.actions);
@@ -2227,14 +2506,19 @@ export class PlanService {
         reason: `Environment "${environmentName}" is not tracked locally`,
       });
     }
+    const domainSecurity = await inspectDomainSecurity(environmentSpec.domain);
     const email = serviceFilter
-      ? { actions: [], warnings: [], fingerprint: undefined }
+      ? await (async () => {
+        const senderReadiness = await inspectEmailSenderReadiness({ project: projectForPlan, environmentSpec, observed, runtimeValues: specForDiff.envVars });
+        return { actions: [], warnings: senderReadiness?.guidance ? [senderReadiness.guidance] : [], fingerprint: undefined, senderReadiness };
+      })()
       : await planEmail({
         project: projectForPlan,
         environmentName,
         environmentSpec,
         environment,
         observed,
+        runtimeValues: specForDiff.envVars,
         serviceDependencies: [
           ...actions
             .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
@@ -2242,20 +2526,8 @@ export class PlanService {
         ],
         domainDependencies: domainRegistration.action ? [domainRegistration.action.id] : [],
       });
+    const webhookReadiness = inspectWebhookReadiness({ environmentSpec, environment, observed, runtimeValues: specForDiff.envVars, eventSigningReadiness: 'eventSigningReadiness' in email ? email.eventSigningReadiness : undefined, inboundSigningReadiness: 'inboundSigningReadiness' in email ? email.inboundSigningReadiness : undefined });
     actions.push(...email.actions);
-    const messaging = serviceFilter
-      ? { actions: [], warnings: [], fingerprint: undefined }
-      : await planTwilioMessaging({
-        project: projectForPlan,
-        environmentName,
-        environmentSpec,
-        environment,
-        observed,
-        serviceDependencies: actions
-          .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
-          .map((action) => action.id),
-      });
-    actions.push(...messaging.actions);
     const queues = await planQueues({ project: projectForPlan, environmentSpec, environment });
     if (queues.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
@@ -2266,6 +2538,9 @@ export class PlanService {
       }
     }
     const storage = planStorage({ environmentSpec, environment, observed });
+    const serviceVolumes = planServiceVolumes({ environmentSpec, environment, observed });
+    storage.warnings.push(...serviceVolumes.warnings);
+    actions.unshift(...serviceVolumes.actions);
     if (storage.actions.length > 0) {
       const ensureActions = storage.actions.filter((action) => action.metadata?.operation === 'storageEnsure');
       const followupActions = storage.actions.filter((action) => action.metadata?.operation !== 'storageEnsure');
@@ -2273,65 +2548,6 @@ export class PlanService {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
       if (firstServiceIndex === -1) actions.push(...followupActions);
       else actions.splice(firstServiceIndex, 0, ...followupActions);
-    }
-    const loadBalancer = serviceFilter
-      ? { actions: [], warnings: [], unmanaged: [] }
-      : await planLoadBalancer({
-        project: projectForPlan,
-        environmentName,
-        environmentSpec,
-        environment,
-        observed,
-        serviceActions: actions.filter((action) => action.resource.kind === 'service'),
-      });
-    actions.push(...loadBalancer.actions);
-    if (domainRegistration.action) {
-      const publicLoadBalancer = actions.find((action) =>
-        action.metadata?.operation === LOAD_BALANCER_OPERATIONS.ensure
-      );
-      if (publicLoadBalancer && publicLoadBalancer.type !== 'noop') {
-        publicLoadBalancer.dependsOn = Array.from(new Set([
-          ...(publicLoadBalancer.dependsOn ?? []),
-          domainRegistration.action.id,
-        ]));
-      }
-    }
-    if (!environmentSpec.loadBalancer) {
-      const publicDestroy = actions.find((action) =>
-        action.metadata?.operation === LOAD_BALANCER_OPERATIONS.destroy
-      );
-      const domainAction = environmentSpec.domain
-        ? actions.find((action) => action.id === `domain:${environmentSpec.domain}`)
-        : undefined;
-      if (publicDestroy && domainAction && domainAction.type !== 'noop') {
-        domainAction.dependsOn = Array.from(new Set([
-          ...(domainAction.dependsOn ?? []),
-          publicDestroy.id,
-        ]));
-      }
-    }
-    const providerEnvironmentAction = actions.find((action) =>
-      action.id === environmentActionId
-      && action.metadata?.operation === HOSTING_ENVIRONMENT_ENSURE_OPERATION
-      && action.type !== 'noop'
-    );
-    if (providerEnvironmentAction) {
-      for (const action of actions) {
-        if (
-          action.id === providerEnvironmentAction.id
-          || action.type === 'noop'
-          || action.type === 'destroy'
-          || action.resource.provider !== environmentSpec.hosting.provider
-          || action.resource.kind === 'project'
-          || action.resource.kind === 'environment'
-        ) {
-          continue;
-        }
-        action.dependsOn = Array.from(new Set([
-          ...(action.dependsOn ?? []),
-          providerEnvironmentAction.id,
-        ]));
-      }
     }
     for (const managedSecretAction of delegatedSecrets.actions) {
       if (managedSecretAction.type === 'noop') continue;
@@ -2425,7 +2641,7 @@ export class PlanService {
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
         && action.metadata?.operation !== DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
-        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email', 'messaging']
+        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
       : [];
@@ -2438,8 +2654,34 @@ export class PlanService {
     // CI rendering needs durable provider identities. Reconcile those in an
     // isolated apply, then re-plan against the resulting bindings.
     const managedCiEnabled = environmentUsesManagedCi(specResult.spec, environmentName);
-    const ciBindingPrerequisites = managedCiEnabled
-      ? actions.filter(isManagedCiBindingRoot)
+    const pendingVolumes = serviceVolumes.actions.some(action => action.type !== 'noop');
+    const identityOnlyWorkloads = observed?.services.filter(service => service.identityOnly === true) ?? [];
+    const volumeIdentityStage = Object.entries(environmentSpec.services).some(([name, s]) => s.volume
+      && (!((environment?.platformBindings.services as Record<string, { serviceId?: string }> | undefined)?.[name]?.serviceId)
+        || (!pendingVolumes && identityOnlyWorkloads.some(service => service.name === name))));
+    // A fresh project has no destinations whose generated secrets can be
+    // observed yet. Bootstrap only its project identity; the project handler
+    // still verifies absence before creating it. Re-plan before authorizing
+    // environments, workloads or any secret writes.
+    const ciProjectBootstrapStage = managedCiEnabled
+      && !environmentForObserve
+      && projectAction?.type === 'create'
+      && !projectAction.metadata?.blockedReason
+      && delegatedSecrets.blockers.length > 0;
+    // A separately scoped provider environment must have its durable identity
+    // before a later plan can review child resources in that exact scope.
+    // This namespace prerequisite is independent of CI and backup intent.
+    const namespacePrerequisites = providerHasSeparateEnvironment
+      ? projectAction?.verified && !projectAction.metadata?.blockedReason ? [projectAction]
+        : actions.filter(action => action.id === environmentActionId && isManagedCiBindingRoot(action)
+          && action.verified && !action.metadata?.blockedReason)
+      : [];
+    const namespaceBindingStage = namespacePrerequisites.length > 0;
+    const serviceInstancePrerequisites = actions.filter(action => ['serviceInstanceCreate','serviceInstanceFinalize','serviceInstanceFinalizeRecovery'].includes(String(action.metadata?.operation)));
+    const instanceIdentityStage = serviceInstancePrerequisites.length > 0;
+    const ciBindingPrerequisites = namespaceBindingStage ? namespacePrerequisites : instanceIdentityStage ? serviceInstancePrerequisites : managedCiEnabled || volumeIdentityStage
+      ? ciProjectBootstrapStage ? [projectAction!] : actions.filter(action => isManagedCiBindingRoot(action)
+        && !(pendingVolumes && action.metadata?.workloadCreateRequired === true))
       : [];
     const ciBindingStage = ciBindingPrerequisites.length > 0;
     const ciBindingServiceNames = new Set(
@@ -2460,11 +2702,15 @@ export class PlanService {
       && action.billable === true
       && action.metadata?.operation === undefined
     );
-    const ciDeploy: Awaited<ReturnType<typeof planManagedCiDeploy>> = ciBindingStage
+    const ciDeploy: Awaited<ReturnType<typeof planManagedCiDeploy>> = ciBindingStage || (pendingVolumes && identityOnlyWorkloads.length > 0)
       ? {
           actions: [],
           warnings: [
-            'Managed CI reconciliation is deferred until provider identity changes converge. Apply this binding stage, then re-run hv_plan.',
+            namespaceBindingStage && !managedCiEnabled
+              ? 'Child infrastructure and application deployment are deferred until the provider namespace identity converges. Apply this identity-only stage, then re-run hv_plan.'
+              : volumeIdentityStage && !managedCiEnabled
+              ? 'Volume creation and application deployment are deferred until provider identities converge. Apply this identity-only stage, then re-run hv_plan.'
+              : 'Managed CI reconciliation is deferred until provider identity changes converge. Apply this binding stage, then re-run hv_plan.',
           ],
         }
       : await planManagedCiDeploy({
@@ -2484,7 +2730,7 @@ export class PlanService {
       action.type !== 'noop' && action.metadata?.workflowPublicationRequired !== true
     );
     const ciWorkflowPublicationStage = !ciBindingStage && ciWorkflowPublicationActions.length > 0;
-    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage) {
+    if (delegatedSecrets.blockers.length > 0 && !ciWorkflowPublicationStage && !ciProjectBootstrapStage && !namespaceBindingStage) {
       const detail = delegatedSecrets.blockers
         .map((blocker) => `${blocker.key}: ${blocker.reason}`)
         .join('; ');
@@ -2518,10 +2764,11 @@ export class PlanService {
     if (repoCollaboration.action) {
       actions.push(repoCollaboration.action);
     }
-    const githubInfrastructure = await planGitHubInfrastructure({
+    const githubInfrastructure = scopedBackupProgram ?? await planGitHubInfrastructure({
       project: projectForPlan,
       spec: specResult.spec,
       environmentName,
+      ...(scope === 'backups' ? { backupEnvironment: environmentName } : {}),
       suppliedSecretValues: delegatedSecretValues,
     });
     const secretInputRequired = [
@@ -2558,18 +2805,23 @@ export class PlanService {
     actions.push(...ios.actions);
     actions.push(...githubConfirmationActions);
 
-    // A CI-managed seed must run only after the exact desired commit is
+    const ciConfigurationPending = checkpointStageActive || ciBindingStage || ciWorkflowPublicationActions.length > 0;
+    const scheduleActivations = ciConfigurationPending ? [] : planScheduleActivations({ environment, environmentSpec, observed });
+    actions.push(...scheduleActivations);
+
+    // Post-release work must run only after the exact desired commit is
     // deployed. Exclude it from the applied-contract marker to avoid a cycle;
-    // the explicit release action below bridges marker -> deploy -> seed.
+    // one release bridges marker -> deploy -> seed and/or schedule activation.
     const managedCiSeedAction = actions.find((action) =>
       action.type !== 'noop'
       && action.metadata?.operation === 'databaseSeed'
       && environmentUsesManagedCi(specResult.spec, environmentName)
     );
+    const postReleaseActions = [...scheduleActivations, ...(managedCiSeedAction ? [managedCiSeedAction] : [])];
+    const postReleaseIds = new Set(postReleaseActions.map(action => action.id));
     const appliedSpecHashDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.id !== managedCiSeedAction?.id)
+      .filter((action) => action.type !== 'noop' && !postReleaseIds.has(action.id))
       .map((action) => action.id);
-    const ciConfigurationPending = ciBindingStage || ciWorkflowPublicationActions.length > 0;
     const appliedSpecHash = ciConfigurationPending
       ? {
           actions: [] as PlanAction[],
@@ -2591,7 +2843,7 @@ export class PlanService {
     const releaseDependsOn = appliedSpecHashChanges.length > 0
       ? appliedSpecHashChanges.map((action) => action.id)
       : appliedSpecHashDependsOn;
-    const managedSeedRelease = managedCiSeedAction
+    const managedPostRelease = postReleaseActions.length > 0
       && resolveDevOpsSelection(specResult.spec)?.ci?.provider === 'github-actions'
       && !ciConfigurationPending
       ? await planGitHubActionsRelease({
@@ -2601,21 +2853,27 @@ export class PlanService {
         dependsOn: releaseDependsOn,
       })
       : { warnings: [] };
-    if (managedSeedRelease.action && managedCiSeedAction) {
-      actions.push(managedSeedRelease.action);
-      managedCiSeedAction.dependsOn = Array.from(new Set([
-        ...(managedCiSeedAction.dependsOn ?? []),
-        managedSeedRelease.action.id,
-      ]));
-    } else if (managedCiSeedAction) {
-      managedCiSeedAction.metadata = {
-        ...(managedCiSeedAction.metadata ?? {}),
-        blockedReason: 'managed_ci_release_unavailable',
-      };
+    if (managedPostRelease.action) actions.push(managedPostRelease.action);
+    for (const action of postReleaseActions) {
+      if (managedPostRelease.action && !managedPostRelease.action.metadata?.blockedReason) {
+        action.dependsOn = Array.from(new Set([...(action.dependsOn ?? []), managedPostRelease.action.id]));
+        if (action.metadata?.operation === SCHEDULE_ACTIVATION_OPERATION) {
+          const release = managedPostRelease.action.metadata!;
+          action.metadata.release = Object.fromEntries(['repository', 'workflow', 'ref', 'targetSha', 'workflowInputHash', 'workflowContentHash']
+            .map(key => [key, release[key]]));
+        }
+      } else {
+        action.metadata = { ...(action.metadata ?? {}), blockedReason: action.metadata?.operation === SCHEDULE_ACTIVATION_OPERATION
+          && resolveDevOpsSelection(specResult.spec)?.ci?.provider !== 'github-actions'
+          ? 'schedule_activation_ci_unsupported' : 'managed_ci_release_unavailable' };
+        if (action.metadata.blockedReason === 'schedule_activation_ci_unsupported') {
+          action.reason = 'Prepared schedule activation currently requires managed GitHub Actions release evidence; the selected CI provider is unsupported.';
+        }
+      }
     }
 
     if (
-      !maintenance.pending
+      !maintenanceStageActive
       && !dataMigration.pending
       && nativeDeploySources.actions.length === 0
       && !ciBindingStage
@@ -2635,13 +2893,18 @@ export class PlanService {
       const syncIds = new Set(ciSyncActions.map((action) => action.id));
       actions = actions.map((action) => {
         if (syncIds.has(action.id)) {
-          return prerequisiteRoots.length > 0
-            ? { ...action, dependsOn: prerequisiteRoots }
+          const dependencies = [...new Set([...(action.dependsOn ?? []), ...prerequisiteRoots])];
+          return dependencies.length > 0
+            ? { ...action, dependsOn: dependencies }
             : { ...action, dependsOn: undefined };
         }
         if (
           action.type === 'noop'
           || prerequisiteIds.has(action.id)
+          // Durable namespace/data identities do not consume CI credentials.
+          // Preserve their own prerequisites without making backup bootstrap
+          // depend on a later CI sync that its isolated stage cannot execute.
+          || isBackupProvisioningAction(action)
         ) {
           return action;
         }
@@ -2659,7 +2922,7 @@ export class PlanService {
     // desired database/bucket or deploy services in the same apply: each copy
     // handler owns a fresh unreachable candidate, verifies it, and only then
     // records it as active for a later plan.
-    if (maintenance.pending) {
+    if (maintenanceStageActive) {
       const scaffolding = actions.filter((action) =>
         (action.resource.kind === 'project' || action.resource.kind === 'environment')
         && action.type !== 'destroy'
@@ -2729,12 +2992,35 @@ export class PlanService {
       );
     }
 
-    const providerSafetyStageActive = maintenance.pending
-      || dataMigration.pending
-      || nativeDeploySources.actions.length > 0;
-    const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive;
-    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive;
-    if (ciBindingStageActive) {
+    wireServiceVolumeActions(actions, serviceVolumes.actions);
+    for (const action of actions) {
+      const volumeBlock = retainedVolumeHostingBlock(environment, environmentSpec, action);
+      if (volumeBlock) {
+        action.verified = false;
+        action.reason = volumeBlock;
+        action.metadata = { ...action.metadata, blockedReason: 'retained_service_volumes' };
+      }
+    }
+    const ciBindingStageActive = ciBindingStage && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
+    const ciWorkflowPublicationStageActive = ciWorkflowPublicationStage && !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive;
+    const volumeStageActive = !providerSafetyStageActive && !backupPolicyStageActive && !databaseBindingStageActive && !ciBindingStageActive && !ciWorkflowPublicationStageActive
+      && serviceVolumes.actions.some(action => action.type !== 'noop');
+    let backupProvisioningStageActive = false;
+    let backupReadinessStageActive = false;
+    let ciCredentialsStageActive = false;
+    if (checkpointStageActive) {
+      // A recovery checkpoint acts only on an already-bound database. It must
+      // precede workflow publication and unrelated reconciliation, and must
+      // never carry their dependency edges or advance a deployment marker.
+      actions = checkpointActions.map(action => ({ ...action, dependsOn: undefined }));
+      databaseResilience.warnings.push('This plan is limited to the requested database checkpoint. After its provider completion is verified, re-run hv_plan for remaining infrastructure changes. A completed snapshot is not a tested restore.');
+    } else if (backupPolicyStageActive && backupPolicy) {
+      actions = backupPolicy.actions;
+      backupPolicy.warnings.push('This plan configures only daily backup schedules on bound resources. Re-run hv_plan scope="backups" for remaining backup setup. Backup completion and restores remain unchecked.');
+    } else if (databaseBindingStageActive) {
+      actions = databaseScopeBinding.actions;
+      databaseScopeBinding.warnings.push('This plan records only verified metadata for the existing database. Re-run hv_plan for remaining backup provisioning, verification and deployment work.');
+    } else if (ciBindingStageActive) {
       const closure = actionDependencyClosure(
         actions,
         ciBindingPrerequisites.map((action) => action.id)
@@ -2748,6 +3034,11 @@ export class PlanService {
           ...action,
           dependsOn: action.dependsOn?.filter((dependency) => retained.has(dependency)),
         }));
+      if (ciProjectBootstrapStage) {
+        ciDeploy.warnings.push(
+          'This plan creates only the hosting project. Generated secrets and workloads remain deferred until a new plan can observe their destinations.'
+        );
+      }
     } else if (ciWorkflowPublicationStageActive) {
       actions = ciWorkflowPublicationActions.map((action) => ({
         ...action,
@@ -2756,6 +3047,43 @@ export class PlanService {
       ciDeploy.warnings.push(
         'This plan is limited to managed CI workflow publication. Merge and re-observe the reviewed files, then re-run hv_plan for provider reconciliation.'
       );
+    } else if (volumeStageActive) {
+      actions = serviceVolumes.actions;
+      storage.warnings.push('This plan is limited to the current filesystem component stage. Apply and re-plan to review dependent resources and deployment; no application code is deployed by this stage.');
+    } else if (backupObservation && backupPolicy && backupReadiness && !providerSafetyStageActive) {
+      if (serviceFilter) {
+        return { error: 'A service-filtered plan cannot bypass backup readiness. Run hv_plan without services to review protection for every persistent resource.' };
+      }
+      const unbound = backupObservation.policy.resources.filter(resource => resource.bindingState === 'unbound');
+      const backupDestination = resolveBackupStrategy(environmentSpec).destination;
+      const provisioningRoots = actions.filter(action => action.type !== 'noop' && isBackupProvisioningAction(action)
+        && (['project', 'environment'].includes(action.resource.kind) && unbound.length > 0
+          || action.resource.kind === 'storage' && action.resource.name === backupDestination
+          || unbound.some(resource => resource.kind === action.resource.kind && resource.name === action.resource.name
+            && resource.provider === action.resource.provider)));
+      // Native namespace identity is needed to observe and review resource
+      // creation. Do not request later billable confirmations in that stage.
+      const scaffolding = provisioningRoots.filter(action => ['project', 'environment'].includes(action.resource.kind));
+      const roots = scaffolding.length ? scaffolding : provisioningRoots;
+      const closure = actionDependencyClosure(actions, roots.map(action => action.id));
+      backupProvisioningStageActive = closure.some(action => action.type !== 'noop') && closure.every(isBackupProvisioningAction);
+      // Credentials are a prerequisite of the first recovery run. Preserve
+      // genuine dependencies: a missing database URL must provision first.
+      const credentials = actionDependencyClosure(actions, ciSyncActions.filter(isManagedCiCredentialAction).map(action => action.id));
+      const credentialIds = new Set(credentials.map(action => action.id));
+      ciCredentialsStageActive = !backupProvisioningStageActive && credentials.length > 0
+        && credentials.every(action => isManagedCiCredentialAction(action)
+          && (action.dependsOn ?? []).every(dependency => credentialIds.has(dependency)));
+      backupReadinessStageActive = !backupProvisioningStageActive && !ciCredentialsStageActive;
+      actions = backupProvisioningStageActive ? closure.map(action => action.type !== 'noop'
+        && ['database', 'storage'].includes(action.resource.kind)
+        ? { ...action, requiresConfirm: true, dataBearing: true } : action) : ciCredentialsStageActive ? credentials : [];
+      backupPolicy.warnings.push(backupProvisioningStageActive
+        ? 'This plan provisions only durable data identities for requested backups. Re-run hv_plan scope="backups" to review schedules and recovery verification.'
+        : ciCredentialsStageActive
+        ? 'This plan synchronizes only credentials for accepted CI workflows so recovery can run. Re-run hv_plan scope="backups" in this environment to publish its backup files.'
+        : backupReadiness.ready ? 'Requested backups are configured and current recovery evidence is verified. No application deployment is authorized by this plan.'
+        : `Requested backup setup is incomplete. ${backupReadiness.gaps.join(' ')}`);
     }
 
     const filterWarnings: string[] = [];
@@ -2769,6 +3097,7 @@ export class PlanService {
         if (action.type === 'destroy') return false;
         if (action.metadata?.operation === 'hostingEnvRemove') return false;
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
+        if (action.resource.kind === 'volume') return keep.has(action.resource.name);
         if (action.resource.kind === 'database' || action.resource.kind === 'cache') {
           return action.type === 'create' || action.type === 'noop';
         }
@@ -2882,36 +3211,42 @@ export class PlanService {
           : {}),
       }
       : undefined;
-    const isolatedCiStage = ciBindingStageActive || ciWorkflowPublicationStageActive;
+    const isolatedCiStage = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || ciBindingStageActive || ciWorkflowPublicationStageActive || volumeStageActive;
     const ciSelection = resolveDevOpsSelection(specResult.spec)?.ci;
     const ciConnectionProvider = ciSelection
       ? devOpsProviderRegistry.ciProvider(ciSelection.provider)?.connectionProvider
       : undefined;
-    const isolatedProviders = ciWorkflowPublicationStageActive && ciConnectionProvider
+    const isolatedProviders = (ciWorkflowPublicationStageActive || ciCredentialsStageActive) && ciConnectionProvider
       ? [ciConnectionProvider]
       : actions.map((action) => action.resource.provider);
     const planBlocked = isolatedCiStage
       ? this.providerPreflight(isolatedProviders)
       : blocked;
-    const planInputRequired = ciWorkflowPublicationStageActive
+    if (backupReadinessStageActive && backupReadiness && !backupReadiness.ready) planBlocked.push({ category: 'prerequisite', provider: 'hypervibe', policy: 'hard', reason: `Requested backup setup is incomplete. ${backupReadiness.gaps.join(' ')}` });
+    const planInputRequired = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive || volumeStageActive
       ? []
+      // A volume's new workload identity is prepared with provisionOnly;
+      // no application code runs until a later, separately reviewed full plan.
+      // Keep runtime input requirements on that later plan, not this empty
+      // identity stage. Ordinary managed-CI bindings still require their inputs.
+      : ciBindingStageActive && (volumeIdentityStage || instanceIdentityStage)
+        ? []
       : ciBindingStageActive
         ? ciBindingInputRequired
         : secretInputRequired;
-    const planOverrides = ciWorkflowPublicationStageActive ? undefined : overrides;
-    const persistedScope = ciBindingStageActive
-      ? 'managed-ci-bindings' as const
+    const planOverrides = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive || ciProjectBootstrapStage || namespaceBindingStage || volumeStageActive || instanceIdentityStage ? undefined : overrides;
+    const persistedScope = databaseBindingStageActive ? 'database-bindings' as const : checkpointStageActive ? 'database-checkpoint' as const : backupPolicyStageActive ? 'backup-policy' as const
+      : backupProvisioningStageActive ? 'backup-provisioning' as const : ciCredentialsStageActive ? 'managed-ci-credentials' as const : backupReadinessStageActive ? 'backup-readiness' as const : ciBindingStageActive
+      ? ((volumeIdentityStage || namespaceBindingStage || instanceIdentityStage) && !managedCiEnabled ? 'hosting-bindings' as const : 'managed-ci-bindings' as const)
       : ciWorkflowPublicationStageActive
         ? 'managed-ci-publication' as const
-        : 'full' as const;
+        : volumeStageActive ? 'service-volumes' as const : 'full' as const;
     const actionKinds = new Set(actions.map((action) => action.resource.kind));
-    const integrationFingerprints = ciWorkflowPublicationStageActive ? {} : {
+    const integrationFingerprints = checkpointStageActive || backupPolicyStageActive || databaseBindingStageActive || backupProvisioningStageActive || backupReadinessStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive ? {} : {
       ...((!ciBindingStageActive || actionKinds.has('payment')) && stripeSync.fingerprint
         ? { stripe: stripeSync.fingerprint } : {}),
       ...((!ciBindingStageActive || actionKinds.has('email')) && email.fingerprint
         ? { email: email.fingerprint } : {}),
-      ...((!ciBindingStageActive || actionKinds.has('messaging')) && messaging.fingerprint
-        ? { messaging: messaging.fingerprint } : {}),
     };
 
     try {
@@ -2928,20 +3263,22 @@ export class PlanService {
       scope: persistedScope,
       environmentName,
       specRevision: specResult.revision,
-      ...(sourceCommitSha ? { sourceCommitSha } : {}),
-      observedFingerprint: ciWorkflowPublicationStageActive
+      ...(!databaseBindingStageActive && !ciCredentialsStageActive && sourceCommitSha ? { sourceCommitSha } : {}),
+      ...(backupCoverage && backupReadiness ? { backupCoverage, backupReadiness } : {}),
+      observedFingerprint: instanceIdentityStage || databaseBindingStageActive || ciCredentialsStageActive || ciWorkflowPublicationStageActive || backupPolicyStageActive || backupReadinessStageActive
         ? null
         : observed ? fingerprintObservedState(observed) : null,
-      ...(dataMigration.pending && sourceEnvironment
+      ...(!checkpointStageActive && dataMigration.pending && sourceEnvironment
         ? { lockEnvironmentIds: [sourceEnvironment.id] }
         : {}),
       ...(Object.keys(integrationFingerprints).length > 0 ? { integrationFingerprints } : {}),
       actions,
-      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedPostRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...filterWarnings],
       ...(planInputRequired.length > 0 ? { inputRequired: planInputRequired } : {}),
       ...(planOverrides ? { overrides: planOverrides } : {}),
     };
+    document.warnings = [...(document.warnings ?? []), ...(backupPolicy?.warnings ?? []), ...databaseScopeBinding.warnings];
 
     // Plans for untracked environments can't reference an environment row;
     // create the local record now so runs can attach to it.
@@ -2959,6 +3296,11 @@ export class PlanService {
     return {
       planRunId: run.id,
       scope: persistedScope,
+      ...(backupCoverage && backupReadiness ? { backupCoverage, backupReadiness } : {}),
+      databaseConsumers,
+      ...(domainSecurity ? { domainSecurity } : {}),
+      ...(webhookReadiness ? { webhookReadiness } : {}),
+      ...(email.senderReadiness ? { emailSenderReadiness: email.senderReadiness } : {}),
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,

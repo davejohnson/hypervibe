@@ -1,18 +1,22 @@
+import '../../../application/providers.js';
+import * as githubCredentialActivation from '../../../adapters/providers/github/github-credential-activation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { parse, stringify } from 'yaml';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
-import '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
+import { AdapterFactory } from '../adapter.factory.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
@@ -41,10 +45,42 @@ import {
   MATCH_SIGNING_REQUIRED_SECRETS,
 } from '../ios-release-workflow.service.js';
 import type { PlanAction } from '../../plan/plan.types.js';
+import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
+import { credentialActionId, type CredentialTarget } from '../../plan/credential-plan.contract.js';
+
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { ...fixtureHostingMetadata.orchestration, ci: {
+      ...fixtureHostingMetadata.orchestration!.ci!,
+      requiredSecrets: ['FIXTURE_CREDENTIALS', 'FIXTURE_PROJECT'],
+      secretCredentialKeys: { FIXTURE_CREDENTIALS: 'credentials', FIXTURE_PROJECT: 'projectId' },
+    } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
+
+// Captured from the named historical Git revisions, not the current renderer.
+// The accepted workflow envelope below is reconstructed; the gate artifacts and
+// input-contract revisions stay frozen so removing the gate cannot erase RED.
+const historicalBackupGates = JSON.parse(fs.readFileSync(
+  new URL('./fixtures/historical-backup-deploy-gates.json', import.meta.url), 'utf8'
+)) as {
+  backupPolicy: { mode: 'daily'; runnerImage: string; credentialNames: string[] };
+  fixtures: Array<{ rendererRevision: number; sourceCommit: string; step: { name: string; run: string } }>;
+};
 
 const CI_ENVIRONMENT_SPEC = {
   hosting: { provider: 'railway' },
@@ -406,21 +442,6 @@ describe('ci-deploy.service', () => {
       ]);
     });
 
-    it('returns GCP credentials for cloudrun', () => {
-      expect(requiredProviderSecretNamesForGitHubActions('cloudrun')).toEqual([
-        'GCP_SERVICE_ACCOUNT_JSON',
-        'GCP_PROJECT_ID',
-      ]);
-    });
-
-    it('returns only the DigitalOcean API token', () => {
-      expect(
-        requiredProviderSecretNamesForGitHubActions('digitalocean')
-      ).toEqual([
-        'DIGITALOCEAN_TOKEN',
-      ]);
-    });
-
     it('returns no secrets for unknown providers', () => {
       expect(requiredProviderSecretNamesForGitHubActions('vercel')).toEqual([]);
     });
@@ -432,7 +453,7 @@ describe('ci-deploy.service', () => {
       const secretStore = getSecretStore();
       const add = (scope: string | undefined, projectId: string) => {
         const connection = connectionRepo.create({
-          provider: 'cloudrun',
+          provider: "fixture-hosting",
           scope,
           credentialsEncrypted: secretStore.encryptObject({
             credentials: `credentials-for-${projectId}`,
@@ -445,11 +466,11 @@ describe('ci-deploy.service', () => {
       add('davejohnson/other-app', 'other-project');
       add('davejohnson/billforge', 'billforge-project');
 
-      expect(providerSecretsForGitHubActions('cloudrun', {
+      expect(providerSecretsForGitHubActions("fixture-hosting", {
         githubRepo: 'davejohnson/billforge',
       })).toEqual([
-        { name: 'GCP_SERVICE_ACCOUNT_JSON', value: 'credentials-for-billforge-project' },
-        { name: 'GCP_PROJECT_ID', value: 'billforge-project' },
+        { name: "FIXTURE_CREDENTIALS", value: 'credentials-for-billforge-project' },
+        { name: "FIXTURE_PROJECT", value: 'billforge-project' },
       ]);
     });
 
@@ -457,7 +478,7 @@ describe('ci-deploy.service', () => {
       const connectionRepo = new ConnectionRepository();
       const secretStore = getSecretStore();
       const connection = connectionRepo.create({
-        provider: 'cloudrun',
+        provider: "fixture-hosting",
         scope: 'davejohnson/other-app',
         credentialsEncrypted: secretStore.encryptObject({
           credentials: 'other-credentials',
@@ -466,7 +487,7 @@ describe('ci-deploy.service', () => {
       });
       connectionRepo.updateStatus(connection.id, 'verified');
 
-      expect(providerSecretsForGitHubActions('cloudrun', {
+      expect(providerSecretsForGitHubActions("fixture-hosting", {
         githubRepo: 'davejohnson/billforge',
       })).toEqual([]);
     });
@@ -558,6 +579,32 @@ describe('ci-deploy.service', () => {
 
   describe('planGitHubActionsDeploy', () => {
     const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
+
+    it('preserves the accepted role input instead of restoring an older connection token', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const descriptor = { role: 'package-downloads', label: 'Package downloads', purpose: 'Read application images', kind: 'opaque', source: 'env:NEXT_UNACCEPTED_CANDIDATE' };
+      const store = new SpecStore();
+      store.replace(project, { ...store.get(project)!.spec, github: { repository: 'davejohnson/billforge', canonicalEnvironment: 'production' }, secrets: {
+        IMAGE_REGISTRY_TOKEN: { ownership: 'delegated', principal: 'user:owner', environments: [], githubActions: { environments: ['production'] }, credential: descriptor },
+      } });
+      const target: CredentialTarget = { kind: 'github', provider: 'github', environment: 'production', environmentId, repository: 'davejohnson/billforge', scope: 'production', scopeId: 17, key: 'IMAGE_REGISTRY_TOKEN' };
+      const runs = new RunRepository();
+      const accepted = runs.create({ projectId: project.id, environmentId, type: 'plan', plan: { overrides: { delegatedSecretVarsEncrypted: getSecretStore().encryptObject({ value: 'replacement-accepted-token', descriptor, reviewedActions: [{ metadata: { target } }] }) } } });
+      runs.updateStatus(accepted.id, 'succeeded');
+      envRepo.updatePlatformBindings(environmentId, { credentialUpdates: { 'package-downloads': { state: 'accepted', planId: accepted.id, descriptor, completed: [credentialActionId('package-downloads', target)] } } });
+      const workflow = expectedWorkflow(project);
+      const binding = syncedBinding(project, workflow.content);
+      binding.syncedEnvironmentSecretHashes.IMAGE_REGISTRY_TOKEN = sha256('superseded-sync-record');
+      acceptWorkflow(project, envRepo, environmentId, workflow, { binding });
+      const plan = await planGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec, environment: envRepo.findById(environmentId) });
+      mockVerifiedGitHub();
+      const write = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
+      const applied = await applyGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec, action: plan.action!, authority: 'secret-sync' });
+      expect(applied).toMatchObject({ success: true });
+      expect(write).toHaveBeenCalledWith('davejohnson', 'billforge', 'production', 'IMAGE_REGISTRY_TOKEN', 'replacement-accepted-token');
+      expect(write.mock.calls.some(call => call[4] === 'pkg-token')).toBe(false);
+    });
 
     it('returns no action when the environment does not use GitHub Actions deploys', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
@@ -671,6 +718,28 @@ describe('ci-deploy.service', () => {
       );
       expect(getFileContent).not.toHaveBeenCalled();
       expect(GitHubAdapter.prototype.listEnvironmentSecrets).not.toHaveBeenCalled();
+    });
+
+    it('does not require beta workflows or Apple/build credentials for a promotion-only target', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const environmentSpec = environmentSpecSchema.parse({...IOS_ENVIRONMENT_SPEC,
+        ios: {...IOS_ENVIRONMENT_SPEC.ios, release: {...IOS_ENVIRONMENT_SPEC.ios!.release, trigger: 'manual', promoteFrom: 'staging'}}});
+      new SpecStore().replace(project, {version: 1, project: project.name,
+        environments: {production: environmentSpec, staging: IOS_ENVIRONMENT_SPEC}});
+      const {targets, migration} = resolveBranchDeployTargets(project);
+      const target = targets.find(value => value.environmentName === 'production')!;
+      const workflow = buildBranchDeployWorkflow('railway', target, migration, environmentSpec.ios);
+      expect(workflow.companionFiles ?? []).toEqual([]);
+      expect(workflow.requiredSecrets).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
+      expect(workflow.requiredSecrets).not.toContain('MATCH_PASSWORD');
+      acceptWorkflow(project, envRepo, environmentId, workflow, {binding: {...syncedBinding(project, workflow.content),
+        managedPaths: [workflow.path], inputHash: githubActionsWorkflowInputHash({provider: 'railway', target, migration, ios: environmentSpec.ios})}});
+      mockVerifiedGitHub();
+      const result = await planGitHubActionsDeploy({project, environmentName: 'production', environmentSpec,
+        environment: envRepo.findById(environmentId)});
+      expect(result.action?.type).toBe('noop');
+      expect(result.warnings.join(' ')).not.toMatch(/App Store|MATCH_PASSWORD|APP_STORE/);
     });
 
     it('plans managed iOS companion files before resolving environment secrets', async () => {
@@ -791,6 +860,116 @@ describe('ci-deploy.service', () => {
       if (scenario === 'live-drift') expect(liveContent).not.toBe(acceptedContent);
     });
 
+    it.each(historicalBackupGates.fixtures)(
+      'requires reviewed gate removal from a revision-$rendererRevision workflow', async ({ rendererRevision, step }) => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const protectedSpec = environmentSpecSchema.parse({
+        ...CI_ENVIRONMENT_SPEC,
+        database: { provider: 'railway', engine: 'postgres' },
+        backups: { mode: 'daily', runnerImage: historicalBackupGates.backupPolicy.runnerImage },
+      });
+      new SpecStore().replace(project, {
+        version: 1, project: project.name, environments: { production: protectedSpec },
+      });
+      const { targets, migration } = resolveBranchDeployTargets(project);
+      const target = { ...targets[0] };
+      delete target.providerImageUris;
+      delete target.programFingerprint;
+      delete target.deploymentContractFingerprint;
+      // Historical resolver 4bde0d2:managed-ci-targets.ts353-365 serialized
+      // this policy into target, and therefore into the accepted input hash.
+      // Removing that input requires review even without a global revision bump.
+      const oldInputHash = canonicalJsonSha256({
+        version: 1, rendererRevision, provider: 'railway',
+        target: { ...target, backupPolicy: historicalBackupGates.backupPolicy },
+        migration: { includeStep: migration.includeStep,
+          ...(migration.includeStep && migration.command ? { command: migration.command } : {}) },
+      });
+      const workflow = expectedWorkflow(project);
+      const accepted = parse(workflow.content);
+      const contractIndex = accepted.jobs.deploy.steps.findIndex((step: { id?: string }) => step.id === 'deployment_contract');
+      expect(contractIndex).toBeGreaterThan(-1);
+      accepted.jobs.deploy.steps.splice(contractIndex + 1, 0, structuredClone(step));
+      const acceptedContent = stringify(accepted);
+      expect(acceptedContent).toContain('Verify retained backup health');
+      acceptWorkflow(project, envRepo, environmentId, workflow, {
+        acceptedContent,
+        binding: { ...syncedBinding(project, acceptedContent), inputHash: oldInputHash },
+      });
+      const database = vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter');
+      const listEnvironmentSecrets = vi.mocked(GitHubAdapter.prototype.listEnvironmentSecrets);
+      const result = await planGitHubActionsDeploy({
+        project, environmentName: 'production', environmentSpec: protectedSpec,
+        environment: envRepo.findById(environmentId),
+      });
+      expect(result.action).toMatchObject({
+        type: 'update', verified: true,
+        reason: `GitHub Actions deploy workflow inputs changed for ${workflow.path}`,
+        metadata: { workflowPublicationRequired: true },
+      });
+      expect((result.action?.metadata?.workflow as { inputHash: string }).inputHash).not.toBe(oldInputHash);
+      expect(parse(workflow.content).jobs.deploy.steps.some((step: { name?: string }) => step.name === 'Verify retained backup health')).toBe(false);
+      expect(listEnvironmentSecrets).not.toHaveBeenCalled();
+      expect(database).not.toHaveBeenCalled();
+      mockVerifiedGitHub();
+      mockFreshManagedWorkflowPullRequest(72);
+      vi.spyOn(GitHubAdapter.prototype, 'getFile').mockImplementation(async (_owner, _repo, filePath) =>
+        filePath === workflow.path ? { sha: 'accepted-file', content: acceptedContent } : null);
+      const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: false, updated: true });
+      const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
+      const publication = await applyGitHubActionsDeploy({ project, environmentName: 'production',
+        environmentSpec: protectedSpec, action: result.action!, authority: 'publication-only' });
+      expect(publication).toMatchObject({ success: false, status: 'pending' });
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][2]).toBe(workflow.path);
+      expect(write.mock.calls[0][3]).toBe(workflow.content);
+      expect(write.mock.calls[0][3]).not.toContain('Verify retained backup health');
+      expect(write.mock.calls[0][5]).toBe(MANAGED_WORKFLOW_BRANCH);
+      expect(setSecret).not.toHaveBeenCalled();
+      expect(database).not.toHaveBeenCalled();
+      // Model the reviewed publication being accepted, then use the normal
+      // planner again: the migrated contract converges without another PR.
+      acceptWorkflow(project, envRepo, environmentId, workflow);
+      const retry = await planGitHubActionsDeploy({
+        project, environmentName: 'production', environmentSpec: protectedSpec,
+        environment: envRepo.findById(environmentId),
+      });
+      expect(retry.action).toMatchObject({ type: 'noop' });
+      expect(retry.action?.metadata?.workflowPublicationRequired).toBeUndefined();
+      expect(database).not.toHaveBeenCalled();
+    });
+
+    it('adopts obsolete disabled-policy metadata without replacing accepted workflow bytes', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const disabled = environmentSpecSchema.parse({ ...CI_ENVIRONMENT_SPEC,
+        database: { provider: 'railway', engine: 'postgres' },
+        backups: { mode: 'disabled', reason: 'Disposable data with no managed backup program.' },
+      });
+      new SpecStore().replace(project, { version: 1, project: project.name, environments: { production: disabled } });
+      const { targets, migration } = resolveBranchDeployTargets(project);
+      const target = { ...targets[0] };
+      delete target.providerImageUris; delete target.programFingerprint; delete target.deploymentContractFingerprint;
+      // The old resolver recorded this disabled metadata despite emitting no gate.
+      const oldInputHash = canonicalJsonSha256({ version: 1, rendererRevision: 7, provider: 'railway',
+        target: { ...target, backupPolicy: { mode: 'disabled', credentialNames: ['RAILWAY_API_TOKEN'] } },
+        migration: { includeStep: migration.includeStep },
+      });
+      const workflow = expectedWorkflow(project);
+      expect(workflow.content).not.toContain('Verify retained backup health');
+      acceptWorkflow(project, envRepo, environmentId, workflow, {
+        binding: { ...syncedBinding(project, workflow.content), inputHash: oldInputHash },
+      });
+      const database = vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter');
+      const result = await planGitHubActionsDeploy({ project, environmentName: 'production', environmentSpec: disabled,
+        environment: envRepo.findById(environmentId) });
+      expect(result.action).toMatchObject({ type: 'update', reason: `Record the reviewed GitHub Actions workflow input contract for ${workflow.path}` });
+      expect(result.action?.metadata?.workflowPublicationRequired).toBeUndefined();
+      expect((result.action?.metadata?.workflow as { inputHash: string }).inputHash).not.toBe(oldInputHash);
+      expect(database).not.toHaveBeenCalled();
+    });
+
     it('keeps managed workflow bytes stable when only deploy-time environment values change', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
@@ -875,58 +1054,9 @@ describe('ci-deploy.service', () => {
         target: { ...target, providerImageUris: [imageUri] },
         migration,
       });
-      const firstTag = 'registry.digitalocean.com/acme-reg/davejohnson/billforge:sha-one';
-      const nextTag = 'registry.digitalocean.com/acme-reg/davejohnson/billforge:sha-two';
+      const firstTag = 'registry.example.invalid/acme/app:sha-one';
+      const nextTag = 'registry.example.invalid/acme/app:sha-two';
       expect(hash(nextTag)).toBe(hash(firstTag));
-    });
-
-    it('compiles a Cloud Run workflow from converged hosting bindings', async () => {
-      const projectRepo = new ProjectRepository();
-      const envRepo = new EnvironmentRepository();
-      const project = projectRepo.create({
-        name: 'cloud-app',
-        defaultPlatform: 'cloudrun',
-        gitRemoteUrl: 'https://github.com/davejohnson/cloud-app',
-      });
-      const environmentSpec = environmentSpecSchema.parse({
-        hosting: { provider: 'cloudrun', region: 'us-west1' },
-        services: { web: { workloadKind: 'web' } },
-        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
-      });
-      const environment = envRepo.create({
-        projectId: project.id,
-        name: 'staging',
-        platformBindings: {
-          provider: 'cloudrun',
-          projectId: 'cloud-app-staging',
-          providerScope: { projectId: 'gcp-project', region: 'us-west1' },
-          services: {
-            web: {
-              serviceId: 'cloud-app-staging-web',
-              workloadKind: 'web',
-              resourceType: 'service',
-            },
-          },
-        },
-      });
-      new SpecStore().replace(project, {
-        version: 1,
-        project: project.name,
-        environments: { staging: environmentSpec },
-      });
-
-      const converged = await planGitHubActionsDeploy({
-        project: projectRepo.findById(project.id)!,
-        environmentName: 'staging',
-        environmentSpec,
-        environment: envRepo.findById(environment.id),
-      });
-
-      expect(converged.error).toBeUndefined();
-      expect(converged.action?.metadata?.workflow).toMatchObject({
-        aggregateContentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
-        requiredVariables: [],
-      });
     });
 
     it('refuses to compile a workflow with a missing desired service binding', async () => {
@@ -1887,6 +2017,7 @@ describe('ci-deploy.service', () => {
     it.each([
       ['recorded path', 'recorded'],
       ['legacy iOS credentials', 'legacy'],
+      ['promotion target', 'promotion'],
     ] as const)('deletes a previously bound iOS companion workflow with %s when iOS release is disabled', async (
       _case,
       bindingKind
@@ -1920,7 +2051,7 @@ describe('ci-deploy.service', () => {
                 migration: oldTargets.migration,
                 ios: iosEnvironmentSpec.ios,
               }),
-              ...(bindingKind === 'recorded'
+              ...(bindingKind !== 'legacy'
                 ? { managedPaths: oldFiles.map((file) => file.path) }
                 : { syncedEnvironmentSecrets: [...IOS_RELEASE_REQUIRED_SECRETS] }),
             },
@@ -1928,13 +2059,16 @@ describe('ci-deploy.service', () => {
         },
       });
 
-      const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
+      const environmentSpec = bindingKind === 'promotion'
+        ? environmentSpecSchema.parse({...iosEnvironmentSpec, ios: {...iosEnvironmentSpec.ios, release: {...iosEnvironmentSpec.ios!.release, trigger: 'manual', promoteFrom: 'staging'}}})
+        : environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
       new SpecStore().replace(project, {
         version: 1,
         project: project.name,
-        environments: { production: environmentSpec },
+        environments: { production: environmentSpec, ...(bindingKind === 'promotion' ? {staging: iosEnvironmentSpec} : {}) },
       });
-      const currentWorkflow = expectedWorkflow(project);
+      const next = resolveBranchDeployTargets(project);
+      const currentWorkflow = buildBranchDeployWorkflow('railway', next.targets.find(value => value.environmentName === 'production')!, next.migration, environmentSpec.ios);
       const currentFiles = new Map(workflowFiles(currentWorkflow).map((file) => [file.path, file.content]));
       const retiredContent = oldWorkflow.companionFiles![0]!.content;
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(
@@ -2232,12 +2366,15 @@ describe('ci-deploy.service', () => {
 
       expect(result.action).toMatchObject({
         type: 'update',
-        reason: `Deploy and verify exact commit ${sha} before database seeding`,
+        reason: `Deploy and verify exact commit ${sha} before post-release work`,
       });
     });
 
     it('dispatches the exact commit and waits for verified release evidence', async () => {
       const release = seedAcceptedRelease();
+      const credentialInputs = { commit_sha: 'b'.repeat(40), credential_operations: JSON.stringify({ web: { serviceId: 's', operationId: 'op' } }) };
+      const prepare = vi.spyOn(githubCredentialActivation, 'prepareGitHubCredentialRollout').mockResolvedValue(credentialInputs);
+      const observe = vi.spyOn(githubCredentialActivation, 'observeGitHubCredentialRollout').mockResolvedValue([{ service: 'web', operationId: 'op', deploymentIds: ['new'] }]);
       const sha = 'b'.repeat(40);
       const run = {
         id: 42,
@@ -2287,12 +2424,13 @@ describe('ci-deploy.service', () => {
         success: true,
         data: { targetSha: sha, runId: 42, artifactId: 99 },
       });
+      expect(prepare).toHaveBeenCalled(); expect(observe).toHaveBeenCalled();
       expect(trigger).toHaveBeenCalledWith(
         'davejohnson',
         'billforge',
         '.github/workflows/deploy-railway-production.yml',
         'main',
-        { commit_sha: sha }
+        credentialInputs
       );
     });
 
@@ -2389,7 +2527,7 @@ describe('ci-deploy.service', () => {
       expect(trigger).not.toHaveBeenCalled();
     });
   });
-  it.each(['railway', 'cloudrun', 'digitalocean'].flatMap(provider => [
+  it.each(['railway', "fixture-hosting"].flatMap(provider => [
     { provider, order: ['production', 'staging'] },
     { provider, order: ['staging', 'production'] },
   ]))('isolates $provider migration secrets applied in $order order', async ({ provider, order }) => {

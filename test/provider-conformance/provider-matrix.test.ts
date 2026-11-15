@@ -12,7 +12,6 @@ import {
   cacheProviderContracts,
   databaseProviderContracts,
   hostingProviderContracts,
-  loadBalancerProviderContracts,
   managedWorkflowGitHubCredentials,
   providerContracts,
   queueProviderContracts,
@@ -65,27 +64,24 @@ describe('provider conformance matrix', () => {
         'cloud.google.com',
         'docs.aws.amazon.com',
         'learn.microsoft.com',
-        'docs.digitalocean.com',
-        'vercel.com',
-        'fly.io',
-        'docs.machines.dev',
       ]),
     });
     const instructions = actions['provider-truth'].kind === 'code-audit'
       ? actions['provider-truth'].instructions
       : '';
     expect(instructions).toContain('providerContracts');
-    expect(instructions).toContain('providerRegistry');
+    expect(instructions).toContain('provider, DevOps and secret-manager registries');
     expect(instructions).toContain('ready-for-live');
     expect(instructions).toContain('live-conformance evidence');
     const shardScopes = actions['provider-truth'].kind === 'code-audit'
       ? actions['provider-truth'].shards.map((shard) => shard.instructions).join('\n')
       : '';
     for (const scope of [
-      'hosting lifecycle',
+      'OpenTofu-managed compute lifecycle',
       'database, cache, storage, queue',
-      'email, messaging, payments',
+      'email, payments',
       'secret-manager',
+      'delegated API-key, webhook, credential-check and AI workflow behavior',
     ]) {
       expect(shardScopes).toContain(scope);
     }
@@ -97,24 +93,13 @@ describe('provider conformance matrix', () => {
       'Google Cloud',
       'AWS',
       'Microsoft Azure',
-      'DigitalOcean',
-      'Vercel',
-      'Fly.io',
     ]);
-    expect(hostingProviderContracts.map((entry) => entry.provider).sort())
+    expect(hostingProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('hosting').sort());
   });
 
   it('keeps maintenance live promotion distinct from implemented adapter support', () => {
-    expect(
-      hostingProviderContracts
-        .filter((entry) => ['digitalocean', 'vercel'].includes(entry.provider))
-        .map((entry) => [entry.provider, entry.maintenance])
-    ).toEqual([
-      ['digitalocean', 'ready-for-live'],
-      ['vercel', 'ready-for-live'],
-    ]);
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       const lifecycle = providerRegistry.getMetadata(contract.provider)
         ?.lifecycle?.hosting?.maintenance;
       expect(lifecycle, contract.provider).toBe(
@@ -124,7 +109,7 @@ describe('provider conformance matrix', () => {
   });
 
   it('pins environment custom-domain support to provider lifecycle metadata', () => {
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       expect(
         providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.customDomains,
         contract.provider
@@ -136,11 +121,11 @@ describe('provider conformance matrix', () => {
     }
     expect(providerRegistry.supports('github', 'hosting')).toBe(false);
     expect(hostingProviderContracts.filter((entry) => entry.customDomains === 'managed').map((entry) => entry.provider))
-      .toEqual(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'digitalocean', 'vercel', 'fly']);
+      .toEqual(['railway']);
   });
 
   it('pins exact hosting workload-kind support to provider lifecycle metadata', () => {
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       expect(
         providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.workloadKinds,
         contract.provider
@@ -150,12 +135,9 @@ describe('provider conformance matrix', () => {
       hostingProviderContracts.map((entry) => [entry.provider, entry.workloadKinds])
     )).toEqual({
       railway: ['web', 'worker', 'cron'],
-      cloudrun: ['web', 'worker', 'cron'],
-      ecs: ['web'],
-      'azure-container-apps': ['web'],
-      digitalocean: ['web', 'worker', 'cron'],
-      vercel: ['web'],
-      fly: ['web', 'worker'],
+      cloudrun: [],
+      ecs: [],
+      'azure-container-apps': [],
     });
   });
 
@@ -167,7 +149,7 @@ describe('provider conformance matrix', () => {
     const environments = Object.values(fixture.environments);
 
     expect(environments.map((environment) => environment.hosting.provider)).toEqual(
-      hostingProviderContracts.map((contract) => contract.provider)
+      hostingProviderContracts.filter(entry => entry.status !== 'planned').map((contract) => contract.provider)
     );
     expect(new Set(environments.map((environment) => environment.domain)).size).toBe(environments.length);
     for (const environment of environments) {
@@ -180,12 +162,9 @@ describe('provider conformance matrix', () => {
   it('declares and enforces non-native source ownership for every applicable hosting provider', () => {
     const expectedPolicies = {
       railway: 'disconnect',
-      digitalocean: 'block',
-      vercel: 'block',
-      fly: 'block',
     } as const;
 
-    for (const contract of hostingProviderContracts) {
+    for (const contract of hostingProviderContracts.filter(entry => entry.status !== 'planned')) {
       const metadata = providerRegistry.getMetadata(contract.provider);
       const policy = metadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy;
       const expected = expectedPolicies[contract.provider as keyof typeof expectedPolicies];
@@ -240,15 +219,11 @@ describe('provider conformance matrix', () => {
   it('covers the retained PostgreSQL providers', () => {
     expect(databaseProviderContracts.map((entry) => [entry.vendor, entry.engine])).toEqual([
       ['Google Cloud', 'postgres'],
-      ['DigitalOcean', 'postgres'],
-      ['Fly.io', 'postgres'],
       ['AWS', 'postgres'],
       ['Railway', 'postgres'],
-      ['Supabase', 'postgres'],
       ['Microsoft Azure', 'postgres'],
-      ['Neon', 'postgres'],
     ]);
-    expect(databaseProviderContracts.map((entry) => entry.provider).sort())
+    expect(databaseProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('database').sort());
   });
 
@@ -260,13 +235,11 @@ describe('provider conformance matrix', () => {
       .toEqual(providerRegistry.namesFor('cache').sort());
   });
 
-  it('tracks every production storage, queue, and load-balancer lifecycle in the evidence matrix', () => {
+  it('tracks every production storage and queue lifecycle in the evidence matrix', () => {
     expect(storageProviderContracts.map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('storage').sort());
     expect(queueProviderContracts.map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('queue').sort());
-    expect(loadBalancerProviderContracts.map((entry) => entry.provider).sort())
-      .toEqual(providerRegistry.namesFor('load-balancer').sort());
 
     for (const entry of queueProviderContracts) {
       expect(providerRegistry.getMetadata(entry.provider)?.lifecycle?.queue).toEqual({
@@ -274,22 +247,6 @@ describe('provider conformance matrix', () => {
         resources: entry.resources,
       });
     }
-    for (const entry of loadBalancerProviderContracts) {
-      expect(providerRegistry.getMetadata(entry.provider)?.lifecycle?.loadBalancer).toEqual({
-        topology: entry.topology,
-        minimumOrigins: entry.minimumOrigins,
-      });
-    }
-  });
-
-  it('includes Azure Managed Redis in the cache lifecycle matrix', () => {
-    expect(cacheProviderContracts).toContainEqual(
-      expect.objectContaining({
-        provider: 'azure-managed-redis',
-        vendor: 'Microsoft Azure',
-        engine: 'redis',
-      })
-    );
   });
 
   it('excludes Upstash from the provider catalog', () => {
@@ -298,40 +255,10 @@ describe('provider conformance matrix', () => {
     ).toBe(false);
   });
 
-  it('keeps Memorystore ready-for-live until the declarative GCP stack passes live conformance', () => {
-    const memorystore = cacheProviderContracts.find(
-      (entry) => entry.provider === 'memorystore'
-    );
-    expect(memorystore).toMatchObject({
-      status: 'ready-for-live',
-      fixtureHostingProvider: 'cloudrun',
-    });
-    expect(memorystore?.implementationNote).toContain(
-      'Cloud Run Direct VPC egress'
-    );
-    expect(memorystore?.credentials.map((credential) => credential.field)).toEqual([
-      'projectId',
-      'credentials',
-    ]);
-  });
-
-  it('keeps ElastiCache at ready-for-live until the declarative AWS stack passes live conformance', () => {
-    const elasticache = cacheProviderContracts.find((entry) => entry.provider === 'elasticache');
-    expect(elasticache).toMatchObject({
-      status: 'ready-for-live',
-      engine: 'redis',
-      fixtureHostingProvider: 'ecs',
-    });
-    expect(elasticache?.credentials.map((credential) => credential.field)).toEqual([
-      'accessKeyId',
-      'secretAccessKey',
-    ]);
-  });
-
-  it('keeps RDS pinned to the ECS workload-network lifecycle', () => {
+  it('preserves RDS authentication aliases while its lifecycle moves to OpenTofu', () => {
     const rds = databaseProviderContracts.find((entry) => entry.provider === 'rds');
     expect(rds).toMatchObject({
-      status: 'ready-for-live',
+      status: 'planned',
       engine: 'postgres',
       fixtureHostingProvider: 'ecs',
     });
@@ -341,35 +268,39 @@ describe('provider conformance matrix', () => {
     ]);
     expect(providerRegistry.connectionProviders('rds')).toEqual(['rds', 'ecs']);
     expect(providerRegistry.getMetadata('rds')?.lifecycle?.databaseConnectivity)
-      .toEqual({ compatibleHostingProviders: ['ecs'] });
+      .toBeUndefined();
   });
 
   it('assigns database lifecycle to the provider that owns the resource', () => {
     expect(hostingProviderContracts).toContainEqual(
-      expect.objectContaining({ provider: 'vercel', kind: 'hosting' })
+      expect.objectContaining({ provider: 'cloudrun', kind: 'hosting' })
     );
-    expect(databaseProviderContracts.some((entry) => entry.provider === 'vercel')).toBe(false);
+    expect(databaseProviderContracts.some((entry) => entry.provider === 'cloudrun')).toBe(false);
     expect(databaseProviderContracts).toContainEqual(
-      expect.objectContaining({ provider: 'neon', engine: 'postgres' })
+      expect.objectContaining({ provider: 'cloudsql', engine: 'postgres' })
     );
-    expect(hostingProviderContracts.some((entry) => entry.provider === 'neon')).toBe(false);
+    expect(hostingProviderContracts.some((entry) => entry.provider === 'cloudsql')).toBe(false);
   });
 
   it('keeps deliberately excluded providers out of the lifecycle catalog and registry', () => {
     const excluded = new Set([
       'heroku',
       'render',
-      'fly-managed-postgres',
+      'fly',
+      'vercel',
+      'digitalocean',
+      'supabase',
+      'neon',
     ]);
     expect(providerContracts.some((entry) => excluded.has(entry.provider))).toBe(false);
     expect(providerRegistry.supports('heroku', 'hosting')).toBe(false);
     expect(providerRegistry.supports('render', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
-    expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
-    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(true);
-    expect(providerRegistry.supports('fly', 'hosting')).toBe(true);
-    expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(true);
+    expect(providerRegistry.supports('ecs', 'hosting')).toBe(false);
+    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(false);
+    expect(providerRegistry.supports('fly', 'hosting')).toBe(false);
+    expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(false);
   });
 
   it('uses stable provider ids and secret-free credential descriptors', () => {
@@ -509,9 +440,7 @@ describe('provider conformance matrix', () => {
             ? 'cache'
             : entry.kind === 'storage'
               ? 'storage'
-              : entry.kind === 'queue'
-                ? 'queue'
-                : 'load-balancer';
+              : 'queue';
       expect(
         providerRegistry.lifecycleMaturity(entry.provider, capability)?.status,
         `${entry.provider}/${capability}`
@@ -521,109 +450,6 @@ describe('provider conformance matrix', () => {
         `${entry.provider}/${capability}`
       ).toBe(entry.status !== 'planned');
     }
-  });
-
-  it('exposes the complete DigitalOcean stack to the managed-workflow live gate', () => {
-    const entries = providerContracts.filter(
-      (entry) => entry.provider === 'digitalocean'
-    );
-    const hosting = entries.find((entry) => entry.kind === 'hosting');
-
-    expect(entries).toHaveLength(3);
-    expect(hosting).toMatchObject({
-      status: 'ready-for-live',
-      managedWorkflow: {
-        environmentName: 'production',
-        fixtureDirectory: 'test/provider-conformance/fixture',
-        workflow: 'deploy-digitalocean-production.yml',
-        publicUrlProtocols: ['https:'],
-        serviceName: 'web',
-        service: {
-          workloadKind: 'web',
-          startCommand: 'node server.mjs',
-          healthCheckPath: '/health',
-          public: true,
-        },
-        database: {
-          provider: 'digitalocean',
-          engine: 'postgres',
-        },
-        cache: {
-          provider: 'digitalocean',
-          engine: 'redis',
-        },
-      },
-    });
-    expect(
-      entries.every((entry) => entry.status === 'ready-for-live')
-    ).toBe(true);
-    expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
-    expect(providerRegistry.supports('digitalocean', 'hosting')).toBe(true);
-    expect(
-      providerRegistry.supportsEngine('digitalocean', 'database', 'postgres')
-    ).toBe(true);
-    expect(
-      providerRegistry.supportsEngine('digitalocean', 'cache', 'redis')
-    ).toBe(true);
-  });
-
-  it('exposes the implemented Vercel slice only to the managed-workflow live gate', () => {
-    const entry = hostingProviderContracts.find(
-      (provider) => provider.provider === 'vercel'
-    );
-
-    expect(entry).toMatchObject({
-      status: 'ready-for-live',
-      implementationNote: expect.stringContaining('implemented'),
-      credentials: expect.arrayContaining([
-        expect.objectContaining({ field: 'accessToken' }),
-        expect.objectContaining({ field: 'teamId', optional: true }),
-      ]),
-      managedWorkflow: {
-        environmentName: 'production',
-        workflow: 'deploy-vercel-production.yml',
-        publicUrlProtocols: ['https:'],
-        serviceName: 'web',
-        service: {
-          workloadKind: 'web',
-          healthCheckPath: '/api/health',
-          public: true,
-        },
-      },
-    });
-    expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
-  });
-
-  it('exposes the implemented Fly.io hosting and Managed Postgres slices only to live gates', () => {
-    const entries = providerContracts.filter((entry) => entry.provider === 'fly');
-    const hosting = entries.find((entry) => entry.kind === 'hosting');
-    const database = entries.find((entry) => entry.kind === 'database');
-
-    expect(entries).toHaveLength(2);
-    expect(hosting).toMatchObject({
-      status: 'ready-for-live',
-      workloadKinds: ['web', 'worker'],
-      customDomains: 'managed',
-      maintenance: 'unsupported',
-      credentials: [
-        expect.objectContaining({ field: 'apiToken' }),
-        expect.objectContaining({ field: 'organizationSlug' }),
-      ],
-      managedWorkflow: {
-        environmentName: 'production',
-        workflow: 'deploy-fly-production.yml',
-        database: { provider: 'fly', engine: 'postgres' },
-      },
-    });
-    expect(database).toMatchObject({
-      status: 'ready-for-live',
-      fixtureHostingProvider: 'fly',
-      engine: 'postgres',
-      implementationNote: expect.stringContaining('private to Fly networking'),
-    });
-    expect(database?.implementationNote).toContain('operation-scoped WireGuard peer');
-    expect(providerRegistry.supports('fly', 'hosting')).toBe(true);
-    expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(true);
   });
 
 });

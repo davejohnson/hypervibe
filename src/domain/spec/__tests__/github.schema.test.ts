@@ -14,41 +14,6 @@ function baseSpec(github: Record<string, unknown>) {
 }
 
 describe('github desired state', () => {
-  it('accepts repository-only GitHub Pages desired state', () => {
-    const spec = projectSpecSchema.parse({
-      version: 1,
-      project: 'pages-only',
-      github: {
-        canonicalEnvironment: 'repository',
-        pages: { sourcePath: 'apps/website', customDomain: 'hypervibe.dev' },
-      },
-      environments: {},
-    });
-
-    expect(spec.github?.pages).toEqual({
-      enabled: true,
-      sourcePath: 'apps/website',
-      branch: 'main',
-      customDomain: 'hypervibe.dev',
-      dnsProvider: 'cloudflare',
-    });
-  });
-
-  it('rejects unsafe Pages paths and non-canonical domains', () => {
-    for (const pages of [
-      { sourcePath: '../website', customDomain: 'hypervibe.dev' },
-      { sourcePath: 'apps/website', customDomain: 'https://hypervibe.dev' },
-      { sourcePath: 'apps/website', customDomain: 'Hypervibe.dev' },
-    ]) {
-      expect(projectSpecSchema.safeParse({
-        version: 1,
-        project: 'bad-pages',
-        github: { canonicalEnvironment: 'repository', pages },
-        environments: {},
-      }).success).toBe(false);
-    }
-  });
-
   it('parses typed checks, AI automations, security, dependencies, and schedules', () => {
     const spec = projectSpecSchema.parse(baseSpec({
       canonicalEnvironment: 'production',
@@ -309,16 +274,6 @@ describe('github desired state', () => {
     });
     expect(result.success).toBe(false);
     expect(result.error?.issues[0]?.message).toContain('cannot both be declared');
-  });
-
-  it('keeps basic project specs valid without GitHub or OpenAI', () => {
-    expect(projectSpecSchema.parse({
-      version: 1,
-      project: 'local-only',
-      environments: {
-        development: { hosting: { provider: 'railway' }, services: {} },
-      },
-    }).github).toBeUndefined();
   });
 
   it('rejects legacy runtime autofix intent with migration guidance', () => {

@@ -4,10 +4,11 @@ import type { Service } from '../entities/service.entity.js';
 export interface ProviderEnvironmentVariablesRequest {
   environment: Environment;
   service: Service;
+  preserveReferences?: boolean;
 }
 
 export type ProviderEnvironmentVariablesResult =
-  | { success: true; variables: Record<string, string> }
+  | { success: true; variables: Record<string, string>; unresolvedKeys?: string[] }
   | { success: false; error: string };
 
 /** Provider-neutral read boundary for one exactly bound service's variables. */

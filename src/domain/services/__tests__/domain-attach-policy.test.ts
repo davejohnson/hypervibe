@@ -37,10 +37,10 @@ describe('domain attach policy', () => {
   });
 
   it('explains that DNS is not changed when provider attach is unsupported', () => {
-    const message = customDomainAttachUnsupportedMessage('vercel', 'example.com');
+    const message = customDomainAttachUnsupportedMessage('fixture-unsupported-hosting', 'example.com');
     expect(message).toContain('provider-side custom-domain attachment');
     expect(message).toContain('DNS was not changed');
-    expect(message).toContain('vercel');
+    expect(message).toContain('fixture-unsupported-hosting');
   });
 
   it('detects and invokes verified custom-domain detachment with adapter context', async () => {

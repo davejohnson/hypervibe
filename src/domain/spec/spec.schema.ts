@@ -1,5 +1,13 @@
+import { credentialTrackingSchema } from './credential.schema.js';
+import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
+import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
+import { canonicalizeJson } from '../../lib/canonical-json.js';
+import { withDefaultDatabaseProvider } from './database-defaults.js';
+import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
+export { dnsSpecSchema, dnsSecurityPolicySchema } from './dns.schema.js';
+export type { DnsSpec, DnsSecurityPolicy } from './dns.schema.js';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -13,6 +21,9 @@ import { parse as parseDomain } from 'tldts';
 const environmentVariableNameSchema = z.string().regex(
   /^[A-Za-z_][A-Za-z0-9_]*$/,
   'environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
+);
+const applicationEnvVarNameSchema = environmentVariableNameSchema.refine(
+  key => !isReservedRuntimeEnvKey(key), RESERVED_RUNTIME_ENV_ERROR
 );
 
 /**
@@ -53,8 +64,12 @@ const DATABASE_ENV_ALIAS_SOURCES = [
 export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
 
 export const serviceSpecSchema = z.object({
+  /** Retained filesystem storage; not object/bucket storage. */
+  volume: z.object({
+    mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
+  }).strict().optional(),
   workloadKind: z.enum(['web', 'worker', 'cron'], {
-    errorMap: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
+    error: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
   }).default('web'),
   startCommand: z.string().min(1).optional(),
   releaseCommand: z.string().min(1).optional(),
@@ -62,13 +77,32 @@ export const serviceSpecSchema = z.object({
   cronSchedule: z.string().min(1).optional(),
   timeZone: z.string().min(1).optional(),
   public: z.boolean().optional(),
+  /** vCPU per instance, for example "0.5" or "1" (provider limits apply). */
+  cpu: z.string().regex(/^(0\.\d{1,2}|[1-8])$/, 'Use a vCPU count such as "0.5", "1" or "2".').optional(),
+  /** Memory per instance, for example "512Mi" or "1Gi". */
+  memory: z.string().regex(/^[1-9]\d*(Mi|Gi)$/, 'Use a memory size such as "512Mi" or "1Gi".').optional(),
+  /**
+   * Run a background worker only while it has work: it scales to zero when
+   * idle and starts within about a minute of new work. pendingWorkQuery is one
+   * read-only SELECT against the app database that returns a single count of
+   * queued plus in-progress work. nextWorkAtQuery returns the single earliest
+   * time future work becomes due (or NULL); databases that pause when idle
+   * need it, so work scheduled for later starts on time without keeping the
+   * database awake.
+   */
+  onDemand: z.object({
+    pendingWorkQuery: z.string().min(1).max(2000)
+      .regex(/^\s*(select|with)\b[^;]*;?\s*$/i, 'Use one SELECT statement that returns a single count, for example SELECT count(*) FROM jobs WHERE status IN (\'queued\', \'running\').'),
+    nextWorkAtQuery: z.string().min(1).max(2000)
+      .regex(/^\s*(select|with)\b[^;]*;?\s*$/i, 'Use one SELECT statement that returns a single timestamp, for example SELECT min(run_at) FROM jobs WHERE status = \'queued\'.').optional(),
+  }).strict().optional(),
   /**
    * Per-service compatibility aliases for Hypervibe-managed database URLs.
    * Only names and canonical sources are persisted; resolved values remain
    * inside the encrypted plan/provider boundary.
    */
   databaseEnvAliases: z.record(
-    environmentVariableNameSchema,
+    applicationEnvVarNameSchema,
     databaseEnvAliasSourceSchema
   ).optional(),
 }).strict().superRefine((service, ctx) => {
@@ -77,6 +111,13 @@ export const serviceSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'cron services require cronSchedule',
       path: ['cronSchedule'],
+    });
+  }
+  if (service.onDemand && service.workloadKind !== 'worker') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'onDemand applies only to background workers (workloadKind "worker")',
+      path: ['onDemand'],
     });
   }
   if (service.workloadKind === 'cron' && !service.startCommand) {
@@ -174,6 +215,10 @@ const databaseRestoreDrillSchema = z.object({
 }).strict();
 
 const databaseResilienceSchema = z.object({
+  /** Named one-use provider snapshot; removing intent never deletes its backup. */
+  checkpoint: z.object({
+    id: z.string().min(1).max(63).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'checkpoint id must be a lowercase slug'),
+  }).strict().optional(),
   /** Zonal uses one zone; regional provisions a synchronous standby. */
   availability: z.enum(['zonal', 'regional']).optional(),
   /** Provider-managed backups and point-in-time recovery retention. */
@@ -209,6 +254,14 @@ export const databaseSpecSchema = z.object({
    */
   seedCommand: z.string().min(1).optional(),
   resilience: databaseResilienceSchema.optional(),
+  /** Keep provider-managed connection aliases tied to its existing issuer password. */
+  credentialAliases: z.object({ mode: z.literal('issuer-references') }).strict().optional(),
+  /** One-use destructive initialization of empty persistence on an exact existing database. */
+  freshInitialization: databaseFreshInitializationIntentSchema.optional(),
+  /** OpenTofu-managed databases: increment to rotate the Hypervibe-owned password with no downtime. */
+  passwordGeneration: z.number().int().positive().optional(),
+  /** OpenTofu-managed databases: PostgreSQL major version (default 16). Never lower than a migration source. */
+  version: z.number().int().min(13).max(18).optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
@@ -226,18 +279,6 @@ export const cacheSpecSchema = z.object({
   size: z.string().trim().min(1).optional(),
 }).strict();
 
-/**
- * Provider-managed traffic distribution in front of deployed web services.
- * The schema is provider-neutral; capability support is resolved during plan.
- */
-export const loadBalancerSpecSchema = z.object({
-  provider: providerIdSchema,
-  /** Two or more equivalent public web services that can receive traffic. */
-  services: z.array(z.string().min(1)).min(2),
-  /** HTTPS endpoint used by the provider's active health monitor. */
-  healthCheckPath: z.string().regex(/^\/[\S]*$/, 'healthCheckPath must be an absolute path beginning with /').default('/health'),
-}).strict();
-
 export const deploySpecSchema = z.object({
   strategy: z.enum(['branch', 'manual']).default('manual'),
   trigger: z.enum(['ci', 'native']).optional(),
@@ -247,6 +288,15 @@ export const deploySpecSchema = z.object({
   autoDeploy: z.boolean().optional(),
   /** Environment whose verified exact-SHA release is required before this manual deployment. */
   promoteFrom: z.string().min(1).optional(),
+  /** Same-repository reusable full-test workflow required before promotion. */
+  promotionTests: z.object({
+    workflow: z.string().regex(
+      /^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/,
+      'promotionTests.workflow must be a literal .github/workflows/filename.yml or .yaml path'
+    ),
+    /** Forward NODE_AUTH_TOKEN only when the test workflow installs private packages. */
+    packageReadToken: z.boolean().optional(),
+  }).strict().optional(),
 }).strict();
 
 export function effectiveBranchCiAutoDeploy(
@@ -268,6 +318,8 @@ export const collaborationLabelSpecSchema = z.object({
   description: z.string().max(100).optional(),
 }).strict();
 
+// Parse object default templates so their nested defaults retain the existing
+// desired-state contract. Zod 4 .default() would return an unparsed template.
 export const collaborationSpecSchema = z.object({
   provider: z.literal('github').default('github'),
   enabled: z.boolean().default(true),
@@ -279,11 +331,11 @@ export const collaborationSpecSchema = z.object({
     enabled: z.boolean().default(true),
     labels: z.array(collaborationLabelSpecSchema).default([]),
     templates: z.boolean().default(true),
-  }).strict().default({}),
+  }).strict().prefault({}),
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
-    requireReview: z.boolean().default(true),
+    requireReview: z.boolean().default(false),
     requiredReviewers: z.number().int().min(1).max(6).default(1),
     dismissStaleReviews: z.boolean().default(false),
     requireCodeOwnerReviews: z.boolean().default(false),
@@ -291,12 +343,12 @@ export const collaborationSpecSchema = z.object({
     statusChecks: z.array(z.string().min(1)).default([]),
     strictStatusChecks: z.boolean().default(true),
     enforceAdmins: z.boolean().default(false),
-  }).strict().default({}),
+  }).strict().prefault({}),
   collaborators: z.array(z.object({
     username: z.string().min(1),
     permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
   }).strict()).default([]),
-}).strict().default({});
+}).strict().prefault({});
 
 const automationIdSchema = z.string().regex(
   /^[a-z][a-z0-9-]{0,62}$/,
@@ -308,7 +360,7 @@ const githubAutomationTriggersSchema = z.object({
   push: z.array(z.string().min(1)).default([]),
   schedule: githubScheduleSpecSchema.optional(),
   manual: z.boolean().default(true),
-}).strict().default({});
+}).strict().prefault({});
 
 const githubAutomationRuntimeSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -362,7 +414,7 @@ const githubAiAgentSchema = z.object({
   provider: z.literal('openai').default('openai'),
   model: z.literal('gpt-5.6-sol').default('gpt-5.6-sol'),
   effort: z.enum(['low', 'medium', 'high', 'xhigh']).default('high'),
-}).strict().default({});
+}).strict().prefault({});
 
 const githubAuditInstructionsSchema = z.string().min(1).max(12_000).superRefine((value, ctx) => {
   if (value.includes('${{') || /[\0]/.test(value)) {
@@ -484,7 +536,50 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   findings: z.object({
     createIssues: z.literal(true).default(true),
     closeAfterCleanRuns: z.literal(1).default(1),
-  }).strict().default({}),
+  }).strict().prefault({}),
+}).strict();
+
+const githubTaskTextSchema = z.string().max(2_048).refine(
+  (value) => !/[\u0000-\u001f\u007f-\u009f]|\$\{\{/.test(value),
+  'environment-task values cannot contain control characters or GitHub expressions'
+);
+
+const githubTaskInputFields = {
+  flag: z.string().regex(/^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/, 'task flags must be lowercase long options'),
+  description: githubTaskTextSchema.refine((value) => value.length > 0, 'task input description is required'),
+  required: z.boolean().optional(),
+};
+
+export const githubEnvironmentTaskInputSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('string'),
+    ...githubTaskInputFields,
+    default: githubTaskTextSchema.default(''),
+  }).strict(),
+  z.object({
+    type: z.literal('boolean'),
+    ...githubTaskInputFields,
+    default: z.boolean().default(false),
+  }).strict(),
+]);
+
+export const githubEnvironmentTaskAutomationSpecSchema = z.object({
+  kind: z.literal('environment-task'),
+  enabled: z.boolean().default(true),
+  environment: githubTaskTextSchema.refine((value) => value.length > 0, 'task environment is required'),
+  service: githubTaskTextSchema.refine((value) => value.length > 0, 'task service is required'),
+  /** Fixed argv reviewed in desired state, never a shell command or dispatch input. */
+  command: z.array(githubTaskTextSchema.refine((value) => value.length > 0, 'task arguments cannot be empty')).min(1).max(16),
+  inputs: z.record(
+    z.string().regex(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/, 'task input ids must use lowercase snake_case'),
+    githubEnvironmentTaskInputSchema
+  ).refine((inputs) => Object.keys(inputs).length <= 10, 'environment-task supports at most 10 inputs').default({}),
+  /** Only this bounded machine receipt can be exposed; task logs stay private. */
+  receiptPrefix: z.string().regex(/^[A-Z_][A-Z0-9_]{0,79}:$/, 'task receipt prefix must be an uppercase marker ending in a colon').optional(),
+  /** Reviewed numeric field names; arbitrary application output cannot supply labels. */
+  receiptCountKeys: z.array(z.string().regex(/^[a-z][A-Za-z0-9_]{0,63}$/, 'task receipt count keys must be identifiers'))
+    .max(32).refine((keys) => new Set(keys).size === keys.length, 'task receipt count keys must be unique')
+    .default(['applied', 'skipped']),
 }).strict();
 
 export const githubAutomationSpecSchema = z.discriminatedUnion('kind', [
@@ -492,6 +587,7 @@ export const githubAutomationSpecSchema = z.discriminatedUnion('kind', [
   githubAutofixAutomationSpecSchema,
   githubPullRequestReviewAutomationSpecSchema,
   githubCodeAuditAutomationSpecSchema,
+  githubEnvironmentTaskAutomationSpecSchema,
 ]);
 
 const githubCollaborationSpecSchema = z.object({
@@ -499,11 +595,11 @@ const githubCollaborationSpecSchema = z.object({
     enabled: z.boolean().default(true),
     labels: z.array(collaborationLabelSpecSchema).default([]),
     templates: z.boolean().default(true),
-  }).strict().default({}),
+  }).strict().prefault({}),
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
-    requireReview: z.boolean().default(true),
+    requireReview: z.boolean().default(false),
     requiredReviewers: z.number().int().min(1).max(6).default(1),
     dismissStaleReviews: z.boolean().default(false),
     requireCodeOwnerReviews: z.boolean().default(false),
@@ -511,57 +607,12 @@ const githubCollaborationSpecSchema = z.object({
     statusChecks: z.array(z.string().min(1)).default([]),
     strictStatusChecks: z.boolean().default(true),
     enforceAdmins: z.boolean().default(false),
-  }).strict().default({}),
+  }).strict().prefault({}),
   collaborators: z.array(z.object({
     username: z.string().min(1),
     permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
   }).strict()).default([]),
-}).strict().default({});
-
-const githubPagesSourcePathSchema = z.string().min(1).superRefine((value, ctx) => {
-  if (
-    value.trim() !== value
-    || value.startsWith('/')
-    || value.startsWith('\\')
-    || value.split(/[\\/]/).some((segment) => !segment || segment === '.' || segment === '..')
-    || /[\r\n\0]/.test(value)
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'pages.sourcePath must be a normalized repository-relative directory without empty, current, or parent segments',
-    });
-  }
-});
-
-const githubPagesDomainSchema = z.string().min(1).max(253).superRefine((value, ctx) => {
-  const normalized = value.trim().toLowerCase().replace(/\.$/, '');
-  const labels = normalized.split('.');
-  if (
-    value !== normalized
-    || labels.length < 2
-    || labels.some((label) => (
-      label.length === 0
-      || label.length > 63
-      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
-    ))
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'pages.customDomain must be a lowercase hostname without a scheme, path, port, or trailing dot',
-    });
-  }
-});
-
-export const githubPagesSpecSchema = z.object({
-  enabled: z.boolean().default(true),
-  /** Repository directory uploaded as the static Pages artifact. */
-  sourcePath: githubPagesSourcePathSchema,
-  /** Branch whose pushes publish the site. */
-  branch: z.string().min(1).default('main'),
-  /** Optional custom hostname. DNS is managed through Cloudflare as a separate plan action. */
-  customDomain: githubPagesDomainSchema.optional(),
-  dnsProvider: z.literal('cloudflare').default('cloudflare'),
-}).strict();
+}).strict().prefault({});
 
 export const githubSpecSchema = z.object({
   enabled: z.boolean().default(true),
@@ -570,8 +621,6 @@ export const githubSpecSchema = z.object({
   /** Environment whose hv_plan owns project-level GitHub infrastructure. */
   canonicalEnvironment: z.string().min(1).optional(),
   collaboration: githubCollaborationSpecSchema,
-  /** Static GitHub Pages publishing as project-level desired state. */
-  pages: githubPagesSpecSchema.optional(),
   actions: z.record(automationIdSchema, githubAutomationSpecSchema).default({}),
   /** Existing workflow names that autofix may consume but Hypervibe does not own. */
   externalWorkflows: z.record(automationIdSchema, z.object({
@@ -589,14 +638,32 @@ export const githubSpecSchema = z.object({
       interval: z.enum(['daily', 'weekly', 'monthly']).default('weekly'),
       targetBranch: z.string().min(1).optional(),
     }).strict()).default([]),
-  }).strict().default({}),
+  }).strict().prefault({}),
   security: z.object({
     codeScanning: z.boolean().default(false),
     secretScanning: z.boolean().default(false),
     pushProtection: z.boolean().default(false),
-  }).strict().default({}),
+  }).strict().prefault({}),
 }).strict().superRefine((github, ctx) => {
   for (const [id, automation] of Object.entries(github.actions)) {
+    if (automation.kind === 'environment-task') {
+      if (automation.receiptPrefix && (!automation.receiptCountKeys.includes('applied') || !automation.receiptCountKeys.includes('skipped'))) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'task application receipts require applied and skipped count keys',
+          path: ['actions', id, 'receiptCountKeys'],
+        });
+      }
+      const flags = new Set<string>();
+      for (const [inputId, input] of Object.entries(automation.inputs)) {
+        if (flags.has(input.flag)) ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'environment-task input flags must be unique',
+          path: ['actions', id, 'inputs', inputId, 'flag'],
+        });
+        flags.add(input.flag);
+      }
+    }
     if (automation.kind === 'check') {
       const triggers = automation.triggers;
       if (!triggers.manual && !triggers.pullRequest && triggers.push.length === 0 && !triggers.schedule) {
@@ -685,7 +752,7 @@ const devopsScopeSchema = z.string().trim().min(1).max(2_048).superRefine((scope
 export const devopsSpecSchema = z.object({
   code: z.object({
     provider: providerIdSchema,
-    /** Provider-owned canonical repository scope (URL for GitLab, owner/repo for GitHub). */
+    /** Provider-owned canonical repository scope (owner/repo for GitHub). */
     scope: devopsScopeSchema,
     /**
      * Repository lifecycle is explicit. The default preserves the existing
@@ -693,8 +760,9 @@ export const devopsSpecSchema = z.object({
      * from a missing project or from repository file writes.
      */
     repository: z.object({
-      state: z.enum(['present', 'absent']).default('present'),
-      management: z.enum(['external', 'managed']).default('external'),
+      state: z.literal('present').default('present'),
+      /** Hypervibe never creates or deletes code repositories. */
+      management: z.literal('external').default('external'),
       visibility: z.enum(['private', 'internal', 'public']).default('private'),
       defaultBranch: z.string().min(1).max(255).superRefine((branch, ctx) => {
         const components = branch.split('/');
@@ -714,26 +782,18 @@ export const devopsSpecSchema = z.object({
         }
       })
         .default('main'),
-    }).strict().default({}),
+    }).strict().prefault({}),
   }).strict(),
   ci: z.object({
     provider: providerIdSchema,
-    runner: z.discriminatedUnion('mode', [
-      z.object({
-        mode: z.literal('provider-hosted'),
-      }).strict(),
-      z.object({
-        mode: z.literal('self-managed'),
-        /** Exact GitLab runner id; never select a runner by tag alone. */
-        runnerId: z.string().regex(/^[1-9]\d*$/, 'runnerId must be a positive numeric provider id'),
-        /** Exact manager machine identity observed through the provider API. */
-        managerSystemId: z.string().min(1).max(255),
-        /** Dedicated tag that no other runner assigned to the project may claim. */
-        tag: z.string().regex(/^[A-Za-z0-9_.-]{1,255}$/, 'runner tag contains unsupported characters'),
-        /** Operator-owned, provider-observed execution-capability attestation. */
-        capabilities: z.array(z.enum(['linux-amd64', 'docker-privileged'])).min(1),
-      }).strict(),
-    ]).default({ mode: 'provider-hosted' }),
+    /** Ordinary non-secret flags only. Omission preserves provider values and ownership. */
+    repositoryVariables: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,255}$/), z.object({
+      value: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 48 * 1024, 'Variable exceeds 48 KiB'),
+      adoptExisting: z.boolean().default(false),
+    }).strict()).refine(values => Object.keys(values).length <= 500, 'Too many repository variables').optional(),
+    runner: z.object({
+      mode: z.literal('provider-hosted'),
+    }).strict().default({ mode: 'provider-hosted' }),
   }).strict().optional(),
   /** Environment that owns project-level DevOps lifecycle actions. */
   canonicalEnvironment: z.string().min(1).optional(),
@@ -751,9 +811,10 @@ export const envFileSpecSchema = z.object({
   include: z.array(z.string().min(1)).default([]),
   /** Exact .env keys to omit even if the mode or include list would select them. */
   exclude: z.array(z.string().min(1)).default([]),
-}).strict().default({});
+}).strict().prefault({});
 
 export const delegatedSecretSpecSchema = z.object({
+  credential: credentialTrackingSchema.optional(),
   /** Delegated values are supplied explicitly at plan time and never stored in the spec. */
   ownership: z.literal('delegated').default('delegated'),
   /** Non-secret identity that documents who is responsible for supplying and rotating the value. */
@@ -772,6 +833,7 @@ export const delegatedSecretSpecSchema = z.object({
 }).strict().superRefine((secret, ctx) => {
   if (
     secret.environments.length === 0
+    && !(secret.credential?.kind === 'database-password' && secret.credential.database)
     && !secret.githubActions?.repository
     && (secret.githubActions?.environments.length ?? 0) === 0
   ) {
@@ -803,6 +865,7 @@ const generatedSecretConflictsSchema = z.array(environmentVariableNameSchema)
   .transform((keys) => [...keys].sort());
 
 export const hypervibeRandomSecretSpecSchema = z.object({
+  credential: credentialTrackingSchema.optional(),
   /** Hypervibe generates and owns this value; users never supply it. */
   ownership: z.literal('hypervibe'),
   /** Stable, opinionated generation contract. */
@@ -874,6 +937,44 @@ const repositoryRelativePathSchema = z.string().min(1).refine(
   'must be a repository-relative path without parent-directory traversal'
 );
 
+/** Literal tracked inputs, never shell globs or paths outside the repository. */
+const releaseInputPathSchema = repositoryRelativePathSchema.refine(
+  (value) => value === '.' || (/^[A-Za-z0-9_.@/-]+$/.test(value)
+    && !value.split('/').some((part) => part === '' || part === '.' || part === '..')),
+  'must be a literal repository-relative file or directory, without globs'
+);
+const releaseCommandSchema = z.string().trim().min(1).refine(
+  value => !value.includes('${{'), 'release command cannot contain GitHub expression interpolation'
+);
+
+export const apiReleaseSpecSchema = z.object({
+  service: z.string().min(1),
+  versions: z.record(z.string().regex(/^v[1-9][0-9]*$/), z.object({
+    path: z.string().regex(/^\/v[1-9][0-9]*$/, 'API routes must use an explicit major version such as /v1'),
+    contract: releaseInputPathSchema.refine(value => value.endsWith('.json'), 'API contracts must be self-contained JSON files'),
+    status: z.enum(['supported', 'deprecated', 'retired']).default('supported'),
+    retirement: z.object({ id: z.string().trim().min(1).max(100), reason: z.string().trim().min(1).max(500) }).strict().optional(),
+  }).strict()).refine(value => Object.keys(value).length > 0 && Object.keys(value).length <= 32, 'declare between 1 and 32 API versions'),
+  consumers: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), z.object({
+    versions: z.array(z.string().regex(/^v[1-9][0-9]*$/)).min(1),
+  }).strict()).default({}),
+  compatibility: z.object({
+    command: releaseCommandSchema,
+    workingDirectory: releaseInputPathSchema.default('.'),
+    installCommand: releaseCommandSchema.optional(),
+  }).strict(),
+}).strict().superRefine((api, ctx) => {
+  for (const [name, version] of Object.entries(api.versions)) {
+    if (version.path !== '/' + name) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API path must match its version name', path: ['versions', name, 'path'] });
+    if ((version.status === 'retired') !== Boolean(version.retirement)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only retired API versions require an explicit retirement id and reason', path: ['versions', name, 'retirement'] });
+  }
+  for (const [name, consumer] of Object.entries(api.consumers)) {
+    for (const version of consumer.versions) {
+      if (!api.versions[version] || api.versions[version].status === 'retired') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API consumers must name supported or deprecated versions', path: ['consumers', name, 'versions'] });
+    }
+  }
+});
+
 export const iosReleaseSigningSpecSchema = z.discriminatedUnion('provider', [
   z.object({
     /** The project build command owns signing and explicitly names any secrets it needs. */
@@ -905,8 +1006,12 @@ export const iosReleaseSpecSchema = z.object({
   /** Server services whose successful deployment evidence gates this mobile release. */
   services: z.array(z.string().min(1)).min(1),
   trigger: z.enum(['manual', 'after-server-deploy']).default('after-server-deploy'),
+  /** Promote an already tested binary from this environment; never rebuild it for submission. */
+  promoteFrom: z.string().min(1).optional(),
+  apiVersion: z.string().regex(/^v[1-9][0-9]*$/).optional(),
   build: z.object({
     workingDirectory: repositoryRelativePathSchema.default('.'),
+    inputs: z.array(releaseInputPathSchema).min(1).optional(),
     command: z.string().min(1).refine(
       (value) => !value.includes('${{'),
       'build command cannot contain GitHub expression interpolation'
@@ -915,8 +1020,24 @@ export const iosReleaseSpecSchema = z.object({
       (value) => value.toLowerCase().endsWith('.ipa'),
       'ipaPath must end in .ipa'
     ),
+    /** Exact public top-level metadata required in the finished IPA; never secret values. */
+    expectedInfoPlist: z.record(
+      z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/, 'expectedInfoPlist keys must be literal top-level Info.plist names')
+        .refine((key) => key !== 'CFBundleIdentifier' && key !== 'CFBundleVersion',
+          'bundle ID and build number are already validated by the managed release boundary'),
+      z.string().min(1).max(2048)
+        .refine((value) => value.trim().length > 0, 'expectedInfoPlist values must be nonempty strings')
+        .refine((value) => !/[\u0000-\u001f\u007f-\u009f]/.test(value), 'expectedInfoPlist values cannot contain control characters')
+        .refine((value) => !/\$[({]/.test(value), 'expectedInfoPlist values must be resolved literals without interpolation')
+    ).refine((value) => Object.keys(value).length >= 1 && Object.keys(value).length <= 32,
+      'declare between 1 and 32 expectedInfoPlist entries').optional(),
     /** Existing GitHub environment secret names needed only by the project build command. */
     requiredSecrets: z.array(runtimeEnvVarNameSchema).default([]),
+    /** Existing GitHub environment used only by the build job for its declared credentials. */
+    credentialsEnvironment: z.string().min(1).max(255).refine(
+      (value) => value.trim().length > 0 && value === value.trim() && !/[\u0000-\u001f\u007f-\u009f]/.test(value) && !value.includes('${{'),
+      'credentialsEnvironment must be a nonblank static name without outer whitespace, control characters or GitHub expressions'
+    ).optional(),
   }).strict(),
   signing: iosReleaseSigningSpecSchema.default({ provider: 'project' }),
   testflight: z.object({
@@ -979,9 +1100,10 @@ export const iosSpecSchema = z.object({
     }
   }
 
-  const buildSecretNames = new Set(ios.release?.build.requiredSecrets ?? []);
+  const buildSecretNames = new Set((ios.release?.build.requiredSecrets ?? []).map(name => name.toUpperCase()));
   const reservedSecretNames = [
     ...appStoreReleaseSecretNames,
+    'HYPERVIBE_BUILD_NUMBER',
     ...(ios.release?.signing.provider === 'match' ? matchSigningSecretNames : []),
   ];
   for (const name of reservedSecretNames) {
@@ -1017,7 +1139,13 @@ export const storageSpecSchema = z.object({
   region: z.string().min(1),
   /** Services that receive this bucket's generated runtime variables. */
   injectInto: z.array(z.string().min(1)),
+  /** A retained backup destination is never wired into application services. */
+  purpose: z.literal('backup').optional(),
+  /** "s3": also give services S3-compatible variables (AWS_*), for apps written against S3 APIs. */
+  access: z.enum(['native', 's3']).optional(),
 }).strict().superRefine((storage, ctx) => {
+  if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
+    path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });
   const railwayRegions = ['sjc', 'iad', 'ams', 'sin'];
   if (storage.provider === 'railway' && !railwayRegions.includes(storage.region)) {
     ctx.addIssue({
@@ -1068,6 +1196,10 @@ export const dataMigrationSpecSchema = z.object({
  */
 export const maintenanceSpecSchema = z.object({
   enabled: z.boolean(),
+  /** Application pause leaves databases and buckets available for manual work. Omitted preserves legacy data maintenance. */
+  mode: z.enum(['application', 'data']).optional(),
+  /** Keep the page up while paused, or send public traffic to the separately prepared domainTarget. */
+  page: z.enum(['active', 'off']).optional(),
 }).strict();
 
 export const stripePriceEnvBindingSpecSchema = z.object({
@@ -1097,7 +1229,7 @@ export const stripeCatalogPriceSpecSchema = z.object({
     .default('usd'),
   interval: z.enum(['month', 'year']),
   /** Hosting variable receiving this environment's provider price id. */
-  envVar: runtimeEnvVarNameSchema,
+  envVar: applicationEnvVarNameSchema,
 }).strict();
 
 export const stripeCatalogProductSpecSchema = z.object({
@@ -1171,7 +1303,7 @@ export const stripeWebhookSpecSchema = z.object({
   /** Exactly one service receives this endpoint's signing value. */
   service: z.string().min(1),
   /** Hosting variable that receives the signing value returned at endpoint creation. */
-  envVar: runtimeEnvVarNameSchema.default('STRIPE_WEBHOOK_SECRET'),
+  envVar: applicationEnvVarNameSchema.default('STRIPE_WEBHOOK_SECRET'),
   /** Stripe events delivered to this endpoint. */
   events: z.array(z.string().min(1)).min(1).default([...STRIPE_DEFAULT_WEBHOOK_EVENTS]),
 }).strict().superRefine((webhook, ctx) => {
@@ -1201,8 +1333,8 @@ export const stripeEnvironmentSyncSpecSchema = z.object({
    * scoped Stripe connection and never enter the committed spec or plan.
    */
   credentials: z.object({
-    secretKeyEnvVar: runtimeEnvVarNameSchema.default('STRIPE_SECRET_KEY'),
-    publishableKeyEnvVar: runtimeEnvVarNameSchema.optional(),
+    secretKeyEnvVar: applicationEnvVarNameSchema.default('STRIPE_SECRET_KEY'),
+    publishableKeyEnvVar: applicationEnvVarNameSchema.optional(),
   }).strict().optional(),
   /** Hypervibe-owned SaaS product and recurring-price catalog for this environment. */
   catalog: stripeCatalogSpecSchema.optional(),
@@ -1210,7 +1342,7 @@ export const stripeEnvironmentSyncSpecSchema = z.object({
    * Removed compatibility field. It remains in the parser only so old specs
    * receive an actionable migration error instead of an unknown-key message.
    */
-  prices: z.record(runtimeEnvVarNameSchema, stripePriceEnvBindingSpecSchema).optional(),
+  prices: z.record(applicationEnvVarNameSchema, stripePriceEnvBindingSpecSchema).optional(),
   /**
    * Named Stripe webhook endpoints. Hypervibe owns each endpoint lifecycle,
    * projects its creation-only signing value to one service, and records only
@@ -1315,6 +1447,8 @@ export const emailSenderSpecSchema = z.object({
 }).strict();
 
 export const emailInboundSpecSchema = z.object({
+  /** Manage an already attached signing policy; unsupported creation/removal block. */
+  signatureVerification: z.boolean().optional(),
   hostname: emailHostnameSchema,
   service: z.string().min(1),
   path: z.string()
@@ -1339,7 +1473,13 @@ export const SENDGRID_DELIVERY_EVENTS = [
   'unsubscribe',
 ] as const;
 
+export const SENDGRID_INBOUND_PUBLIC_KEY = 'SENDGRID_INBOUND_WEBHOOK_PUBLIC_KEY';
+
+export const SENDGRID_EVENT_PUBLIC_KEY = 'SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY';
+
 export const emailDeliveryEventsSpecSchema = z.object({
+  /** Omitted preserves unmanaged signing; false explicitly disables signing. */
+  signatureVerification: z.boolean().optional(),
   service: z.string().min(1),
   path: z.string()
     .regex(/^\/(?!\/)[^?#\s]*$/, 'delivery-event paths must begin with one slash and cannot contain a query or fragment')
@@ -1385,7 +1525,8 @@ export const emailSpecSchema = z.object({
 });
 
 export const EMAIL_MANAGED_ENV_KEYS = [
-  'SENDGRID_API_KEY',
+  SENDGRID_INBOUND_PUBLIC_KEY,
+  SENDGRID_EVENT_PUBLIC_KEY,
   'SENDGRID_FROM_EMAIL',
   'SENDGRID_FROM_NAME',
   'SENDGRID_REPLY_TO',
@@ -1393,62 +1534,65 @@ export const EMAIL_MANAGED_ENV_KEYS = [
   'SENDGRID_INBOUND_ALIASES',
 ] as const;
 
-const messagingWebhookTargetSchema = z.object({
+/**
+ * A webhook another service sends to one of this app's public web services.
+ * Hypervibe never calls the sending service; it reports the exact callback URL
+ * to register in that service's dashboard and whether the signing secret is
+ * wired to the receiving service. Declare API keys and signing secrets under
+ * project `secrets`.
+ */
+export const environmentWebhookSchema = z.object({
+  /** Service that sends the webhook, for display only (for example "twilio" or "slack"). */
+  vendor: z.string().trim().min(1).max(64),
+  /** Public web service that receives the webhook. */
   service: z.string().min(1),
   path: z.string()
-    .regex(/^\/(?!\/)[^?#\s]*$/, 'messaging webhook paths must begin with one slash and cannot contain a query or fragment'),
+    .regex(/^\/(?!\/)[^?#\s]*$/, 'webhook paths must begin with one slash and cannot contain a query or fragment'),
+  /** Environment variable on the receiving service that holds the signing secret or token. */
+  signingSecretEnvVar: environmentVariableNameSchema.optional(),
 }).strict();
 
-export const twilioMessagingSpecSchema = z.object({
-  provider: z.literal('twilio').default('twilio'),
-  /** Application services that receive the Twilio runtime contract. */
-  services: z.array(z.string().min(1)).min(1),
-  service: z.object({
-    name: z.string().trim().min(1).max(64),
-    inbound: messagingWebhookTargetSchema.extend({
-      path: messagingWebhookTargetSchema.shape.path.default('/webhooks/twilio/messages'),
-    }).optional(),
-    deliveryStatus: messagingWebhookTargetSchema.extend({
-      path: messagingWebhookTargetSchema.shape.path.default('/webhooks/twilio/status'),
-    }).optional(),
-  }).strict(),
-  /** Existing Twilio phone number to attach. Hypervibe never purchases numbers. */
-  sender: z.object({
-    phoneNumberSid: z.string()
-      .regex(/^PN[0-9a-fA-F]{32}$/, 'Twilio phone number SID must start with PN and contain 32 hexadecimal characters')
-      .describe('Existing SMS-capable Phone Number SID (PN...) from Twilio Console -> Numbers & Senders -> Phone Numbers; use the SID, not the +E.164 number'),
-  }).strict().optional(),
-}).strict();
-
-export const MESSAGING_MANAGED_ENV_KEYS = [
-  'TWILIO_ACCOUNT_SID',
-  'TWILIO_API_KEY_SID',
-  'TWILIO_API_KEY_SECRET',
-  'TWILIO_AUTH_TOKEN',
-  'TWILIO_MESSAGING_SERVICE_SID',
-  'TWILIO_PHONE_NUMBER_SID',
-] as const;
-
-export const environmentSpecSchema = z.object({
+export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
+    /** Compatibility field for saved specs; Cloud Run always uses OpenTofu. */
+    engine: z.literal('opentofu').optional().describe('Optional compatibility field. Cloud Run always uses OpenTofu; other hosting providers cannot select it.'),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
+  /** Optional backup intent. Ordinary deployments never require this policy or recovery evidence. */
+  backups: z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('daily'),
+      destination: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/).optional(),
+      /** Published Hypervibe helper artifact; a mutable tag cannot authorize recovery work. */
+      runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/).optional(),
+      fileReferenceQueries: z.array(z.object({ storageName: z.string().regex(/^[a-z][a-z0-9-]{0,60}$/),
+        query: z.string().trim().min(1).max(16000) }).strict()).max(32).optional(),
+    }).strict(),
+    z.object({ mode: z.literal('disabled'), reason: z.string().trim().min(1).max(500) }).strict(),
+  ]).optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  /** DNS authority is independent of hosting; an exact existing zone is required. */
+  dns: dnsSpecSchema.optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
   domainProxy: z.boolean().optional(),
+  /** Route this hostname through its owned Cloudflare Worker to a verified service in a separate environment. */
+  domainTarget: z.object({ environment: z.string().min(1), service: z.string().min(1) }).strict().optional(),
   /** One-time custom-domain replacement revision. A new value plans a confirmation-gated provider delete/recreate. */
   domainRecreateRevision: z.string().min(1).max(100).optional(),
-  loadBalancer: loadBalancerSpecSchema.optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: emailSpecSchema.default({ enabled: false }),
-  messaging: twilioMessagingSpecSchema.optional(),
-  envVars: z.record(z.string()).default({}),
+  /** Removed Twilio messaging desired state; kept only to explain the replacement. */
+  messaging: z.unknown().optional(),
+  webhooks: z.record(
+    z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'webhook names must be lowercase letters, digits and hyphens'),
+    environmentWebhookSchema
+  ).optional(),
+  envVars: z.record(applicationEnvVarNameSchema, z.string()).default({}),
   /** Explicitly documents that a shared runtime key does not apply here. */
   envVarExceptions: z.array(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'exception keys must be valid environment variable names')
@@ -1460,10 +1604,12 @@ export const environmentSpecSchema = z.object({
   removeEnvVars: z.array(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'retired keys must be valid environment variable names')
   ).optional(),
-  envFile: envFileSpecSchema.optional(),
+  // Omission remains absent; v4 otherwise applies defaults through optional().
+  envFile: envFileSpecSchema.unwrap().optional(),
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
   ios: iosSpecSchema.optional(),
+  api: apiReleaseSpecSchema.optional(),
   queues: z.record(
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'queue names: lowercase alphanumeric and dashes, starting with a letter'),
     queueSpecSchema
@@ -1474,10 +1620,59 @@ export const environmentSpecSchema = z.object({
   ).optional(),
   dataMigration: dataMigrationSpecSchema.optional(),
   maintenance: maintenanceSpecSchema.optional(),
+  /** How often runtime secrets should be replaced; hv_status warns when one is older. Defaults to 90 days. */
+  secretRotation: z.object({ everyDays: z.number().int().min(7).max(730) }).strict().optional(),
   payments: paymentsSpecSchema.optional(),
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.dns) {
+    const dns = environment.dns;
+    const hostname = environment.domain?.toLowerCase().replace(/\.$/, '');
+    const wildcard = hostname?.startsWith('*.') === true;
+    if (hostname && !dnsHostnameSchema.safeParse(wildcard ? hostname.slice(2) : hostname).success) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domain'],
+        message: 'DNS management requires a complete custom-domain hostname.' });
+    } else if (hostname && !dnsHostnameBelongsToZone(hostname, dns.zone.name)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dns', 'zone', 'name'],
+        message: 'The custom domain must belong to the selected DNS zone.' });
+    }
+    if (wildcard && dns.policy?.wildcard !== 'allow') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dns', 'policy', 'wildcard'],
+        message: 'A wildcard custom domain requires an explicit wildcard policy.' });
+    }
+    if (environment.domainProxy !== undefined && dns.policy?.proxy !== undefined
+      && environment.domainProxy !== (dns.policy.proxy === 'on')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dns', 'policy', 'proxy'],
+        message: 'domainProxy and dns.policy.proxy must describe the same intent.' });
+    }
+  }
+  if (environment.domainTarget || environment.maintenance?.page === 'off') {
+    const unsupportedDnsRouting = environment.dns && (environment.dns.provider !== 'cloudflare'
+      || (environment.dns.policy?.proxy ?? (environment.domainProxy === true ? 'on' : 'off')) !== 'on');
+    if (!environment.domainTarget || !environment.domain || environment.domainProxy === false
+      || unsupportedDnsRouting || environment.maintenance?.mode !== 'application' || environment.maintenance.enabled !== true) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domainTarget'],
+        message: 'Traffic switching requires a domainTarget, a Cloudflare-proxied domain, and enabled application maintenance. Explicit DNS intent must enable its Cloudflare proxy. Keep the original app paused while routing to its replacement.' });
+    }
+  }
+  const databaseBootstrap = environment.database?.freshInitialization?.bootstrap;
+  if (databaseBootstrap && !Object.hasOwn(environment.services, databaseBootstrap.service)) {
+    ctx.addIssue({ code: 'custom', path: ['database', 'freshInitialization', 'bootstrap', 'service'],
+      message: 'Database bootstrap requires an explicitly declared application service.' });
+  }
+  if (environment.backups?.mode === 'daily') {
+    const destination = environment.backups.destination;
+    if (destination && environment.storage?.[destination]?.purpose !== 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['backups', 'destination'], message: 'The backup destination must name separate storage declared with purpose="backup".' });
+    const seen = new Set<string>();
+    for (const [index, reference] of (environment.backups.fileReferenceQueries ?? []).entries()) {
+      if (seen.has(reference.storageName) || !environment.database || !environment.storage?.[reference.storageName]
+        || environment.storage[reference.storageName].purpose === 'backup') ctx.addIssue({ code: z.ZodIssueCode.custom,
+        path: ['backups', 'fileReferenceQueries', index], message: 'Each file reference query requires a database and a unique application storage source.' });
+      seen.add(reference.storageName);
+    }
+  }
   if (environment.autofix !== undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1614,127 +1809,36 @@ export const environmentSpecSchema = z.object({
       }
     }
   }
-  if (environment.messaging) {
-    const messaging = environment.messaging;
-    const runtimeServices = new Set<string>();
-    for (const [index, serviceName] of messaging.services.entries()) {
-      if (runtimeServices.has(serviceName)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio runtime service "${serviceName}" is listed more than once`,
-          path: ['messaging', 'services', index],
-        });
-      }
-      runtimeServices.add(serviceName);
-      if (!environment.services[serviceName]) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio runtime targets unknown service "${serviceName}"`,
-          path: ['messaging', 'services', index],
-        });
-      }
-    }
-    for (const [name, target] of [
-      ['inbound', messaging.service.inbound],
-      ['deliveryStatus', messaging.service.deliveryStatus],
-    ] as const) {
-      if (!target) continue;
-      const service = environment.services[target.service];
-      if (!service) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio ${name} webhook targets unknown service "${target.service}"`,
-          path: ['messaging', 'service', name, 'service'],
-        });
-      } else if (service.workloadKind !== 'web' || service.public === false) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio ${name} webhook service "${target.service}" must be a public web service`,
-          path: ['messaging', 'service', name, 'service'],
-        });
-      }
-      if (!runtimeServices.has(target.service)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Twilio ${name} webhook service "${target.service}" must also be listed in messaging.services for signature validation`,
-          path: ['messaging', 'service', name, 'service'],
-        });
-      }
-    }
-    const databaseAliasKeys = new Set(Object.values(environment.services)
-      .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})));
-    for (const key of MESSAGING_MANAGED_ENV_KEYS) {
-      if (databaseAliasKeys.has(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be a managed database alias`,
-          path: ['messaging'],
-        });
-      }
-      if (key in environment.envVars) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be declared in envVars`,
-          path: ['envVars', key],
-        });
-      }
-      if (environment.envVarExceptions?.includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be an environment variable exception`,
-          path: ['envVarExceptions'],
-        });
-      }
-      if (environment.envFile?.include.includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be selected through envFile.include`,
-          path: ['envFile', 'include'],
-        });
-      }
-      if (environment.removeEnvVars?.includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `messaging-managed environment variable "${key}" cannot also be retired`,
-          path: ['removeEnvVars'],
-        });
-      }
-    }
+  if (environment.messaging !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'messaging (Twilio desired state) is no longer managed by Hypervibe. Declare the Twilio keys under project secrets and the callback URLs under webhooks, for example webhooks.twilio-inbound = { vendor: "twilio", service: "web", path: "/webhooks/twilio/messages", signingSecretEnvVar: "TWILIO_AUTH_TOKEN" }.',
+      path: ['messaging'],
+    });
   }
-  if (environment.loadBalancer) {
-    if (!environment.domain) {
+  for (const [name, webhook] of Object.entries(environment.webhooks ?? {})) {
+    const target = environment.services[webhook.service];
+    if (!target) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'loadBalancer requires domain because the domain is its public hostname',
-        path: ['loadBalancer'],
+        message: `webhook "${name}" targets unknown service "${webhook.service}"`,
+        path: ['webhooks', name, 'service'],
+      });
+    } else if ((target.workloadKind && target.workloadKind !== 'web') || target.public === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `webhook "${name}" service "${webhook.service}" must be a public web service`,
+        path: ['webhooks', name, 'service'],
       });
     }
-    const seenServices = new Set<string>();
-    for (const [index, serviceName] of environment.loadBalancer.services.entries()) {
-      if (seenServices.has(serviceName)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `loadBalancer service "${serviceName}" is declared more than once`,
-          path: ['loadBalancer', 'services', index],
-        });
-        continue;
-      }
-      seenServices.add(serviceName);
-      const service = environment.services[serviceName];
-      if (!service) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `loadBalancer targets unknown service "${serviceName}"`,
-          path: ['loadBalancer', 'services', index],
-        });
-      } else if (service.workloadKind !== 'web' || service.public === false) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `loadBalancer service "${serviceName}" must be a public web service`,
-          path: ['loadBalancer', 'services', index],
-        });
-      }
-    }
+  }
+  if (environment.api) {
+    if (environment.services[environment.api.service]?.workloadKind !== 'web') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'api.service must name a declared web service', path: ['api', 'service'] });
+    if (environment.deploy?.strategy !== 'branch' || environment.deploy.trigger === 'native') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection requires managed branch CI', path: ['api'] });
+    const apiVersion = environment.ios?.release?.apiVersion;
+    if (environment.ios?.release && (!apiVersion || !environment.api.versions[apiVersion] || environment.api.versions[apiVersion].status === 'retired')) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'iOS releases must declare a supported apiVersion when API protection is enabled', path: ['ios', 'release', 'apiVersion'] });
+  } else if (environment.ios?.release?.apiVersion) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'ios.release.apiVersion requires an API policy', path: ['ios', 'release', 'apiVersion'] });
   }
   if (environment.ios?.release) {
     for (const [index, serviceName] of environment.ios.release.services.entries()) {
@@ -2013,7 +2117,7 @@ export const environmentSpecSchema = z.object({
       }
     }
   }
-});
+}));
 
 export const projectSpecSchema = z.object({
   version: z.literal(1),
@@ -2025,13 +2129,77 @@ export const projectSpecSchema = z.object({
   devops: devopsSpecSchema.optional(),
   github: githubSpecSchema.optional(),
   /** @deprecated Use github.collaboration. Accepted for one compatibility period. */
-  collaboration: collaborationSpecSchema.optional(),
+  collaboration: collaborationSpecSchema.unwrap().optional(),
   secrets: z.record(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'secret names must be valid environment variable names'),
     projectSecretSpecSchema
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  for (const [key, slot] of Object.entries(spec.secrets)) for (const [index, check] of (slot.credential?.verification ?? []).entries()) {
+    if (!spec.environments[check.environment]?.services[check.service]) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['secrets', key, 'credential', 'verification', index], message: 'Credential operation checks must target a declared environment and service.' });
+    if (check.kind === 'http-receipt' && check.receiptService && !spec.environments[check.environment]?.services[check.receiptService]) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ['secrets', key, 'credential', 'verification', index, 'receiptService'], message: 'The receipt service must be declared in the checked consumer environment.' });
+    if (check.kind === 'environment-task') {
+      const task = spec.github?.actions[check.task];
+      if (task?.kind !== 'environment-task' || !task.enabled || task.environment !== check.environment || task.service !== check.service
+        || task.inputs[check.operationIdInput]?.type !== 'string' || !task.receiptPrefix || Object.keys(check.requiredCounts).some(name => !task.receiptCountKeys.includes(name))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'credential', 'verification', index],
+          message: 'Credential verification must reference an enabled declared task with matching service, reviewed operation-ID input and numeric receipt counts.' });
+      }
+    }
+  }
+  for (const [id, automation] of Object.entries(spec.github?.actions ?? {})) {
+    if (automation.kind !== 'environment-task') continue;
+    const target = Object.hasOwn(spec.environments, automation.environment)
+      ? spec.environments[automation.environment] : undefined;
+    if (!target) ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environment-task must name a declared environment',
+      path: ['github', 'actions', id, 'environment'],
+    });
+    else if (!Object.hasOwn(target.services, automation.service)) ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environment-task must name a declared service in its target environment',
+      path: ['github', 'actions', id, 'service'],
+    });
+  }
+  const githubActions = spec.devops
+    ? spec.devops.code.provider === 'github' && spec.devops.ci?.provider === 'github-actions'
+    : Boolean(spec.github?.repository || /github\.com[:/]/.test(spec.gitRemoteUrl ?? ''));
+  for (const [environmentName, environment] of Object.entries(spec.environments)) {
+    if (environment.dns && !environment.domain) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'dns'],
+        message: 'Select DNS only for an environment that has a domain.' });
+    }
+    if (environment.domainTarget) {
+      const destination = spec.environments[environment.domainTarget.environment];
+      const service = destination?.services[environment.domainTarget.service];
+      if (environment.domainTarget.environment === environmentName || !destination || !service
+        || service.workloadKind !== 'web' || service.public === false || destination.domainTarget
+        || (destination.domain && environment.domain
+          && destination.domain.trim().toLowerCase().replace(/\.+$/, '')
+            === environment.domain.trim().toLowerCase().replace(/\.+$/, ''))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'domainTarget'],
+          message: 'Choose a public web service in a different declared environment, without routing chains or shared domain ownership.' });
+      }
+    }
+    if (environment.api) {
+      if (!githubActions) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API release protection currently requires GitHub Actions; other release paths cannot verify its evidence', path: ['environments', environmentName, 'api'] });
+      if (!spec.runtime) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'API compatibility checks require an explicit project runtime', path: ['runtime'] });
+    }
+    const release = environment.ios?.release;
+    if (!release?.promoteFrom) continue;
+    const source = spec.environments[release.promoteFrom]?.ios;
+    const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['environments', environmentName, 'ios', 'release', 'promoteFrom'] });
+    if (release.promoteFrom === environmentName || !source?.release || source.release.promoteFrom) issue('iOS promotion must name a different beta-building environment, without promotion chains');
+    if (release.trigger !== 'manual') issue('iOS promotion targets require trigger="manual"');
+    if (source && (source.bundleId !== environment.ios!.bundleId || source.platform !== environment.ios!.platform)) issue('iOS promotion requires the same bundle ID and platform');
+    if (source?.release && (JSON.stringify(canonicalizeJson(source.release.build)) !== JSON.stringify(canonicalizeJson(release.build))
+      || JSON.stringify(source.release.signing) !== JSON.stringify(release.signing)
+      || source.release.apiVersion !== release.apiVersion)) issue('iOS promotion requires identical build, signing, and API version settings for the tested binary');
+  }
   const promotionIssuePath = (environmentName: string): Array<string | number> => (
     ['environments', environmentName, 'deploy', 'promoteFrom']
   );
@@ -2042,6 +2210,15 @@ export const projectSpecSchema = z.object({
 
   for (const [targetName, target] of Object.entries(spec.environments)) {
     const sourceName = target.deploy?.promoteFrom;
+    if (target.deploy?.promotionTests) {
+      if (!sourceName || !githubActions) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'deploy.promotionTests requires explicit deploy.promoteFrom and GitHub Actions',
+          path: ['environments', targetName, 'deploy', 'promotionTests'],
+        });
+      }
+    }
     if (!sourceName) continue;
     if (sourceName === targetName) {
       ctx.addIssue({
@@ -2198,31 +2375,6 @@ export const projectSpecSchema = z.object({
       }
     }
   }
-  if (spec.devops?.code.repository.state === 'absent') {
-    if (spec.devops.code.repository.management !== 'managed') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'devops.code.repository.state="absent" requires management="managed"; Hypervibe never deletes an externally managed repository',
-        path: ['devops', 'code', 'repository', 'management'],
-      });
-    }
-    if (spec.devops.ci) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'devops.ci must be removed before the managed code repository can be declared absent',
-        path: ['devops', 'ci'],
-      });
-    }
-    for (const [environmentName, environment] of Object.entries(spec.environments)) {
-      if (environment.deploy?.strategy === 'branch') {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'branch deploys must be removed before the managed code repository can be declared absent',
-          path: ['environments', environmentName, 'deploy', 'strategy'],
-        });
-      }
-    }
-  }
   if (
     spec.github?.canonicalEnvironment
     && spec.github.canonicalEnvironment !== 'repository'
@@ -2289,6 +2441,33 @@ export const projectSpecSchema = z.object({
     });
   }
   for (const [key, secret] of Object.entries(spec.secrets)) {
+    const descriptor = secret.credential;
+    if (descriptor?.runtimeConsumers) {
+      const coordinates = new Set<string>();
+      for (const [index, consumer] of descriptor.runtimeConsumers.entries()) {
+        const target = spec.secrets[consumer.variable];
+        const coordinate = JSON.stringify([consumer.environment, consumer.service, consumer.variable]);
+        if (!spec.environments[consumer.environment]?.services[consumer.service]
+          || target?.credential?.role !== descriptor.role
+          || !target.environments.includes(consumer.environment)
+          || consumer.format === 'database-url' && descriptor.kind !== 'database-password'
+          || coordinates.has(coordinate)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom,
+            message: 'Credential consumers require unique declared environment/service/alias coordinates for this role; database-url format requires a database-password role.',
+            path: ['secrets', key, 'credential', 'runtimeConsumers', index] });
+        }
+        coordinates.add(coordinate);
+      }
+      for (const environmentName of secret.environments) {
+        if (!descriptor.runtimeConsumers.some(consumer => consumer.environment === environmentName && consumer.variable === key)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Every declared runtime alias/environment needs an explicit consumer when runtimeConsumers is selected.',
+            path: ['secrets', key, 'credential', 'runtimeConsumers'] });
+        }
+      }
+    }
+    if (isReservedRuntimeEnvKey(key) && secret.environments.length > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: RESERVED_RUNTIME_ENV_ERROR, path: ['secrets', key, 'environments'] });
+    }
     const secretKind = secret.ownership === 'delegated'
       ? 'delegated secret'
       : 'Hypervibe-owned secret';
@@ -2403,7 +2582,10 @@ export const projectSpecSchema = z.object({
           : []),
         ...Object.values(stripe?.webhooks ?? {}).map((webhook) => webhook.envVar),
       ]);
-      if (stripeManagedKeys.has(key)) {
+      const trackedWebhook = secret.ownership === 'delegated' && secret.credential?.kind === 'stripe-webhook'
+        && secret.credential.stripeWebhook?.environment === environmentName
+        && stripe?.webhooks?.[secret.credential.stripeWebhook.webhook]?.envVar === key;
+      if (stripeManagedKeys.has(key) && !trackedWebhook) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${secretKind} "${key}" cannot also be managed by Stripe environment sync in "${environmentName}"`,
@@ -2414,13 +2596,6 @@ export const projectSpecSchema = z.object({
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${secretKind} "${key}" cannot also be managed by email desired state in "${environmentName}"`,
-          path: ['secrets', key],
-        });
-      }
-      if (environment.messaging && (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${secretKind} "${key}" cannot also be managed by messaging desired state in "${environmentName}"`,
           path: ['secrets', key],
         });
       }
@@ -2449,7 +2624,7 @@ export type EmailInboundSpec = z.infer<typeof emailInboundSpecSchema>;
 export type EmailDeliveryEventsSpec = z.infer<typeof emailDeliveryEventsSpecSchema>;
 export type EmailForwardingSpec = z.infer<typeof emailForwardingSpecSchema>;
 export type EmailSpec = z.infer<typeof emailSpecSchema>;
-export type TwilioMessagingSpec = z.infer<typeof twilioMessagingSpecSchema>;
+export type EnvironmentWebhookSpec = z.infer<typeof environmentWebhookSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;
@@ -2460,8 +2635,11 @@ export type ProjectSecretSpec = z.infer<typeof projectSecretSpecSchema>;
 export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
 export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
-export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
+export type GitHubEnvironmentTaskAutomationSpec = z.infer<typeof githubEnvironmentTaskAutomationSpecSchema>;
+export type GitHubEnvironmentTaskInputSpec = z.infer<typeof githubEnvironmentTaskInputSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;
+
+export type ApiReleaseSpec = z.infer<typeof apiReleaseSpecSchema>;

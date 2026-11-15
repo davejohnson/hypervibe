@@ -3,6 +3,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
+import { resourceName } from './resource-names.js';
 
 /**
  * Env var contract for spec queues, mirroring database-env.ts. Every
@@ -20,23 +21,38 @@ export function queueEnvVarSuffix(queueName: string): string {
   return queueName.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
-function sanitizeResourceName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 63);
-}
-
 export function pubsubQueueResourceIds(
-  environment: Pick<Environment, 'platformBindings'> | null,
-  queueName: string
+  environment: (Pick<Environment, 'platformBindings'> & { name?: string }) | null,
+  queueName: string,
+  providerProjectId?: string
 ): { topicId: string; subscriptionId: string } {
-  const bindings = environment?.platformBindings as { projectId?: string } | undefined;
-  const prefix = bindings?.projectId || 'hypervibe';
-  const topicId = sanitizeResourceName(`${prefix}-${queueName}`);
-  return { topicId, subscriptionId: `${topicId}-sub` };
+  const bindings = environment?.platformBindings as {
+    projectId?: string;
+    queues?: Record<string, { backend?: string; topicName?: string; subscriptionName?: string; providerScope?: { projectId?: string } }>;
+  } | undefined;
+  const binding = bindings?.queues?.[queueName];
+  if (binding) {
+    if (binding.backend !== 'pubsub') throw new Error(`Queue "${queueName}" is not bound to Pub/Sub.`);
+    const topic = binding.topicName?.split('/');
+    const subscription = binding.subscriptionName?.split('/');
+    const projectId = providerProjectId ?? binding.providerScope?.projectId;
+    if (!projectId || binding.providerScope?.projectId !== projectId
+      || topic?.length !== 4 || topic[0] !== 'projects' || topic[1] !== projectId || topic[2] !== 'topics' || !topic[3]
+      || subscription?.length !== 4 || subscription[0] !== 'projects' || subscription[1] !== projectId || subscription[2] !== 'subscriptions' || !subscription[3]) {
+      throw new Error(`Pub/Sub queue "${queueName}" has an incomplete or cross-project binding.`);
+    }
+    return { topicId: topic[3], subscriptionId: subscription[3] };
+  }
+  const projectId = providerProjectId ?? bindings?.projectId;
+  if (!environment?.name || !projectId) throw new Error('Pub/Sub naming requires a project/environment scope.');
+  const topicId = resourceName(queueName, { scope: [projectId, environment.name], reservedPrefixes: ['goog'] });
+  // Topics and subscriptions already occupy different provider namespaces.
+  return { topicId, subscriptionId: topicId };
 }
 
 export function buildQueueEnvVars(params: {
   environmentSpec: EnvironmentSpec;
-  environment: Pick<Environment, 'platformBindings'> | null;
+  environment: (Pick<Environment, 'platformBindings'> & { name?: string }) | null;
   backend: 'pubsub' | 'postgres' | undefined;
   gcpProjectId?: string;
 }): Record<string, string> {
@@ -51,9 +67,9 @@ export function buildQueueEnvVars(params: {
     QUEUE_NAMES: names.join(','),
   };
 
-  if (params.backend === 'pubsub' && params.gcpProjectId) {
+  if (params.backend === 'pubsub' && params.gcpProjectId && params.environment) {
     for (const name of names) {
-      const { topicId, subscriptionId } = pubsubQueueResourceIds(params.environment, name);
+      const { topicId, subscriptionId } = pubsubQueueResourceIds(params.environment, name, params.gcpProjectId);
       const suffix = queueEnvVarSuffix(name);
       vars[`QUEUE_TOPIC_${suffix}`] = `projects/${params.gcpProjectId}/topics/${topicId}`;
       vars[`QUEUE_SUBSCRIPTION_${suffix}`] = `projects/${params.gcpProjectId}/subscriptions/${subscriptionId}`;
@@ -72,7 +88,7 @@ export function buildQueueEnvVars(params: {
 export async function resolveQueueEnvVars(
   project: Project,
   environmentSpec: EnvironmentSpec,
-  environment: Pick<Environment, 'platformBindings'> | null
+  environment: (Pick<Environment, 'platformBindings'> & { name?: string }) | null
 ): Promise<Record<string, string> | undefined> {
   if (!environmentSpec.queues || Object.keys(environmentSpec.queues).length === 0) {
     return undefined;

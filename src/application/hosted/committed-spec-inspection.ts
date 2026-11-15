@@ -258,7 +258,7 @@ function decodeJsonSource(content: Uint8Array): unknown {
   }
 }
 
-function secretValueLooksPresent(value: string): boolean {
+export function secretValueLooksPresent(value: string): boolean {
   if (SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
     return true;
   }
@@ -300,14 +300,14 @@ function secretShapedPaths(document: unknown): string[] {
   return Array.from(found).sort();
 }
 
-function safeDocumentPath(path: Array<string | number>): string {
+function safeDocumentPath(path: PropertyKey[]): string {
   return path
-    .map((segment) => String(segment).replace(/[^A-Za-z0-9_.-]/g, '?').slice(0, 80))
+    .map((segment) => typeof segment === 'symbol' ? '?' : String(segment).replace(/[^A-Za-z0-9_.-]/g, '?').slice(0, 80))
     .join('.')
     .slice(0, 512);
 }
 
-function requireSafeReceiptLabel(value: string, path: string): string {
+export function requireSafeReceiptLabel(value: string, path: string): string {
   if (
     value.length > 255
     || value.trim() !== value
@@ -428,17 +428,11 @@ function environmentProviders(environment: EnvironmentSpec): DeclaredProviderCap
   if (environment.cache) {
     providers.push({ capability: 'cache', provider: environment.cache.provider });
   }
-  if (environment.loadBalancer) {
-    providers.push({ capability: 'load-balancer', provider: environment.loadBalancer.provider });
-  }
   if (environment.domainRegistration) {
     providers.push({ capability: 'domain-registration', provider: environment.domainRegistration.provider });
   }
   for (const [name, storage] of Object.entries(environment.storage ?? {})) {
     providers.push({ capability: 'storage', provider: storage.provider, resource: name });
-  }
-  if (environment.messaging) {
-    providers.push({ capability: 'messaging', provider: environment.messaging.provider });
   }
   return sortCapabilities(providers);
 }
@@ -455,9 +449,8 @@ function environmentFeatures(environment: EnvironmentSpec): string[] {
   if (environment.cache) features.add('cache');
   if (environment.domain) features.add('custom-domain');
   if (environment.domainRegistration) features.add('domain-registration');
-  if (environment.loadBalancer) features.add('load-balancer');
   if (environment.email.enabled) features.add('email');
-  if (environment.messaging) features.add('messaging');
+  if (Object.keys(environment.webhooks ?? {}).length > 0) features.add('webhooks');
   if (Object.keys(environment.queues ?? {}).length > 0) features.add('queue');
   if (Object.keys(environment.storage ?? {}).length > 0) features.add('storage');
   if (environment.dataMigration) features.add('data-migration');
@@ -504,16 +497,21 @@ function environmentReceipt(
  * provider. The hosting service owns repository authentication and exact-SHA
  * reads; this boundary owns schema, identity, secret, and receipt validation.
  */
-export function inspectCommittedProjectSpecV1(
-  input: CommittedSpecInspectionInputV1
-): CommittedSpecInspectionReceiptV1 {
+/** Shared exact-source validation; callers still own their document schema. */
+export function readCommittedJsonSourceV1(input: CommittedSpecInspectionInputV1) {
   const source = validateInput(input);
   const actualSha256 = createHash('sha256').update(input.content).digest('hex');
   if (actualSha256 !== source.expectedSha256) {
-    inspectionError('DIGEST_MISMATCH', 'Committed spec bytes do not match the supplied SHA-256 digest.');
+    inspectionError('DIGEST_MISMATCH', 'Committed source bytes do not match the supplied SHA-256 digest.');
   }
+  return { source, actualSha256, document: decodeJsonSource(input.content) };
+}
 
-  const document = decodeJsonSource(input.content);
+/** Internal parsed desired state; only the value-free receipt is publicly exported. */
+export function parseCommittedProjectSpecV1(
+  input: CommittedSpecInspectionInputV1
+): { spec: ProjectSpec; receipt: CommittedSpecInspectionReceiptV1 } {
+  const { source, actualSha256, document } = readCommittedJsonSourceV1(input);
   const parsed = projectSpecSchema.safeParse(document);
   if (!parsed.success) {
     inspectionError('INVALID_SPEC', 'Committed spec does not match the Hypervibe project schema.', {
@@ -533,7 +531,7 @@ export function inspectCommittedProjectSpecV1(
   }
 
   const remoteIdentityVerified = verifyRepositoryClaims(parsed.data, source);
-  return {
+  return { spec: parsed.data, receipt: {
     schemaVersion: 1,
     status: 'accepted',
     source: {
@@ -556,5 +554,9 @@ export function inspectCommittedProjectSpecV1(
     environments: Object.entries(parsed.data.environments)
       .map(([name, environment]) => environmentReceipt(name, environment))
       .sort((a, b) => a.name.localeCompare(b.name)),
-  };
+  } };
+}
+
+export function inspectCommittedProjectSpecV1(input: CommittedSpecInspectionInputV1): CommittedSpecInspectionReceiptV1 {
+  return parseCommittedProjectSpecV1(input).receipt;
 }

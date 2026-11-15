@@ -1,12 +1,20 @@
 import { readFileSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { IOS_RELEASE_EVIDENCE_VERSION, iosBuildContractFingerprint, iosReleaseBuildInputs, iosBuildContractRuntimeBase64 } from './ios-release-evidence.js';
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
 import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
+import { iosReleaseAttemptRuntimeBase64 } from './ios-release-attempt.js';
 import {
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
+  MANAGED_CI_CREDENTIAL_ACTIVATION_VALIDATOR_SOURCE,
+  MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE,
   managedCiReleaseArtifactPrefix,
 } from './managed-ci-evidence.js';
+
+// Bump for intentional migrations of the generated iOS release contract.
+export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 7;
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -19,6 +27,10 @@ export const MATCH_SIGNING_REQUIRED_SECRETS = [
   'MATCH_PASSWORD',
   'MATCH_GIT_BASIC_AUTHORIZATION',
 ] as const;
+
+export function iosBuildCredentialsEnvironment(ios: IosSpec | undefined, environmentName: string): string {
+  return ios?.release?.build.credentialsEnvironment ?? environmentName;
+}
 
 export function iosReleaseWorkflowPath(environmentName: string): string {
   const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
@@ -33,6 +45,7 @@ const matchSigningStepTemplateUrl = new URL(
   '../../../templates/ios/match-signing-step.yml',
   import.meta.url
 );
+const infoPlistValidationTemplateUrl = new URL('../../../templates/ios/validate-info-plist.py', import.meta.url);
 
 function projectRuntimeSetup(target: BranchDeployTarget): string {
   const runtime = target.runtime;
@@ -53,14 +66,12 @@ function projectRuntimeSetup(target: BranchDeployTarget): string {
 }
 
 function renderTemplate(content: string, replacements: Record<string, string>): string {
-  for (const [name, value] of Object.entries(replacements)) {
-    content = content.split('@@' + name + '@@').join(value);
-  }
-  const unresolved = content.match(/@@[A-Z0-9_]+@@/g);
-  if (unresolved) {
-    throw new Error('Unresolved iOS release workflow placeholders: ' + unresolved.join(', '));
-  }
-  return content;
+  // Replace only markers in the template, never marker-like literal app values.
+  return content.replace(/@@([A-Z0-9_]+)@@/g, (marker, name: string) => {
+    const value = replacements[name];
+    if (value === undefined) throw new Error('Unresolved iOS release workflow placeholder: ' + marker);
+    return value;
+  });
 }
 
 function managedMatchSigningStep(gitBranch: string): string {
@@ -86,7 +97,7 @@ export function buildIosReleaseWorkflow(params: {
   ios: IosSpec;
 }): { files: Array<{ path: string; content: string }>; requiredSecrets: string[] } | null {
   const release = params.ios.release;
-  if (!release) return null;
+  if (!release || release.promoteFrom) return null;
 
   const releaseTarget = params.target.releaseTarget;
   if (!releaseTarget || !/^[0-9a-f]{64}$/.test(params.target.programFingerprint ?? '')) {
@@ -98,6 +109,7 @@ export function buildIosReleaseWorkflow(params: {
   }
 
   const environmentName = params.target.environmentName;
+  const credentialsEnvironment = iosBuildCredentialsEnvironment(params.ios, environmentName);
   const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const workflowPath = iosReleaseWorkflowPath(environmentName);
   const automaticTrigger = release.trigger === 'after-server-deploy'
@@ -121,6 +133,18 @@ export function buildIosReleaseWorkflow(params: {
 
   const content = renderTemplate(readFileSync(workflowTemplateUrl, 'utf8'), {
     ENVIRONMENT: environmentName,
+    BUILD_ENVIRONMENT: credentialsEnvironment.toLowerCase() === environmentName.toLowerCase()
+      ? environmentName
+      : JSON.stringify({ name: credentialsEnvironment, deployment: false }),
+    CREDENTIAL_ACTIVATION_VALIDATOR_JSON: JSON.stringify(Buffer.from(MANAGED_CI_CREDENTIAL_ACTIVATION_VALIDATOR_SOURCE).toString('base64')),
+    SERVER_CONTRACT_RUNTIME_JSON: JSON.stringify(Buffer.from(MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE).toString('base64')),
+    IOS_BUILD_CONTRACT_RUNTIME_JSON: JSON.stringify(iosBuildContractRuntimeBase64()),
+    IOS_RELEASE_ATTEMPT_RUNTIME_JSON: JSON.stringify(iosReleaseAttemptRuntimeBase64()),
+    IOS_EVIDENCE_VERSION: String(IOS_RELEASE_EVIDENCE_VERSION),
+    IOS_BUILD_FINGERPRINT_JSON: JSON.stringify(iosBuildContractFingerprint(params.ios, params.target.runtime)),
+    IOS_INPUT_PATHS_JSON: JSON.stringify(JSON.stringify([...iosReleaseBuildInputs(params.ios), workflowPath])),
+    IOS_WORKFLOW_PATH_JSON: JSON.stringify(workflowPath),
+    IOS_CONCURRENCY_GROUP: 'hypervibe-ios-' + createHash('sha256').update(params.ios.bundleId).digest('hex').slice(0, 20),
     ENVIRONMENT_JSON: JSON.stringify(environmentName),
     SAFE_ENVIRONMENT: safeEnvironment,
     SERVER_EVIDENCE_VERSION: String(MANAGED_CI_RELEASE_EVIDENCE_VERSION),
@@ -135,6 +159,9 @@ export function buildIosReleaseWorkflow(params: {
     PROJECT_RUNTIME_SETUP: projectRuntimeSetup(params.target),
     MANAGED_NODE_VERSION: HYPERVIBE_MANAGED_NODE_VERSION,
     BUNDLE_ID_JSON: JSON.stringify(params.ios.bundleId),
+    EXPECTED_INFO_PLIST_JSON: JSON.stringify(JSON.stringify(release.build.expectedInfoPlist ?? {})),
+    INFO_PLIST_VALIDATION: readFileSync(infoPlistValidationTemplateUrl, 'utf8').trimEnd()
+      .split('\n').map((line) => '          ' + line).join('\n'),
     WORKING_DIRECTORY_JSON: JSON.stringify(release.build.workingDirectory),
     IPA_PATH_JSON: JSON.stringify(release.build.ipaPath),
     TESTFLIGHT_GROUPS_JSON: JSON.stringify(JSON.stringify(release.testflight.groups)),

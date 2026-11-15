@@ -1,7 +1,67 @@
 import { describe, expect, it } from 'vitest';
-import { iosSpecSchema, environmentSpecSchema } from '../spec.schema.js';
+import { parse } from 'yaml';
+import { iosSpecSchema, environmentSpecSchema, projectSpecSchema } from '../spec.schema.js';
+import { buildIosReleaseWorkflow } from '../../services/ios-release-workflow.service.js';
+
+function renderedBuildSecretEnvironment(name: string, signing: 'project' | 'match'): Record<string, string> {
+  const ios = iosSpecSchema.parse({
+    bundleId: 'com.example.staging', testflight: { groups: { beta: {} } },
+    release: {
+      services: ['web'], signing: { provider: signing }, testflight: { groups: ['beta'] },
+      build: { command: 'make ipa', ipaPath: 'App.ipa', credentialsEnvironment: 'production', requiredSecrets: [name] },
+    },
+  });
+  const rendered = buildIosReleaseWorkflow({
+    provider: 'railway', providerName: 'Railway', serverWorkflowPath: '.github/workflows/deploy-staging.yml', ios,
+    target: {
+      environmentName: 'staging', kind: 'staging', branch: 'main', autoDeployOnPush: true,
+      serviceNames: ['web'], providerServiceIds: ['web-id'], programFingerprint: 'a'.repeat(64),
+      releaseTarget: {
+        scope: { providerProjectId: 'project', providerEnvironmentId: 'staging' }, bindingsFingerprint: 'b'.repeat(64),
+        resources: [{ logicalName: 'web', workloadKind: 'web', providerResourceType: 'service', providerResourceId: 'web-id' }],
+      },
+    },
+  })!;
+  return parse(rendered.files[0].content).jobs.build.steps.find((step: { name?: string }) => step.name === 'Build signed IPA').env;
+}
 
 describe('iosSpecSchema', () => {
+  // GitHub references secret names case-insensitively, including environment secrets.
+  // https://docs.github.com/en/actions/reference/security/secrets
+  const reservedBuildKeys = [
+    'APP_STORE_CONNECT_KEY_ID', 'APP_STORE_CONNECT_ISSUER_ID', 'APP_STORE_CONNECT_PRIVATE_KEY',
+    'MATCH_GIT_URL', 'MATCH_PASSWORD', 'MATCH_GIT_BASIC_AUTHORIZATION',
+  ];
+  it.each(reservedBuildKeys.map((key, index) => index % 2 ? key.toLowerCase() : key.slice(0, 1) + key.slice(1).toLowerCase()))(
+    'rejects reserved key %s before rendering a build with production credentials', name => {
+      expect(() => renderedBuildSecretEnvironment(name, 'match')).toThrow('reserved for the Hypervibe-managed release boundary');
+    }
+  );
+
+  it.each(['MATCH_GIT_URL', 'MATCH_PASSWORD', 'match_git_basic_authorization'])(
+    'keeps explicitly requested project-owned signing key %s available to the build', name => {
+      expect(renderedBuildSecretEnvironment(name, 'project')).toEqual({ [name]: '${{ secrets.' + name + ' }}' });
+    }
+  );
+
+  it('preserves ordinary mixed-case build secret names', () => {
+    expect(renderedBuildSecretEnvironment('Build_token', 'match')).toEqual({ Build_token: '${{ secrets.Build_token }}' });
+  });
+
+  it('reserves the managed build-number handoff against project secret overrides', () => {
+    const result = iosSpecSchema.safeParse({
+      bundleId: 'com.example.app',
+      testflight: { groups: { beta: {} } },
+      release: {
+        services: ['web'],
+        build: { command: 'make ipa', ipaPath: 'Example.ipa', requiredSecrets: ['HYPERVIBE_BUILD_NUMBER'] },
+        testflight: { groups: ['beta'] },
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.success ? '' : result.error.message).toContain('HYPERVIBE_BUILD_NUMBER is reserved');
+  });
+
   it('applies defaults', () => {
     const ios = iosSpecSchema.parse({ bundleId: 'com.example.app' });
     expect(ios.platform).toBe('IOS');
@@ -184,5 +244,154 @@ describe('iosSpecSchema', () => {
     expect(result.success).toBe(false);
     expect(result.success ? '' : result.error.message).toContain('unknown service');
     expect(result.success ? '' : result.error.message).toContain('deploy.strategy');
+  });
+});
+
+
+describe('iOS release selection and promotion', () => {
+  const ios = () => ({
+    bundleId: 'com.example.app', testflight: { groups: { beta: {} } },
+    release: { services: ['api'], build: { command: 'make ipa', ipaPath: 'App.ipa', inputs: ['apps/ios', 'shared'] }, testflight: { groups: ['beta'] } },
+  });
+  it('accepts explicit mobile inputs and rejects globs, traversal, and empty lists', () => {
+    expect(iosSpecSchema.safeParse(ios()).success).toBe(true);
+    for (const inputs of [[], ['../ios'], ['apps/**'], ['/ios'], ['!web']]) {
+      const value = ios(); value.release.build.inputs = inputs;
+      expect(iosSpecSchema.safeParse(value).success).toBe(false);
+    }
+  });
+  it('promotes only from a compatible existing app with a manual target', () => {
+    const environment = () => ({ hosting: { provider: 'railway' }, services: { api: {} }, deploy: { strategy: 'branch', trigger: 'ci' }, ios: ios() });
+    const value = { version: 1, project: 'example', environments: { staging: environment(), production: environment() } };
+    Object.assign(value.environments.production.ios.release, { promoteFrom: 'staging', trigger: 'manual' });
+    expect(projectSpecSchema.safeParse(value).success).toBe(true);
+    value.environments.staging.ios.bundleId = 'com.example.other';
+    expect(projectSpecSchema.safeParse(value).success).toBe(false);
+  });
+});
+
+describe('iOS build credential environment', () => {
+  const declaration = (credentialsEnvironment?: unknown) => ({
+    bundleId: 'com.example.app', testflight: { groups: { beta: {} } },
+    release: {
+      services: ['web'],
+      build: { command: 'make ipa', ipaPath: 'App.ipa', ...(credentialsEnvironment === undefined ? {} : { credentialsEnvironment }) },
+      testflight: { groups: ['beta'] },
+    },
+  });
+  it('preserves omission rather than introducing a source environment default', () => {
+    expect(iosSpecSchema.parse(declaration()).release?.build).not.toHaveProperty('credentialsEnvironment');
+  });
+  it.each(['Apple signing / shared', 'a'.repeat(255)])('accepts the static environment %s', name => {
+    expect(iosSpecSchema.parse(declaration(name)).release?.build).toHaveProperty('credentialsEnvironment', name);
+  });
+  it.each(['', '   ', ' leading', 'trailing ', 'a'.repeat(256), 'prefix-${{ vars.ENV }}', 'nul\0name', 'delete\x7fname', 'control\x85name', null])('rejects an invalid environment %#', name => {
+    expect(iosSpecSchema.safeParse(declaration(name)).success).toBe(false);
+  });
+});
+
+describe('iOS embedded environment expectations', () => {
+  const environment = (expectedInfoPlist?: unknown) => ({
+    hosting: { provider: 'railway' },
+    services: { web: {} },
+    deploy: { strategy: 'branch', trigger: 'ci' },
+    ios: {
+      bundleId: 'com.example.invoiceperfect',
+      testflight: { groups: { beta: {} } },
+      release: {
+        services: ['web'],
+        build: {
+          command: 'bundle exec fastlane build configuration:Release',
+          ipaPath: 'build/InvoicePerfect.ipa',
+          ...(expectedInfoPlist === undefined ? {} : { expectedInfoPlist }),
+        },
+        testflight: { groups: ['beta'] },
+      },
+    },
+  });
+
+  it('accepts separate release-quality staging and production app contracts', () => {
+    const production = environment({
+      AppEnvironment: 'production',
+      APIBaseURL: 'https://invoiceperfect.com',
+      CFBundleDisplayName: 'Invoice Perfect',
+    });
+    const staging = environment({
+      AppEnvironment: 'staging',
+      APIBaseURL: 'https://staging.invoiceperfect.com',
+      CFBundleDisplayName: 'IP Staging',
+    });
+    staging.ios.bundleId += '.staging';
+    const result = projectSpecSchema.parse({
+      version: 1, project: 'invoice-perfect', environments: { production, staging },
+    });
+    expect(result.environments.production.ios?.bundleId).toBe('com.example.invoiceperfect');
+    expect(result.environments.staging.ios?.bundleId).toBe('com.example.invoiceperfect.staging');
+    expect(result.environments.production.ios?.release?.build.expectedInfoPlist).toEqual(production.ios.release.build.expectedInfoPlist);
+    expect(result.environments.staging.ios?.release?.build.expectedInfoPlist).toEqual(staging.ios.release.build.expectedInfoPlist);
+  });
+
+  it('preserves absent expectations on existing specs', () => {
+    expect(environmentSpecSchema.parse(environment()).ios?.release?.build).not.toHaveProperty('expectedInfoPlist');
+  });
+
+  it('keeps exact public strings and literal keys within the declared bounds', () => {
+    const expectedInfoPlist = {
+      'com.example.app-environment': ' staging ',
+      API_BASE_URL: 'https://staging.invoiceperfect.com',
+      CFBundleShortVersionString: '1.2.3',
+      ['K'.repeat(128)]: 'v'.repeat(2048),
+      ...Object.fromEntries(Array.from({ length: 28 }, (_, index) => [`PublicSetting${index}`, 'value'])),
+    };
+    expect(environmentSpecSchema.parse(environment(expectedInfoPlist)).ios?.release?.build.expectedInfoPlist).toEqual(expectedInfoPlist);
+  });
+
+  it.each([
+    ['empty record', {}],
+    ['too many keys', Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`Setting${index}`, 'value']))],
+    ['empty key', { '': 'staging' }],
+    ['nonliteral key', { 'AppEnvironment:Nested': 'staging' }],
+    ['invalid first character', { _AppEnvironment: 'staging' }],
+    ['too long key', { ['K'.repeat(129)]: 'staging' }],
+    ['empty value', { AppEnvironment: '' }],
+    ['blank value', { AppEnvironment: '   ' }],
+    ['too long value', { AppEnvironment: 'v'.repeat(2049) }],
+    ['NUL', { AppEnvironment: 'stag\0ing' }],
+    ['control character', { AppEnvironment: 'stag\u0085ing' }],
+    ['unresolved Xcode setting', { APIBaseURL: '$(API_BASE_URL)' }],
+    ['unresolved variable', { APIBaseURL: '${API_BASE_URL}' }],
+    ['GitHub expression', { APIBaseURL: '${{ vars.API_BASE_URL }}' }],
+    ['managed bundle identity', { CFBundleIdentifier: 'com.example.invoiceperfect.staging' }],
+    ['managed build number', { CFBundleVersion: '42' }],
+    ['numeric value', { AppEnvironment: 42 }],
+    ['null record', null],
+    ['array record', ['staging']],
+  ])('rejects malformed expectations: %s', (_description, expectedInfoPlist) => {
+    expect(environmentSpecSchema.safeParse(environment(expectedInfoPlist)).success).toBe(false);
+  });
+
+  it('accepts promotion with reordered metadata keys without rewriting either declaration', () => {
+    const staging = environment({ AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com' });
+    const production = environment({ APIBaseURL: 'https://staging.invoiceperfect.com', AppEnvironment: 'staging' });
+    Object.assign(production.ios.release, { promoteFrom: 'staging', trigger: 'manual' });
+    const result = projectSpecSchema.parse({
+      version: 1, project: 'invoice-perfect', environments: { staging, production },
+    });
+    expect(Object.keys(result.environments.staging.ios!.release!.build.expectedInfoPlist!)).toEqual(['AppEnvironment', 'APIBaseURL']);
+    expect(Object.keys(result.environments.production.ios!.release!.build.expectedInfoPlist!)).toEqual(['APIBaseURL', 'AppEnvironment']);
+  });
+
+  it('rejects promoting a binary whose embedded environment contract differs', () => {
+    const staging = environment({ AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com' });
+    const production = environment({ AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com' });
+    Object.assign(production.ios.release, { promoteFrom: 'staging', trigger: 'manual' });
+    const spec = { version: 1, project: 'invoice-perfect', environments: { staging, production } };
+    expect(projectSpecSchema.safeParse(spec).success).toBe(true);
+    production.ios.release.build.expectedInfoPlist = {
+      AppEnvironment: 'production', APIBaseURL: 'https://invoiceperfect.com',
+    };
+    const result = projectSpecSchema.safeParse(spec);
+    expect(result.success).toBe(false);
+    expect(result.success ? '' : result.error.message).toContain('iOS promotion requires identical build');
   });
 });

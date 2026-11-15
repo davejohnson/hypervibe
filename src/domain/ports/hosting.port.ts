@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { serviceInstanceIntentsSchema } from './service-instance.port.js';
+import { dnsSpecSchema } from '../spec/dns.schema.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type {
@@ -46,9 +48,101 @@ export interface HostingCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+  /** Selected-key writes to exact bound services without creates or workload
+   * restarts; verified configuration is picked up by a later managed CI run. */
+  supportsDeferredSecretUpdates?: boolean;
+  credentialUpdateActivation?: 'deferred' | 'provider-rollout';
+  credentialValueEvidence?: 'readback' | 'acknowledgement';
+  registryCredentialModel?: 'native-workload-identity' | 'build-input';
+  registryCredentialGuidance?: string;
+  /** Enforces creation-only admission at the final provider mutation boundary. */
+  supportsCreateOnlyDeploy?: boolean;
+  /** Can prepare an untriggered cron workload and activate it after a verified CI release. */
+  supportsDeferredCronActivation?: boolean;
 
   /** Whether the adapter can provider-verify reversible workload suspension. */
   supportsMaintenance?: boolean;
+}
+
+/** Provider-owned private execution, using the existing one-off task lifecycle.
+ * Caller authority fixes the helper command, selected data sources and immutable
+ * image; providers validate references and current source identity before writes.
+ * A successful result must prove terminal execution and owned cleanup. */
+export interface ManagedRecoveryTaskOptions {
+  variableMode: 'references';
+  sweep: false;
+  expectedImage: string;
+  executionId: string;
+  databaseSource: import('./recovery-source.port.js').RecoverySourceIdentity;
+  variableReferences: Array<{ sourceServiceId: string; variableName: string; targetName: string }>;
+  /** Non-secret reviewed worker configuration; never application environment. */
+  variables: Record<string, string>;
+  /** Only selected destination/source storage credentials. No provider/admin token. */
+  selectedSecretValues?: Record<string, string>;
+  registryCredentials?: { username: string; token: string };
+}
+
+/** Closed, value-free evidence emitted by the reviewed database task program. */
+export const databaseTaskReceiptSchema = z.object({
+  version: z.literal(1), executionId: z.string().min(1).max(500), mode: z.enum(['authenticate', 'migrate']),
+  commandHash: z.string().regex(/^[a-f0-9]{64}$/), authentication: z.enum(['authenticated', 'rejected', 'unknown']),
+  migration: z.enum(['unchecked', 'completed', 'failed', 'unknown']), exitCode: z.number().int().min(0).max(255).optional(),
+}).strict();
+export type DatabaseTaskReceipt = z.infer<typeof databaseTaskReceiptSchema>;
+
+/** The caller stores this beside its encrypted, immutable private review. */
+export const databaseTaskCheckpointSchema = z.object({
+  version: z.literal(1),
+  /** Binds public identity/command/reference authority only, never secret hashes. */
+  authorityHash: z.string().regex(/^[a-f0-9]{64}$/),
+  phase: z.enum(['create-attempted', 'created', 'configure-attempted', 'configured',
+    'deploy-attempted', 'deployed', 'terminal', 'cleanup-attempted', 'complete']),
+  taskServiceId: z.string().min(1).max(500).optional(),
+  taskInstanceId: z.string().min(1).max(500).optional(),
+  deploymentId: z.string().min(1).max(500).optional(),
+  terminal: z.object({ status: z.enum(['succeeded', 'failed']), exitCode: z.number().int().min(0).max(255),
+    result: databaseTaskReceiptSchema.optional() }).strict().optional(),
+}).strict().superRefine((state, ctx) => {
+  if (state.phase !== 'create-attempted' && !state.taskServiceId
+    || !['create-attempted', 'created'].includes(state.phase) && !state.taskInstanceId
+    || ['deployed', 'terminal', 'cleanup-attempted', 'complete'].includes(state.phase) !== Boolean(state.deploymentId)
+    || ['terminal', 'cleanup-attempted', 'complete'].includes(state.phase) !== Boolean(state.terminal)
+    || state.phase === 'create-attempted' && (state.taskServiceId || state.taskInstanceId)) {
+    ctx.addIssue({ code: 'custom', message: 'Incomplete private task progress.' });
+  }
+});
+export type DatabaseTaskCheckpoint = z.infer<typeof databaseTaskCheckpointSchema>;
+
+export interface DatabaseTaskOptions {
+  mode: 'authenticate' | 'migrate';
+  source: import('./recovery-source.port.js').RecoverySourceIdentity;
+  variableReferences: Array<{ sourceServiceId: string; variableName: string; targetName: string }>;
+  commandHash: string;
+  /** Explicit non-secret application mode; other application variables are excluded. */
+  approvedVariables?: { NODE_ENV?: 'production' | 'development' | 'test' };
+  /** Passed only to the private task's native variables; encrypted by the caller. */
+  privateConfiguration: string;
+  state?: DatabaseTaskCheckpoint;
+  /** Save atomically, then independently reload. A missing/different readback blocks. */
+  persist: (next: DatabaseTaskCheckpoint) => Promise<DatabaseTaskCheckpoint>;
+}
+
+/** A reviewed named CI task; its application layer owns execution authority. */
+export interface EnvironmentTaskOptions {
+  /** Authoritative project repository context for image credential selection. */
+  gitRemoteUrl?: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  declaredTask?: {
+    variableMode: 'references';
+    sweep: false;
+    expectedImage: string;
+    registryCredentials?: { username: string; token: string };
+    executionId: string;
+    databaseTask?: DatabaseTaskOptions;
+  };
+  /** Hypervibe's reviewed immutable backup helper; never an application image. */
+  managedRecoveryTask?: ManagedRecoveryTaskOptions;
 }
 
 /**
@@ -76,9 +170,11 @@ export interface HostingBindings {
     imageUri?: string;
     workloadKind?: string;
     resourceType?: string;
+    resourceUid?: string;
     jobName?: string;
     schedulerJobName?: string;
     releaseJobName?: string;
+    scheduleActivation?: PendingScheduleActivation;
     source?: {
       repo?: string;
       branch?: string;
@@ -93,6 +189,16 @@ export interface HostingBindings {
   serviceCreateRecovery?: Record<string, HostingServiceCreateRecovery>;
 }
 
+/** Durable identity of a configured workload whose trigger is deliberately absent. */
+export const pendingScheduleActivationSchema = z.object({
+  version: z.literal(1),
+  state: z.literal('pending'),
+  jobName: z.string().trim().min(1),
+  jobUid: z.string().trim().min(1),
+  holdingImage: z.string().regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/),
+}).strict();
+export type PendingScheduleActivation = z.infer<typeof pendingScheduleActivationSchema>;
+
 export interface HostingServiceCreateRecovery {
   provider: string;
   operation: 'create';
@@ -104,7 +210,7 @@ export interface HostingServiceCreateRecovery {
 }
 
 const nonEmptyHostingBindingString = z.string().trim().min(1);
-const hostingProviderScopeSchema = z.record(nonEmptyHostingBindingString)
+const hostingProviderScopeSchema = z.record(z.string(), nonEmptyHostingBindingString)
   .refine(
     (scope) => Object.keys(scope).length > 0
       && Object.keys(scope).every((key) => key.trim().length > 0),
@@ -205,28 +311,30 @@ const hostingServiceBindingSchema = z.object({
   imageUri: z.string().optional(),
   workloadKind: z.string().optional(),
   resourceType: z.string().optional(),
+  resourceUid: nonEmptyHostingBindingString.optional(),
   jobName: nonEmptyHostingBindingString.optional(),
   schedulerJobName: nonEmptyHostingBindingString.optional(),
   releaseJobName: nonEmptyHostingBindingString.optional(),
+  scheduleActivation: pendingScheduleActivationSchema.optional(),
   source: z.object({
     repo: z.string().optional(),
     branch: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough();
 
-const hostingServicesSchema = z.record(hostingServiceBindingSchema)
+const hostingServicesSchema = z.record(z.string(), hostingServiceBindingSchema)
   .refine(
     (services) => Object.keys(services).every((name) => name.trim().length > 0),
     'Service binding names must not be empty.'
   );
 
-const serviceCreateRecoveryMapSchema = z.record(hostingServiceCreateRecoverySchema)
+const serviceCreateRecoveryMapSchema = z.record(z.string(), hostingServiceCreateRecoverySchema)
   .refine(
     (recoveries) => Object.keys(recoveries).every((name) => name.trim().length > 0),
     'Service-create recovery names must not be empty.'
   );
 
-const retainedProviderScopeSchema = z.record(nonEmptyHostingBindingString)
+const retainedProviderScopeSchema = z.record(z.string(), nonEmptyHostingBindingString)
   .refine(
     (scope) => Object.keys(scope).length > 0 && Object.keys(scope).every((key) => key.trim().length > 0),
     'Retained provider scope must contain non-empty keys and values.'
@@ -258,9 +366,14 @@ export const hostingBindingsSchema = z.object({
   providerScope: retainedProviderScopeSchema.optional(),
   services: hostingServicesSchema.optional(),
   serviceCreateRecovery: serviceCreateRecoveryMapSchema.optional(),
+  serviceInstanceCreates: serviceInstanceIntentsSchema.optional(),
   previousDatabase: previousDatabaseSchema.optional(),
   previousCache: previousCacheSchema.optional(),
   domainDns: z.object({
+    dnsEngineRemoved: z.boolean().optional(),
+    /** Fresh attachment awaiting its first DNS stage; this is not DNS ownership. */
+    dnsStagePending: z.boolean().optional(),
+    dnsSelection: dnsSpecSchema.optional(),
     name: z.string().optional(),
     proxied: z.boolean().optional(),
     recreateRevision: z.string().optional(),
@@ -276,7 +389,7 @@ export const hostingBindingsSchema = z.object({
       target: z.string(),
     }).strict()).optional(),
   }).passthrough().optional(),
-  maintenance: z.record(z.unknown()).optional(),
+  maintenance: z.record(z.string(), z.unknown()).optional(),
 }).passthrough().default({});
 
 export type ParsedHostingBindings = z.infer<typeof hostingBindingsSchema>;
@@ -297,6 +410,10 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
+  /** Read-only admission for an explicitly reviewed private database task. */
+  readonly databaseInitialization?: import('./database-initialization-bootstrap.port.js').IDatabaseInitializationBootstrap;
+  readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
   /** Platform capabilities */
@@ -368,7 +485,7 @@ export interface IHostingAdapter {
    * Disconnect a provider-native repository source so pushes cannot bypass
    * manual promotion or a Hypervibe-owned CI deployment workflow.
    */
-  disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
+  disconnectDeploySource?(params: { serviceId: string; projectId?: string; environmentId?: string }): Promise<Receipt>;
 
   /**
    * Get the current deployment status.
@@ -386,7 +503,8 @@ export interface IHostingAdapter {
   runJob?(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult>;
 
   /**
@@ -431,7 +549,7 @@ export interface IHostingAdapter {
    * Read back live state for an environment (services, config, env var
    * hashes, databases). Implemented when capabilities.supportsObserve is true.
    */
-  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
+  observe?(environment: Environment, context?: import('./observe.port.js').HostingObservationContext): Promise<import('./observe.port.js').ObservedState>;
 }
 
 /**

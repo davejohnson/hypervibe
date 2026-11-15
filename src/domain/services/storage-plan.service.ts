@@ -3,19 +3,22 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
-import type { IProviderAdapter } from '../ports/provider.port.js';
+import type { IProviderAdapter, IProviderLifecycleAdapter, Receipt } from '../ports/provider.port.js';
 import {
   createStorageCreateRecovery,
   parseStorageCreateRecovery,
   parseStorageCreateRecoveryMap,
   type StorageContext,
   type StorageCreateRecovery,
+  type StorageRuntimeTarget,
 } from '../ports/storage.port.js';
 import { withStorageInstanceScopes } from './storage-instance-identity.js';
 import { S3_STORAGE_RUNTIME_ENV_KEYS } from './storage-runtime-env.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
+import { providerRegistry } from '../registry/provider.registry.js';
+import { receiptRolloutBaseline } from './runtime-rollout.service.js';
 
 export const STORAGE_OPERATIONS = {
   ensure: 'storageEnsure',
@@ -37,6 +40,9 @@ export interface StorageBinding {
   region: string;
   services: string[];
   envKeys: string[];
+  /** Applied runtime projection per consumer; not proof of continuous remote secret absence. */
+  runtimeContracts?: Record<string, string>;
+  purpose?: 'backup';
   updatedAt?: string;
   dataMigration?: Record<string, unknown>;
   previousTarget?: {
@@ -186,6 +192,31 @@ function storageObservationKnown(observed: ObservedState | null, provider: strin
   return byProvider
     ? byProvider[provider] === 'complete'
     : observed.completeness?.storage !== 'unknown';
+}
+
+function storageRuntimeContract(provider: string, hostingProvider: string): string | undefined {
+  const version = providerRegistry.getMetadata(provider)?.storageRuntimeContract;
+  return version ? `${version}:${hostingProvider}` : undefined;
+}
+
+function requireAppliedStorageEnvUpdate(receipt: Receipt): Receipt {
+  return receipt.data?.skipped === true
+    ? { ...receipt, success: false, message: `Storage environment update was skipped: ${receipt.message}` }
+    : receipt;
+}
+
+/** Preserve pending rollout evidence for the exact storage consumer without
+ * forwarding arbitrary provider receipt data or claiming runtime activation. */
+function storageRuntimeRolloutData(receipt: Receipt, serviceName: string): Record<string, unknown> {
+  if (receipt.data?.runtimeRolloutRequired !== true) return {};
+  const baseline = receiptRolloutBaseline(receipt, serviceName) ?? { state: 'unknown' as const };
+  return {
+    services: [serviceName], runtimeRolloutRequired: true,
+    rolloutBaseline: { state: baseline.state,
+      ...(baseline.id ? { deploymentId: baseline.id } : {}),
+      ...(baseline.activeDeploymentIds ? { activeDeploymentIds: baseline.activeDeploymentIds } : {}) },
+    ...(receipt.data.deploymentDeferred === true ? { deploymentDeferred: true } : {}),
+  };
 }
 
 function boundServiceId(environment: Environment | null, serviceName: string): string | undefined {
@@ -412,7 +443,7 @@ export function planStorage(params: {
       : [];
     const nameCandidates = binding
       ? []
-      : live.filter((item) => item.name.toLowerCase() === name.toLowerCase());
+      : live.filter((item) => item.provider === spec.provider && item.name.toLowerCase() === name.toLowerCase());
     const observed = binding
       ? boundObserved.length === 1 ? boundObserved[0] : undefined
       : nameCandidates.length === 1 ? nameCandidates[0] : undefined;
@@ -506,8 +537,10 @@ export function planStorage(params: {
           : sameNameCandidates.length > 0
       ));
       const keys = binding?.envKeys ?? storageEnvKeys(name);
+      const runtimeContract = storageRuntimeContract(spec.provider, params.environmentSpec.hosting.provider);
       const wired = !serviceIdentityMismatch
         && binding?.services.includes(serviceName)
+        && (!runtimeContract || binding.runtimeContracts?.[serviceName] === runtimeContract)
         && keys.every((key) => observedService?.envVarKeys.includes(key));
       actions.push(action({
         id: `storage:${name}:wiring:${serviceName}`,
@@ -525,6 +558,7 @@ export function planStorage(params: {
         metadata: {
           serviceName,
           envKeys: keys,
+          ...(runtimeContract ? { runtimeContract } : {}),
           ...(serviceId ? { serviceId } : { serviceIdPending: true }),
           ...(serviceIdentityMismatch ? {
             blockedReason: 'service_binding_identity_mismatch',
@@ -571,6 +605,10 @@ export function planStorage(params: {
   for (const [name, binding] of Object.entries(bindings)) {
     if (desired[name]) continue;
     if (recoveries.parsed[name]) continue;
+    if (binding.purpose === 'backup') {
+      warnings.push(`Retaining backup storage "${name}" after its policy was removed. Backup exclusion never authorizes deleting recovery history.`);
+      continue;
+    }
     const observationKnown = storageObservationKnown(params.observed, binding.provider);
     if (params.observed && !observationKnown) {
       actions.push(action({
@@ -627,6 +665,30 @@ export function isStorageAction(planAction: PlanAction): boolean {
   return typeof planAction.metadata?.operation === 'string' && STORAGE_OPERATION_SET.has(planAction.metadata.operation);
 }
 
+async function storageRuntimeTarget(params: {
+  project: Project; environmentSpec: EnvironmentSpec; environment: Environment;
+  serviceName: string; connectionProvider?: string; usesWorkloadIdentity?: boolean;
+  hosting?: IProviderAdapter;
+}): Promise<StorageRuntimeTarget> {
+  const target: StorageRuntimeTarget = { hostingProvider: params.environmentSpec.hosting.provider,
+    connectionProvider: params.connectionProvider };
+  if (!params.usesWorkloadIdentity) return target;
+  const result = params.hosting ? { success: true, adapter: params.hosting }
+    : await adapterFactory.getProviderAdapter(target.hostingProvider, params.project);
+  if (!result.success || !result.adapter || result.adapter.name !== target.hostingProvider) {
+    throw new Error('Storage runtime identity requires the selected hosting connection.');
+  }
+  const hosting = result.adapter;
+  await hosting.configureTarget?.({ region: params.environmentSpec.hosting.region });
+  if (hosting.resolveRuntimeIdentity) {
+    const desired = params.environmentSpec.services[params.serviceName];
+    if (!desired) throw new Error('Storage runtime destination service is missing from the reviewed project.');
+    target.identity = await hosting.resolveRuntimeIdentity(params.environment, { name: params.serviceName,
+      buildConfig: { workloadKind: desired.workloadKind, cronSchedule: desired.cronSchedule } });
+  }
+  return target;
+}
+
 export async function resolveStorageServiceEnvVars(
   project: Project,
   environmentSpec: EnvironmentSpec,
@@ -646,8 +708,13 @@ export async function resolveStorageServiceEnvVars(
       ? { projectId: root.projectId, environmentId: root.environmentId }
       : undefined);
     if (!context) continue;
-    const vars = await adapterResult.adapter.getRuntimeEnv(environment, context, binding.externalId, name);
-    for (const serviceName of spec.injectInto) output[serviceName] = { ...(output[serviceName] ?? {}), ...vars };
+    for (const serviceName of spec.injectInto) {
+      const target = await storageRuntimeTarget({ project, environmentSpec, environment, serviceName,
+        connectionProvider: adapterResult.connectionProvider,
+        usesWorkloadIdentity: adapterResult.adapter.capabilities.usesWorkloadIdentity });
+      const vars = await adapterResult.adapter.getRuntimeEnv(environment, context, binding.externalId, name, target);
+      output[serviceName] = { ...(output[serviceName] ?? {}), ...vars };
+    }
   }
   return Object.keys(output).length > 0 ? output : undefined;
 }
@@ -963,6 +1030,7 @@ export async function applyStorageAction(params: {
           externalId: plannedExternalId,
           instanceScope: plannedContext,
           region: desired.region,
+          ...(desired.purpose ? { purpose: desired.purpose } : {}),
           services: [],
           envKeys: adapter.runtimeEnvKeys(name),
           updatedAt: new Date().toISOString(),
@@ -1042,6 +1110,7 @@ export async function applyStorageAction(params: {
         ? desired?.provider === params.action.resource.provider
             && Boolean(plannedService && desired.injectInto.includes(plannedService))
             && serviceTargetMatches
+            && params.action.metadata?.runtimeContract === storageRuntimeContract(params.action.resource.provider, params.environmentSpec.hosting.provider)
           : operation === STORAGE_OPERATIONS.unwire
             ? binding?.provider === params.action.resource.provider
               && Boolean(plannedService)
@@ -1166,6 +1235,9 @@ export async function applyStorageAction(params: {
         : undefined;
       return {
         success: false,
+        ...(!result.receipt.success && result.receipt.data?.pending === true
+          && returnedRecovery?.state === 'identified' && contextMatches && !persistenceError
+          ? { status: 'pending' as const } : {}),
         message: result.receipt.success
           ? `Storage provider returned an incomplete or inconsistent success for "${name}"`
           : result.receipt.message,
@@ -1210,6 +1282,7 @@ export async function applyStorageAction(params: {
         externalId,
         instanceScope: context,
         region: spec.region,
+        ...(spec.purpose ? { purpose: spec.purpose } : {}),
         services: latestBindings[name]?.services ?? [],
         envKeys: adapter.runtimeEnvKeys(name),
         updatedAt: new Date().toISOString(),
@@ -1239,7 +1312,7 @@ export async function applyStorageAction(params: {
   const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
   if (!service) return { success: false, message: `Service "${serviceName}" not found locally` };
   const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project);
-  const hosting = hostingResult.adapter as IProviderAdapter | undefined;
+  const hosting = hostingResult.adapter as (IProviderAdapter & Partial<IProviderLifecycleAdapter>) | undefined;
   if (!hostingResult.success || !hosting?.setEnvVars) return { success: false, message: 'Hosting adapter cannot sync storage variables', error: hostingResult.error };
   if (hosting.name !== params.environmentSpec.hosting.provider) {
     return {
@@ -1252,23 +1325,30 @@ export async function applyStorageAction(params: {
 
   if (operation === STORAGE_OPERATIONS.unwire) {
     const cleared = Object.fromEntries((binding.envKeys ?? storageEnvKeys(name)).map((key) => [key, '']));
-    const receipt = await hosting.setEnvVars(environment, service, cleared);
+    const receipt = requireAppliedStorageEnvUpdate(await hosting.setEnvVars(environment, service, cleared));
     if (receipt.success) {
       persist(environment, { ...bindings, [name]: { ...binding, services: binding.services.filter((item) => item !== serviceName) } }, contexts);
     }
-    return { success: receipt.success, message: receipt.success ? `Removed storage "${name}" access from "${serviceName}"` : receipt.message, error: receipt.error };
+    return { success: receipt.success, message: receipt.success ? `Removed storage "${name}" access from "${serviceName}"` : receipt.message, error: receipt.error,
+      data: receipt.success ? { serviceName, envKeys: Object.keys(cleared).sort(), ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data };
   }
 
-  const runtimeEnv = await adapter.getRuntimeEnv(environment, context, binding.externalId, name);
+  const runtimeTarget = await storageRuntimeTarget({ project: params.project, environmentSpec: params.environmentSpec,
+    environment, serviceName, hosting, connectionProvider: storageResult.connectionProvider,
+    usesWorkloadIdentity: adapter.capabilities.usesWorkloadIdentity });
+  const runtimeEnv = await adapter.getRuntimeEnv(environment, context, binding.externalId, name, runtimeTarget);
   const runtimeEnvKeys = Object.keys(runtimeEnv).sort();
-  const receipt = await hosting.setEnvVars(environment, service, runtimeEnv);
+  const receipt = requireAppliedStorageEnvUpdate(await hosting.setEnvVars(environment, service, runtimeEnv));
   if (receipt.success) {
-    persist(environment, { ...bindings, [name]: { ...binding, services: Array.from(new Set([...binding.services, serviceName])), envKeys: runtimeEnvKeys, updatedAt: new Date().toISOString() } }, contexts);
+    const runtimeContract = storageRuntimeContract(adapter.name, params.environmentSpec.hosting.provider);
+    persist(environment, { ...bindings, [name]: { ...binding, services: Array.from(new Set([...binding.services, serviceName])),
+      ...(runtimeContract ? { runtimeContracts: { ...binding.runtimeContracts, [serviceName]: runtimeContract } } : {}),
+      envKeys: runtimeEnvKeys, updatedAt: new Date().toISOString() } }, contexts);
   }
   return {
     success: receipt.success,
     message: receipt.success ? `Wired storage "${name}" to service "${serviceName}"` : receipt.message,
     error: receipt.error,
-    data: receipt.success ? { serviceName, envKeys: runtimeEnvKeys } : receipt.data,
+    data: receipt.success ? { serviceName, envKeys: runtimeEnvKeys, ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data,
   };
 }

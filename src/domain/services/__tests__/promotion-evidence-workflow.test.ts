@@ -4,9 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '../../../adapters/providers/railway/railway.adapter.js';
-import '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
 import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
-import { buildBranchDeployWorkflow } from '../github-ops.service.js';
+import {
+  buildBranchDeployWorkflow,
+  githubActionsWorkflowInputHash,
+} from '../github-ops.service.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
 import {
   MANAGED_CI_RELEASE_EVIDENCE_VERSION,
@@ -20,6 +23,8 @@ import {
 
 const SHA = '0123456789abcdef0123456789abcdef01234567';
 const WRONG_SHA = 'f'.repeat(40);
+const TRUSTED_HEAD_SHA = 'c'.repeat(40);
+const REPOSITORY = { id: 101, full_name: 'acme/promoted-app' };
 const SOURCE_WORKFLOW = '.github/workflows/deploy-railway-staging.yml';
 const EXPECTED_ARTIFACT = managedCiReleaseArtifactName('staging', SHA);
 const STEP_NAME = 'Verify promotion release evidence';
@@ -89,6 +94,7 @@ function productionTarget(): BranchDeployTarget {
     branch: 'main',
     autoDeployOnPush: false,
     promoteFromEnvironment: 'staging',
+    promoteFromBranch: 'main',
     promoteFromProvider: 'railway',
     promoteFromServiceNames: ['web', 'nightly'],
     promoteFromProgramFingerprint: PROGRAM_FINGERPRINT,
@@ -161,6 +167,11 @@ function sourceRun(headSha = SHA) {
   return {
     id: 41,
     head_sha: headSha,
+    head_branch: 'main',
+    event: 'workflow_dispatch',
+    status: 'completed',
+    repository: REPOSITORY,
+    head_repository: REPOSITORY,
     conclusion: 'success',
     path: SOURCE_WORKFLOW,
   };
@@ -171,23 +182,44 @@ function sourceArtifact() {
     id: 71,
     name: EXPECTED_ARTIFACT,
     expired: false,
-    workflow_run: { id: 41, head_sha: SHA },
+    workflow_run: { id: 41, head_sha: SHA, head_branch: 'main', repository_id: 101, head_repository_id: 101 },
   };
 }
 
 async function runPromotionGate(options: {
   runs: unknown[];
   artifacts?: unknown[];
+  branchRef?: unknown;
+  comparison?: unknown;
 }) {
-  const listWorkflowRuns = vi.fn(async () => ({
-    data: { workflow_runs: options.runs },
+  // Documented name filter and paging, not a recorded live response:
+  // https://docs.github.com/en/rest/actions/artifacts#list-artifacts-for-a-repository
+  const listArtifactsForRepo = vi.fn(async (request: { name: string; page: number; per_page: number }) => ({
+    data: { artifacts: (options.artifacts ?? [])
+      .filter((artifact) => (artifact as ReturnType<typeof sourceArtifact>).name === request.name)
+      .slice((request.page - 1) * request.per_page, request.page * request.per_page) },
   }));
-  const listWorkflowRunArtifacts = vi.fn(async () => ({
-    data: { artifacts: options.artifacts ?? [] },
+  const getWorkflowRun = vi.fn(async (request: { run_id: number }) => ({
+    data: options.runs.find((run) => (run as ReturnType<typeof sourceRun>).id === request.run_id) ?? {},
+  }));
+  // Reconstructed documented GitHub metadata, not captured provider responses.
+  // https://docs.github.com/en/rest/git/refs#get-a-reference
+  // https://docs.github.com/en/rest/commits/commits#compare-two-commits
+  const getRef = vi.fn(async () => ({ data: options.branchRef ?? {
+    ref: 'refs/heads/main', object: { type: 'commit', sha: TRUSTED_HEAD_SHA },
+  } }));
+  const comparisons: Record<string, unknown> = {
+    [SHA + '...' + TRUSTED_HEAD_SHA]: { status: 'ahead', base_commit: { sha: SHA }, merge_base_commit: { sha: SHA } },
+    [WRONG_SHA + '...' + TRUSTED_HEAD_SHA]: { status: 'ahead', base_commit: { sha: WRONG_SHA }, merge_base_commit: { sha: WRONG_SHA } },
+  };
+  const compareCommitsWithBasehead = vi.fn(async (request: { basehead: string }) => ({
+    data: options.comparison ?? comparisons[request.basehead] ?? {},
   }));
   const github = {
     rest: {
-      actions: { listWorkflowRuns, listWorkflowRunArtifacts },
+      actions: { listArtifactsForRepo, getWorkflowRun },
+      git: { getRef },
+      repos: { compareCommitsWithBasehead },
     },
   };
   const core = { info: vi.fn(), setOutput: vi.fn() };
@@ -205,12 +237,13 @@ async function runPromotionGate(options: {
       env: {
         HYPERVIBE_PROMOTE_FROM_ENVIRONMENT: 'staging',
         HYPERVIBE_PROMOTE_FROM_WORKFLOW: SOURCE_WORKFLOW,
+        HYPERVIBE_PROMOTE_FROM_BRANCH: 'main',
         HYPERVIBE_PROMOTION_SHA: SHA,
       },
     },
     core
   );
-  return { result, github, core, listWorkflowRuns, listWorkflowRunArtifacts };
+  return { result, github, core, listArtifactsForRepo, getWorkflowRun, getRef, compareCommitsWithBasehead };
 }
 
 async function runPromotionContentValidation(evidence: unknown) {
@@ -360,19 +393,11 @@ describe('generated managed-CI promotion evidence gate', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('rejects promotion through a provider without verifiable immutable artifacts', () => {
+  it('requires a reviewed source branch before rendering promotion', () => {
     const target = productionTarget();
-    target.providerProjectId = 'do-app';
-    target.providerEnvironmentId = undefined;
-    target.providerServiceIds = ['do-app:services:web', 'do-app:jobs:nightly'];
-
-    expect(() => buildBranchDeployWorkflow(
-      'digitalocean',
-      target,
-      { includeStep: false }
-    )).toThrow(
-      'Promotion to production is unavailable because provider "digitalocean" does not expose a verifiable immutable artifact.'
-    );
+    delete target.promoteFromBranch;
+    expect(() => buildBranchDeployWorkflow('railway', target, { includeStep: false }))
+      .toThrow('has no reviewed source branch');
   });
 
   it('writes exact source release evidence that the promotion consumer accepts', async () => {
@@ -445,8 +470,17 @@ describe('generated managed-CI promotion evidence gate', () => {
       programFingerprint: PROGRAM_FINGERPRINT,
       verifiedAt: expect.any(String),
     });
+    const discovered = await runPromotionGate({
+      runs: [sourceRun(WRONG_SHA)],
+      artifacts: [{ ...sourceArtifact(), workflow_run: { ...sourceArtifact().workflow_run, head_sha: WRONG_SHA } }],
+    });
+    await expect(discovered.result).resolves.toBeUndefined();
     const consumed = await runPromotionContentValidation(producedEvidence);
     await expect(consumed.result).resolves.toBeUndefined();
+    const wrongSource = await runPromotionContentValidation({
+      ...producedEvidence, source: { ...producedEvidence.source, sha: WRONG_SHA },
+    });
+    await expect(wrongSource.result).rejects.toThrow(EVIDENCE_MISMATCH);
   });
 
   it('feeds v4 producer evidence to rollback and rejects exact contract or resource drift', async () => {
@@ -547,19 +581,17 @@ describe('generated managed-CI promotion evidence gate', () => {
     const gate = await runPromotionGate({ runs: [sourceRun()], artifacts: [sourceArtifact()] });
 
     await expect(gate.result).resolves.toBeUndefined();
-    expect(gate.listWorkflowRuns).toHaveBeenCalledWith({
+    expect(gate.listArtifactsForRepo).toHaveBeenCalledWith({
       owner: 'acme',
       repo: 'promoted-app',
-      workflow_id: SOURCE_WORKFLOW,
-      head_sha: SHA,
-      status: 'success',
-      per_page: 20,
+      name: EXPECTED_ARTIFACT,
+      per_page: 100,
+      page: 1,
     });
-    expect(gate.listWorkflowRunArtifacts).toHaveBeenCalledWith({
+    expect(gate.getWorkflowRun).toHaveBeenCalledWith({
       owner: 'acme',
       repo: 'promoted-app',
       run_id: 41,
-      per_page: 100,
     });
     expect(gate.core.info).toHaveBeenCalledWith(
       `Verified staging release evidence for ${SHA} from ${SOURCE_WORKFLOW} run 41 artifact 71`
@@ -568,69 +600,225 @@ describe('generated managed-CI promotion evidence gate', () => {
     expect(gate.core.setOutput).toHaveBeenCalledWith('run_id', '41');
   });
 
+  it('accepts an exact deployed commit when dispatch used a different workflow ref commit', async () => {
+    // Reconstructed GitHub responses: workflow_dispatch uses the selected ref's
+    // last commit, independently of custom inputs.commit_sha; head_sha filters
+    // the workflow run, not the deployed source recorded in our release artifact.
+    // https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch
+    // https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow
+    const gate = await runPromotionGate({
+      runs: [sourceRun(WRONG_SHA)],
+      artifacts: [{ ...sourceArtifact(), workflow_run: { ...sourceArtifact().workflow_run, head_sha: WRONG_SHA } }],
+    });
+
+    await expect(gate.result).resolves.toBeUndefined();
+    expect(gate.core.setOutput).toHaveBeenCalledWith('artifact_id', '71');
+    expect(gate.core.setOutput).toHaveBeenCalledWith('run_id', '41');
+    const validation = await runPromotionContentValidation(validReleaseEvidence());
+    await expect(validation.result).resolves.toBeUndefined();
+  });
+
+  it('rejects an unreviewed feature workflow even when forged evidence copies public fingerprints', async () => {
+    // The evidence format is a content contract, not producer authentication.
+    const forged = validReleaseEvidence();
+    for (const resource of forged.target.resources) {
+      resource.imageUri = `ghcr.io/acme/promoted-app@sha256:${'9'.repeat(64)}`;
+    }
+    await expect((await runPromotionContentValidation(forged)).result).resolves.toBeUndefined();
+    const gate = await runPromotionGate({
+      runs: [{ ...sourceRun(WRONG_SHA), head_branch: 'feature/unreviewed-workflow' }],
+      artifacts: [{ ...sourceArtifact(), workflow_run: {
+        ...sourceArtifact().workflow_run, head_sha: WRONG_SHA, head_branch: 'feature/unreviewed-workflow',
+      } }],
+    });
+    await expect(gate.result).rejects.toThrow('No unexpired Hypervibe');
+    expect(gate.core.setOutput).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing branch', { head_branch: undefined }],
+    ['unfinished run', { status: 'in_progress' }],
+    ['pull request', { event: 'pull_request' }],
+    ['pull request target', { event: 'pull_request_target' }],
+    ['another repository', { repository: { id: 202, full_name: 'other/promoted-app' } }],
+    ['fork with same branch name', { head_repository: { id: 202, full_name: 'fork/promoted-app' } }],
+    ['missing repository identity', { repository: undefined }],
+    ['mismatched repository ID', { head_repository: { ...REPOSITORY, id: 202 } }],
+  ])('rejects producer provenance: %s', async (_label, runChanges) => {
+    const gate = await runPromotionGate({ runs: [{ ...sourceRun(), ...runChanges }], artifacts: [sourceArtifact()] });
+    await expect(gate.result).rejects.toThrow('No unexpired Hypervibe');
+    expect(gate.core.setOutput).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['branch mismatch', { head_branch: 'feature/unreviewed-workflow' }],
+    ['repository mismatch', { repository_id: 202 }],
+    ['head repository mismatch', { head_repository_id: 202 }],
+    ['missing repository identity', { repository_id: undefined }],
+  ])('rejects artifact producer metadata: %s', async (_label, metadata) => {
+    const gate = await runPromotionGate({ runs: [sourceRun()], artifacts: [{ ...sourceArtifact(),
+      workflow_run: { ...sourceArtifact().workflow_run, ...metadata },
+    }] });
+    await expect(gate.result).rejects.toThrow('No unexpired Hypervibe');
+    expect(gate.core.setOutput).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unmerged SHA behind a same-named tag', { status: 'diverged', base_commit: { sha: SHA }, merge_base_commit: { sha: WRONG_SHA } }],
+    ['producer ahead of trusted branch', { status: 'behind', base_commit: { sha: SHA }, merge_base_commit: { sha: TRUSTED_HEAD_SHA } }],
+    ['missing comparison', {}],
+    ['wrong comparison base', { status: 'ahead', base_commit: { sha: WRONG_SHA }, merge_base_commit: { sha: SHA } }],
+    ['wrong merge base', { status: 'ahead', base_commit: { sha: SHA }, merge_base_commit: { sha: WRONG_SHA } }],
+  ])('requires producer membership in the exact source branch: %s', async (_label, comparison) => {
+    const gate = await runPromotionGate({ runs: [sourceRun()], artifacts: [sourceArtifact()], comparison });
+    await expect(gate.result).rejects.toThrow('No unexpired Hypervibe');
+    expect(gate.core.setOutput).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { ref: 'refs/tags/main', object: { type: 'commit', sha: TRUSTED_HEAD_SHA } },
+    { ref: 'refs/heads/main', object: { type: 'tag', sha: TRUSTED_HEAD_SHA } },
+    { ref: 'refs/heads/main', object: { type: 'commit', sha: 'short' } },
+    {},
+  ])('fails closed on an unverified source branch reference %#', async (branchRef) => {
+    const gate = await runPromotionGate({ runs: [sourceRun()], artifacts: [sourceArtifact()], branchRef });
+    await expect(gate.result).rejects.toThrow('Promotion source branch');
+    expect(gate.core.setOutput).not.toHaveBeenCalled();
+  });
+
+  it('accepts the exact trusted branch head from a push as well as older dispatched workflow commits', async () => {
+    const gate = await runPromotionGate({
+      runs: [{ ...sourceRun(TRUSTED_HEAD_SHA), event: 'push' }],
+      artifacts: [{ ...sourceArtifact(), workflow_run: { ...sourceArtifact().workflow_run, head_sha: TRUSTED_HEAD_SHA } }],
+      comparison: { status: 'identical', base_commit: { sha: TRUSTED_HEAD_SHA }, merge_base_commit: { sha: TRUSTED_HEAD_SHA } },
+    });
+    await expect(gate.result).resolves.toBeUndefined();
+    expect(gate.getRef).toHaveBeenCalledWith({ owner: 'acme', repo: 'promoted-app', ref: 'heads/main' });
+    expect(gate.compareCommitsWithBasehead).toHaveBeenCalledWith({
+      owner: 'acme', repo: 'promoted-app', basehead: TRUSTED_HEAD_SHA + '...' + TRUSTED_HEAD_SHA, per_page: 1,
+    });
+  });
+
+  it('skips an untrusted newer artifact and selects the trusted release for the same deployed SHA', async () => {
+    const gate = await runPromotionGate({
+      runs: [{ ...sourceRun(), id: 40, head_branch: 'feature/unreviewed-workflow' }, sourceRun()],
+      artifacts: [{ ...sourceArtifact(), id: 70, workflow_run: {
+        ...sourceArtifact().workflow_run, id: 40, head_branch: 'feature/unreviewed-workflow',
+      } }, sourceArtifact()],
+    });
+    await expect(gate.result).resolves.toBeUndefined();
+    expect(gate.core.setOutput).toHaveBeenCalledWith('artifact_id', '71');
+    expect(gate.getWorkflowRun).toHaveBeenCalledTimes(2);
+  });
+
+  it('discovers an unexpired exact release after a full artifact page', async () => {
+    const gate = await runPromotionGate({
+      runs: [sourceRun(WRONG_SHA)],
+      artifacts: [
+        ...Array.from({ length: 100 }, (_, index) => ({ ...sourceArtifact(), id: index + 100, expired: true })),
+        { ...sourceArtifact(), workflow_run: { ...sourceArtifact().workflow_run, head_sha: WRONG_SHA } },
+      ],
+    });
+
+    await expect(gate.result).resolves.toBeUndefined();
+    expect(gate.listArtifactsForRepo).toHaveBeenCalledTimes(2);
+    expect(gate.listArtifactsForRepo).toHaveBeenLastCalledWith({
+      owner: 'acme', repo: 'promoted-app', name: EXPECTED_ARTIFACT, per_page: 100, page: 2,
+    });
+    expect(gate.getWorkflowRun).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when artifact discovery exceeds its bounded search', async () => {
+    const gate = await runPromotionGate({
+      runs: [sourceRun()],
+      artifacts: Array.from({ length: 1000 }, (_, index) => ({ ...sourceArtifact(), id: index + 100, expired: true })),
+    });
+
+    await expect(gate.result).rejects.toThrow('Promotion artifact search exceeded its 1000-artifact limit');
+    expect(gate.listArtifactsForRepo).toHaveBeenCalledTimes(10);
+    expect(gate.core.setOutput).not.toHaveBeenCalled();
+  });
+
+  it('requires reviewed publication for promotion workflows while preserving other workflow locks', () => {
+    const target = productionTarget();
+    delete target.programFingerprint;
+    delete target.deploymentContractFingerprint;
+    const migration = { includeStep: false };
+    // Accepted input hash after the first discovery fix; keep its literal
+    // promotion revision independent of runtime constants.
+    const previousHash = (inputTarget: BranchDeployTarget) => canonicalJsonSha256({
+      version: 1, rendererRevision: 7,
+      ...(inputTarget.promoteFromEnvironment ? { promotionRendererRevision: 1 } : {}),
+      provider: 'railway', target: inputTarget, migration,
+    });
+    expect(githubActionsWorkflowInputHash({ provider: 'railway', target, migration })).not.toBe(previousHash(target));
+    delete target.promoteFromEnvironment;
+    expect(githubActionsWorkflowInputHash({ provider: 'railway', target, migration })).toBe(previousHash(target));
+  });
+
   it.each([
     {
       label: 'missing artifact',
       runs: [sourceRun()],
       artifacts: [],
       expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: true,
+      observesRun: false,
     },
     {
-      label: 'run SHA',
+      label: 'run SHA differing from artifact workflow SHA',
       runs: [sourceRun(WRONG_SHA)],
       artifacts: [sourceArtifact()],
-      expectedError: `No successful staging deployment of ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: false,
+      expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
+      observesRun: true,
     },
     {
       label: 'workflow path',
       runs: [{ ...sourceRun(), path: '.github/workflows/unreviewed.yml' }],
       artifacts: [sourceArtifact()],
-      expectedError: `No successful staging deployment of ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: false,
+      expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
+      observesRun: true,
     },
     {
       label: 'run conclusion',
       runs: [{ ...sourceRun(), conclusion: 'failure' }],
       artifacts: [sourceArtifact()],
-      expectedError: `No successful staging deployment of ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: false,
+      expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
+      observesRun: true,
     },
     {
       label: 'artifact expiry',
       runs: [sourceRun()],
       artifacts: [{ ...sourceArtifact(), expired: true }],
       expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: true,
+      observesRun: false,
     },
     {
       label: 'artifact workflow run',
       runs: [sourceRun()],
-      artifacts: [{ ...sourceArtifact(), workflow_run: { id: 42, head_sha: SHA } }],
+      artifacts: [{ ...sourceArtifact(), workflow_run: { ...sourceArtifact().workflow_run, id: 42 } }],
       expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: true,
+      observesRun: true,
     },
     {
       label: 'artifact workflow SHA',
       runs: [sourceRun()],
-      artifacts: [{ ...sourceArtifact(), workflow_run: { id: 41, head_sha: WRONG_SHA } }],
+      artifacts: [{ ...sourceArtifact(), workflow_run: { ...sourceArtifact().workflow_run, head_sha: WRONG_SHA } }],
       expectedError: `No unexpired Hypervibe staging release artifact for ${SHA} was found in ${SOURCE_WORKFLOW}`,
-      observesArtifacts: true,
+      observesRun: true,
     },
   ])('rejects promotion with mismatched $label provenance', async ({
     runs,
     artifacts,
     expectedError,
-    observesArtifacts,
+    observesRun,
   }) => {
     const gate = await runPromotionGate({ runs, artifacts });
 
     await expect(gate.result).rejects.toThrow(expectedError);
-    if (observesArtifacts) {
-      expect(gate.listWorkflowRunArtifacts).toHaveBeenCalledOnce();
+    if (observesRun) {
+      expect(gate.getWorkflowRun).toHaveBeenCalledOnce();
     } else {
-      expect(gate.listWorkflowRunArtifacts).not.toHaveBeenCalled();
+      expect(gate.getWorkflowRun).not.toHaveBeenCalled();
     }
     expect(gate.core.setOutput).not.toHaveBeenCalled();
   });

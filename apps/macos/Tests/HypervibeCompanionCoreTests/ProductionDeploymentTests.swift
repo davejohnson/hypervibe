@@ -115,11 +115,11 @@ struct ProductionDeploymentTests {
             {
               "ok": true,
               "data": {
-                "ciProvider": "gitlab-ci",
+                "ciProvider": "github-actions",
                 "definitions": [{
-                  "id": ".gitlab-ci.yml",
-                  "name": "GitLab pipeline",
-                  "path": ".gitlab-ci.yml",
+                  "id": "deploy.yml",
+                  "name": "Deploy environments",
+                  "path": ".github/workflows/deploy.yml",
                   "state": "active"
                 }]
               }
@@ -149,7 +149,7 @@ struct ProductionDeploymentTests {
         let legacyCatalog = try HypervibeResponseMapper.decodeCIDefinitionCatalog(legacy)
 
         #expect(canonicalCatalog.usesCanonicalBindings)
-        #expect(canonicalCatalog.definitions.first?.id == ".gitlab-ci.yml")
+        #expect(canonicalCatalog.definitions.first?.id == "deploy.yml")
         #expect(!legacyCatalog.usesCanonicalBindings)
         #expect(legacyCatalog.definitions.first?.id == "42")
     }
@@ -215,9 +215,9 @@ struct ProductionDeploymentTests {
     func canonicalSharedCIDefinitionCarriesExactShaAndEnvironment() throws {
         let sha = String(repeating: "a", count: 40)
         let definition = CIDefinitionSummary(
-            id: ".gitlab-ci.yml",
-            name: "GitLab pipeline",
-            path: ".gitlab-ci.yml",
+            id: "deploy.yml",
+            name: "Deploy environments",
+            path: ".github/workflows/deploy.yml",
             state: "active"
         )
         let preparation = ProductionDeploymentPreparation(
@@ -238,7 +238,7 @@ struct ProductionDeploymentTests {
         )
         let inputs = try #require(arguments["inputs"]?.objectValue)
 
-        #expect(arguments["definition"]?.stringValue == ".gitlab-ci.yml")
+        #expect(arguments["definition"]?.stringValue == "deploy.yml")
         #expect(arguments["ref"]?.stringValue == "main")
         #expect(arguments["sha"]?.stringValue == sha)
         #expect(inputs["commit_sha"]?.stringValue == sha)

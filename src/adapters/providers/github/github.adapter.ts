@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { createRequire } from 'module';
+import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
+import { githubPackageReadCredentialUpdate } from './github-credential-update.js';
 import {
   providerRegistry,
   type ProviderInspectionRequest,
@@ -7,8 +9,6 @@ import {
 
 const GITHUB_API_URL = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
-const GITHUB_PAGES_HEALTH_ATTEMPTS = 3;
-const GITHUB_PAGES_HEALTH_RETRY_MS = 1_000;
 const require = createRequire(import.meta.url);
 
 function encodeFileContent(content: string): string {
@@ -44,65 +44,9 @@ export interface GitHubUser {
 export interface GitHubVerifyResult {
   success: boolean;
   error?: string;
+  id?: number;
   login?: string;
   scopes?: string[];
-}
-
-export interface GitHubPagesConfig {
-  url?: string;
-  html_url?: string;
-  status?: string;
-  cname?: string | null;
-  custom_404: boolean;
-  https_enforced?: boolean;
-  public: boolean;
-  source?: {
-    branch: string;
-    path: string;
-  };
-  build_type?: string;
-  https_certificate?: {
-    state: string;
-    description: string;
-    domains: string[];
-    expires_at?: string;
-  };
-  protected_domain_state?: string | null;
-  pending_domain_unverified_at?: string | null;
-}
-
-export interface GitHubPagesDomainHealth {
-  host?: string;
-  uri?: string;
-  nameservers?: string;
-  dns_resolves?: boolean;
-  is_proxied?: boolean;
-  is_cloudflare_ip?: boolean;
-  is_fastly_ip?: boolean;
-  is_old_ip_address?: boolean;
-  is_a_record?: boolean;
-  has_cname_record?: boolean;
-  has_mx_records_present?: boolean;
-  is_valid_domain?: boolean;
-  is_apex_domain?: boolean;
-  should_be_a_record?: boolean;
-  is_cname_to_github_user_domain?: boolean;
-  is_cname_to_pages_dot_github_dot_com?: boolean;
-  is_cname_to_fastly?: boolean;
-  is_pointed_to_github_pages_ip?: boolean;
-  is_non_github_pages_ip_present?: boolean;
-  is_https_eligible?: boolean;
-  is_served_by_pages?: boolean;
-  is_valid?: boolean;
-  responds_to_https?: boolean;
-  enforces_https?: boolean;
-  https_error?: string | null;
-  caa_error?: string | null;
-}
-
-export interface GitHubPagesHealthCheck {
-  domain?: GitHubPagesDomainHealth;
-  alt_domain?: GitHubPagesDomainHealth | null;
 }
 
 export interface GitHubLabel {
@@ -158,11 +102,30 @@ export class GitHubAdapter {
     this.credentials = credentials as GitHubCredentials;
   }
 
+  async inspectRepositoryVariables(scope: string, name: string | undefined, limit: number): Promise<Record<string, unknown>> {
+    const resource = 'repository-variable';
+    try {
+      if (!this.credentials) throw new Error('Unconnected');
+      const { GitHubRepositoryVariablesAdapter } = await import('./github-repository-variables.adapter.js');
+      const variables = new GitHubRepositoryVariablesAdapter(this.credentials);
+      const selected = name === undefined ? undefined : variables.normalizeName(name);
+      const observed = await variables.observe(scope);
+      if (observed.state !== 'present') return { resource, observation: 'unknown', variables: [], truncated: false, partial: true,
+        reason: 'Complete repository-variable inventory could not be verified.' };
+      const matches = selected ? observed.value.variables.filter(variable => variable.name === selected) : observed.value.variables;
+      return { resource, observation: matches.length ? 'present' : 'absent',
+        repositoryId: observed.value.repository.nativeId, repository: observed.value.repository.path,
+        observedAt: observed.value.observedAt, variables: matches.slice(0, limit).map(variable => ({ id: variable.name, ...variable })),
+        truncated: matches.length > limit, partial: false };
+    } catch { return { resource, observation: 'unknown', variables: [], truncated: false, partial: true,
+      reason: 'Repository-variable inspection could not be verified.' }; }
+  }
+
   private async request<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     endpoint: string,
     body?: Record<string, unknown>,
-    responseOptions?: { acceptEmpty202?: boolean }
+    responseOptions?: { acceptEmpty202?: boolean; acceptEmpty201?: boolean; expectedStatus?: number }
   ): Promise<T> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -204,7 +167,11 @@ export class GitHubAdapter {
       throw new GitHubApiError(errorMessage, response.status, documentationUrl);
     }
 
-    if (response.status === 204 || (response.status === 202 && responseOptions?.acceptEmpty202)) {
+    if (responseOptions?.expectedStatus !== undefined && response.status !== responseOptions.expectedStatus) {
+      throw new GitHubApiError('GitHub returned an unexpected acknowledgment', response.status);
+    }
+    if (response.status === 204 || (response.status === 202 && responseOptions?.acceptEmpty202)
+      || (response.status === 201 && responseOptions?.acceptEmpty201)) {
       return {} as T;
     }
 
@@ -251,6 +218,8 @@ export class GitHubAdapter {
       }
       const response = await fetch(`${GITHUB_API_URL}/user`, {
         method: 'GET',
+        redirect: 'error',
+        signal: AbortSignal.timeout(10_000),
         headers: {
           Authorization: `Bearer ${this.credentials.apiToken}`,
           Accept: 'application/vnd.github+json',
@@ -274,64 +243,10 @@ export class GitHubAdapter {
         .split(',')
         .map((scope) => scope.trim())
         .filter(Boolean);
-      return { success: true, login: user.login, ...(scopes.length > 0 ? { scopes } : {}) };
+      return { success: true, login: user.login, ...(typeof user.id === 'number' ? { id: user.id } : {}), ...(scopes.length > 0 ? { scopes } : {}) };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
-  }
-
-  async getPagesConfig(owner: string, repo: string): Promise<GitHubPagesConfig | null> {
-    try {
-      return await this.request<GitHubPagesConfig>('GET', `/repos/${owner}/${repo}/pages`);
-    } catch (error) {
-      // 404 means Pages is not enabled (GitHub returns "Not Found" message)
-      if (isGitHubNotFound(error)) {
-        return null;
-      }
-      throw error;
-    }
-  }
-
-  async getPagesHealthCheck(owner: string, repo: string): Promise<GitHubPagesHealthCheck> {
-    for (let attempt = 0; attempt < GITHUB_PAGES_HEALTH_ATTEMPTS; attempt += 1) {
-      const health = await this.request<GitHubPagesHealthCheck>(
-        'GET',
-        `/repos/${owner}/${repo}/pages/health`,
-        undefined,
-        { acceptEmpty202: true }
-      );
-      if (health.domain || health.alt_domain) return health;
-      if (attempt < GITHUB_PAGES_HEALTH_ATTEMPTS - 1) {
-        await new Promise((resolve) => setTimeout(resolve, GITHUB_PAGES_HEALTH_RETRY_MS));
-      }
-    }
-    throw new GitHubApiError('GitHub Pages DNS health check is still pending', 202);
-  }
-
-  async createPagesSite(
-    owner: string,
-    repo: string,
-    options: { buildType: 'workflow' }
-  ): Promise<void> {
-    await this.request<unknown>('POST', `/repos/${owner}/${repo}/pages`, {
-      build_type: options.buildType,
-    });
-  }
-
-  async updatePagesSite(
-    owner: string,
-    repo: string,
-    config: { buildType?: 'workflow'; cname?: string | null; httpsEnforced?: boolean }
-  ): Promise<void> {
-    await this.request<void>('PUT', `/repos/${owner}/${repo}/pages`, {
-      ...(config.buildType ? { build_type: config.buildType } : {}),
-      ...(config.cname !== undefined ? { cname: config.cname } : {}),
-      ...(config.httpsEnforced !== undefined ? { https_enforced: config.httpsEnforced } : {}),
-    });
-  }
-
-  async deletePagesSite(owner: string, repo: string): Promise<void> {
-    await this.request<void>('DELETE', `/repos/${owner}/${repo}/pages`);
   }
 
   /**
@@ -362,6 +277,21 @@ export class GitHubAdapter {
     };
   }> {
     return this.request('GET', `/repos/${owner}/${repo}`);
+  }
+
+  async listRepositoryVariablePage(owner: string, repo: string, page: number): Promise<unknown> {
+    return this.request('GET', `/repos/${owner}/${repo}/actions/variables?per_page=30&page=${page}`,
+      undefined, { expectedStatus: 200 });
+  }
+
+  async createRepositoryVariable(owner: string, repo: string, name: string, value: string): Promise<void> {
+    await this.request('POST', `/repos/${owner}/${repo}/actions/variables`, { name, value },
+      { expectedStatus: 201, acceptEmpty201: true });
+  }
+
+  async updateRepositoryVariable(owner: string, repo: string, name: string, value: string): Promise<void> {
+    await this.request('PATCH', `/repos/${owner}/${repo}/actions/variables/${encodeURIComponent(name)}`,
+      { name, value }, { expectedStatus: 204 });
   }
 
   async getRef(owner: string, repo: string, ref: string): Promise<{ ref: string; object: { sha: string } } | null> {
@@ -512,6 +442,58 @@ export class GitHubAdapter {
     return response.secrets.map((secret) => secret.name);
   }
 
+  /** Inventory is strictly read-only. A 404 alone cannot distinguish hidden
+   * resources from deleted ones; absence requires a complete environment list. */
+  async observeSecretInventory(owner: string, repo: string, environmentName?: string): Promise<{
+    state: 'present' | 'absent' | 'unknown';
+    environmentId?: number;
+    secrets: Array<{ name: string; created_at: string; updated_at: string }>;
+  }> {
+    try {
+      const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+      const identitySchema = z.object({ id: z.number().int().positive().safe(), name: z.string().min(1) });
+      const secretSchema = z.object({ name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+        created_at: z.string().datetime({ offset: true }), updated_at: z.string().datetime({ offset: true }) });
+      const list = async <T>(endpoint: string, field: string, schema: z.ZodType<T>, identity: (item: T) => string): Promise<T[]> => {
+        const result: T[] = []; const seen = new Set<string>(); let total: number | undefined;
+        for (let page = 1; page <= 10; page++) {
+          const response = z.object({ total_count: z.number().int().min(0).max(1000),
+            [field]: z.array(schema).max(100) }).parse(await this.request('GET', `${endpoint}?per_page=100&page=${page}`));
+          const count = response.total_count as number;
+          if (total !== undefined && total !== count) throw new Error('Inventory changed');
+          total = count;
+          const items = response[field] as T[];
+          for (const item of items) {
+            const key = identity(item).toLowerCase();
+            if (seen.has(key)) throw new Error('Duplicate identity');
+            seen.add(key); result.push(item);
+          }
+          if (result.length > total) throw new Error('Invalid count');
+          if (result.length === total) return result;
+          if (items.length < 100) throw new Error('Incomplete inventory');
+        }
+        throw new Error('Inventory limit');
+      };
+      let environment: z.infer<typeof identitySchema> | undefined;
+      if (environmentName !== undefined) {
+        const environments = await list(`${base}/environments`, 'environments', identitySchema, item => item.name);
+        environment = environments.find(item => item.name.toLowerCase() === environmentName.toLowerCase());
+        if (!environment) return { state: 'absent', secrets: [] };
+      }
+      const scope = environment ? `${base}/environments/${encodeURIComponent(environment.name)}` : `${base}/actions`;
+      const secrets = await list(`${scope}/secrets`, 'secrets', secretSchema, item => item.name);
+      if (environment) {
+        const current = identitySchema.parse(await this.request('GET', scope));
+        if (current.id !== environment.id || current.name.toLowerCase() !== environment.name.toLowerCase()) {
+          throw new Error('Environment replaced');
+        }
+      }
+      return { state: 'present', ...(environment ? { environmentId: environment.id } : {}), secrets };
+    } catch {
+      return { state: 'unknown', secrets: [] };
+    }
+  }
+
   async getVulnerabilityAlertsEnabled(owner: string, repo: string): Promise<boolean> {
     try {
       await this.request('GET', `/repos/${owner}/${repo}/vulnerability-alerts`);
@@ -622,6 +604,73 @@ export class GitHubAdapter {
     }
   }
 
+  /** Read-only, value-free evidence for an existing alternate iOS build scope. */
+  async observeBuildCredentialsEnvironment(
+    owner: string,
+    repo: string,
+    environmentName: string,
+    requiredSecretNames: readonly string[]
+  ): Promise<{ id: number; name: string; secretNames: string[]; customProtectionRuleIds: number[] }> {
+    const failure = 'Cannot verify the existing GitHub build credentials environment.';
+    try {
+      const key = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+      const requested = z.array(key).max(1000).parse(requiredSecretNames);
+      if (typeof environmentName !== 'string' || !environmentName.trim() || environmentName.length > 255
+          || environmentName !== environmentName.trim() || /[\u0000-\u001f\u007f]/.test(environmentName)
+          || environmentName.includes('${{')) throw new Error(failure);
+      const positiveId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+      const identity = z.object({id: positiveId, name: z.string().min(1)});
+      const endpoint = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/environments/${encodeURIComponent(environmentName)}`;
+      const environment = identity.parse(await this.request('GET', endpoint));
+      if (environment.name.toLowerCase() !== environmentName.toLowerCase()) throw new Error(failure);
+
+      const pageSchema = z.object({
+        total_count: z.number().int().min(0).max(1000),
+        secrets: z.array(z.object({name: key, created_at: z.string().datetime({offset: true}), updated_at: z.string().datetime({offset: true})})).max(100),
+      });
+      const observed = new Set<string>();
+      let total: number | undefined;
+      for (let page = 1; page <= 10; page++) {
+        const listed = pageSchema.parse(await this.request('GET', `${endpoint}/secrets?per_page=100&page=${page}`));
+        if (total !== undefined && total !== listed.total_count) throw new Error(failure);
+        total = listed.total_count;
+        for (const secret of listed.secrets) {
+          const name = secret.name.toUpperCase();
+          if (observed.has(name)) throw new Error(failure);
+          observed.add(name);
+        }
+        if (observed.size > total) throw new Error(failure);
+        if (observed.size === total) break;
+        if (listed.secrets.length < 100) throw new Error(failure);
+      }
+      if (observed.size !== total) throw new Error(failure);
+
+      // This endpoint lists enabled custom rules only; the ordinary environment
+      // protection_rules field covers built-in rules and may be omitted.
+      const custom = z.object({
+        total_count: z.number().int().min(0).max(100),
+        custom_deployment_protection_rules: z.array(z.object({
+          id: positiveId, node_id: z.string().min(1), enabled: z.literal(true),
+          app: z.object({id: positiveId, node_id: z.string().min(1), slug: z.string().min(1), integration_url: z.string().url()}),
+        })).max(100),
+      }).parse(await this.request('GET', `${endpoint}/deployment_protection_rules`));
+      const customProtectionRuleIds = custom.custom_deployment_protection_rules.map(rule => rule.id).sort((a, b) => a - b);
+      if (custom.total_count !== customProtectionRuleIds.length || new Set(customProtectionRuleIds).size !== customProtectionRuleIds.length) throw new Error(failure);
+      const current = identity.parse(await this.request('GET', endpoint));
+      if (current.id !== environment.id || current.name.toLowerCase() !== environment.name.toLowerCase()) throw new Error(failure);
+      return {
+        id: environment.id,
+        name: environment.name,
+        secretNames: [...new Set(requested)].filter(name => observed.has(name.toUpperCase())).sort(),
+        customProtectionRuleIds,
+      };
+    } catch {
+      // Provider errors and malformed observations may contain credentials or
+      // unrelated names. Only this fixed, value-free failure crosses the port.
+      throw new Error(failure);
+    }
+  }
+
   /**
    * Create or update an Actions secret scoped to a GitHub environment.
    */
@@ -630,12 +679,15 @@ export class GitHubAdapter {
     repo: string,
     environmentName: string,
     secretName: string,
-    secretValue: string
+    secretValue: string,
+    options?: { expectedEnvironmentId: number }
   ): Promise<void> {
     const environment = encodeURIComponent(environmentName);
     try {
-      await this.request<unknown>('GET', `/repos/${owner}/${repo}/environments/${environment}`);
+      const current = await this.request<{ id: number }>('GET', `/repos/${owner}/${repo}/environments/${environment}`);
+      if (options && current.id !== options.expectedEnvironmentId) throw new Error('The reviewed GitHub environment identity changed.');
     } catch (error) {
+      if (options) throw new Error('The reviewed GitHub environment cannot be verified.');
       if (!isGitHubNotFound(error)) throw error;
       await this.request<unknown>('PUT', `/repos/${owner}/${repo}/environments/${environment}`, {});
     }
@@ -792,6 +844,12 @@ export class GitHubAdapter {
 
   // ============= Workflows =============
 
+  async getWorkflow(owner: string, repo: string, definition: string): Promise<{ id: number; path: string; state: string }> {
+    const identity = definition.startsWith('.github/workflows/') ? definition.slice('.github/workflows/'.length) : definition;
+    if (!identity.trim() || identity.includes('/')) throw new Error('Exact workflow id or file name is required.');
+    return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(identity)}`);
+  }
+
   /**
    * List workflows in a repository.
    */
@@ -826,7 +884,7 @@ export class GitHubAdapter {
     owner: string,
     repo: string,
     workflowId: string | number,
-    options?: { status?: string; per_page?: number }
+    options?: { status?: string; per_page?: number; page?: number }
   ): Promise<{
     total_count: number;
     workflow_runs: Array<{
@@ -846,6 +904,7 @@ export class GitHubAdapter {
     const params = new URLSearchParams();
     if (options?.status) params.set('status', options.status);
     if (options?.per_page) params.set('per_page', String(options.per_page));
+    if (options?.page) params.set('page', String(options.page));
     const query = params.toString() ? `?${params.toString()}` : '';
 
     return await this.request<{
@@ -867,9 +926,8 @@ export class GitHubAdapter {
   }
 
   /**
-   * List repository Actions artifacts. Names and workflow-run identities are
-   * sufficient for release-gate verification; artifact contents remain in
-   * GitHub and are not exposed through command results.
+   * List artifact metadata. Release authorization additionally validates the
+   * exact run's artifact contents; names alone do not prove a released build.
    */
   async listArtifacts(owner: string, repo: string, perPage = 100): Promise<{
     total_count: number;
@@ -920,6 +978,72 @@ export class GitHubAdapter {
       'GET',
       `/repos/${owner}/${repo}/actions/runs/${runId}/artifacts?per_page=100`
     );
+  }
+
+  async getWorkflowRun(owner: string, repo: string, runId: number): Promise<{
+    id: number; path: string; status: string; conclusion: string | null;
+    head_sha: string; head_branch: string; event: string; run_attempt: number; run_started_at?: string;
+    repository: { full_name: string }; head_repository: { full_name: string };
+  }> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid workflow run id.');
+    return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`);
+  }
+
+  /** Exact-attempt endpoint; callers must reject incomplete or unsuccessful evidence. */
+  async listWorkflowRunAttemptJobs(owner: string, repo: string, runId: number, attempt: number): Promise<{
+    total_count: number;
+    jobs: Array<{
+      id: number; run_id: number; run_attempt?: number; head_sha: string;
+      name: string; status: string; conclusion: string | null;
+      started_at: string; completed_at: string | null;
+    }>;
+  }> {
+    if (!Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(attempt) || attempt <= 0) {
+      throw new Error('Invalid workflow run id or attempt.');
+    }
+    return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
+  }
+
+  /** Authenticated redirect discovery, then credential-free bounded ZIP read. */
+  async readArtifactFiles(owner: string, repo: string, artifactId: number): Promise<Record<string, string>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    if (!Number.isSafeInteger(artifactId) || artifactId <= 0) throw new Error('Invalid artifact id.');
+    const signal = AbortSignal.timeout(15_000);
+    let redirect: Response;
+    try {
+      redirect = await fetch(`${GITHUB_API_URL}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifactId}/zip`, {
+        method: 'GET', redirect: 'manual', signal,
+        headers: { Authorization: `Bearer ${this.credentials.apiToken}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': GITHUB_API_VERSION },
+      });
+    } catch {
+      throw new Error('Could not read the release artifact download receipt.');
+    }
+    if (redirect.status !== 302) throw new Error(`Artifact download unavailable (${redirect.status}).`);
+    let location: URL;
+    try {
+      location = new URL(redirect.headers.get('location') ?? '');
+      if (location.protocol !== 'https:' || location.username || location.password || location.hash) throw new Error();
+    } catch {
+      throw new Error('Invalid release artifact download location.');
+    }
+    let body: Response;
+    try {
+      // The signed URL is provider-returned, expires quickly, and must never be
+      // logged or receive the repository's API token.
+      body = await fetch(location.toString(), { method: 'GET', redirect: 'error', signal });
+    } catch {
+      throw new Error('Could not download the release artifact.');
+    }
+    if (body.status !== 200) throw new Error(`Artifact body unavailable (${body.status}).`);
+    return readReleaseArtifactFilesZip(await readBoundedArtifactBody(body, signal));
+  }
+
+  async readJsonArtifact(owner: string, repo: string, artifactId: number, filename: string): Promise<unknown> {
+    const files = await this.readArtifactFiles(owner, repo, artifactId);
+    try {
+      if (Object.keys(files).length !== 1 || !Object.hasOwn(files, filename)) throw new Error();
+      return JSON.parse(files[filename]);
+    } catch { throw new Error('Invalid release artifact: expected one bounded JSON file in a valid ZIP.'); }
   }
 
   /**
@@ -1131,6 +1255,9 @@ async function inspectGitHubResources(
 ): Promise<Record<string, unknown>> {
   const { owner, repo } = repositoryFromInspectionScope(request.scope);
   const resource = request.resource ?? 'repository';
+  if (resource === 'repository-variable') {
+    return adapter.inspectRepositoryVariables(`${owner}/${repo}`, request.name, request.limit);
+  }
   if (resource === 'repository') {
     return {
       observation: 'present',
@@ -1150,19 +1277,6 @@ async function inspectGitHubResources(
       resource,
       repository: `${owner}/${repo}`,
       ...(ref ? { ref: { name: ref.ref, sha: ref.object.sha } } : { name: selected }),
-    };
-  }
-  if (resource === 'pages') {
-    const [config, health] = await Promise.all([
-      adapter.getPagesConfig(owner, repo),
-      adapter.getPagesHealthCheck(owner, repo),
-    ]);
-    return {
-      observation: config ? 'present' : 'absent',
-      resource,
-      repository: `${owner}/${repo}`,
-      config,
-      health,
     };
   }
   if (resource === 'pull-request') {
@@ -1234,14 +1348,19 @@ providerRegistry.register({
     adapter.connect(credentials);
     return adapter;
   },
+  credentialUpdate: githubPackageReadCredentialUpdate(async apiToken => {
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken });
+    return adapter.verify();
+  }),
   inspection: {
-    resources: ['repository', 'ref', 'branch', 'pages', 'pull-request', 'branch-protection'],
+    resources: ['repository', 'ref', 'branch', 'pull-request', 'branch-protection', 'repository-variable'],
     defaultResource: 'repository',
     selectors: {
       repository: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
+      'repository-variable': { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'name', 'limit'], list: true, collectionKey: 'variables' },
       ref: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
       branch: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
-      pages: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
       'pull-request': { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'name', 'limit'], list: true, collectionKey: 'pullRequests' },
       'branch-protection': { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
     },

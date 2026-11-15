@@ -1,11 +1,20 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
-import { z } from 'zod';
+import { serviceInstanceIntentsSchema } from '../ports/service-instance.port.js';
+import { serviceInstanceHistory, serviceInstanceIntentFingerprint } from '../services/service-instance-recovery.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
+import { repoBindingsFileSchema } from './repo-bindings.schema.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import { findRepoRoot, readRepoSpecFile, repositoryMatchesProjectIdentity, repoSpecEnabled } from './repo-spec-file.js';
 import { withStorageInstanceScopes } from '../services/storage-instance-identity.js';
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
+import { parseServiceVolumeBindings } from '../services/service-volume.service.js';
+import type { ServiceVolumeComponentBinding } from '../ports/service-volume.port.js';
+import { databaseCheckpointBindings } from '../services/database-checkpoint.js';
+import { backupPolicyAttempts, mergeBackupPolicyAttempts } from '../services/backup-policy-attempts.js';
+import { projectRecoveryDatabases, recoveryDatabaseBindings } from '../services/recovery-database-bindings.js';
+import type { Component } from '../entities/component.entity.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -27,18 +36,12 @@ const BINDINGS_FILE = 'bindings.json';
 const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|connectionurl|databaseurl|databaseprivateurl|privateurl|privatekey|apikey)($|_)?/i;
 const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
+  'credentialUpdates',
+  'runtimeRollouts',
   'delegatedActionsBindings',
+  'repositoryVariableOwnership',
+  'serviceInstanceCreateHistory',
 ]);
-const repoBindingsFileSchema = z.object({
-  version: z.literal(1),
-  project: z.string().trim().min(1),
-  environments: z.record(
-    z.string().min(1),
-    z.object({
-      platformBindings: z.record(z.unknown()),
-    }).strict()
-  ),
-}).strict();
 
 function bindingsPath(root: string): string {
   return path.join(root, HYPERVIBE_DIR, BINDINGS_FILE);
@@ -74,6 +77,14 @@ function mergeSanitizedBindingObject(
   return merged;
 }
 
+function mergeVolumeRecovery<T extends ServiceVolumeComponentBinding>(previous: T, next: T, name: string): T {
+  if (previous.externalId !== undefined && next.externalId !== undefined && previous.externalId !== next.externalId) {
+    throw new Error(`Repository service-volume identity conflicts with retained local state for ${name}.`);
+  }
+  const rank = { creating: 0, identified: 1, bound: 2 };
+  return rank[next.state] >= rank[previous.state] ? next : previous;
+}
+
 /**
  * Overlay the sanitized repository export onto authoritative local bindings.
  * Top-level bindings absent from the export retain the historical merge
@@ -84,13 +95,131 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (Object.hasOwn(repoBindings, 'serviceInstanceCreateHistory')) throw new Error('Service instance attempt history is private local evidence and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');
+  if (Object.hasOwn(repoBindings, 'runtimeRollouts')) throw new Error('Runtime configuration expectations and activation requirements are local only and cannot be imported.');
+  if (existing.recoveryDatabases !== undefined) recoveryDatabaseBindings(existing.recoveryDatabases);
+  if (repoBindings.recoveryDatabases !== undefined) recoveryDatabaseBindings(repoBindings.recoveryDatabases);
+  const localVolumes = parseServiceVolumeBindings({ platformBindings: existing });
+  const incomingVolumes = parseServiceVolumeBindings({ platformBindings: repoBindings });
+  if (!localVolumes || !incomingVolumes) {
+    throw new Error('Malformed retained service-volume bindings; refusing to overwrite recovery state.');
+  }
   const merged: Record<string, unknown> = { ...existing, ...repoBindings };
+  const localInstances = serviceInstanceIntentsSchema.parse(existing.serviceInstanceCreates ?? {});
+  const incomingInstances = serviceInstanceIntentsSchema.parse(repoBindings.serviceInstanceCreates ?? {});
+  for (const [name, intent] of Object.entries(incomingInstances)) {
+    const local = localInstances[name];
+    const identity = (value: typeof intent) => {
+      const { workflowId: _workflow, completed: _done, recoveryApproval: _approval, ...base } = value; return base;
+    };
+    if (intent.recoveryApproval && (!local?.recoveryApproval || canonicalJsonSha256(intent.recoveryApproval) !== canonicalJsonSha256(local.recoveryApproval)))
+      throw new Error('Repository data cannot introduce or change a private service instance recovery approval.');
+    if (local && (canonicalJsonSha256(identity(local)) !== canonicalJsonSha256(identity(intent))
+      || local.workflowId && intent.workflowId && local.workflowId !== intent.workflowId)
+      || intent.completed && !local?.completed)
+      throw new Error('Conflicting service instance recovery cannot replace accepted intent.');
+    if (local && !local.workflowId && intent.workflowId) localInstances[name] = { ...local, workflowId:intent.workflowId };
+  }
+  if (Object.keys(localInstances).length || Object.keys(incomingInstances).length)
+    merged.serviceInstanceCreates = { ...incomingInstances, ...localInstances };
+  if (existing.backupPolicyAttempts !== undefined || repoBindings.backupPolicyAttempts !== undefined) {
+    merged.backupPolicyAttempts = mergeBackupPolicyAttempts(existing.backupPolicyAttempts, repoBindings.backupPolicyAttempts);
+  }
+  if (existing.databaseCheckpoints !== undefined || repoBindings.databaseCheckpoints !== undefined) {
+    merged.databaseCheckpoints = databaseCheckpointBindings(
+      { resilience: { checkpoints: existing.databaseCheckpoints } },
+      { databaseCheckpoints: repoBindings.databaseCheckpoints }
+    );
+  }
   for (const [key, repoValue] of Object.entries(repoBindings)) {
+    if (key === 'serviceInstanceCreates') continue;
+    if (key === 'databaseCheckpoints' || key === 'backupPolicyAttempts') continue;
+    if (key === 'serviceVolumes' && existing[key] !== undefined) {
+      const retained = { ...incomingVolumes, ...localVolumes };
+      for (const [name, next] of Object.entries(incomingVolumes)) {
+        const previous = localVolumes[name];
+        if (!previous) { retained[name] = next; continue; }
+        const previousTarget = previous.target;
+        const nextTarget = next.target;
+        if (previous.provider !== next.provider
+          || (['projectId', 'environmentId', 'serviceId', 'mountPath'] as const).some((field) => previousTarget[field] !== nextTarget[field])
+          || JSON.stringify(Object.entries(previousTarget.instanceScope ?? {}).sort()) !== JSON.stringify(Object.entries(nextTarget.instanceScope ?? {}).sort())
+          || (previous.state === 'staged') !== (next.state === 'staged')) {
+          throw new Error(`Repository service-volume identity conflicts with retained local state for ${name}.`);
+        }
+        if (previous.state === 'staged' && next.state === 'staged') {
+          const components = { ...next.components, ...previous.components };
+          for (const [key, component] of Object.entries(next.components)) {
+            components[key] = previous.components[key]
+              ? mergeVolumeRecovery(previous.components[key], component, `${name}/${key}`)
+              : component;
+          }
+          retained[name] = { ...previous, components };
+        } else if (previous.state !== 'staged' && next.state !== 'staged') {
+          retained[name] = mergeVolumeRecovery(previous, next, name);
+        }
+      }
+      merged[key] = retained;
+      continue;
+    }
     const existingRecord = asRecord(existing[key]);
     const repoRecord = asRecord(repoValue);
     if (existingRecord && repoRecord) {
       merged[key] = mergeSanitizedBindingObject(existingRecord, repoRecord);
     }
+  }
+  // The repository can still hold the pre-dispatch marker after a failed
+  // export. Only an exact, privately archived attempt with active local replacement
+  // intent and no new local recovery is suppressed; different
+  // or newly introduced recovery remains active and vetoes later writes.
+  const history = serviceInstanceHistory(existing.serviceInstanceCreateHistory);
+  const recoveries = asRecord(merged.serviceCreateRecovery);
+  if (recoveries) {
+    const retained = { ...recoveries };
+    for (const entry of history) {
+      const {record} = entry;
+      const name = record.serviceName;
+      const intent = localInstances[name];
+      const sameTarget = intent && canonicalJsonSha256(intent.target) === canonicalJsonSha256(record.target)
+        && intent.provider === record.marker.provider;
+      // An authoritative local marker remains active even if its bytes match.
+      if (asRecord(existing.serviceCreateRecovery)?.[name] !== undefined) continue;
+      if (retained[name] === undefined || canonicalJsonSha256(retained[name]) !== entry.digest) continue;
+      if (sameTarget && intent.priorCreateRecoverySha256 === entry.digest) {
+        if (intent.recoveryApproval && !history.some(receipt => receipt.record.disposition === 'operator-confirmed-unresolved-rearchive'
+          && receipt.record.serviceName === name && canonicalJsonSha256(receipt.record.target) === canonicalJsonSha256(intent.target)
+          && canonicalJsonSha256(receipt.record.approval) === canonicalJsonSha256(intent.recoveryApproval)
+          && intent.recoveryApproval!.intentSha256 === serviceInstanceIntentFingerprint(intent)))
+          throw new Error('Private service instance recovery approval could not be verified.');
+        delete retained[name];
+      } else if (record.disposition === 'operator-confirmed-unresolved-rearchive') {
+        // Completed recovery is a local receipt, not authority to import or
+        // erase a later unresolved attempt. Reject a stale file explicitly.
+        throw new Error('Repository recovery marker conflicts with a completed private instance recovery; refresh the accepted bindings export.');
+      }
+    }
+    merged.serviceCreateRecovery = retained;
+  }
+  // A completed local receipt remains authoritative until its export succeeds.
+  // Stale files cannot erase or redirect the service ID committed with it.
+  for (const [name, intent] of Object.entries(localInstances)) {
+    if (!intent.completed) continue;
+    if (intent.recoveryApproval && !history.some(entry => entry.record.disposition === 'operator-confirmed-unresolved-rearchive'
+      && entry.record.serviceName === name && canonicalJsonSha256(entry.record.target) === canonicalJsonSha256(intent.target)
+      && canonicalJsonSha256(entry.record.approval) === canonicalJsonSha256(intent.recoveryApproval)
+      && intent.recoveryApproval!.intentSha256 === serviceInstanceIntentFingerprint(intent)))
+      throw new Error('Private service instance recovery approval could not be verified.');
+    const localService = asRecord(asRecord(existing.services)?.[name]);
+    const incomingService = asRecord(asRecord(repoBindings.services)?.[name]);
+    if (localService?.serviceId !== intent.target.serviceId
+      || incomingService?.serviceId && incomingService.serviceId !== intent.target.serviceId)
+      throw new Error('Conflicting completed service instance identity.');
+    merged.services = { ...asRecord(merged.services), [name]:localService };
+  }
+  if (!parseServiceVolumeBindings({ platformBindings: merged })) {
+    throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
   }
   return merged;
 }
@@ -129,6 +258,30 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
   };
 }
 
+function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.serviceInstanceCreates !== undefined) sanitized.serviceInstanceCreates = Object.fromEntries(
+    Object.entries(serviceInstanceIntentsSchema.parse(raw.serviceInstanceCreates)).filter(([, intent]) => intent.completed !== true));
+  if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
+  if (raw.backupPolicyAttempts !== undefined) {
+    // Strict value-free identities remain recoverable even for secret-shaped names.
+    sanitized.backupPolicyAttempts = backupPolicyAttempts(raw.backupPolicyAttempts);
+  }
+  if (raw.databaseCheckpoints !== undefined) {
+    // Strict non-secret checkpoint identities must survive even when their
+    // reviewed logical intent id contains a word such as "token".
+    sanitized.databaseCheckpoints = databaseCheckpointBindings({}, raw);
+  }
+  if (raw.serviceVolumes !== undefined) {
+    const serviceVolumes = parseServiceVolumeBindings({ platformBindings: raw });
+    if (!serviceVolumes) throw new Error('Malformed retained service-volume bindings cannot be exported or imported safely.');
+    // Logical names can contain "token". Only this strictly value-free identity
+    // schema bypasses generic key redaction; arbitrary metadata never does.
+    sanitized.serviceVolumes = serviceVolumes;
+  }
+  return sanitized;
+}
+
 function parseDocument(raw: unknown, file: string, projectName?: string): RepoBindingsFile {
   const parsed = repoBindingsFileSchema.safeParse(raw);
   if (!parsed.success) {
@@ -151,7 +304,7 @@ function parseDocument(raw: unknown, file: string, projectName?: string): RepoBi
   const normalized: RepoBindingsFile['environments'] = {};
   for (const [envName, value] of Object.entries(parsed.data.environments)) {
     normalized[envName] = {
-      platformBindings: sanitize(value.platformBindings) as Record<string, unknown>,
+      platformBindings: sanitizePlatformBindings(value.platformBindings),
     };
   }
   return {
@@ -198,7 +351,8 @@ export function readRepoBindingsFile(projectName?: string, startDir = primaryWor
   return { path: file, document };
 }
 
-export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = primaryWorkspaceDirectory()): string | null {
+export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = primaryWorkspaceDirectory(),
+  loadComponents?: () => Component[]): string | null {
   if (!repoSpecEnabled()) {
     return null;
   }
@@ -222,8 +376,13 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
     : parseDocument(parseBindingsJson(raw, file), file, project.name);
 
   const platformBindings = presentStorageInstanceScopes(
-    sanitize(environment.platformBindings) as Record<string, unknown>
+    sanitizePlatformBindings(environment.platformBindings)
   );
+  const backupPolicy = spec?.environments[environment.name]?.backups;
+  if (Object.keys(platformBindings).length && backupPolicy?.mode === 'daily' && backupPolicy.runnerImage) {
+    if (!loadComponents) throw new Error('Managed backup bindings require a fresh component inventory.');
+    platformBindings.recoveryDatabases = projectRecoveryDatabases(loadComponents(), environment.id);
+  }
   if (Object.keys(platformBindings).length === 0) {
     delete current.environments[environment.name];
   } else {
