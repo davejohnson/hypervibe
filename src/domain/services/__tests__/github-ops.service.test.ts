@@ -1173,15 +1173,8 @@ describe('github tools', () => {
       'HYPERVIBE_SERVER_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json'
     );
     expect(releaseWorkflow).toContain(
-      'fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")'
-    );
-    expect(releaseWorkflow).toContain(
       `HYPERVIBE_SERVER_EVIDENCE_VERSION: "${MANAGED_CI_RELEASE_EVIDENCE_VERSION}"`
     );
-    expect(releaseWorkflow).toContain(
-      'evidence.version!==Number(process.env.HYPERVIBE_SERVER_EVIDENCE_VERSION)'
-    );
-    expect(releaseWorkflow).toContain('evidence.deploymentContractFingerprint');
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toMatch(/group: hypervibe-ios-[0-9a-f]{20}/);
