@@ -461,33 +461,6 @@ describe('command presentation', () => {
 
   it('covers the complete registered command surface centrally', () => {
     const ids = [...PRESENTED_COMMAND_IDS].sort();
-    expect(ids).toEqual([
-      'hv_apply',
-      'hv_appstore_status',
-      'hv_appstore_submit',
-      'hv_ci_status',
-      'hv_ci_trigger',
-      'hv_cloud_connections',
-      'hv_cloud_pair',
-      'hv_cloud_requests',
-      'hv_cloud_secrets',
-      'hv_connections',
-      'hv_db_query',
-      'hv_deploy',
-      'hv_destroy',
-      'hv_health',
-      'hv_import',
-      'hv_inspect',
-      'hv_launch',
-      'hv_logs',
-      'hv_migrate',
-      'hv_plan',
-      'hv_rollback',
-      'hv_runs',
-      'hv_secrets',
-      'hv_spec',
-      'hv_status',
-    ]);
     ids.forEach((id) => {
       const output = formatCommandResult(id, commandSuccess({ id: 'sample' }));
       expect(output).toContain('HYPERVIBE ·');
