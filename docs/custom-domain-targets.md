@@ -70,6 +70,12 @@ attachment creation retains its acknowledged native identity. Hosting actions
 never replay the old direct DNS mutation path. The hostname has an outage between
 DNS removal and new routing/certificate convergence.
 
+An interruption after the engine records empty ownership but before the hosting
+removal marker is persisted remains blocked. Empty engine state alone cannot
+prove the reviewed removal receipt. Automatic receipt reconciliation for this
+window is not implemented; preserve both states until a supported recovery path
+is available. Repeated planning or manual state edits are not a recovery method.
+
 A validated create acknowledgement whose follow-up observation is unavailable
 retains its exact identity as pending recovery, without claiming attachment or
 DNS readiness. A later apply cannot create again while that acknowledgement
