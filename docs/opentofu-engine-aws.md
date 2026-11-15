@@ -103,6 +103,11 @@ not current quotes.
   environments must use the same Postgres major. Staging and production will
   get their own databases. An environment created with its own cluster before
   this change is blocked from planning until it is torn down and launched again.
+  Verified live 2026-11-15 in us-west-2: the first launch created the cluster;
+  a second testing environment launched in 3m12s with no cluster change. Its
+  waker login was refused on the other environment's database
+  (`permission denied for database`). Tearing it down dropped only its database,
+  and tearing down the last environment removed the cluster.
 - **Database network: public endpoint, TLS required (decided 2026-11-10).**
   Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
   $32/mo and would be more than the rest of a staging environment. The database
