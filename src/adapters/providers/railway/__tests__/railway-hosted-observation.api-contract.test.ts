@@ -152,17 +152,20 @@ describe('hosted Railway observation through the pinned official GraphQL schema'
 
   it('forbids a serialized mutation even if an observation helper attempts one', async () => {
     const fixture = await railwayHttpFixture();
+    fixture.environments.delete(productionId);
+    fixture.services.clear();
+    fixture.addService('staging-web', 'web', stagingId);
     const original = RailwayAdapter.prototype.observe;
     const mutationReceipts: unknown[] = [];
     vi.spyOn(RailwayAdapter.prototype, 'observe').mockImplementation(async function (this: RailwayAdapter, environment, options) {
-      mutationReceipts.push(await this.connectServiceToRepo({ serviceId: 'staging-web', repo: 'owner/repo', branch: 'main' }));
+      mutationReceipts.push(await this.connectServiceToRepo({ serviceId: 'staging-web', ...scope, repo: 'owner/repo', branch: 'main' }));
       return original.call(this, environment, options);
     });
     const result = await observe({ environment: fixture.environment, credentials: { apiToken: 'synthetic-contract-token' }, scope, limits });
-    expect(result).toMatchObject({ observed: null, reason: 'provider_error', requests: 1 });
+    expect(result).toMatchObject({ observed: null, reason: 'provider_error', requests: 3 });
     expect(mutationReceipts).toMatchObject([{ success: false }]);
     expect(fixture.mutations).toEqual([]);
-    expect(fixture.requests).toHaveLength(1);
+    expect(fixture.requests).toHaveLength(3);
   });
 
   it('does not treat a truncated service-instance page as complete observation', async () => {

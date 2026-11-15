@@ -42,6 +42,35 @@ function selectedCredentialNames(target: ManagedBackupTarget) {
 }
 
 /** Verify the reviewed default-branch program and durable bindings before credentials or writes. */
+/**
+ * The runner image is pinned while the spec keeps evolving, so a newer spec
+ * writer may add fields this runner does not know. Fields this runner does
+ * not recognize are dropped only inside other environments; every
+ * environment is kept so cross-environment references (promoteFrom,
+ * canonicalEnvironment, secret targets) still resolve. Unknown fields in the
+ * target environment or at project level, and every other issue, still fail.
+ */
+function targetEnvironmentSpec(raw: unknown, environment: string) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Backup desired state is invalid.');
+  const environments = (raw as { environments?: unknown }).environments;
+  if (!environments || typeof environments !== 'object' || Array.isArray(environments)
+    || !Object.hasOwn(environments, environment)) throw new Error('The current spec does not authorize this backup program.');
+  const candidate = structuredClone(raw) as Record<string, unknown>;
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const parsed = projectSpecSchema.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+    const foreign = parsed.error.issues.filter(issue => issue.code === 'unrecognized_keys'
+      && issue.path[0] === 'environments' && issue.path.length >= 2 && issue.path[1] !== environment);
+    if (foreign.length === 0 || foreign.length !== parsed.error.issues.length) throw parsed.error;
+    for (const issue of foreign) {
+      const holder = issue.path.reduce<unknown>((node, key) => (node as Record<PropertyKey, unknown> | undefined)?.[key], candidate);
+      if (!holder || typeof holder !== 'object') throw parsed.error;
+      for (const key of (issue as { keys: string[] }).keys) delete (holder as Record<string, unknown>)[key];
+    }
+  }
+  throw new Error('Backup desired state is invalid.');
+}
+
 export async function verifyManagedBackupAuthority(params: {
   target: unknown; contractHash: string; runnerImage: string; repository: string; sha: string; ref: string;
   github: GitHubAdapter;
@@ -55,7 +84,7 @@ export async function verifyManagedBackupAuthority(params: {
   if (params.ref !== `refs/heads/${repository.default_branch}`) throw new Error('Backup execution requires the default branch.');
   const reference = await params.github.getRef(owner, repo, `heads/${repository.default_branch}`);
   if (reference?.object.sha !== params.sha) throw new Error('The default branch changed before backup execution.');
-  const spec = projectSpecSchema.parse(JSON.parse(await params.github.getFileContent(owner, repo, '.hypervibe/spec.json', params.sha) ?? ''));
+  const spec = targetEnvironmentSpec(JSON.parse(await params.github.getFileContent(owner, repo, '.hypervibe/spec.json', params.sha) ?? ''), target.environment);
   if ((spec.github?.repository ?? parseGitHubRepoFromRemote(spec.gitRemoteUrl)) !== params.repository) throw new Error('Backup desired state belongs to another repository.');
   const bindings = repoBindingsFileSchema.parse(JSON.parse(await params.github.getFileContent(owner, repo, '.hypervibe/bindings.json', params.sha) ?? ''));
   const raw = spec.environments[target.environment];

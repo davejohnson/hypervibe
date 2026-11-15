@@ -38,18 +38,17 @@ function action(partial: Partial<PlanAction> & { id: string }): PlanAction {
   } as PlanAction;
 }
 
-function publicationAction(provider: 'github' | 'gitlab-ci' = 'github'): PlanAction {
-  const gitLab = provider === 'gitlab-ci';
+function publicationAction(): PlanAction {
   return action({
-    id: gitLab ? 'ci:gitlab-ci:configuration' : 'ci:github-actions:staging:deploy-branch',
+    id: 'ci:github-actions:staging:deploy-branch',
     type: 'update',
     resource: {
       kind: 'ci',
-      name: gitLab ? 'configuration' : 'deploy-branch:staging',
-      provider,
+      name: 'deploy-branch:staging',
+      provider: 'github',
     },
     metadata: {
-      operation: gitLab ? 'ciConfigurationSync' : 'githubActionsDeployBranch',
+      operation: 'githubActionsDeployBranch',
       workflowPublicationRequired: true,
     },
   });
@@ -321,12 +320,9 @@ describe('ConvergeExecutor staleness', () => {
     expect(runRepo().findByEnvironmentId(environmentId).filter((run) => run.type === 'apply')).toEqual([]);
   });
 
-  it.each([
-    { label: 'GitHub Actions', provider: 'github' as const },
-    { label: 'GitLab CI', provider: 'gitlab-ci' as const },
-  ])('accepts an exact $label publication action', async ({ provider }) => {
+  it('accepts an exact GitHub Actions publication action', async () => {
     const handler = vi.fn().mockResolvedValue({ success: true, message: 'published' });
-    const planId = storePlan([publicationAction(provider)], { scope: 'managed-ci-publication' });
+    const planId = storePlan([publicationAction()], { scope: 'managed-ci-publication' });
 
     const result = await new ConvergeExecutor().execute({
       planRunId: planId,

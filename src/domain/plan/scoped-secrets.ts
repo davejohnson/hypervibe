@@ -39,7 +39,7 @@ export function scopedSecretObservation(
     || observed.provider !== binding.provider || observed.projectId !== binding.projectId
     || observed.completeness?.project === 'unknown' || observed.completeness?.environment === 'unknown'
     || (separateEnvironment && (!binding.environmentId || binding.environmentId !== observed.environmentId))
-    || !(observed.completeness?.services === 'complete' || !observed.completeness?.services && !observed.partial)) {
+    || !(observed.completeness?.services === 'complete' || !keys.length && observed.completeness?.serviceIdentities === 'complete' || !observed.completeness?.services && !observed.partial)) {
     throw new Error('Secret updates require verified existing hosting bindings for this exact environment.');
   }
   const names = Object.keys(spec.services).sort();

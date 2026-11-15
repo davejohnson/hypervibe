@@ -211,7 +211,7 @@ public actor HypervibeMCPClient {
             let connectionsData = try await self.call(
                 client: client,
                 tool: "hv_connections",
-                arguments: [:]
+                arguments: ["project": .string(topology.projectName)]
             )
             let connections = try HypervibeResponseMapper.decodeConnections(connectionsData)
             return CompanionRefresh(
@@ -233,9 +233,22 @@ public actor HypervibeMCPClient {
             let data = try await self.call(
                 client: client,
                 tool: "hv_connections",
-                arguments: [:]
+                arguments: ["repositoryContext": .bool(true)]
             )
             return try HypervibeResponseMapper.decodeConnectionCatalog(data)
+        }
+    }
+
+    public func describeConnection(
+        project: CompanionProject,
+        provider: String,
+        scope: String? = nil
+    ) async throws -> ConnectionGuidance {
+        try await withSession(project: project, requiredTools: ["hv_connections"]) { client in
+            var arguments = await self.mutationArguments(action: "describe", provider: provider, scope: scope)
+            arguments["repositoryContext"] = .bool(true)
+            let data = try await self.call(client: client, tool: "hv_connections", arguments: arguments)
+            return try HypervibeResponseMapper.decodeConnectionGuidance(data)
         }
     }
 

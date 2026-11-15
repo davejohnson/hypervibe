@@ -90,7 +90,7 @@ export const storageCreateRecoverySchema = z.object({
   provider: nonEmptyStorageRecoveryString,
   operation: z.literal('create'),
   resourceName: nonEmptyStorageRecoveryString,
-  providerScope: z.record(nonEmptyStorageRecoveryString).refine(
+  providerScope: z.record(z.string(), nonEmptyStorageRecoveryString).refine(
     (scope) => Object.keys(scope).length > 0
       && Object.keys(scope).every((key) => key.trim().length > 0),
     'Storage create recovery requires a non-empty provider scope.'
@@ -158,7 +158,7 @@ export function parseStorageCreateRecovery(value: unknown): StorageCreateRecover
   return parsed.success ? parsed.data : null;
 }
 
-export const storageCreateRecoveryMapSchema = z.record(storageCreateRecoverySchema)
+export const storageCreateRecoveryMapSchema = z.record(z.string(), storageCreateRecoverySchema)
   .superRefine((recoveries, ctx) => {
     for (const [name, recovery] of Object.entries(recoveries)) {
       if (!name.trim() || recovery.resourceName !== name) {
@@ -235,6 +235,21 @@ export interface IStorageAdapter {
    */
   openObjectTransfer?(environment: Environment, context: StorageContext, externalId: string): Promise<StorageObjectClient>;
   destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt>;
+}
+
+/** Object access and inspection do not grant authority to create or delete buckets. */
+export type IStorageOperations = Omit<IStorageAdapter, 'ensureBucket' | 'destroyBucket'>;
+
+export function supportsStorageOperations(value: unknown): value is IStorageOperations {
+  if (!value || typeof value !== 'object') return false;
+  const adapter = value as Partial<IStorageOperations>;
+  return typeof adapter.name === 'string'
+    && typeof adapter.connect === 'function'
+    && typeof adapter.verify === 'function'
+    && typeof adapter.ensureContext === 'function'
+    && typeof adapter.observe === 'function'
+    && typeof adapter.getRuntimeEnv === 'function'
+    && (typeof adapter.openObjectTransfer === 'function' || typeof adapter.getCredentials === 'function');
 }
 
 /** Runtime proof for every method required by the production storage contract. */

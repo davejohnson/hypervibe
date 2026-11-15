@@ -5,7 +5,6 @@ The environment hostname belongs to the sole desired public web service.
 public-web default, while `public: false` excludes the service. Service names,
 object insertion order and already-attached hostnames are not target selectors.
 Zero or multiple eligible services require clarification before domain mutation.
-Load-balancer domains retain their separate topology contract.
 
 ## Evidence and failure
 
@@ -25,16 +24,11 @@ and verification DNS requirements. Complete paginated observation is required:
 a first page containing production cannot prove staging absence. Missing or
 malformed selected fields also remain unknown.
 
-Cloudflare's [DNS record contract](https://developers.cloudflare.com/api/resources/dns/subresources/records/)
-returns a complete name including the zone. The staging receipt retained a relative
-TXT label, which the old teardown incorrectly compared directly with Cloudflare's
-full name. Two regressions failed before the fix: setup retained the relative name,
-and exact legacy cleanup refused the matching full name. Setup now retains the
-returned name; legacy cleanup expands a relative label only after re-observing the
-exact bound zone, while still checking record ID, type and content. The five new
-tests exercise the real Cloudflare HTTP boundary with reconstructed responses,
-including omitted `zone_name` and rejected name, content and zone changes. They and
-the eight adjacent domain-service tests pass; no live DNS deletion is certified.
+DNS changes run only through the shared saved OpenTofu plans. Hosting attachment
+and detachment do not write DNS. The earlier direct Cloudflare cleanup path is
+superseded by the engine's exact-zone identity, ownership and recovery checks.
+Legacy record identities require explicit engine adoption before their removal;
+a missing engine state is not evidence that public traffic DNS is absent.
 
 ## Reviewed provider boundary
 
@@ -50,35 +44,39 @@ the other rows remain unsupported for this new operation, including on retry.
 | Cloud Run | [Domain mappings](https://docs.cloud.google.com/run/docs/mapping-custom-domains) target a service route and require verified domain ownership; mappings and certificate readiness have a separate lifecycle. | Unsupported; no force override or inferred transfer. |
 | AWS ECS Express Mode | [Custom domains](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-advanced-customization.html) combine ALB host-header routing, listener certificates and DNS. A certificate alone is not traffic ownership. | Unsupported; routing/certificate transfer has not been validated. |
 | Azure Container Apps | [Custom domains and certificates](https://learn.microsoft.com/en-us/azure/container-apps/custom-domains-certificates) bind domains to an ingress-enabled app; certificates belong to its managed environment. | Unsupported; shared certificate and app-binding recovery requires separate validation. |
-| DigitalOcean App Platform | [App domains](https://docs.digitalocean.com/products/app-platform/how-to/manage-domains/) belong to the app spec, which must preserve other components and configuration. | Unsupported; a component change is not necessarily a domain-owner transfer. |
-| Fly.io | [Custom domains](https://docs.fly.io/networking/custom-domain) attach to an app, with app-specific routing and certificate validation. | Unsupported; app/certificate transfer recovery has not been validated. |
-| Vercel | [Project domains](https://vercel.com/docs/domains/working-with-domains/remove-a-domain) have project/account ownership distinct from deployment identity. | Unsupported; cross-project ownership and verification are not admitted by this repair. |
 
 ## Authority and recovery
 
-Planning pins the unique target service and its exact provider scope. A bound
-wrong-owner attachment never becomes a noop or automatic adoption. Retargeting
-requires exact action-ID confirmation and a complete old domain binding,
-including every DNS record's ID, name, type and target. Apply rechecks current
-desired selection, both service identities, the old attachment and the reviewed
-DNS snapshot before destructive work. The destination must already exist;
-domain repair never provisions a missing workload implicitly.
+Planning pins the unique target service and exact provider scope. Cross-service
+repair is a confirmed `replace` action with the old domain binding and the new
+service identity. Ordinary attachment, same-service recreation and local-only
+adoption cannot move a hostname between services.
 
-The existing teardown boundary removes the exact provider attachment and proves
-absence before deleting its managed DNS records. Partial cleanup retains the
-old binding for an idempotent retry. Only complete cleanup clears the old local
-ownership, before creating the new attachment. If that create fails, subsequent
-planning attaches to the desired service without repeating deletion. Pending
-provider verification and partial DNS writes retain the new attachment and
-every confirmed record identity for recovery.
+Retargeting follows separate reviewed stages:
+
+1. Adopt legacy DNS into the engine through explicit exact record identities when
+   needed. Unknown ownership or missing adoption intent blocks.
+2. Review and apply a saved engine plan removing only the old hosting-domain DNS
+   contribution. The source pins the old attachment and reviewed destination.
+3. Re-plan after verified DNS removal, confirm the hosting retarget, detach the
+   exact old provider domain, and attach to the declared public web service.
+4. Re-plan to review the new attachment's DNS requirements through OpenTofu, then
+   verify DNS and the provider certificate before dependent callback changes.
+
+Failed or unknown DNS removal preserves the old hosting claim. Failed detachment
+preserves its recovery binding and stops attachment. A successful detach followed
+by failed attachment resumes as an ordinary attach on the next plan. Interrupted
+attachment creation retains its acknowledged native identity. Hosting actions
+never replay the old direct DNS mutation path. The hostname has an outage between
+DNS removal and new routing/certificate convergence.
 
 A validated create acknowledgement whose follow-up observation is unavailable
 retains its exact identity as pending recovery, without claiming attachment or
 DNS readiness. A later apply cannot create again while that acknowledgement
 remains unobserved. It resumes only after complete observation finds the same
 domain ID on the same service; a different ID blocks instead of adoption. For
-that same attachment, later DNS failures must retain earlier confirmed record
-IDs rather than replace them with an empty receipt.
+that same attachment, refresh preserves retained record identities; the DNS engine
+owns its separate uncertain-write and removal recovery.
 
 `mergeRepoPlatformBindings` in `repo-bindings-file.ts` preserves those domain
 recovery identities when command resolution hydrates an older repository export.
@@ -104,3 +102,12 @@ acceptance workflow. The provider roster must remain explicit when a hosting
 adapter is added. Synthetic HTTP evidence covers serialized requests and pinned
 contracts; it does not establish current credentials, live certificate issuance,
 public routing, or a successful customer onboarding journey.
+
+Email callbacks use the declared hostname only for its exact public service.
+A pending domain action blocks callback replacement without requesting an
+unrelated replacement confirmation. Previously accepted custom callbacks retain
+main's fresh exact attachment check. A changed callback path or receiver must
+have the required desired ownership; missing or ambiguous ownership blocks.
+Inbound route observation reads the exact declared hostname, and unknown
+security-policy association still blocks replacement. Offline regression checks
+do not establish current live delivery, DNS propagation or certificate issuance.

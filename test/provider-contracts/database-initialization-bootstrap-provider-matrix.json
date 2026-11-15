@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-26",
+  "evidenceBoundary": "Official-source design review and offline contract checks; no live database authentication, schema migration, workload activation or cleanup certification. Unsupported means this Hypervibe lifecycle is not implemented, not that the native product lacks jobs or PostgreSQL.",
+  "hosting": [
+    {
+      "provider": "railway",
+      "implementation": "implemented",
+      "databaseProviders": [
+        "railway"
+      ],
+      "identity": "Project, environment, source service, acknowledged temporary service and exact deployment; database volume and volume-instance are separate retained identities.",
+      "completionAndRecovery": "Require the fixed correlated SQL or migration result and terminal exit, then exact temporary-service absence. Persist acknowledged identities and result before cleanup; unresolved creation or execution blocks replay.",
+      "prerequisites": "Completed exact fresh-initialization receipt, approved immutable configured application image, selected database reference keys, private environment network and scoped image-pull access.",
+      "limitations": "One private task proves only its own connection and reviewed command outcome. Application rollout, old-deployment drainage, schema correctness and restore readiness remain separate; no public proxy or CLI fallback.",
+      "officialSources": [
+        "https://docs.railway.com/networking/private-networking",
+        "https://docs.railway.com/variables",
+        "https://docs.railway.com/volumes",
+        "https://docs.railway.com/builds/private-registries",
+        "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json"
+      ]
+    }
+  ],
+  "database": [
+    {
+      "provider": "railway",
+      "hostingProviders": [
+        "railway"
+      ],
+      "identity": "Exact database service in its project/environment plus the newly acknowledged volume and volume-instance identities.",
+      "completionAndRecovery": "PostgreSQL image initialization variables apply only to an empty data directory. A container's local trust connection does not prove the password; require a fresh private task connection and retained generation receipt.",
+      "prerequisites": "Retained provider credential/reference sources and intended database/role; no existing-data replacement or password rotation is inferred.",
+      "limitations": "Configured persistence and matching references are not SQL proof. Replacing storage invalidates earlier bootstrap completion; the future backup/restore gate remains in force.",
+      "officialSources": [
+        "https://github.com/docker-library/docs/blob/master/postgres/README.md",
+        "https://docs.railway.com/volumes",
+        "https://raw.githubusercontent.com/railwayapp/cli/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json",
+        "https://www.postgresql.org/docs/18/auth-password.html"
+      ]
+    }
+  ]
+}

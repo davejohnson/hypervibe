@@ -655,13 +655,14 @@ function planStripeWebhookActions(params: {
         actions.push(stripeWebhookAction({
           stripeEnvironment: params.stripeEnvironment,
           name,
-          type: 'replace',
+          type: 'update',
           operation: STRIPE_WEBHOOK_OPERATIONS.ensure,
-          reason: `Stripe webhook "${name}" signing value is missing or drifted on service "${spec.service}"; replace the endpoint to rotate it`,
+          reason: `Stripe webhook "${name}" signing value is missing or drifted on service "${spec.service}"; preserve its existing endpoint`,
           verified: true,
           spec,
           endpointId: binding.endpointId,
           requiresConfirm: true,
+          blockedReason: 'Review an endpoint-bound stripe-webhook credential role and rotate its signing value through scope=credentials. Configuration drift does not authorize deleting an active endpoint.',
         }));
         continue;
       }
@@ -2366,18 +2367,18 @@ export async function applyStripeWebhookAction(params: {
         error: 'Its durable provider binding changed after planning. Re-run hv_plan.',
       };
     }
-    const deleted = await deleteStripeWebhookAndVerify({
-      adapter: stripe.adapter,
-      mode: stripe.mode,
-      endpointId,
-    });
-    if (!deleted.success) {
+    let existing: StripeWebhookEndpoint | null;
+    try { existing = await stripe.adapter.getWebhookEndpoint(stripe.mode, endpointId); }
+    catch {
       return {
         success: false,
-        message: `Failed to replace Stripe webhook "${name}"`,
-        error: `The existing endpoint could not be deleted and verified absent: ${deleted.error}`,
+        status: 'blocked',
+        message: `Stripe webhook "${name}" replacement could not verify endpoint absence`,
+        error: 'No endpoint was deleted. Inspect the exact endpoint before retrying.',
       };
     }
+    if (existing) return { success: false, status: 'blocked', message: 'The existing webhook endpoint remains active.',
+      error: 'Use the endpoint-bound credential rotation lifecycle. Replacing its signing value does not authorize deleting the endpoint.' };
   }
 
   let created: StripeWebhookEndpoint;

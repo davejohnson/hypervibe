@@ -6,6 +6,31 @@ import type { ManagedGitHubFile } from './github-infrastructure.service.js';
 import { backupOperationReceiptValidatorSource } from './backup-operation-receipt.js';
 export { BACKUP_HEALTH_REASON_CODES } from './backup-operation-receipt.js';
 
+export function managedBackupFilePaths(environment: string): [string, string] {
+  return [`.github/hypervibe/backups-${environment}.json`, `.github/workflows/hypervibe-backup-${environment}.yml`];
+}
+
+/** Both paths are observed: null binds confirmed absence, never unknown state. */
+export type BackupRetirementFile = { path: string; hash: string | null };
+
+export function parseBackupRetirementFiles(value: unknown, environment: string): BackupRetirementFile[] | undefined {
+  const paths = managedBackupFilePaths(environment);
+  if (!Array.isArray(value) || value.length !== paths.length) return undefined;
+  const files: BackupRetirementFile[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || !paths.includes(item.path)
+      || (item.hash !== null && (typeof item.hash !== 'string' || !/^[a-f0-9]{64}$/.test(item.hash)))
+      || files.some(file => file.path === item.path)) return undefined;
+    files.push({ path: item.path, hash: item.hash });
+  }
+  return files;
+}
+
+export function isManagedBackupFilePath(path: string): boolean {
+  return /^\.github\/hypervibe\/backups-[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.json$/.test(path)
+    || /^\.github\/workflows\/hypervibe-backup-[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.yml$/.test(path);
+}
+
 function alertScript(): string {
   return `const fs = require('node:fs');
 const env = process.env.HYPERVIBE_BACKUP_ENVIRONMENT;
@@ -87,7 +112,7 @@ export function compileBackupWorkflow(input: {
   const credentials = [...new Set(input.providerCredentialNames)].sort();
   if (credentials.some(name => !/^[A-Z][A-Z0-9_]{0,95}$/.test(name)
     || /^(GITHUB_|HYPERVIBE_|PG)/.test(name) || /DATABASE_URL|DB_URL|PASSWORD/.test(name))) throw new Error('Managed backup workflow credential names must be explicit control-plane inputs.');
-  const path = `.github/hypervibe/backups-${input.environment}.json`;
+  const [path, workflowPath] = managedBackupFilePaths(input.environment);
   const output = `hypervibe-backup-${input.environment}`;
   const forwarded = [
     ...credentials, 'GITHUB_TOKEN', 'GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_REF', 'GITHUB_EVENT_NAME', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
@@ -174,7 +199,7 @@ export function compileBackupWorkflow(input: {
   };
   return [
     { path, content: `${JSON.stringify(canonicalizeJson(input.contract), null, 2)}\n` },
-    { path: `.github/workflows/hypervibe-backup-${input.environment}.yml`, content: '# Managed by Hypervibe. Change desired state with hv_spec.\n' + stringify(workflow, { lineWidth: 0 }) },
+    { path: workflowPath, content: '# Managed by Hypervibe. Change desired state with hv_spec.\n' + stringify(workflow, { lineWidth: 0 }) },
   ].map(file => ({ ...file, hash: createHash('sha256').update(file.content).digest('hex'), review: {
     title: `Manage ${input.environment} backups and health alerts`,
     summary: `Daily retained recovery sets and hourly health observation for ${input.project}/${input.environment}.`,

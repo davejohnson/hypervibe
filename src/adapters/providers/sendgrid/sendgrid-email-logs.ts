@@ -87,7 +87,7 @@ function parseEvidence<S extends z.ZodTypeAny>(schema: S, value: unknown, stage:
   if (result.success) return result.data;
   // Never return Zod messages, received values or arbitrary provider property names.
   const fields = [...new Set(result.error.issues.slice(0, 5).map((issue) => issue.path
-    .map((part) => typeof part === 'number' ? '*' : diagnosticFields.has(part) ? part : 'field')
+    .map((part) => typeof part === 'number' ? '*' : typeof part === 'string' && diagnosticFields.has(part) ? part : 'field')
     .join('.') || 'response'))];
   throw new SendGridLogsError('invalid_response', undefined, { stage, reason: 'schema', fields });
 }

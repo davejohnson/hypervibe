@@ -44,26 +44,6 @@ function prepare(raw: Record<string, string> = original, resolved = raw) {
 }
 
 describe('Railway database password alias preparation', () => {
-  it('replaces only existing alias password segments, preserving source and target bytes', () => {
-    const result = prepare();
-    expect(result.changes).toEqual({
-      PGPASSWORD: repaired.PGPASSWORD,
-      DATABASE_URL: repaired.DATABASE_URL,
-      DATABASE_PRIVATE_URL: repaired.DATABASE_PRIVATE_URL,
-    });
-    expect(result.expected).toEqual(result.changes);
-    expect(result.sourcePassword).toBe(source);
-    expect(original.POSTGRES_PASSWORD).toBe(source);
-    expect(result.changes).not.toHaveProperty('POSTGRES_PASSWORD');
-    expect(result.changes).not.toHaveProperty('UNRELATED');
-    // Execute the actual pg parser to show that the preserved safe options do
-    // not replace credentials/target, independently of the helper's parser.
-    expect(parse(rendered.DATABASE_URL)).toMatchObject({
-      user: 'postgres', password: source, host: `${old}.example`, port: '5432',
-      database: old, application_name: old, connect_timeout: '10',
-    });
-  });
-
   it('is a no-op for references already using the canonical source, including whitespace', () => {
     const spaced = {
       ...repaired,

@@ -10,7 +10,7 @@ export const normalizeDnsName = (name: string): string => name.toLowerCase().rep
 
 /** Account-free public DNS observation. No connection credentials enter requests. */
 export class PublicDnsClient {
-  async query(name: string, type: 6 | 257, signal: AbortSignal): Promise<PublicDnsRead> {
+  async query(name: string, type: 1 | 5 | 6 | 28 | 257, signal: AbortSignal): Promise<PublicDnsRead> {
     try {
       const url = new URL('https://dns.google/resolve');
       url.search = new URLSearchParams({ name, type: String(type), cd: 'false', do: 'true', edns_client_subnet: '0.0.0.0/0' }).toString();

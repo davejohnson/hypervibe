@@ -116,7 +116,9 @@ export async function runEnvironmentTask(params: {
     };
   }
 
-  const job = await adapter.runJob(params.environment, service, command);
+  const job = await adapter.runJob(params.environment, service, command, {
+    gitRemoteUrl: params.project.gitRemoteUrl,
+  });
   const receipt = job.receipt as unknown as Record<string, unknown>;
   const diagnostics = {
     ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),

@@ -62,6 +62,9 @@ public struct ProviderCatalogEntry: Equatable, Identifiable, Sendable {
     public let notes: [String]
     public let credentialFields: [CredentialField]?
     public let defaultScalarKey: String?
+    public let bootstrap: ProviderBootstrap?
+    public let localSetup: ProviderLocalSetup?
+    public var requiresAgentSetup: Bool { bootstrap != nil || localSetup != nil }
 
     public init(
         name: String,
@@ -72,7 +75,9 @@ public struct ProviderCatalogEntry: Equatable, Identifiable, Sendable {
         requiredPermissions: [String] = [],
         notes: [String] = [],
         credentialFields: [CredentialField]? = nil,
-        defaultScalarKey: String? = nil
+        defaultScalarKey: String? = nil,
+        bootstrap: ProviderBootstrap? = nil,
+        localSetup: ProviderLocalSetup? = nil
     ) {
         self.name = name
         self.displayName = displayName
@@ -83,6 +88,35 @@ public struct ProviderCatalogEntry: Equatable, Identifiable, Sendable {
         self.notes = notes
         self.credentialFields = credentialFields
         self.defaultScalarKey = defaultScalarKey
+        self.bootstrap = bootstrap
+        self.localSetup = localSetup
+    }
+}
+
+public struct ProviderBootstrap: Equatable, Sendable, Decodable {
+    public let provider: String
+    public let action: String
+    public let adminAuth: String
+}
+
+public struct ProviderLocalSetup: Equatable, Sendable, Decodable {
+    public let cloud: String
+    public let connectionAction: String
+}
+
+public struct ConnectionGuidance: Equatable, Sendable {
+    public let provider: ProviderCatalogEntry
+    public let recommendedSetupURL: URL?
+    public let credentialExample: String
+    public let projectName: String?
+    public let scope: String?
+
+    public var agentSetupPrompt: String {
+        var prompt = "Use Hypervibe to help me connect \(provider.displayName) for this repository."
+        if let projectName { prompt += " The existing Hypervibe project is \(projectName)." }
+        if let scope { prompt += " Use connection scope \(scope)." }
+        prompt += " Follow its provider-owned bootstrap or local sign-in setup. Reuse verified access, show the concrete plan before consequential approvals, and leave browser consent and billing choices to me. Do not ask me to create cloud projects or generated credentials manually."
+        return prompt
     }
 }
 

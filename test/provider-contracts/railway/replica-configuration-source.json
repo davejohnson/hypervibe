@@ -1,0 +1,119 @@
+{
+  "evidenceKind": "official-source-excerpts",
+  "description": "Exact excerpts from immutable public Railway CLI and documentation revisions, retrieved over HTTPS with certificate verification. CLI sources use the existing GraphQL schema pin. The compact schema field excerpt includes its enclosing type selection and byte offsets; other excerpts preserve upstream lines. These establish nullable legacy replica fields, explicit regional configuration shapes and aggregation, and the distinction between configured and deployment-effective settings. They do not establish a null-to-one default or record a live service observation.",
+  "sources": [
+    {
+      "path": "src/gql/schema.json",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/gql/schema.json",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "91e281d5d34fd23c881d93dcf9f4f3ea0f5e57b7",
+      "sha256": "7fa2a58556676103cd6c64f68e0388d6d4561bf770b87d314a4df6d8f5289213",
+      "excerpts": [
+        {
+          "startLine": 1,
+          "endLine": 1,
+          "startByte": 643422,
+          "endByteExclusive": 643571,
+          "selection": {
+            "typeName": "ServiceInstance",
+            "fieldName": "numReplicas"
+          },
+          "sha256": "7527f4fe3906ef7035b7b019bdabbc8583b218cea21ddc0e71a603baaaa9ed0b",
+          "text": "{\"name\":\"numReplicas\",\"description\":null,\"args\":[],\"type\":{\"kind\":\"SCALAR\",\"name\":\"Int\",\"ofType\":null},\"isDeprecated\":false,\"deprecationReason\":null}"
+        }
+      ]
+    },
+    {
+      "path": "src/controllers/config/environment.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/config/environment.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "8ffa42f7a5950881159bf35dc3140ff3c8a0d203",
+      "sha256": "3f39605a3516595fb01a63b45523e9a0b49c42ce78785852f6910dc9f9f7a8d7",
+      "excerpts": [
+        {
+          "startLine": 14,
+          "endLine": 42,
+          "sha256": "43b47e631914c2c1cc39c05dc230ad6a6476ff4af75bb428cbe58490c187989d",
+          "text": "/// Root environment config from `environment.config` GraphQL field\n#[skip_serializing_none]\n#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]\n#[serde(default, rename_all = \"camelCase\")]\npub struct EnvironmentConfig {\n    #[serde(skip_serializing_if = \"BTreeMap::is_empty\")]\n    pub services: BTreeMap<String, ServiceInstance>,\n    #[serde(skip_serializing_if = \"BTreeMap::is_empty\")]\n    pub shared_variables: BTreeMap<String, Option<Variable>>,\n    #[serde(skip_serializing_if = \"BTreeMap::is_empty\")]\n    pub volumes: BTreeMap<String, VolumeInstance>,\n    #[serde(skip_serializing_if = \"BTreeMap::is_empty\")]\n    pub buckets: BTreeMap<String, BucketInstance>,\n    pub private_network_disabled: Option<bool>,\n}\n\n#[skip_serializing_none]\n#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]\n#[serde(default, rename_all = \"camelCase\")]\npub struct ServiceInstance {\n    pub source: Option<ServiceSource>,\n    pub networking: Option<ServiceNetworking>,\n    #[serde(skip_serializing_if = \"BTreeMap::is_empty\")]\n    pub variables: BTreeMap<String, Option<Variable>>,\n    pub config_file: Option<String>,\n    pub deploy: Option<DeployConfig>,\n    pub build: Option<BuildConfig>,\n    #[serde(skip_serializing_if = \"BTreeMap::is_empty\")]\n    pub volume_mounts: BTreeMap<String, VolumeMount>,\n"
+        },
+        {
+          "startLine": 268,
+          "endLine": 295,
+          "sha256": "d53f46c0b03055601039312df3aba521fb2cca09a2cc993b581bbb925ab6144e",
+          "text": "#[skip_serializing_none]\n#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]\n#[serde(default, rename_all = \"camelCase\")]\npub struct DeployConfig {\n    pub start_command: Option<String>,\n    pub pre_deploy_command: Option<serde_json::Value>, // string or [string]\n    pub healthcheck_path: Option<String>,\n    pub healthcheck_timeout: Option<i64>,\n    pub ipv6_egress_enabled: Option<bool>,\n    pub num_replicas: Option<i64>,\n    pub multi_region_config: Option<BTreeMap<String, Option<RegionConfig>>>,\n    pub cron_schedule: Option<String>,\n    pub restart_policy_type: Option<String>, // ON_FAILURE | ALWAYS | NEVER\n    pub restart_policy_max_retries: Option<i64>,\n    pub sleep_application: Option<bool>,\n    pub registry_credentials: Option<RegistryCredentials>,\n    pub limit_override: Option<LimitOverride>,\n    pub required_mount_path: Option<String>,\n    pub overlap_seconds: Option<i64>,\n    pub draining_seconds: Option<i64>,\n}\n\n#[skip_serializing_none]\n#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]\n#[serde(default, rename_all = \"camelCase\")]\npub struct RegionConfig {\n    pub num_replicas: Option<i64>,\n}\n"
+        }
+      ]
+    },
+    {
+      "path": "src/controllers/regions.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/controllers/regions.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "2e21e12e3ce0fd1a71de4d33fa1f41952aa2e980",
+      "sha256": "6ed16ce3b48bc0f3e730efa569fd755061c9258e486cf4fd9e3626179b26dac7",
+      "excerpts": [
+        {
+          "startLine": 204,
+          "endLine": 219,
+          "sha256": "314565f44fed55ca0449f5fa0407a8dd1b824bbacbb78683e11e2d00106bbf72",
+          "text": "pub fn configured_replicas(region_config: &Value) -> u64 {\n    region_config\n        .get(\"numReplicas\")\n        .and_then(Value::as_u64)\n        .unwrap_or(0)\n}\n\npub fn total_replicas(region_data: &Value) -> u64 {\n    region_data\n        .as_object()\n        .map(|config| {\n            config.values().fold(0u64, |total, value| {\n                total.saturating_add(configured_replicas(value))\n            })\n        })\n        .unwrap_or(0)\n"
+        },
+        {
+          "startLine": 453,
+          "endLine": 475,
+          "sha256": "fc9e55ba780f6ecaa525a9c857b3d095e54504783fc52f00b81e4447edb7259d",
+          "text": "pub fn region_data_from_deploy(deploy: &Value) -> Result<Option<Value>> {\n    if let Some(c) = deploy.dot_get::<Value>(\"multiRegionConfig\")? {\n        return Ok(Some(c));\n    }\n\n    if let Some(region) = deploy.dot_get::<String>(\"region\")? {\n        // Old deployments only have numReplicas and a region field.\n        let mut map = Map::new();\n        let replicas = deploy.dot_get::<Value>(\"numReplicas\")?.unwrap_or(json!(1));\n        map.insert(region, json!({ \"numReplicas\": replicas }));\n        return Ok(Some(Value::Object(map)));\n    }\n\n    Ok(None)\n}\n\npub fn region_data_from_deployment_meta(meta: &Value) -> Result<Option<Value>> {\n    let Some(deploy) = meta.dot_get::<Value>(\"serviceManifest.deploy\")? else {\n        return Ok(None);\n    };\n\n    region_data_from_deploy(&deploy)\n}\n"
+        }
+      ]
+    },
+    {
+      "path": "src/commands/scale.rs",
+      "url": "https://github.com/railwayapp/cli/blob/f60f3a77b980c47f1136909fbd9a443e29a2b95f/src/commands/scale.rs",
+      "revision": "f60f3a77b980c47f1136909fbd9a443e29a2b95f",
+      "gitBlobSha": "8d5530d85f2d5ce8771610417eb47787752b633c",
+      "sha256": "f015a7aa1cd9a90d75d6f9bd4903faed28569b942b61dfc5fe7e2638360b86f9",
+      "excerpts": [
+        {
+          "startLine": 263,
+          "endLine": 282,
+          "sha256": "42c9d70859a9b0e171fccb25abbe7e4ed2b73412a5fd22868b4ef23da8dd1336",
+          "text": "    // check that service exists in that environment\n    let instance = find_service_instance(environment_instances, &service_id);\n    let service_meta = if let Some(instance) = instance {\n        if let Some(latest) = &instance.latest_deployment {\n            if let Some(meta) = &latest.meta {\n                region_data_from_deployment_meta(meta)?\n            } else {\n                None\n            }\n        } else {\n            None\n        }\n    } else {\n        bail!(\"Service not found in the environment\")\n    };\n\n    Ok((\n        service_meta.unwrap_or(Value::Object(Map::new())),\n        service_id,\n    ))\n"
+        }
+      ]
+    },
+    {
+      "path": "content/docs/config-as-code/reference.md",
+      "url": "https://github.com/railwayapp/docs/blob/4bc46bc0ba1b27d50c5ef0393132753982b31112/content/docs/config-as-code/reference.md",
+      "revision": "4bc46bc0ba1b27d50c5ef0393132753982b31112",
+      "gitBlobSha": "723779bf8993dc850f08a5e30567bd86ff6bcbc5",
+      "sha256": "26cf227cebaafdb787970abf1a19cd4c74c106b3f1e0192cdd488677af547e7d",
+      "excerpts": [
+        {
+          "startLine": 19,
+          "endLine": 32,
+          "sha256": "6df3c78408350de5e9ce78624789238f20548858b6bd847e1283b9153fc61ea1",
+          "text": "When a new deployment is triggered, Railway will look for any config files in your\ncode and combine these values with the settings from the dashboard.\n\nThe resulting build and deploy config will be used **only for the current deployment**.\n\nThe settings in the dashboard will not be updated with the settings defined in\ncode.\n\nConfiguration defined in code will always override values from the\ndashboard.\n\n## Config source location\n\nOn the deployment details page, all the settings that a deployment went out with are shown. For settings that come from a configuration file, there is a little file icon. Hovering over the icon will show exactly what part of the file the values originated from.\n"
+        },
+        {
+          "startLine": 284,
+          "endLine": 294,
+          "sha256": "614c6ac5376f28692324145977fe6ef7707b2451228311a042a964c813b47113",
+          "text": "### Setting environment overrides\n\nConfiguration can be overridden for a specific environment by nesting it in a\n`environments.[name]` block.\n\nWhen resolving the settings for a deployment, Railway will use this priority order:\n\n1. Environment specific config in code\n2. Base config in code\n3. Service settings\n\n"
+        }
+      ]
+    }
+  ],
+  "interpretation": {
+    "nullableLegacyField": "ServiceInstance.numReplicas is nullable Int, not Int!. Its absence alone cannot establish one configured replica.",
+    "regionalConfiguration": "EnvironmentConfig services are keyed by service identity; deploy.multiRegionConfig maps regions to optional RegionConfig records whose numReplicas is optional. Hypervibe requires complete explicit valid counts for regional authorization rather than treating omitted counts as zero.",
+    "legacyDefaultBoundary": "The official resolver defaults a missing count to one only in its old deployment-manifest region path. This is not a default for a null ServiceInstance field or an absent/null/empty environment regional map.",
+    "configurationVersusDeployment": "The scale command reads latestDeployment.meta.serviceManifest.deploy. The environment configuration and a running deployment manifest are distinct observations; configuration-as-code can override dashboard values for an individual deployment.",
+    "authorizationPolicy": "Hypervibe admission and fingerprints use validated configuration evidence. Nullable legacy count plus a nonempty fully validated regional map can establish its configured total; missing or malformed proof remains unknown. This changes no replica setting."
+  },
+  "limitations": [
+    "No exact BillForge regional configuration was observed for this record.",
+    "The GraphQL EnvironmentConfig and DeploymentMeta scalars do not validate their JSON internals.",
+    "CLI display aggregation tolerates missing counts as zero; Hypervibe does not use that permissive display fallback for mutation authorization.",
+    "The provider server revision and actual running replica population are not pinned by these sources.",
+    "This Railway parser evidence does not add support for the other seven registered database providers or establish live initialization, filesystem persistence, SQL access or restore compatibility."
+  ]
+}

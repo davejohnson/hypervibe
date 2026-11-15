@@ -5,7 +5,7 @@ import type { Run, RunPlan, RunStep, RunReceipt } from '../entities/run.entity.j
 import type {
   HostingServiceDeleteOptions,
   HostingServiceDeleteScope,
-  IProviderAdapter,
+  IProviderLifecycleAdapter,
   DeploymentMutationOptions,
 } from '../ports/provider.port.js';
 import {
@@ -46,8 +46,8 @@ export interface DeployOptions {
   expectedSourceCommitSha?: string;
   /** Project creation is a separate reviewed plan action during hv_apply. */
   ensureProject?: boolean;
-  /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
-  adapter: IProviderAdapter | IHostingAdapter;
+  /** The hosting adapter to use for deployment (can be IProviderLifecycleAdapter or IHostingAdapter) */
+  adapter: IProviderLifecycleAdapter | IHostingAdapter;
 }
 
 export interface DeployResult {
@@ -458,7 +458,7 @@ export class DeployOrchestrator {
                   name: (receipt.data.projectName as string | undefined) ?? options.project.name,
                 },
                 compensate: async () => {
-                  const adapterWithDelete = options.adapter as (IProviderAdapter | IHostingAdapter) & {
+                  const adapterWithDelete = options.adapter as (IProviderLifecycleAdapter | IHostingAdapter) & {
                     deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
                   };
                   if (typeof adapterWithDelete.deleteProject !== 'function') {
@@ -585,7 +585,7 @@ export class DeployOrchestrator {
           const retainedVolumes = parseServiceVolumeBindings(environment);
           if (!retainedVolumes) throw new Error('Malformed retained filesystem identity blocks deployment.');
           const retainedVolume = Object.hasOwn(retainedVolumes, service.name) ? retainedVolumes[service.name] : undefined;
-          const driver = (options.adapter as IProviderAdapter).serviceVolumes?.staged;
+          const driver = (options.adapter as IProviderLifecycleAdapter).serviceVolumes?.staged;
           if (retainedVolume?.state === 'staged' && !options.deferWorkload) {
             if (Object.values(retainedVolume.components).some(c => c.state !== 'bound')) throw new Error('Retained filesystem components must converge before deploying a workload.');
             if (driver?.runtimeMount) {
@@ -694,7 +694,7 @@ export class DeployOrchestrator {
                   },
                 },
                 compensate: async () => {
-                  const adapterWithDelete = options.adapter as (IProviderAdapter | IHostingAdapter) & {
+                  const adapterWithDelete = options.adapter as (IProviderLifecycleAdapter | IHostingAdapter) & {
                     deleteService?: (serviceId: string, target: HostingServiceDeleteScope, options: HostingServiceDeleteOptions) => Promise<{ success: boolean; error?: string }>;
                   };
                   if (typeof adapterWithDelete.deleteService !== 'function') {

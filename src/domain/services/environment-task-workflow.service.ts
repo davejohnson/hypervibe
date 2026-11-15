@@ -1,9 +1,10 @@
 import type { GitHubEnvironmentTaskAutomationSpec } from '../spec/spec.schema.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
+import { HYPERVIBE_VERSION } from '../../version.js';
 
-// This workflow is a proposal until the public package containing its runner is released.
-export const ENVIRONMENT_TASK_RUNNER_PACKAGE_VERSION = '0.1.35';
+// Receipt producers and validators must use the same released contract.
+export const ENVIRONMENT_TASK_RUNNER_PACKAGE_VERSION = HYPERVIBE_VERSION;
 
 /** Compile reviewed argv tasks; provider identity and release verification belong to the public runner. */
 export function compileEnvironmentTaskWorkflow(

@@ -66,6 +66,70 @@ acknowledgements never authorize that marker. Provider tests cover the receipt
 handoff; durable marker persistence and retry admission belong to the separate
 application lifecycle regressions. A transport failure without an acknowledged
 identity does not establish creation ownership or successful cleanup.
+The [repository-variable contract](github/repository-variables/README.md) pins
+GitHub's numeric repository identity and Actions variable endpoints. The named
+CI-provider comparison covers GitHub Actions, the only registered CI provider.
+Normal acceptance exercises complete bounded inventory, serialized create/update
+acknowledgements, exact stale checks, explicit zero-write adoption, durable
+uncertain-outcome reconciliation, inspection and value-free command responses.
+These offline checks establish neither live permissions nor workflow execution.
+
+The [fresh database bootstrap review](../../docs/database-initialization-bootstrap.md)
+and `database-initialization-bootstrap-provider-matrix.json` cover all registered
+hosting and PostgreSQL providers. Only the Railway/Railway private task pair is
+implemented. Normal tests include the registry roster, pinned GraphQL inspection
+and task transport, executable shell wrapper, durable retry and exact cleanup
+boundaries, plus disposable PostgreSQL authentication and migration programs.
+Configuration, SQL authentication, command exit, cleanup and application operation
+remain separate evidence; these tests do not establish live provider readiness.
+
+The [database password rotation contract](../../docs/database-password-rotation.md)
+describes the registered PostgreSQL credential operations. Normal `npm test` checks port
+coverage, native REST and AWS Query serialization, PostgreSQL wire authentication,
+generated-password recovery and Railway's pinned issuer/alias behavior. Password
+updates, fresh authentication, runtime activation and application health remain
+separate evidence. These offline checks do not claim a live credential rotation.
+
+The [database provisioning review](../../docs/database-provisioning-evidence.md)
+and `database-provisioning-provider-matrix.json` cover every registered database
+provider, including hosting-backed databases. The normal acceptance test checks
+registry completeness and runs six real REST adapters through serialized native
+database-create rejection, requiring failure without a generic hosting fallback.
+Railway's separate pinned GraphQL/public-template fixtures establish database
+template configuration and volume requirements; RDS retains its existing
+SDK-command lifecycle coverage. These checks do not certify live persistence,
+backup points or restore success.
+
+The same named matrix reviews explicit fresh initialization of an exact existing
+database before adapter implementation. Railway implements the reviewed operation
+with offline contracts; all seven managed-database adapters are unsupported. This is not
+a generic database reset contract. Completion must distinguish attached storage,
+exact deployment, SQL/application readiness and future backup evidence. Registry
+conformance checks actual adapter admission against the reviewed matrix and
+executes shared planning/apply with each unsupported concrete adapter, requiring
+zero provider mutations and unchanged local bindings. Pinned source contracts are
+under `railway/database-initialization`; synthetic transport outcomes and local
+lifecycle checks do not establish a successful live initialization.
+
+Railway initialization also pins a sanitized observation of a volume-attachment
+activation replacing the explicitly acknowledged deployment. Its opaque patch,
+manifest and raw snapshot fields have narrow reconstructed transport coverage;
+the official SDL alone does not validate those nested semantics. Completion keeps
+the original acknowledgment alongside a separately verified activation/operation,
+with shared receipt, retry, bootstrap and seed-generation checks. No SQL or live
+durability claim follows from these fixtures.
+
+`src/application/__tests__/seed-registry-scope.api-contract.test.ts` exercises
+database seed dispatch through real encrypted connection selection and Railway
+HTTP serialization. Its synthetic responses execute against the pinned official
+Railway SDL, including `ServiceInstanceUpdateInput.registryCredentials`.
+[Railway's private-registry contract](https://docs.railway.com/builds/private-registries)
+requires service image-pull credentials; Hypervibe's project-isolation contract
+determines which saved credential may be supplied. Exact repository, matching
+wildcard, intentional global fallback, missing/non-GitHub context, and failed-task
+reapply are covered in normal `npm test`. This validates selection and wire
+compatibility, not live token permissions, image boot, or the cause of an observed
+customer task failure.
 
 The [scoped secret contract](../../docs/scoped-secret-updates.md) reviews all
 seven hosting providers and distinguishes native capabilities from implemented
@@ -112,6 +176,24 @@ and object inventories; they report prior restore proof and matching retained re
 not a fresh full-byte audit. Partial executions never certify health or count
 toward the seven complete sets required before retention deletion.
 
+`railway/storage-credentials.observation.json` records a value-free current
+observation of Railway's `virtual-host` credential spelling. The official SDL
+declares an unconstrained string; Railway's bucket documentation and AWS's
+addressing contract supply the virtual-hosted semantics. Reconstructed transport
+tests send that observed spelling through the real Railway client, controller
+handoff and unchanged worker parser in two environments. Canonical `path` and
+`virtual` remain accepted; unknown styles are rejected before worker or object
+transport effects. Actual SDK serialization checks hostname/path addressing.
+S3 already emits canonical `virtual`; GCS and Azure Blob use native object
+transports, and private worker credential admission remains unchanged.
+
+Railway runtime projection retains credential references and uses the verified
+canonical style. Its `railway-s3-url-style-v1` contract requires reviewed rewiring
+of existing consumer bindings and rejects stale pre-contract plans. Ordinary
+acceptance tests cover this migration and convergence. The observation reproduces
+the current parser rejection, not the historical failed task's private inputs;
+these offline checks do not establish a completed live backup or restore.
+
 ### Recovery quality audit after PR #242
 
 The audit compared the changes since `v0.1.35` through `f4ccec4` with the shared
@@ -122,7 +204,7 @@ helper publication, not certification of every API operation in the repository.
 
 | Boundary | Executed counterexample and enforcement |
 | --- | --- |
-| Cloud SQL emitted drill | Rejected/uncertain clone, failed or unrelated operation, wrong instance identity, HTTP 200 null after deletion, and provider/credential error leakage. The generated script requires correlated terminal creation before unlabeled cleanup and emits value-free diagnostics. |
+| GCP engine ownership | The former Cloud SQL clone/delete drill compiler was removed during the OpenTofu cutover. Normal tests require unsupported results and zero emitted workflow files. Cloud Run arbitrary tasks, maintenance scaling/scheduler changes and logging IAM repair also stop before provider writes; status and logging reads remain available. |
 | Retained SQL and object bytes | Same-size replacement after read-back or before health/retention. Real PostgreSQL restore tests and real S3 SDK serialization bind format-2 proof to the verified native revision; final deletion inventory must still match it. |
 | Storage inventory | Missing object names/sizes and malformed or repeated pagination fail as unknown through real S3/Azure SDK transports and the GCS JSON API path. No object silently disappears or becomes zero bytes. |
 | Private helper admission | Public immutable GHCR helper without private credentials; Railway hosting with a non-Railway database; changed or ambiguous destination; missing explicit provider cleanup proof. Shared admission checks the supported pair and current desired selection before execution. |
@@ -155,8 +237,6 @@ API definitions.
 | Contract | Pinned source | Executed coverage |
 | --- | --- | --- |
 | Railway | Full schema from official CLI commit `f60f3a77b980c47f1136909fbd9a443e29a2b95f` | Static adapter query validation; real `graphql-request` serialization, GraphQL input coercion and response execution; project/environment creation; unsuffixed staging web/PostgreSQL/Redis beside production; isolated second-environment bucket creation through shared plan/apply, scoped deletion and noop replan; variables, domains, volumes, delete/retry, pagination, unknown reads and uncertain writes |
-| Supabase v1 | Official OpenAPI commit `26585dd4a4d6db8910a595214c9f6e8fdd206768` | Organization response and project-create request validation through the adapter's HTTP transport; ID/slug distinction; negative project-response fixture validation |
-| Neon v2 | Official release OpenAPI snapshot, content hash in `source.json` | Real serialized project-create body/query validation; organization scope; negative input validation |
 | SendGrid v3 webhooks | Official OpenAPI commit `fb95a935c87b79f7f982ac34bd37adab1f697dbc` (selected operations) | Event Webhook exact-ID settings reads, signing PATCH serialization and unique URL discovery; Inbound Parse exact-hostname reads/PATCH requests, exact-ID policy reads, missing/null evidence and canonical P-256 key validation; shared signing/key lifecycle uses reconstructed transport and synthetic hosting observations |
 | SendGrid v3 Email Logs | Exact `tsg_logs_v3.json` at the same official commit, pinned separately as `sendgrid/email-logs.openapi.json` | Full event-name union through the real adapter, safe search/timeline projection, strict account scope, request/body budgets and value-free failure metadata; see [Email Logs](sendgrid-email-logs.md). Separate bounded live account search and same-ID detail succeeded; this does not validate complete response schemas or certify other scopes/accounts. |
 
@@ -167,9 +247,7 @@ operations and the transitive closure of their component references, including
 response schemas. No requiredness or field types were rewritten.
 
 Pinning a test schema does **not** freeze a hosted API. Railway `/graphql/v2`
-does not select the historical CLI schema revision. Supabase `/v1` and Neon
-`/v2` select major API versions, not immutable server builds. In particular,
-Neon's release schema URL is mutable; tests consume only its checked-in snapshot.
+does not select the historical CLI schema revision.
 
 ## Evidence boundary
 
@@ -183,7 +261,6 @@ imply implemented Hypervibe support:
 | CI provider | Native contract and prerequisites | Hypervibe boundary |
 | --- | --- | --- |
 | `github-actions` | An existing repository environment has a durable numeric ID and case-insensitive name. [Jobs without deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#using-environments-without-deployments) can access its secrets while retaining reviewers, wait timers and branch restrictions; custom protection-app rules are incompatible. Reads require environment/secret metadata access. | Alternate build environment implemented for the existing managed iOS path. Exact identity, complete required-key presence and enabled custom rules are observed before publication and rechecked at apply. Unknown state or identity replacement blocks; no source writes, secret retrieval or recovery by same-name recreation. Offline contract coverage only. |
-| `gitlab-ci` | [Environment-scoped variables](https://docs.gitlab.com/ci/environments/#limit-the-environment-scope-of-a-cicd-variable) use exact or wildcard scope matching. These variables are not a GitHub environment identity/protection contract. | Managed iOS releases and this selector are unsupported; the registered lifecycle explicitly rejects this CI combination before workflow generation. No GitLab adapter or live compatibility is claimed. |
 
 `github/build-credentials/` pins the official environment, environment-secret
 and enabled protection-rule endpoints. The real adapter's reconstructed HTTP
@@ -254,8 +331,6 @@ body. Creation receives a deliberate HTTP 400 after inspection: these tests
 do not claim a successful database connection or full REST lifecycle. OpenAPI
 validation checks referenced shapes, required fields, types, enums, bounds and
 patterns; it does not enforce string formats or every vendor semantic rule.
-Neon's optional `org_id` additionally has a semantic assertion preserving the
-configured organization; schema validity alone cannot prove correct ownership.
 
 The pinned SendGrid `ParseSetting` schema does not declare `security_policy`,
 so successful schema validation does not constrain that field. Its string policy
@@ -325,14 +400,13 @@ defaults without accepting them as successful write acknowledgement. These
 regressions run under ordinary `npm test`; they establish a contract defect,
 not which field caused a particular live validation error or live GCP readiness.
 
-Retained service-volume tests additionally exercise Fly, ECS Express/EFS,
+Retained service-volume tests additionally exercise ECS Express/EFS,
 Azure Container Apps/classic Azure Files, and Cloud Run/Filestore through real
 clients with synthetic HTTP/SDK transport. Their fixtures cite official API
 documentation; unlike Railway, they do not execute a pinned provider schema.
 Shared SQLite lifecycle tests cover per-component intent, acknowledged identity,
-confirmation, delayed/unknown observations and mutation-free convergence. Fly
-also exercises app → disk → first Machine through the real plan/apply boundary.
-Generated GitHub and portable deployment scripts are executed to check mount
+confirmation, delayed/unknown observations and mutation-free convergence.
+Generated GitHub deployment scripts are executed to check mount
 preservation and reject provider-observed configuration loss. These checks do
 not prove live permissions, networking, filesystem I/O, regional availability,
 durability or billing. See [service volumes](../../docs/service-volumes.md).

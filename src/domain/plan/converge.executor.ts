@@ -1,18 +1,24 @@
+import { DATABASE_PASSWORD_OPERATIONS, isDatabasePasswordPlan } from './database-password-plan.contract.js';
+import { isDatabaseBootstrapAction } from './database-bootstrap.contract.js';
+import { DATABASE_FRESH_INITIALIZATION_OPERATION, isDatabaseInitializationAction } from './database-initialization.contract.js';
+import { isCredentialAction, CREDENTIAL_OPERATION } from './credential-plan.contract.js';
 import { databaseCredentialAliasesActionSchema, databaseCredentialAliasesMetadataSchema,
   DATABASE_CREDENTIAL_ALIASES_OPERATION } from '../services/database-credential-aliases.service.js';
 import { isDeepStrictEqual } from 'node:util';
 import { API_POLICY_OPERATION } from '../services/api-policy.js';
-import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction } from '../services/database-scope-binding.service.js';
+import { DATABASE_SCOPE_BIND_OPERATION, isDatabaseScopeBindingAction, DATABASE_PROVISION_RECOVERY_OPERATION, DATABASE_PROVISION_CANDIDATE_OPERATION, isDatabaseProvisionRecoveryAction } from '../services/database-scope-binding.service.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
-import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
+import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import type { PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
+import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
+import { managedBackupFilePaths, parseBackupRetirementFiles } from '../services/backup-workflow.service.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -25,7 +31,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
+    kind: z.enum(['project', 'environment', 'service', 'volume', 'database', 'cache', 'storage', 'retained-resource', 'domain', 'email', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),
@@ -36,7 +42,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   billable: z.boolean().optional(),
   requiresConfirm: z.boolean().optional(),
   dependsOn: z.array(z.string().min(1)).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 }).passthrough().superRefine((action, ctx) => {
   const billableDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind);
   const destructiveDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind)
@@ -85,31 +91,6 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
       code: 'custom',
       path: ['requiresConfirm'],
       message: 'maintenance edge enablement must be marked billable and confirmation-gated',
-    });
-  }
-  if (
-    action.resource.kind === 'load-balancer'
-    && action.metadata?.operation === 'loadBalancerPoolEnsure'
-    && !action.metadata?.blockedReason
-    && ['create', 'update'].includes(action.type)
-    && action.billable !== true
-  ) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['billable'],
-      message: 'load-balancer pool mutation must be marked billable',
-    });
-  }
-  if (
-    action.resource.kind === 'load-balancer'
-    && action.metadata?.operation === 'loadBalancerEnsure'
-    && action.type === 'create'
-    && action.billable !== true
-  ) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['billable'],
-      message: 'load-balancer creation must be marked billable',
     });
   }
   if (
@@ -168,7 +149,7 @@ export function isManagedCiBindingRoot(action: PlanAction): boolean {
     && action.type !== 'destroy'
     && (
       (action.resource.kind === 'project' || action.resource.kind === 'environment')
-      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace' || action.metadata?.workloadCreateRequired === true))
+      || (action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace' || action.metadata?.workloadCreateRequired === true || ['serviceInstanceFinalize','serviceInstanceFinalizeRecovery'].includes(String(action.metadata?.operation))))
     );
 }
 
@@ -204,20 +185,44 @@ export function isBackupProvisioningAction(action: PlanAction): boolean {
 
 /** A reviewed repository proposal may publish the initial backup program before a point exists. */
 export function isBackupProgramPublicationAction(action: PlanAction): boolean {
+  const environment = action.metadata?.backupEnvironment;
+  if (typeof environment !== 'string' || !managedBackupTargetSchema.shape.environment.safeParse(environment).success) return false;
+  const files = action.metadata?.desiredFiles;
+  if (!Array.isArray(files)) return false;
+  if (files.some(file => !file || typeof file !== 'object' || typeof file.content !== 'string'
+    || typeof file.hash !== 'string' || file.hash !== createHash('sha256').update(file.content, 'utf8').digest('hex'))) return false;
+  const paths = files.map(file => file && typeof file === 'object' ? (file as { path?: unknown }).path : undefined);
+  const expected = managedBackupFilePaths(environment);
+  if (paths.length !== 0 && (paths.length !== 2 || new Set(paths).size !== 2 || paths.some(path => !expected.includes(String(path))))) return false;
+  if (paths.length === 0 ? !parseBackupRetirementFiles(action.metadata?.retiredManagedFiles, environment)
+    : action.metadata?.retiredManagedFiles !== undefined) return false;
   return action.type === 'update' && action.resource.kind === 'repo' && action.resource.provider === 'github'
     && action.metadata?.operation === 'githubInfrastructurePullRequest'
     && action.metadata?.backupWorkflowPublicationRequired === true && !action.metadata?.blockedReason
-    && action.verified && action.requiresConfirm === true && action.billable === true
+    && action.verified && action.requiresConfirm === true && (files.length === 0 || action.billable === true)
     && resolvePlanActionAuthority(action)?.capability === 'github.infrastructure.sync';
 }
 
 /** Runtime-validated document stored in runs.plan for type 'plan' runs. */
+const dnsPlanDescriptorSchema = z.object({
+  version: z.literal(1), planId: z.string().min(1),
+  segment: z.object({ id: z.string().min(1), engine: z.literal('opentofu'), planDigest: z.string().min(1),
+    configurationDigest: z.string().min(1), engineVersion: z.string().min(1), providerVersions: z.record(z.string(), z.string()) }).strict(),
+  state: z.object({ provider: z.string().regex(/^dns-(cloudflare|gcp|aws|azure)$/), projectId: z.string().min(1),
+    environmentId: z.string().min(1), partition: z.literal('environment') }).strict(),
+  zone: z.object({ provider: z.enum(['cloudflare', 'gcp', 'aws', 'azure']), zoneId: z.string().min(1), zoneName: z.string().min(1),
+    scope: z.object({ accountId: z.string().optional(), projectId: z.string().optional(), subscriptionId: z.string().optional(), resourceGroup: z.string().optional() }).strict() }).strict(),
+  owner: z.string().min(1), domain: z.string().min(1), connectionId: z.string().min(1), connectionScope: z.string().optional(),
+  zoneFingerprint: z.string().min(1), payloadEncrypted: z.string().min(1),
+}).strict();
+
 export const planRunDocumentSchema = z.object({
   kind: z.literal('hv_plan'),
   /** Omitted by plans created before scoped planning; those remain full plans. */
   scope: z.enum([
     'full',
     'secrets',
+    'credentials',
     'api-policy',
     'retained-cleanup',
     'managed-ci-bindings',
@@ -226,21 +231,27 @@ export const planRunDocumentSchema = z.object({
     'database-checkpoint',
     'database-credential-aliases',
     'database-bindings',
+    'database-initialization',
+    'database-bootstrap',
     'backup-policy',
     'backup-provisioning',
     'backup-readiness',
     'backup-program-publication',
     'managed-ci-publication',
     'managed-ci-credentials',
+    'infrastructure-engine',
+    'dns-engine',
   ]).optional(),
   environmentName: z.string().min(1),
+  dns: z.object({ descriptor: dnsPlanDescriptorSchema, source: z.record(z.string(), z.unknown()).optional() }).strict().optional(),
   databaseCredentialAliasesReady: z.boolean().optional(),
+  databaseBootstrapReady: z.boolean().optional(),
   databaseCredentialAliasesVerification: databaseCredentialAliasesMetadataSchema.optional(),
   specRevision: z.number().int().nonnegative(),
   /** Immutable application revision reviewed with this deployment plan. */
   sourceCommitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   observedFingerprint: z.string().nullable(),
-  integrationFingerprints: z.record(z.string()).optional(),
+  integrationFingerprints: z.record(z.string(), z.string()).optional(),
   lockEnvironmentIds: z.array(z.string().min(1)).optional(),
   actions: z.array(planActionSchema),
   unmanaged: z.array(z.object({ kind: z.string(), name: z.string(), detail: z.string().optional() })).optional(),
@@ -254,10 +265,93 @@ export const planRunDocumentSchema = z.object({
     envVarKeys: z.array(z.string()).optional(),
     envVarsEncrypted: z.string().optional(),
     databaseCredentialAliasesEncrypted: z.string().min(1).optional(),
+    databaseInitializationEncrypted: z.string().min(1).optional(),
+    databaseBootstrapEncrypted: z.string().min(1).optional(),
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'dns-engine') {
+    const descriptor = document.dns?.descriptor;
+    const reconciliation = descriptor && document.actions.length === 1
+      && document.actions[0]?.type === 'update' && document.actions[0]?.verified === true
+      && document.actions[0]?.metadata?.operation === 'dnsOwnershipReconcile'
+      && !engineSegmentOf(document.actions[0]) && document.actions[0]?.resource.kind === 'domain'
+      && document.actions[0]?.resource.name === descriptor.domain
+      && document.actions[0]?.resource.provider === `dns-${descriptor.zone.provider}`;
+    if (!descriptor || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length
+      || descriptor.state.provider !== `dns-${descriptor.zone.provider}`
+      || descriptor.state.partition !== 'environment'
+      || !reconciliation && document.actions.some(action => {
+        if (action.resource.kind !== 'domain' || action.resource.provider !== `dns-${descriptor.zone.provider}`) return true;
+        if (action.type === 'noop') return Boolean(action.metadata?.engineSegment);
+        const member = engineSegmentOf(action);
+        if (!member) return true;
+        const { addresses: _addresses, ...reviewed } = member;
+        return !isDeepStrictEqual(reviewed, descriptor.segment);
+      })) ctx.addIssue({ code: 'custom', message: 'DNS plans contain only the exact saved DNS engine segment and its source identity.' });
+    return;
+  }
+  if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
+  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
+    'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
+    'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete',
+    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup'];
+  if (document.scope === 'infrastructure-engine') {
+    const engine = (document as { engine?: { planId?: unknown } }).engine;
+    if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length
+      || document.actions.some((action) => action.type !== 'noop' && !engineSegmentOf(action)
+        && !engineOperations.includes(String(action.metadata?.operation)))) {
+      ctx.addIssue({ code: 'custom', message: 'Engine plans contain only reviewed engine changes and Hypervibe-owned secret actions.' });
+    }
+    return;
+  }
+  if (document.actions.some((action) => engineSegmentOf(action) || engineOperations.includes(String(action.metadata?.operation)))) {
+    ctx.addIssue({ code: 'custom', message: 'Infrastructure-engine actions require their isolated stage.' });
+  }
+  if (document.scope === 'database-bootstrap') {
+    if (document.actions.length > 1 || document.actions.some(action => !isDatabaseBootstrapAction(action))
+      || (document.actions.length === 1) !== (document.databaseBootstrapReady === true)
+      || (document.actions.length === 1) !== Boolean(document.overrides?.databaseBootstrapEncrypted)
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseBootstrapEncrypted')
+      || document.observedFingerprint !== null || document.integrationFingerprints || document.sourceCommitSha
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Database bootstrap requires one exact confirmed action and encrypted private evidence, without rollout inputs.' });
+    }
+    return;
+  }
+  if (document.databaseBootstrapReady !== undefined || document.overrides?.databaseBootstrapEncrypted || document.actions.some(action =>
+    ['databaseBootstrapAuthenticate', 'databaseBootstrapMigrate'].includes(String(action.metadata?.operation)))) {
+    ctx.addIssue({ code: 'custom', message: 'Database bootstrap requires its isolated stage.' });
+  }
+  if (document.scope === 'database-initialization') {
+    if (document.actions.length > 1 || document.actions.some(action => !isDatabaseInitializationAction(action))
+      || (document.actions.length === 1) !== Boolean(document.overrides?.databaseInitializationEncrypted)
+      || document.overrides && Object.keys(document.overrides).some(key => key !== 'databaseInitializationEncrypted')
+      || document.observedFingerprint !== null || document.integrationFingerprints || document.sourceCommitSha
+      || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Database initialization requires one exact confirmed action and encrypted private evidence, without rollout inputs.' });
+    }
+    return;
+  }
+  if (document.overrides?.databaseInitializationEncrypted
+    || document.actions.some(action => action.metadata?.operation === DATABASE_FRESH_INITIALIZATION_OPERATION)) {
+    ctx.addIssue({ code: 'custom', message: 'Fresh database initialization requires its isolated stage.' });
+  }
+  if (document.scope === 'credentials') {
+    if (!document.actions.length || (!isDatabasePasswordPlan(document.actions) && document.actions.some(a => !isCredentialAction(a)))
+      || new Set(document.actions.map(a => a.id)).size !== document.actions.length
+      || !document.overrides?.delegatedSecretVarsEncrypted
+      || Object.keys(document.overrides).some(k => k !== 'delegatedSecretVarsEncrypted')
+      || !document.lockEnvironmentIds?.length || document.observedFingerprint !== null
+      || document.sourceCommitSha || document.integrationFingerprints || document.inputRequired?.length) {
+      ctx.addIssue({ code: 'custom', message: 'Credential plans contain only reviewed credential actions, exact environment locks and one encrypted replacement.' });
+    }
+  } else if (document.actions.some(a => a.metadata?.operation === CREDENTIAL_OPERATION || DATABASE_PASSWORD_OPERATIONS.includes(a.metadata?.operation as typeof DATABASE_PASSWORD_OPERATIONS[number]))) {
+    ctx.addIssue({ code: 'custom', message: 'Credential updates require their isolated scope.' });
+  }
   if (document.scope === 'database-credential-aliases') {
     const m = document.databaseCredentialAliasesVerification;
     if (document.actions.length > 1 || document.actions.some(action => !databaseCredentialAliasesActionSchema.safeParse(action).success
@@ -294,19 +388,26 @@ export const planRunDocumentSchema = z.object({
     }
     return;
   }
-  if (document.scope !== 'database-bindings' && document.actions.some(action => action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION)) {
+  if (document.scope !== 'database-bindings' && document.actions.some(action =>
+    action.metadata?.operation === DATABASE_SCOPE_BIND_OPERATION || action.metadata?.operation === DATABASE_PROVISION_RECOVERY_OPERATION
+    || action.metadata?.operation === DATABASE_PROVISION_CANDIDATE_OPERATION)) {
     ctx.addIssue({ code: 'custom', message: 'Database scope binding requires its isolated database-bindings stage.' });
   }
   if (document.scope === 'database-bindings') {
-    if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action))
+    if (document.actions.length !== 1 || document.actions.some(action => !isDatabaseScopeBindingAction(action) && !isDatabaseProvisionRecoveryAction(action))
       || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
       || document.sourceCommitSha || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'Database binding plans contain only one confirmed local scope repair and no rollout inputs.' });
     }
     return;
   }
+  if (document.scope !== 'backup-program-publication' && document.actions.some(action => action.metadata?.backupWorkflowPublicationRequired === true
+    || action.metadata?.backupEnvironment !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'Backup program publication requires its isolated selected-environment stage.' });
+  }
   if (document.scope === 'backup-program-publication') {
-    if (document.actions.length !== 1 || document.actions.some(action => !isBackupProgramPublicationAction(action) || action.dependsOn?.length)
+    if (document.actions.length !== 1 || document.actions.some(action => !isBackupProgramPublicationAction(action)
+      || action.metadata?.backupEnvironment !== document.environmentName || action.dependsOn?.length)
       || document.observedFingerprint !== null || document.overrides || document.integrationFingerprints
       || document.inputRequired?.length || document.lockEnvironmentIds?.length) {
       ctx.addIssue({ code: 'custom', message: 'Backup program publication contains only its confirmed reviewed repository proposal and no provider or rollout inputs.' });
@@ -352,10 +453,6 @@ export const planRunDocumentSchema = z.object({
         action.resource.provider === 'github'
           && (action.type === 'create' || action.type === 'update')
           && action.metadata?.operation === 'githubActionsDeployBranch'
-        || action.resource.provider === 'gitlab-ci'
-          && action.type === 'update'
-          && action.resource.name === 'configuration'
-          && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
       )
     );
     if (document.actions.length === 0 || invalidAction) {
@@ -477,8 +574,37 @@ export interface ConvergeParams {
   freshIntegrationFingerprints?: Record<string, string>;
   /** Executes a single non-noop action. */
   handler: ActionHandler;
+  /**
+   * Executes one saved infrastructure-engine plan covering several actions.
+   * Called at most once per segment; actions carrying an engine segment are
+   * never passed to `handler`.
+   */
+  segmentHandler?: EngineSegmentHandler;
   /** Maximum plan age before it must be regenerated. Default 24h. */
   maxPlanAgeMs?: number;
+}
+
+export type EngineSegmentHandler = (
+  segment: EngineActionSegment,
+  actions: PlanAction[],
+  context: ActionExecutionContext
+) => Promise<EngineSegmentResult>;
+
+/** Collapses per-address engine outcomes into one truthful action result. */
+export function engineSegmentActionResult(action: PlanAction, segment: EngineActionSegment, result: EngineSegmentResult): ActionResult {
+  const outcomes = segment.addresses.map((address) => result.outcomes[address] ?? 'not_started');
+  const diagnostics = result.diagnostics.join('\n') || undefined;
+  const data = { engineSegment: segment.id, outcomes: Object.fromEntries(segment.addresses.map((a, i) => [a, outcomes[i]])) };
+  if (outcomes.some((outcome) => outcome === 'failed')) {
+    return { success: false, message: `OpenTofu failed to change ${action.resource.name}.`, error: diagnostics ?? 'Engine apply failed.', data };
+  }
+  if (outcomes.some((outcome) => outcome === 'unknown')) {
+    return { success: false, status: 'pending', message: `The outcome for ${action.resource.name} is unknown. Observe it with hv_status before planning a retry.`, error: diagnostics, data };
+  }
+  if (outcomes.every((outcome) => outcome === 'succeeded')) {
+    return { success: true, message: `OpenTofu applied ${segment.addresses.length} change(s) for ${action.resource.name}.`, data };
+  }
+  return { success: false, status: 'blocked', message: `OpenTofu did not start changes for ${action.resource.name}.`, error: diagnostics, data };
 }
 
 export type ActionReceiptStatus =
@@ -503,7 +629,7 @@ export interface ConvergeResult {
   applyRunId?: string;
   error?: string;
   conflict?: {
-    kind: 'already_applied' | 'plan_in_progress' | 'environment_in_progress';
+    kind: 'already_applied' | 'plan_in_progress' | 'environment_in_progress' | 'resource_in_progress';
     runId: string;
   };
   receipts: ActionReceipt[];
@@ -561,6 +687,14 @@ export function fingerprintObservedState(observed: ObservedState): string {
         engine: d.engine,
         externalId: d.externalId,
         status: d.status,
+        ...(d.persistence ? { persistence: {
+          state: d.persistence.state,
+          configurationFingerprint: d.persistence.configurationFingerprint ?? null,
+        } } : {}),
+        ...(d.runtimeReferenceBinding ? { runtimeReferenceBinding: {
+          state: d.runtimeReferenceBinding.state,
+          evidenceFingerprint: d.runtimeReferenceBinding.evidenceFingerprint ?? null,
+        } } : {}),
         providerScope: d.providerScope
           ? Object.fromEntries(Object.entries(d.providerScope).sort(([a], [b]) => a.localeCompare(b)))
           : null,
@@ -649,6 +783,47 @@ export function orderActions(actions: PlanAction[]): PlanAction[] {
   return ordered;
 }
 
+/** Keep DNS publication and hosting-claim release in the same native-zone critical section. */
+function dnsZoneLockKey(zone: z.infer<typeof dnsPlanDescriptorSchema>['zone']): string {
+  const requiredScope = zone.provider === 'azure' ? [zone.scope.subscriptionId, zone.scope.resourceGroup]
+    : zone.provider === 'gcp' ? [zone.scope.projectId] : [zone.scope.accountId];
+  if (requiredScope.some(value => typeof value !== 'string' || !value.trim())) throw new Error('Incomplete native DNS zone scope.');
+  const identity = zone.provider === 'azure'
+    ? [zone.provider, zone.zoneId.toLowerCase(), zone.scope.subscriptionId?.toLowerCase(), zone.scope.resourceGroup?.toLowerCase()]
+    : zone.provider === 'gcp' ? [zone.provider, zone.zoneId, zone.scope.projectId]
+      : [zone.provider, zone.zoneId, zone.scope.accountId];
+  return `dns-zone:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+}
+
+/** Derive locks only from persisted native scope; arbitrary plan-supplied lock keys are ignored. */
+function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
+  if (document.scope === 'dns-engine' && document.dns) return [dnsZoneLockKey(document.dns.descriptor.zone)];
+  if (document.scope !== 'infrastructure-engine') return undefined;
+  const domains = new Set<string>();
+  for (const action of document.actions) {
+    if (action.type === 'noop') continue;
+    const forget = action.metadata?.operation === 'gcpDomainForget';
+    if (!forget && !action.id.startsWith('domain:')) continue;
+    const domain = forget ? action.metadata?.domain : action.id.slice('domain:'.length);
+    if (typeof domain !== 'string' || !domain || action.resource.kind !== 'domain'
+      || action.resource.provider !== 'gcp' || action.resource.name !== domain) throw new Error('Invalid exact domain-claim action.');
+    if (!forget) {
+      const segment = engineSegmentOf(action);
+      if (!segment?.addresses.length || segment.addresses.some(address => !/^google_cloud_run_domain_mapping\.[A-Za-z0-9_]+$/.test(address)))
+        throw new Error('Invalid native domain mapping action.');
+    }
+    domains.add(domain);
+  }
+  if (!domains.size) return undefined;
+  const claims = z.object({ domainClaims: z.record(z.string(), z.object({ zone: dnsPlanDescriptorSchema.shape.zone,
+    connectionScope: z.string().min(1).optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+  return [...new Set([...domains].map(domain => {
+    const claim = claims[domain];
+    if (!claim) throw new Error('The exact domain claim has no saved native DNS zone.');
+    return dnsZoneLockKey(claim.zone);
+  }))].sort();
+}
+
 export class ConvergeExecutor {
   constructor(private runRepo = new RunRepository()) {}
 
@@ -716,6 +891,9 @@ export class ConvergeExecutor {
       return { success: false, error: error instanceof Error ? error.message : String(error), receipts: [] };
     }
 
+    let lockResourceKeys: string[] | undefined;
+    try { lockResourceKeys = dnsZoneResourceLocks(document); }
+    catch { return { success: false, error: 'The saved domain action has no valid exact DNS zone claim. Re-run hv_plan before changing the domain.', receipts: [] }; }
     const reservation = this.runRepo.reserveApply({
       projectId: planRun.projectId,
       environmentId: planRun.environmentId,
@@ -723,13 +901,16 @@ export class ConvergeExecutor {
       environmentName: document.environmentName,
       specRevision: document.specRevision,
       lockEnvironmentIds: document.lockEnvironmentIds,
+      lockResourceKeys,
     });
     if (!reservation.reserved) {
       const error = reservation.reason === 'already_applied'
         ? `Plan ${params.planRunId} was already applied (run ${reservation.conflictingRunId}). Re-run hv_plan.`
         : reservation.reason === 'plan_in_progress'
           ? `Plan ${params.planRunId} is already being applied (run ${reservation.conflictingRunId}). Wait for that apply to finish and inspect its receipts before retrying.`
-          : `Environment ${document.environmentName} already has a running apply (run ${reservation.conflictingRunId}). Wait for it to finish and inspect its receipts before applying another plan.`;
+          : reservation.reason === 'resource_in_progress'
+            ? `This DNS zone already has a running apply in another environment (run ${reservation.conflictingRunId}). Wait for it to finish, then refresh the DNS plan before applying changes.`
+            : `Environment ${document.environmentName} already has a running apply (run ${reservation.conflictingRunId}). Wait for it to finish and inspect its receipts before applying another plan.`;
       return {
         success: false,
         error,
@@ -774,13 +955,18 @@ export class ConvergeExecutor {
     }
 
     const completed = new Set<string>();
+    const segmentResults = new Map<string, EngineSegmentResult>();
     let failed = false;
     let pending = false;
     let blocked = false;
     let firstError: string | undefined;
 
     for (const action of ordered) {
-      if (failed || pending || blocked) {
+      // Members of an already-executed engine plan report their real outcome,
+      // even after an earlier failure: the engine may have changed them.
+      const executedSegment = engineSegmentOf(action);
+      const alreadyExecuted = executedSegment !== undefined && segmentResults.has(executedSegment.id);
+      if (!alreadyExecuted && (failed || pending || blocked)) {
         const state = failed ? 'failure' : pending ? 'pending result' : 'blocked result';
         receipts.push({ actionId: action.id, status: 'aborted', message: `Skipped after earlier ${state}` });
         continue;
@@ -791,7 +977,7 @@ export class ConvergeExecutor {
         continue;
       }
       // A dependency that was skipped (not completed) blocks dependents.
-      const unmetDep = (action.dependsOn ?? []).find(
+      const unmetDep = alreadyExecuted ? undefined : (action.dependsOn ?? []).find(
         (dep) => ordered.some((a) => a.id === dep) && !completed.has(dep)
       );
       if (unmetDep) {
@@ -823,7 +1009,28 @@ export class ConvergeExecutor {
       };
 
       try {
-        const result = await params.handler(action, { applyRunId: applyRun.id });
+        const segment = engineSegmentOf(action);
+        let result: ActionResult;
+        if (segment) {
+          let segmentResult = segmentResults.get(segment.id);
+          if (!segmentResult) {
+            const members = ordered.filter((candidate) => engineSegmentOf(candidate)?.id === segment.id);
+            const memberIds = new Set(members.map((member) => member.id));
+            const externalDep = members.flatMap((member) => member.dependsOn ?? [])
+              .find((dep) => !memberIds.has(dep) && ordered.some((a) => a.id === dep) && !completed.has(dep));
+            if (!params.segmentHandler) {
+              segmentResult = { outcomes: {}, diagnostics: ['This apply path cannot execute infrastructure-engine plans. Re-run hv_plan.'] };
+            } else if (externalDep) {
+              segmentResult = { outcomes: {}, diagnostics: [`Engine plan prerequisite "${externalDep}" has not completed.`] };
+            } else {
+              segmentResult = await params.segmentHandler(segment, members, { applyRunId: applyRun.id });
+            }
+            segmentResults.set(segment.id, segmentResult);
+          }
+          result = engineSegmentActionResult(action, segment, segmentResult);
+        } else {
+          result = await params.handler(action, { applyRunId: applyRun.id });
+        }
         if (result.status === 'pending') {
           pending = true;
           recordReceipt('pending', result.message, result.error, result.data);

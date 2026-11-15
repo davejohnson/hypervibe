@@ -1,0 +1,331 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "reconstructed-from-redacted-live-observations",
+  "provider": "railway",
+  "observedDate": "2026-10-28",
+  "sanitization": {
+    "identities": "All resource, deployment, snapshot and patch identifiers are synthetic contract identifiers. No live IDs are retained.",
+    "values": "No credentials, variable values, image digests, manifest values, actor identity or absolute timestamps are retained.",
+    "representation": "Field names, selected statuses, types, presence and private equality results are retained. This is an evidence summary, not a verbatim GraphQL response."
+  },
+  "identities": {
+    "projectId": "project-contract",
+    "environmentId": "environment-production",
+    "serviceId": "production-postgres-db",
+    "volumeId": "volume-initialization-1",
+    "acknowledgedDeploymentId": "deployment-acknowledged",
+    "observedDeploymentId": "deployment-observed",
+    "patchId": "patch-storage-attachment",
+    "acknowledgedSnapshotId": "snapshot-acknowledged",
+    "observedSnapshotId": "snapshot-observed"
+  },
+  "deployments": {
+    "acknowledged": {
+      "id": "deployment-acknowledged",
+      "projectId": "project-contract",
+      "environmentId": "environment-production",
+      "serviceId": "production-postgres-db",
+      "snapshotId": "snapshot-acknowledged",
+      "status": "REMOVED",
+      "deploymentStopped": true,
+      "reason": "deploy",
+      "metadataKeys": [
+        "duration",
+        "image",
+        "imageDigest",
+        "logsV2",
+        "reason",
+        "runtime",
+        "serviceManifest",
+        "volumeMounts"
+      ],
+      "metadataFieldTypes": {
+        "image": "string",
+        "logsV2": "boolean",
+        "reason": "string",
+        "runtime": "string",
+        "duration": "number",
+        "imageDigest": "string",
+        "volumeMounts": "array",
+        "serviceManifest": "object"
+      },
+      "manifestKeys": [
+        "build",
+        "deploy"
+      ],
+      "deployKeys": [
+        "cronSchedule",
+        "drainingSeconds",
+        "healthcheckPath",
+        "healthcheckTimeout",
+        "ipv6EgressEnabled",
+        "limitOverride",
+        "multiRegionConfig",
+        "numReplicas",
+        "overlapSeconds",
+        "preDeployCommand",
+        "preDeployTimeoutSeconds",
+        "region",
+        "registryCredentials",
+        "requiredMountPath",
+        "restartPolicyMaxRetries",
+        "restartPolicyType",
+        "runtime",
+        "sleepApplication",
+        "startCommand",
+        "useLegacyStacker"
+      ]
+    },
+    "observed": {
+      "id": "deployment-observed",
+      "projectId": "project-contract",
+      "environmentId": "environment-production",
+      "serviceId": "production-postgres-db",
+      "snapshotId": "snapshot-observed",
+      "status": "SUCCESS",
+      "deploymentStopped": false,
+      "reason": "deploy",
+      "metadataKeys": [
+        "image",
+        "imageDigest",
+        "logsV2",
+        "patchId",
+        "queuedReason",
+        "reason",
+        "runtime",
+        "serviceManifest",
+        "volumeMounts"
+      ],
+      "metadataFieldTypes": {
+        "image": "string",
+        "logsV2": "boolean",
+        "reason": "string",
+        "patchId": "string",
+        "runtime": "string",
+        "imageDigest": "string",
+        "queuedReason": "string",
+        "volumeMounts": "array",
+        "serviceManifest": "object"
+      },
+      "manifestKeys": [
+        "build",
+        "deploy"
+      ],
+      "deployKeys": [
+        "cronSchedule",
+        "drainingSeconds",
+        "healthcheckPath",
+        "healthcheckTimeout",
+        "ipv6EgressEnabled",
+        "limitOverride",
+        "multiRegionConfig",
+        "numReplicas",
+        "overlapSeconds",
+        "preDeployCommand",
+        "preDeployTimeoutSeconds",
+        "region",
+        "registryCredentials",
+        "requiredMountPath",
+        "restartPolicyMaxRetries",
+        "restartPolicyType",
+        "runtime",
+        "sleepApplication",
+        "startCommand",
+        "useLegacyStacker"
+      ]
+    },
+    "observedMetadataPatchId": "patch-storage-attachment",
+    "comparisons": {
+      "sameProjectEnvironmentAndService": true,
+      "observedCreatedAfterAcknowledgedMilliseconds": 344,
+      "sameManifest": true,
+      "changedManifestKeys": [],
+      "changedMetadataKeys": [
+        "duration",
+        "patchId",
+        "queuedReason"
+      ]
+    },
+    "observedMetadataShape": {
+      "deploymentId": "deployment-observed",
+      "image": {
+        "type": "string",
+        "value": "postgres:16"
+      },
+      "imageDigest": {
+        "type": "string",
+        "present": true,
+        "valueWithheld": true
+      },
+      "volumeMounts": {
+        "type": "array",
+        "length": 1,
+        "entries": [
+          {
+            "type": "string",
+            "matchesReviewedMount": true
+          }
+        ],
+        "interpretation": "The observed DeploymentMeta.volumeMounts array contains a path string, not a mount object or a volume ID. The exact volume ID is separately correlated through the scoped environment patch."
+      }
+    }
+  },
+  "environmentPatch": {
+    "id": "patch-storage-attachment",
+    "environmentId": "environment-production",
+    "status": "COMMITTED",
+    "appliedAtPresent": true,
+    "topLevelKeys": [
+      "services",
+      "volumes"
+    ],
+    "serviceChanges": {
+      "production-postgres-db": {
+        "keys": [
+          "volumeMounts"
+        ],
+        "deployKeys": [],
+        "variableNames": [],
+        "volumeMounts": {
+          "volume-initialization-1": {
+            "keys": [
+              "mountPath"
+            ],
+            "reviewedMountPathMatches": true
+          }
+        }
+      }
+    },
+    "volumeChanges": {
+      "volume-initialization-1": {
+        "keys": [
+          "isCreated"
+        ],
+        "isCreated": true
+      }
+    },
+    "privateChecks": {
+      "committed": true,
+      "exactEnvironment": true,
+      "onlyServicesAndVolumes": true,
+      "onlyExactService": true,
+      "onlyVolumeMounts": true,
+      "onlyExactMountedVolume": true,
+      "onlyMountPath": true,
+      "reviewedMountPathMatches": true,
+      "onlyExactVolume": true,
+      "onlyCreationMarker": true,
+      "isCreatedTrue": true
+    }
+  },
+  "deploymentSnapshots": {
+    "acknowledgedId": "snapshot-acknowledged",
+    "observedId": "snapshot-observed",
+    "acknowledgedLinked": true,
+    "observedLinked": true,
+    "variableCount": {
+      "acknowledged": 11,
+      "active": 11
+    },
+    "sameNames": true,
+    "allRawValuesEqual": true,
+    "observedPgdataMatchesReviewed": true,
+    "selectedPrivateEqualityChecks": {
+      "POSTGRES_PASSWORD": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      },
+      "PGPASSWORD": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      },
+      "DATABASE_URL": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      },
+      "DATABASE_PRIVATE_URL": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      },
+      "POSTGRES_USER": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      },
+      "POSTGRES_DB": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      },
+      "PGDATA": {
+        "presentInAcknowledged": true,
+        "presentInActive": true,
+        "equal": true
+      }
+    },
+    "valueRepresentationChecks": {
+      "DATABASE_PRIVATE_URL": {
+        "bothStrings": true,
+        "bothResolved": false
+      },
+      "DATABASE_URL": {
+        "bothStrings": true,
+        "bothResolved": false
+      },
+      "PGDATA": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "PGDATABASE": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "PGHOST": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "PGPASSWORD": {
+        "bothStrings": true,
+        "bothResolved": false
+      },
+      "PGPORT": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "PGUSER": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "POSTGRES_DB": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "POSTGRES_PASSWORD": {
+        "bothStrings": true,
+        "bothResolved": true
+      },
+      "POSTGRES_USER": {
+        "bothStrings": true,
+        "bothResolved": true
+      }
+    },
+    "interpretation": "Snapshot values are raw configured strings. DATABASE_URL, DATABASE_PRIVATE_URL and PGPASSWORD retain unresolved reference syntax. No values are copied or dereferenced in this evidence. bothResolved is the original syntactic presence check, not a runtime credential or SQL verification."
+  },
+  "causalAttribution": {
+    "known": false,
+    "explanation": "A later successful deployment carried a patch ID whose observed patch contained only the exact service mount and volume creation marker. Timing, matching manifest and raw snapshot values do not prove which actor or request caused that patch or deployment, or document a provider successor relationship."
+  },
+  "limitations": [
+    "This is one reconstructed observation sequence, not a repeatable live conformance run or a provider guarantee.",
+    "The original patch summary recorded only the isCreated key. Its true value is supported by a separate follow-up read-only proof; it is not inferred from key presence.",
+    "DeploymentMeta and EnvironmentConfig are opaque GraphQL scalars. The SDL does not validate their nested fields or lineage semantics.",
+    "No complete active-deployment inventory is recorded here; a consumer must independently verify current uniqueness and exact scope.",
+    "Equal raw references do not prove equal resolved secrets, authentication, SQL initialization, application migration, backups or durability.",
+    "No independent request-to-patch lineage identifier or provider guarantee of volumeCreate deployment behavior was observed.",
+    "The acceptance of this narrow storage-attachment proof is an explicit Hypervibe policy, not provider-documented causal attribution."
+  ]
+}

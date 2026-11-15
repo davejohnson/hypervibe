@@ -1,7 +1,9 @@
 # Retained service filesystems
 
-> Cross-host implementation in PR #218. Offline tests do not
-> certify live mounts or durability. See the [provider audit](service-volumes-design.md).
+This reference covers existing service-filesystem operations. Offline tests do
+not certify live mounts or durability, and registration alone does not establish
+hosting support. New cloud scope is defined by the
+[common journey](development/user-journey.md).
 
 Declare one persistent filesystem mount on a web service:
 
@@ -26,7 +28,12 @@ Use the normal `hv_spec` → `hv_plan` → `hv_apply` → `hv_status` workflow.
 1. A new service first needs a durable provider identity. Manual deployments get
    an isolated `hosting-bindings` plan; managed CI uses its existing binding
    stage. Apply and re-plan. These stages configure empty services, not disks or
-   application deployments.
+   application deployments. Missing delegated application credentials do not
+   block this volume prerequisite; declared database dependencies still require
+   their own provider connection, exact confirmation and successful provisioning.
+   The later application plan requests the missing credentials again before
+   allowing deployment. This does not waive credentials for an ordinary managed
+   CI binding stage that can configure existing workloads.
 2. A `service-volumes` plan contains `volume:<service>` or individual
    `volume:<service>:<component>` actions, including exact scope, mount path,
    capacity/cost notes and dependencies. Confirm the exact action IDs with
@@ -38,11 +45,6 @@ Use the normal `hv_spec` → `hv_plan` → `hv_apply` → `hv_status` workflow.
    on verified attachment. An unchanged plan performs no disk mutation.
 4. Deploy the application, then verify its actual mounted path, permissions,
    read/write behavior, and persistence across redeployment separately.
-
-Fly has an additional ordering constraint: bind an empty app namespace, create
-the disk, then create its first Machine using the acknowledged disk ID. Only
-then can managed CI publish a workflow targeting that Machine. Adding a disk
-to an existing diskless Machine is blocked; no implicit replacement is allowed.
 
 ## Retention and recovery
 
@@ -79,12 +81,9 @@ ownership evidence, not manual removal of the marker and blind retry.
 | Host | Filesystem path and initial constraints |
 | --- | --- |
 | Railway | Native volume; web only, known single-instance configuration. Capacity follows account defaults. |
-| Fly | Encrypted 1 GB native volume; web/worker, one Machine, attached at Machine creation; no replication. |
 | Azure Container Apps | Dedicated Standard_LRS StorageV2 account, classic SMB share with 5 GiB quota, environment registration and app attachment; web only. |
 | ECS Express | Encrypted regional EFS, access point, dedicated network permissions and task-definition attachment; web only; metered storage/throughput/transfer. |
 | Cloud Run | Dedicated VPC/subnet and BASIC_HDD Filestore, **1024 GiB minimum provisioned capacity**, then NFS attachment; web/worker. |
-| DigitalOcean App Platform | Rejected explicitly: this hosting product has no persistent mount support. |
-| Vercel Functions | Rejected explicitly: sandbox Drives are not mounts for the Functions hosting product. |
 
 Cloud Run's selected `<region>-a` zone must be independently observed as UP in
 the configured region before Filestore creation. Conflicting existing VPC/cache
@@ -112,11 +111,13 @@ See the [volume reference](https://docs.railway.com/volumes/reference) and
 [API guide](https://docs.railway.com/integrations/api/manage-volumes).
 
 Observation requires a known single-instance configuration (including explicit
-regional replica counts) and complete, paginated environment inventory. Nullable
-or incomplete provider settings block rather than imply defaults. Whether a
-fresh live Railway service exposes enough configuration for this check remains
-unverified; the schema permits nullable replica counts. This implementation
-does not silently change replica settings to make the check pass.
+regional replica counts) and complete, paginated environment inventory. A null
+legacy replica count needs a nonempty regional map with every count validated;
+it never implies one. Missing or incomplete proof remains unknown. This proves
+configured capacity, not a running deployment's manifest or container population.
+The [replica evidence record](../test/provider-contracts/railway/replica-configuration-source.json)
+pins the nullable schema and independent configuration model. This implementation
+does not change replica settings to make the check pass or claim live compatibility.
 
 Tests execute serialized GraphQL against the pinned official Railway schema and
 synthetic provider state, plus real local SQLite persistence. The opaque JSON

@@ -3,7 +3,7 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
-import type { IProviderAdapter, Receipt } from '../ports/provider.port.js';
+import type { IProviderAdapter, IProviderLifecycleAdapter, Receipt } from '../ports/provider.port.js';
 import {
   createStorageCreateRecovery,
   parseStorageCreateRecovery,
@@ -18,6 +18,7 @@ import type { PlanAction } from '../plan/plan.types.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
 import { providerRegistry } from '../registry/provider.registry.js';
+import { receiptRolloutBaseline } from './runtime-rollout.service.js';
 
 export const STORAGE_OPERATIONS = {
   ensure: 'storageEnsure',
@@ -202,6 +203,20 @@ function requireAppliedStorageEnvUpdate(receipt: Receipt): Receipt {
   return receipt.data?.skipped === true
     ? { ...receipt, success: false, message: `Storage environment update was skipped: ${receipt.message}` }
     : receipt;
+}
+
+/** Preserve pending rollout evidence for the exact storage consumer without
+ * forwarding arbitrary provider receipt data or claiming runtime activation. */
+function storageRuntimeRolloutData(receipt: Receipt, serviceName: string): Record<string, unknown> {
+  if (receipt.data?.runtimeRolloutRequired !== true) return {};
+  const baseline = receiptRolloutBaseline(receipt, serviceName) ?? { state: 'unknown' as const };
+  return {
+    services: [serviceName], runtimeRolloutRequired: true,
+    rolloutBaseline: { state: baseline.state,
+      ...(baseline.id ? { deploymentId: baseline.id } : {}),
+      ...(baseline.activeDeploymentIds ? { activeDeploymentIds: baseline.activeDeploymentIds } : {}) },
+    ...(receipt.data.deploymentDeferred === true ? { deploymentDeferred: true } : {}),
+  };
 }
 
 function boundServiceId(environment: Environment | null, serviceName: string): string | undefined {
@@ -1297,7 +1312,7 @@ export async function applyStorageAction(params: {
   const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
   if (!service) return { success: false, message: `Service "${serviceName}" not found locally` };
   const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project);
-  const hosting = hostingResult.adapter as IProviderAdapter | undefined;
+  const hosting = hostingResult.adapter as (IProviderAdapter & Partial<IProviderLifecycleAdapter>) | undefined;
   if (!hostingResult.success || !hosting?.setEnvVars) return { success: false, message: 'Hosting adapter cannot sync storage variables', error: hostingResult.error };
   if (hosting.name !== params.environmentSpec.hosting.provider) {
     return {
@@ -1315,7 +1330,7 @@ export async function applyStorageAction(params: {
       persist(environment, { ...bindings, [name]: { ...binding, services: binding.services.filter((item) => item !== serviceName) } }, contexts);
     }
     return { success: receipt.success, message: receipt.success ? `Removed storage "${name}" access from "${serviceName}"` : receipt.message, error: receipt.error,
-      ...(receipt.data ? { data: receipt.data } : {}) };
+      data: receipt.success ? { serviceName, envKeys: Object.keys(cleared).sort(), ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data };
   }
 
   const runtimeTarget = await storageRuntimeTarget({ project: params.project, environmentSpec: params.environmentSpec,
@@ -1334,6 +1349,6 @@ export async function applyStorageAction(params: {
     success: receipt.success,
     message: receipt.success ? `Wired storage "${name}" to service "${serviceName}"` : receipt.message,
     error: receipt.error,
-    data: receipt.success ? { serviceName, envKeys: runtimeEnvKeys } : receipt.data,
+    data: receipt.success ? { serviceName, envKeys: runtimeEnvKeys, ...storageRuntimeRolloutData(receipt, serviceName) } : receipt.data,
   };
 }

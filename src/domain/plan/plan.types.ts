@@ -1,9 +1,10 @@
 import type { Service } from '../entities/service.entity.js';
 import type { Component } from '../entities/component.entity.js';
+import type { DnsSpec } from '../spec/dns.schema.js';
 
 export type PlanActionType = 'create' | 'update' | 'replace' | 'destroy' | 'noop';
 
-export type PlanResourceKind = 'project' | 'environment' | 'service' | 'volume' | 'database' | 'cache' | 'storage' | 'retained-resource' | 'load-balancer' | 'domain' | 'email' | 'messaging' | 'ci' | 'repo' | 'ios' | 'queue' | 'secret' | 'payment' | 'maintenance';
+export type PlanResourceKind = 'project' | 'environment' | 'service' | 'volume' | 'database' | 'cache' | 'storage' | 'retained-resource' | 'domain' | 'email' | 'ci' | 'repo' | 'ios' | 'queue' | 'secret' | 'payment' | 'maintenance';
 
 export interface PlanFieldDiff {
   /** Field name; env vars appear as "env:KEY" with no values. */
@@ -51,6 +52,10 @@ export interface LocalSnapshot {
     /** Durable blockers for hosting creates whose exact outcome is unresolved. */
     serviceCreateRecovery?: Record<string, unknown>;
     domainDns?: {
+      /** Confirmed saved-engine cleanup; permits releasing only the remaining hosting claim. */
+      dnsEngineRemoved?: boolean;
+      dnsStagePending?: boolean;
+      dnsSelection?: DnsSpec;
       name?: string;
       proxied?: boolean;
       recreateRevision?: string;

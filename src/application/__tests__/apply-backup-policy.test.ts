@@ -33,7 +33,7 @@ describe('reviewed daily backup policy application', () => {
         serviceVolumes: { web: { provider: 'railway', state: 'bound', target, externalId: 'volume' } },
       } : {}) } });
     const component = kind === 'database' ? ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'db', bindings: { provider: 'railway' } }) : undefined;
-    const environmentSpec = environmentSpecSchema.parse({ hosting: { provider: 'railway' },
+    const environmentSpec = environmentSpecSchema.parse({ backups: { mode: 'daily' }, hosting: { provider: 'railway' },
       services: kind === 'volume' ? { web: { volume: { mountPath: '/data' } } } : {},
       ...(kind === 'database' ? { database: { provider: 'railway' } } : {}) });
     const source = { provider: 'railway', primaryExternalId: kind === 'database' ? 'db' : 'web',
@@ -48,7 +48,7 @@ describe('reviewed daily backup policy application', () => {
     });
     const adapter = { name: 'railway', ...(kind === 'database' ? { dailyBackups: { observe, configureDaily } }
       : { serviceVolumes: { dailyBackups: { observe, configureDaily } } }) };
-    vi.spyOn(ctx.adapterFactory, kind === 'database' ? 'getDatabaseAdapter' : 'getProviderAdapter')
+    vi.spyOn(ctx.adapterFactory, kind === 'database' ? 'getDatabaseOperations' : 'getProviderAdapter')
       .mockResolvedValue({ success: true, adapter: adapter as never });
     const coverage = await observeBackupPolicy({ spec: environmentSpec, environment, components: component ? [component] : [], project, adapterFactory: ctx.adapterFactory });
     const action = planBackupPolicy(coverage).actions[0];
@@ -76,7 +76,7 @@ describe('reviewed daily backup policy application', () => {
       if (failure === 'wrong target') (action.metadata!.item as { target: { componentId: string } }).target.componentId = 'replacement';
       if (failure === 'unverified') action.verified = false;
       if (failure === 'not billable') action.billable = false;
-      if (failure === 'unsupported provider') action.resource.provider = 'supabase';
+      if (failure === 'unsupported provider') action.resource.provider = 'synthetic-unsupported-provider';
       const result = await f.apply({ action, ...(failure === 'missing confirmation' ? { confirmedActionIds: new Set() } : {}) });
       expect(result).toMatchObject({ success: false, status: 'blocked', data: { applied: 0 } });
       expect(f.configureDaily).not.toHaveBeenCalled();

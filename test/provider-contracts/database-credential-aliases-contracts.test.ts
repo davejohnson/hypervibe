@@ -1,8 +1,8 @@
+import { reviewedOperationProviders } from './operations-scope.js';
 import { readFileSync } from 'node:fs';
 import { buildSchema, getNamedType, isInputObjectType, isScalarType } from 'graphql';
 import { describe, expect, it } from 'vitest';
 import '../../src/application/providers.js';
-import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 
 const document = readFileSync(new URL('../../docs/database-credential-aliases.md', import.meta.url), 'utf8');
 const rows = document.split('\n')
@@ -11,7 +11,7 @@ const rows = document.split('\n')
 
 describe('database credential alias provider contract', () => {
   it('requires one explicit review for every registered database provider', () => {
-    expect(rows.map(row => row[0]).sort()).toEqual(providerRegistry.namesFor('database').sort());
+    expect(rows.map(row => row[0]).sort()).toEqual(reviewedOperationProviders('database'));
     for (const row of rows) {
       expect(row, row[0]).toHaveLength(4);
       expect(row.every(cell => cell.length > 0), row[0]).toBe(true);
@@ -22,13 +22,9 @@ describe('database credential alias provider contract', () => {
     expect(rows.filter(row => row[1] === 'Supported to implement').map(row => row[0])).toEqual(['railway']);
     const officialHosts: Record<string, string> = {
       railway: 'docs.railway.com',
-      supabase: 'supabase.com',
       cloudsql: 'docs.cloud.google.com',
       rds: 'docs.aws.amazon.com',
-      neon: 'neon.com',
       'azure-postgres': 'learn.microsoft.com',
-      digitalocean: 'docs.digitalocean.com',
-      fly: 'docs.fly.io',
     };
     for (const [provider, admission, evidence] of rows) {
       expect(admission, provider).toBe(provider === 'railway' ? 'Supported to implement' : 'Unsupported');

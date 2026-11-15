@@ -4,7 +4,8 @@
 delegated runtime slots in one existing, managed-CI environment. It never loads
 bulk dotenv input, generates application secrets, repairs bindings, publishes
 workflows, changes backups, advances the applied deployment contract, or deploys.
-An omitted scope retains full planning and its backup prerequisites.
+An omitted scope retains full deployment planning. Backup setup is a separate
+explicit scope and is not a release prerequisite.
 
 ```js
 hv_plan({
@@ -34,8 +35,9 @@ authorization boundary: a declared principal is attribution, not a login ACL.
 
 Secret installation and runtime rollout are separate results. Dispatch the
 already accepted workflow with `hv_ci_trigger`, inspect it with `hv_ci_status`,
-and verify health afterward. Existing deployment-contract and backup gates
-remain in force; a secret-only apply cannot make those prerequisites pass.
+and verify health afterward. Existing deployment-contract gates remain in
+force; a secret-only apply cannot make those prerequisites pass. Backup coverage
+and recovery evidence are reported independently from ordinary rollout admission.
 
 ## Provider review
 
@@ -51,9 +53,6 @@ implementation, not the absence of a native provider feature.
 | Cloud Run | Environment variables belong to a service revision; configuration changes create revisions. [Environment variables](https://docs.cloud.google.com/run/docs/configuring/services/environment-variables). | Unsupported; current writer updates workload revisions. |
 | ECS Express | Service ARN in account/region/cluster; updates create a revision and rolling deployment. [UpdateExpressGatewayService](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateExpressGatewayService.html). | Unsupported; current writer delegates to deploy. |
 | Azure Container Apps | App secrets can change without a revision, but environment references belong to revisions. [Manage secrets](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets). | Unsupported; current writer delegates to deploy rather than a proven secret-only operation. |
-| Fly.io | App-scoped staged secrets can wait for a later Machine update. [Secrets](https://docs.fly.io/apps/secrets). | Unsupported; current writer also updates Machines; staged-secret observation/recovery needs separate implementation. |
-| DigitalOcean App Platform | App/component env entries are part of the app spec. [Environment variables](https://docs.digitalocean.com/products/app-platform/how-to/use-environment-variables/). | Unsupported; no proven no-rollout contract in the current app-spec writer. |
-| Vercel | Project/account/target-scoped variables affect new deployments. [Secret rotation](https://vercel.com/docs/environment-variables/rotating-secrets). | Unsupported until exact selected-environment and value-verification/retry contracts are covered. |
 
 Tests must pin this named roster against the hosting registry and the adapter
 capability flags. Offline schema validation cannot prove provider permissions,

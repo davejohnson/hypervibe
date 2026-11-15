@@ -1,7 +1,8 @@
 # Webhook readiness
 
 Ordinary `hv_plan` and `hv_status` return `webhookReadiness` for declared Stripe
-webhooks, Twilio messaging callbacks, and SendGrid inbound/delivery callbacks.
+webhooks, SendGrid inbound/delivery callbacks, and each declared environment
+`webhooks` entry (any API key and webhook service, for example Twilio or Slack).
 They also recognize `STRIPE_WEBHOOK_URL` or `STRIPE_WEBHOOK_SECRET` on application
 web services. An API key alone does not imply an inbound webhook. Custom env
 names and other integrations are not inferred. Bootstrap/cleanup plans returning
@@ -9,12 +10,14 @@ before integration planning omit this report.
 
 The report checks URL configuration and verification-material wiring without
 probing application endpoints. Managed SendGrid signing additionally uses the
-email lifecycle’s read-only provider observations. It never returns URLs, secret values, or their hashes. There
+email lifecycle’s read-only provider observations. It returns a callback URL only
+when Hypervibe composed it from a service binding and a query-free path, never a
+user-declared URL, secret values, or their hashes. There
 are no endpoint probes, test events, credential rotations, or provider writes.
 Infrastructure changes still use reviewed spec/plan/apply actions.
 
 - HTTPS configuration is assessed from the declared Stripe URL or the durable
-  hosting URL used by the existing Twilio/SendGrid callback lifecycle. Invalid
+  hosting URL of the receiving service for SendGrid and declared webhooks. Invalid
   URLs, HTTP, embedded credentials, and fragments need attention. This does not
   test TLS certificates, network reachability, or provider-side registration.
 - Signing-material evidence is either desired configuration or observed hosting
@@ -28,8 +31,9 @@ Infrastructure changes still use reviewed spec/plan/apply actions.
   conventional env configuration. Its API key is not a webhook signing secret.
   Existing Stripe lifecycle drift and confirmation requirements remain authoritative
   for endpoint ownership, binding hashes, installation, and rotation.
-- Twilio's existing messaging contract projects `TWILIO_AUTH_TOKEN`; its API-key
-  secret is not interchangeable. Alternative Twilio signing schemes are not assessed.
+- A declared webhook checks the presence of its `signingSecretEnvVar` (for example
+  `TWILIO_AUTH_TOKEN` or `SLACK_SIGNING_SECRET`) on the receiving service. Without
+  one, signing material is reported as not managed.
 - SendGrid uses public-key signature verification. Delivery events can opt into
   [managed signing](sendgrid-webhook-signing.md), which compares provider signing
   and the exact receiving service’s public-key hash. [Inbound Parse signing](sendgrid-inbound-signing.md)
@@ -57,8 +61,6 @@ contracts, consulted 2026-09-23:
 - [Stripe webhooks](https://docs.stripe.com/webhooks) require publicly accessible
   HTTPS endpoints; [signature verification](https://docs.stripe.com/webhooks/signature)
   uses an endpoint-specific secret and the request payload/header.
-- [Twilio webhook security](https://www.twilio.com/docs/usage/webhooks/webhooks-security)
-  describes account-auth-token signature validation.
 - [SendGrid event webhook security](https://www.twilio.com/docs/sendgrid/for-developers/tracking-events/getting-started-event-webhook-security-features)
   describes public-key verification; the existing email lifecycle documents its
   application-owned verification boundary.

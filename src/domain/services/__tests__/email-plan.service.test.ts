@@ -217,21 +217,6 @@ describe('planEmail', () => {
     }
   });
 
-  it('retains a provider callback when the declared domain belongs to the load balancer', async () => {
-    const desired = environmentSpecSchema.parse({ ...spec(), services: { api: {}, web: {} },
-      loadBalancer: { provider: 'cloudflare', services: ['api', 'web'] } });
-    const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,
-      environment: environment(), observed: observed(), callbackDomainDependencies: ['domain:example.com'],
-      integrationState: state({ inboundRoutes: { status: 'known', items: [{
-        hostname: 'inbound.example.com', url: 'https://api.example.com/webhooks/sendgrid/inbound',
-        spam_check: true, send_raw: false,
-      }] } }) });
-    const inbound = result.actions.find(action => action.id.includes(':inbound:'));
-    expect(inbound?.metadata).toMatchObject({ operation: EMAIL_OPERATIONS.inboundAdopt,
-      expectedUrl: 'https://api.example.com/webhooks/sendgrid/inbound' });
-    expect(inbound?.metadata?.blockedReason).toBeUndefined();
-    expect(inbound?.dependsOn).not.toContain('domain:example.com');
-  });
 
   it('retains a provider delivery-event callback without a declared domain', async () => {
     const desired = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} },
@@ -269,6 +254,13 @@ describe('planEmail', () => {
       expect(evidence).toEqual({ spamCheck: true, sendRaw: false, policyAssociation: 'unknown' });
     });
 
+  it('does not freeze a partial provider authentication response into a smaller DNS intent', async () => {
+    const result = await planEmail({ project, environmentName: 'production', environmentSpec: spec(), environment: null, observed: null,
+      integrationState: state({ domainAuthentications: { status: 'known', items: [{ ...domainAuthentication,
+        dns: { dkim2: domainAuthentication.dns.dkim2, mail_cname: domainAuthentication.dns.mail_cname },
+      }] } }) });
+    expect(result.actions.find(action => action.metadata?.operation === EMAIL_OPERATIONS.dnsSync)?.metadata).not.toHaveProperty('desiredRecords');
+  });
   it.each([undefined, { perServiceKeys: { api: ['SENDGRID_API_KEY'] } }])('does not plan empty runtime writes for email setup alone: %j', async (runtime) => {
     const desired = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: { api: {} }, email: { enabled: true } });
     const result = await planEmail({ project, environmentName: 'production', environmentSpec: desired,

@@ -1,3 +1,5 @@
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { canonicalJsonSha256 } from '../../../lib/canonical-json.js';
 import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { execFileSync } from 'node:child_process';
@@ -403,6 +405,8 @@ describe('repo bindings delegated metadata', () => {
           requiredAt: now.toISOString(),
           applyRunId: 'apply-1',
           actionIds: ['secret:OWNER_MANAGED_SECRET'],
+          operationId: 'database-rotation',
+          configurationExpectationEncrypted: 'private-encrypted-runtime-expectation',
         }],
       },
       createdAt: now,
@@ -434,14 +438,11 @@ describe('repo bindings delegated metadata', () => {
         instanceScope: { projectId: 'railway-project', environmentId: 'railway-production' },
       });
       expect(document.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
-      expect(document.environments.production.platformBindings.runtimeRollouts).toEqual([
-        expect.objectContaining({
-          service: 'worker',
-          provider: 'railway',
-          baselineDeployment: { state: 'present', id: 'deployment-before-config' },
-          actionIds: ['secret:OWNER_MANAGED_SECRET'],
-        }),
-      ]);
+      expect(document.environments.production.platformBindings.runtimeRollouts).toBeUndefined();
+      expect(serialized).not.toContain('private-encrypted-runtime-expectation');
+      const imported = document.environments.production.platformBindings;
+      expect(mergeRepoPlatformBindings(environment.platformBindings, imported).runtimeRollouts).toEqual(environment.platformBindings.runtimeRollouts);
+      expect(() => mergeRepoPlatformBindings(environment.platformBindings, { ...imported, runtimeRollouts: [] })).toThrow(/local|private/i);
     } finally {
       if (oldDisable === undefined) {
         delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -546,5 +547,47 @@ describe('repo bindings delegated metadata', () => {
       }
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('service instance intent export merge', () => {
+  const intent = { version:1, provider:'railway', target:{projectId:'p',environmentId:'target',sourceEnvironmentId:'source',serviceId:'web'},
+    sourceEnvironmentLocalId:'source-local',sourceBindingSha256:'a'.repeat(64),nativeFingerprint:'b'.repeat(64) };
+  it('never suppresses a same-shaped new recovery using historical evidence alone', () => {
+    const marker={provider:'railway',operation:'create',resourceName:'web',providerScope:{projectId:'p',environmentId:'target'},state:'unresolved'};
+    const digest=canonicalJsonSha256(marker);
+    const history=[{id:'history',digest,recordEncrypted:getSecretStore().encryptObject({marker,target:intent.target,serviceName:'web',disposition:'unresolved-not-retried'})}];
+    expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
+    expect(mergeRepoPlatformBindings({serviceInstanceCreateHistory:history,serviceCreateRecovery:{web:marker},
+      serviceInstanceCreates:{web:{...intent,priorCreateRecoverySha256:digest}}},{serviceCreateRecovery:{web:marker}}).serviceCreateRecovery).toEqual({web:marker});
+  });
+  it('rejects an approval introduced by an untrusted repository even when intent identity matches',()=>{
+    const approval={archiveId:'original',activeMarkerSha256:'d'.repeat(64),planId:'plan',actionId:'service:web',intentSha256:'e'.repeat(64)};
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:intent}},
+      {serviceInstanceCreates:{web:{...intent,recoveryApproval:approval}}})).toThrow(/cannot introduce or change/);
+    expect(()=>mergeRepoPlatformBindings({},
+      {serviceInstanceCreates:{web:{...intent,recoveryApproval:approval}}})).toThrow(/cannot introduce or change/);
+  });
+  it('requires independent private proof even when local and incoming approval fields match',()=>{
+    const approved={...intent,completed:true,recoveryApproval:{archiveId:'original',activeMarkerSha256:'d'.repeat(64),planId:'plan',actionId:'service:web',intentSha256:'e'.repeat(64)}};
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:approved},services:{web:{serviceId:'web'}}},
+      {serviceInstanceCreates:{web:approved}})).toThrow(/approval could not be verified/);
+  });
+  it('preserves acknowledged progress when a repository still has the pre-dispatch intent', () => {
+    expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
+      {serviceInstanceCreates:{web:intent}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});
+  });
+  it('accepts an acknowledged export of the exact same pending attempt', () => {
+    expect(mergeRepoPlatformBindings({serviceInstanceCreates:{web:intent}},
+      {serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}}).serviceInstanceCreates).toEqual({web:{...intent,workflowId:'workflow'}});
+  });
+  it.each([
+    {...intent,workflowId:'different'},
+    {...intent,workflowId:'workflow',target:{...intent.target,serviceId:'other'}},
+    {...intent,workflowId:'workflow',nativeFingerprint:'c'.repeat(64)},
+    {...intent,workflowId:'workflow',completed:true},
+  ])('rejects conflicting identity or untrusted completion: %j', incoming => {
+    expect(()=>mergeRepoPlatformBindings({serviceInstanceCreates:{web:{...intent,workflowId:'workflow'}}},
+      {serviceInstanceCreates:{web:incoming}})).toThrow(/Conflicting service instance recovery/);
   });
 });

@@ -8,14 +8,14 @@ import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import type { HostedObservationCapability } from '../ports/hosted-observation.port.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability =
   | 'hosting'
   | 'database'
   | 'cache'
   | 'storage'
   | 'queue'
-  | 'load-balancer';
+  | 'dns';
 export type ProviderImplementationStatus = 'supported' | 'ready-for-live' | 'planned';
 
 export interface ProviderLiveEvidence {
@@ -130,10 +130,11 @@ export const standardDatabaseRuntimeProjection: ProviderDatabaseRuntimeProjectio
 };
 
 function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
-  let current = schema;
+  let current: z.core.$ZodType = schema;
   while (true) {
-    if (current instanceof z.ZodEffects) {
-      current = current.innerType();
+    if (current instanceof z.ZodPipe) {
+      // Refinements and brands retain their schema in v4; transforms use pipes.
+      current = current.in instanceof z.ZodTransform ? current.out : current.in;
       continue;
     }
     if (
@@ -141,12 +142,10 @@ function credentialSchemaKeys(schema: z.ZodTypeAny): Set<string> | null {
       || current instanceof z.ZodNullable
       || current instanceof z.ZodDefault
       || current instanceof z.ZodCatch
+      || current instanceof z.ZodPrefault
+      || current instanceof z.ZodReadonly
     ) {
-      current = current._def.innerType;
-      continue;
-    }
-    if (current instanceof z.ZodBranded) {
-      current = current._def.type;
+      current = current.unwrap();
       continue;
     }
     break;
@@ -198,6 +197,8 @@ export interface ProviderMetadata {
   };
   orchestration?: ProviderOrchestrationMetadata;
   lifecycle?: {
+    /** DNS records are managed independently from cloud infrastructure hosting. */
+    dns?: { engine: 'opentofu'; records: readonly ('A' | 'AAAA' | 'CNAME' | 'TXT' | 'CAA' | 'MX')[] };
     /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
     hosting?: {
       /** Workload kinds this adapter can reconcile through the complete hosting lifecycle. */
@@ -233,6 +234,13 @@ export interface ProviderMetadata {
         /** Native database references the private helper can actually resolve. */
         databaseProviders: readonly string[];
       };
+      /** Fresh-generation SQL verification and reviewed schema bootstrap only. */
+      databaseInitializationTasks?: {
+        variableMode: 'references';
+        execution: 'temporary-workload';
+        status: 'ready-for-live';
+        databaseProviders: readonly string[];
+      };
       /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
       teardownBoundary: 'services' | 'environment' | 'project';
     };
@@ -261,11 +269,6 @@ export interface ProviderMetadata {
       backend: 'pubsub' | 'postgres';
       /** Whether the provider owns external queue resources or only wiring. */
       resources: 'managed' | 'application-managed';
-    };
-    /** Provider-managed edge load-balancer topology exposed by its adapter. */
-    loadBalancer?: {
-      topology: 'monitor-pool-balancer';
-      minimumOrigins: number;
     };
     /**
      * Complete daily policy observation/configuration ports implemented by the adapter.
@@ -341,11 +344,25 @@ export interface ProviderOrchestrationMetadata {
   };
 }
 
+export interface ProviderCredentialUpdateCapability {
+  /** Existing private fields to scrub; public identity metadata is not secret material. */
+  secretKeys: readonly string[];
+  /** Recognize a narrow secondary-role payload; primary payloads retain replacement semantics. */
+  matches(supplied: Record<string, unknown>): boolean;
+  /** Read-only verification and private merge. Called only for a verified exact-scope connection. */
+  prepare(input: { existing: Record<string, unknown>; supplied: Record<string, unknown>; scope: string | null }): Promise<
+    | { success: true; credentials: Record<string, unknown>; credentialKeys: string[]; message: string }
+    | { success: false; error: string }
+  >;
+}
+
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
+  /** Optional narrow update which preserves an existing primary credential. */
+  credentialUpdate?: ProviderCredentialUpdateCapability;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
   inspection?: ProviderInspectionCapability;
   /** Bounded, exact-scope observation without local CLI state or provider mutations. */
@@ -440,7 +457,7 @@ export class ProviderRegistry {
         `Provider "${provider.metadata.name}" declares database lifecycle support without a database runtime projection.`
       );
     }
-    if (!supportsDatabase && provider.databaseRuntime) {
+    if (!supportsDatabase && provider.databaseRuntime && provider.metadata.category !== 'database') {
       throw new Error(
         `Provider "${provider.metadata.name}" declares a database runtime projection without a database lifecycle.`
       );
@@ -449,6 +466,7 @@ export class ProviderRegistry {
 
   private declaredLifecycleCapabilities(provider: RegisteredProvider): ProviderLifecycleCapability[] {
     const capabilities: ProviderLifecycleCapability[] = [];
+    if (provider.metadata.lifecycle?.dns) capabilities.push('dns');
     if (
       provider.metadata.category === 'deployment'
       && provider.metadata.lifecycle?.hosting !== undefined
@@ -481,9 +499,6 @@ export class ProviderRegistry {
     }
     if (provider.metadata.lifecycle?.queue) {
       capabilities.push('queue');
-    }
-    if (provider.metadata.lifecycle?.loadBalancer) {
-      capabilities.push('load-balancer');
     }
     return capabilities;
   }
@@ -574,7 +589,7 @@ export class ProviderRegistry {
       }
     }
     for (const capability of Object.keys(maturity) as ProviderLifecycleCapability[]) {
-      if (!declared.has(capability)) {
+      if (!declared.has(capability) && maturity[capability]?.status !== 'planned') {
         throw new Error(
           `Provider "${provider.metadata.name}" declares ${capability} maturity without an implemented lifecycle capability.`
         );
@@ -805,10 +820,10 @@ export class ProviderRegistry {
       return provider.metadata.category === 'storage'
         || typeof provider.derivedAdapters?.storage === 'function';
     }
-    if (capability === 'queue') {
-      return provider.metadata.lifecycle?.queue !== undefined;
+    if (capability === 'dns') {
+      return provider.metadata.lifecycle?.dns !== undefined;
     }
-    return provider.metadata.lifecycle?.loadBalancer !== undefined;
+    return provider.metadata.lifecycle?.queue !== undefined;
   }
 
   namesFor(capability: ProviderLifecycleCapability): string[] {
@@ -819,12 +834,12 @@ export class ProviderRegistry {
     name: string,
     capability: ProviderLifecycleCapability
   ): ProviderCapabilityMaturity | undefined {
-    if (!this.supports(name, capability)) return undefined;
     return this.providers.get(name)?.metadata.maturity?.lifecycle?.[capability];
   }
 
   /** Planned capabilities remain discoverable/readable but cannot authorize mutation. */
   supportsMutation(name: string, capability: ProviderLifecycleCapability): boolean {
+    if (!this.supports(name, capability)) return false;
     const maturity = this.lifecycleMaturity(name, capability);
     return maturity?.status === 'ready-for-live' || maturity?.status === 'supported';
   }

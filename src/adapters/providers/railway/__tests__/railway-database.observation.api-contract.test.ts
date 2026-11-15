@@ -12,9 +12,12 @@ async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, i
   const instance = http.addService('staging-postgres', 'postgres', stagingId).instances.get(stagingId)!;
   instance.source = { image };
   Object.assign(instance, { latestDeployment: { id: 'database-deployment', status: 'SUCCESS' } });
+  http.addVolume('staging-postgres', stagingId, '/var/lib/postgresql/data');
+  http.variables.set(`staging-postgres/${stagingId}`, { PGDATA: '/var/lib/postgresql/data/pgdata',
+    DATABASE_URL: 'postgresql://synthetic:private@database.railway.internal/postgres' });
   const component: Component = {
     id: 'local-db', environmentId: http.environment.id, type: 'postgres', externalId: 'staging-postgres',
-    bindings: { provider: 'railway', resourceKind: 'service', providerScope: { projectId, environmentId: stagingId } },
+    bindings: { provider: 'railway', resourceKind: 'service', pluginName: 'postgres', directUrlVariable: 'DATABASE_URL', providerScope: { projectId, environmentId: stagingId } },
     createdAt: new Date(), updatedAt: new Date(),
   };
   const databaseAdapter = createRailwayDatabaseAdapter({ hostingAdapter: http.adapter,
@@ -32,8 +35,12 @@ describe('Railway bound database observation API contract', () => {
     'preserves verified environment scope for a repaired binding using %s', async (image) => {
       const f = await fixture({}, image);
       const hosting = await f.adapter.observe(f.environment);
-      expect(hosting.databases).toEqual([]);
-      expect(hosting.services).toContainEqual(expect.objectContaining({ externalId: f.component.externalId }));
+      if (image.startsWith('ghcr.io/railwayapp-templates/')) {
+        expect(hosting.databases).toContainEqual(expect.objectContaining({ externalId: f.component.externalId }));
+      } else {
+        expect(hosting.databases).toEqual([]);
+        expect(hosting.services).toContainEqual(expect.objectContaining({ externalId: f.component.externalId }));
+      }
 
       const database = await f.databaseAdapter.observeDatabase(f.environment, f.component);
       const result = diffEnvironment({
@@ -42,7 +49,9 @@ describe('Railway bound database observation API contract', () => {
         local: { projectExists: true, environmentExists: true, services: [], components: [f.component],
           bindings: { provider: 'railway', projectId, environmentId: stagingId } },
       });
-      expect(result.actions.find(action => action.id === 'database:railway')).toMatchObject({ type: 'noop', verified: true });
+      expect(result.actions.find(action => action.id === 'database:railway')).toMatchObject(image.startsWith('ghcr.io/railwayapp-templates/')
+        ? { type: 'noop', verified: true }
+        : { type: 'update', verified: false, metadata: { blockedReason: 'database_persistence_unknown' } });
       expect(database?.providerScope).toEqual({ projectId, environmentId: stagingId });
       expect(f.requests.some(request => request.query.includes('query GetServiceEnvironmentInstance'))).toBe(true);
       expect(f.contractErrors).toEqual([]);

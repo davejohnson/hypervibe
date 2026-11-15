@@ -7,6 +7,7 @@ import { constants as fsConstants, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { normalizeCredentialActivation } from "../managed-ci/credential-activation.mjs";
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
 const PROCESSING_INTERVAL_MS = 30 * 1000;
@@ -462,6 +463,9 @@ function validateServerEvidence(config, serverEvidence) {
     || new Set(services).size !== services.length
   ) {
     throw new Error("Server release evidence no longer matches the gated mobile release");
+  }
+  if (serverEvidence.credentialActivation !== undefined) {
+    normalizeCredentialActivation(serverEvidence.credentialActivation, resources);
   }
   return services;
 }

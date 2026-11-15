@@ -62,6 +62,17 @@ The Dockerfile alone is not a published image or live compatibility proof.
 The tools must support the source server's major version; this image is not a
 database upgrade and does not support dumping a newer server.
 
+The ordinary `npm test` acceptance suite builds this actual Dockerfile and runs
+the packaged PostgreSQL/files restore smoke. Local development therefore requires
+a running Docker daemon with `linux/amd64` support; the check fails rather than
+skipping when Docker is unavailable. The first build needs access to the public
+base images and npm registry and can take several minutes; later builds reuse
+Docker's cache. Runtime checks use the exact built image, its default `postgres`
+user, no network and a read-only root filesystem. They clean their own container
+IDs and image tag. The image includes the same `templates/` assets as the npm
+package for build-time imports and packaged runtime consumers. These checks do
+not establish registry publication or live provider compatibility.
+
 ## Release publication
 
 The tag-triggered [release workflow](../.github/workflows/release.yml) publishes
@@ -121,10 +132,6 @@ hosting adapter independently. A public proxy is not an acceptable substitute.
 | Cloud SQL | [Official pg_dump/pg_restore guide](https://docs.cloud.google.com/sql/docs/postgres/import-export/import-export-dmp) supports logical export. Private execution needs a VPC-reachable runner/connector and appropriate SQL rights. The existing native clone drill's public connector setting does not prove private execution for this helper. |
 | RDS | [Official PostgreSQL import guidance](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Procedural.Importing.html) describes native dump/restore tooling and managed-superuser limits. The helper needs reviewed VPC routing, credentials and compatible extensions; this change does not implement an RDS private runner. |
 | Azure PostgreSQL | [Official dump/restore guide](https://learn.microsoft.com/en-us/azure/postgresql/migrate/how-to-migrate-using-dump-and-restore) distinguishes single-database export, roles and tool-version requirements. A private network path and supported extension set are prerequisites; this change does not implement an Azure private runner. |
-| Supabase | [Official logical restore guide](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore) identifies separate role, managed-schema, encryption-key and platform configuration work. A generic PostgreSQL restore cannot certify a whole Supabase project or its Storage object bytes. Its platform extensions can make this narrow helper unsupported. |
-| Neon | [Official dump/restore workflow](https://neon.com/blog/optimizing-dev-environments-in-aws-rds-with-neon-postgres-part-ii-using-github-actions-to-mirror-rds-in-neon) demonstrates native logical tooling. This does not prove a private route, session-safe snapshot export, compatible extension set or the provider's native recovery-point availability. Those remain prerequisites. |
-| Fly Managed Postgres | [Official MPG documentation](https://docs.fly.io/postgres) identifies the private organization network and provider extension catalogue. [Official staff guidance](https://community.fly.io/t/you-asked-and-we-shipped-postgres-17-on-mpg/26430) recommends pg_dump/pg_restore between major versions. A provider runner must use the exact MPG source, not an unrelated Fly volume snapshot. |
-| DigitalOcean | [Official PostgreSQL migration guide](https://docs.digitalocean.com/products/databases/postgresql/how-to/migrate/) documents custom-format pg_dump/pg_restore. A reviewed private/VPC path and supported SQL privileges/extensions are still required; this change does not implement a DigitalOcean private runner. |
 
 The [PostgreSQL pg_dump contract](https://www.postgresql.org/docs/current/app-pgdump.html)
 defines custom archives, synchronized snapshots, single-database scope and the

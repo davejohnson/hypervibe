@@ -166,9 +166,7 @@ describe('public release configuration', () => {
     ) as {
       secrets?: Record<string, unknown>;
     };
-    const bindings = JSON.parse(
-      readFileSync(new URL('../../.hypervibe/bindings.json', import.meta.url), 'utf8')
-    ) as {
+    let bindings: {
       environments?: {
         repository?: {
           platformBindings?: {
@@ -178,7 +176,15 @@ describe('public release configuration', () => {
           };
         };
       };
-    };
+    } = {};
+    try {
+      bindings = JSON.parse(
+        readFileSync(new URL('../../.hypervibe/bindings.json', import.meta.url), 'utf8')
+      );
+    } catch (error) {
+      // Hypervibe removes this optional export when no public bindings remain.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
 
     expect(spec.secrets?.NPM_TOKEN).toBeUndefined();
     expect(

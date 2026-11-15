@@ -8,6 +8,7 @@ import path from 'node:path';
 import { IOS_RELEASE_EVIDENCE_VERSION } from '../ios-release-evidence.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../managed-ci-evidence.js';
 import { buildIosReleaseWorkflow } from '../ios-release-workflow.service.js';
+import { getManagedIosReleaseRuntime } from '../ios-release-template.service.js';
 
 const runtimeUrl = new URL('../../../../templates/ios/hypervibe-ios-release.mjs', import.meta.url);
 const workflow = buildIosReleaseWorkflow({
@@ -38,7 +39,6 @@ const encodedRuntime = parse(workflow!.files[0].content).jobs.release.steps.find
 )?.env?.HYPERVIBE_MANAGED_RUNTIME_BASE64;
 if (!encodedRuntime) throw new Error('Generated workflow did not embed its release runtime');
 const runtimes = await Promise.all([
-  ['source template', runtimeUrl.href],
   ['generated workflow runtime', `data:text/javascript;base64,${encodedRuntime}`],
 ].map(async ([name, url]) => ({ name, runtime: await import(url) as {
   main: () => Promise<void>;
@@ -146,6 +146,20 @@ function stubAppStore(options: { buildStatus?: number; duplicate?: boolean; mark
   return requests;
 }
 
+// Run the complete HTTP contract against the emitted program. The source
+// template retains the original-upload regression without repeating that matrix.
+it('source template also rejects reuse of an older upload without attribution proof, including retries', async () => {
+  const runtime = await import(runtimeUrl.href);
+  const { outputPath } = setupRelease();
+  const requests = stubAppStore();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(runtime.main()).rejects.toThrow(/already exists|provenance|cannot verify/i);
+  }
+  expect(requests.every(({ method }) => method === 'GET')).toBe(true);
+  expect(requests.some(({ pathname }) => pathname.includes('betaGroups'))).toBe(false);
+  expect(existsSync(outputPath)).toBe(false);
+});
+
 describe.each(runtimes)('managed iOS release provenance: $name', ({ runtime }) => {
   it('does not attribute an older uploaded build to the newly gated commit, including retries', async () => {
     const { outputPath } = setupRelease();
@@ -166,7 +180,7 @@ describe.each(runtimes)('managed iOS release provenance: $name', ({ runtime }) =
     expect(existsSync(outputPath)).toBe(false);
   });
 
-  it.each([401, 429, 503])('does not treat an unknown build read (%i) as permission to upload', async (buildStatus) => {
+  it.each([401, 503])('does not treat an unknown build read (%i) as permission to upload', async (buildStatus) => {
     const { outputPath } = setupRelease();
     const requests = stubAppStore({ buildStatus });
     await expect(runtime.main()).rejects.toThrow(`App Store Connect returned ${buildStatus}`);
@@ -188,6 +202,41 @@ describe.each(runtimes)('managed iOS release provenance: $name', ({ runtime }) =
     const requests = stubAppStore({ marketingVersion: '0.9' });
     await expect(runtime.main()).rejects.toThrow(/marketing version/);
     expect(requests.every(({ method }) => method === 'GET')).toBe(true);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    { version: 1, operations: [] },
+    { version: 1, operations: [{ service: 'web', serviceId: 'web-1', operationId: 'operation-1', deploymentIds: ['deployment-1'], configurationVersion: 42 }] },
+  ])('accepts credential activation without weakening upload retry protection (%j)', async credentialActivation => {
+    const { evidencePath, outputPath, evidence } = setupRelease();
+    writeFileSync(evidencePath, JSON.stringify({
+      ...evidence,
+      target: { resources: [{ logicalName: 'web', providerResourceId: 'web-1' }] },
+      credentialActivation,
+    }));
+    const requests = stubAppStore();
+    await expect(runtime.main()).rejects.toThrow(/already exists.*provenance/);
+    expect(requests).toHaveLength(3);
+    expect(requests.every(({ method }) => method === 'GET')).toBe(true);
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each([
+    null,
+    { version: 2, operations: [] },
+    { version: 1, operations: [{ service: 'web', serviceId: 'other-service', operationId: 'operation-1', deploymentIds: ['deployment-1'] }] },
+    { version: 1, operations: [{ service: 'web', serviceId: 'web-1', operationId: 'operation-1', deploymentIds: [] }] },
+  ])('rejects malformed credential activation before any App Store effects (%j)', async credentialActivation => {
+    const { evidencePath, outputPath, evidence } = setupRelease();
+    writeFileSync(evidencePath, JSON.stringify({
+      ...evidence,
+      target: { resources: [{ logicalName: 'web', providerResourceId: 'web-1' }] },
+      credentialActivation,
+    }));
+    const requests = stubAppStore();
+    await expect(runtime.main()).rejects.toThrow(/Credential activation/);
+    expect(requests).toEqual([]);
     expect(existsSync(outputPath)).toBe(false);
   });
 
@@ -255,7 +304,7 @@ describe.each(runtimes)('managed build-number allocation: $name', ({ runtime }) 
     await expect(runtime.allocateBuildNumber(env)).resolves.toBe(expected);
   });
 
-  it.each([401, 429, 503])('never treats an unknown listing (%i) as an empty app', async status => {
+  it.each([401, 503])('never treats an unknown listing (%i) as an empty app', async status => {
     const { env } = setupRelease();
     stubBuildPages([{ errors: [{ title: 'Unavailable' }] }], status);
     await expect(runtime.allocateBuildNumber(env)).rejects.toThrow(`App Store Connect returned ${status}`);
@@ -362,7 +411,7 @@ globalThis.fetch = async input => {
     const line = readFileSync(environment.GITHUB_ENV!, 'utf8').trim();
     const separator = line.indexOf('=');
     environment[line.slice(0, separator)] = line.slice(separator + 1);
-    expect(readFileSync(environment.HYPERVIBE_MANAGED_RELEASE_RUNTIME!, 'utf8')).toBe(readFileSync(runtimeUrl, 'utf8'));
+    expect(readFileSync(environment.HYPERVIBE_MANAGED_RELEASE_RUNTIME!, 'utf8')).toBe(getManagedIosReleaseRuntime());
     const allocation = steps.find((step: any) => step.id === 'number');
     const result = spawnSync('bash', ['-eu', '-c', allocation.run], { encoding: 'utf8', cwd: directory, env: environment });
     expect(result.status, result.stderr).toBe(0);

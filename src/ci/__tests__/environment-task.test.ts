@@ -53,7 +53,7 @@ describe('public named task CI entry', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  function manualDispatch() {
+  function manualDispatch(database?: Record<string, unknown>) {
     directory = mkdtempSync(join(tmpdir(), 'task-ci-'));
     const rawSpec = {
       version: 1, project: 'example',
@@ -63,10 +63,13 @@ describe('public named task CI entry', () => {
       } } },
       environments: { staging: {
         hosting: { provider: 'railway' }, services: { web: {} },
+        ...(database ? { database } : {}),
         deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
       } },
     };
-    const spec = projectSpecSchema.parse(rawSpec);
+    const spec = projectSpecSchema.parse({ ...rawSpec, environments: { staging: {
+      ...rawSpec.environments.staging, ...(database ? { database: { provider: 'railway', ...database } } : {}),
+    } } });
     vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(rawSpec)).mockReturnValueOnce('{}');
     vi.stubEnv('GITHUB_EVENT_NAME', 'workflow_dispatch');
     vi.stubEnv('GITHUB_TOKEN', 'private-token-value');
@@ -90,6 +93,16 @@ describe('public named task CI entry', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     return { log, error };
   }
+
+  it('passes a host-native database to the task while retaining raw committed authority', async () => {
+    const { error } = manualDispatch({});
+    await runManagedEnvironmentTaskFromProcess();
+    expect(error).not.toHaveBeenCalled();
+    expect(executeManagedEnvironmentTask).toHaveBeenCalledTimes(1);
+    const [input] = vi.mocked(executeManagedEnvironmentTask).mock.calls[0];
+    expect(input.spec.environments.staging.database?.provider).toBe('railway');
+    expect(input.rawSpec).toHaveProperty('environments.staging.database', {});
+  });
 
   it.each(['receipt-once', 'receipt-persistent', 'summary-once', 'summary-persistent', 'both-persistent'])(
     'preserves attempted work when post-execution output fails (%s)', async (failure) => {

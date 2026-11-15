@@ -159,7 +159,7 @@ struct ProjectSetupView: View {
             VStack(alignment: .leading, spacing: 9) {
                 Text("Connect a coding agent")
                     .font(.headline)
-                Text("Choose where you want to chat with Hypervibe. You can change this later in Settings.")
+                Text("Choose where you want to chat with Hypervibe. Codex setup includes workflow guidance; Claude Desktop receives it through MCP.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 ForEach(MCPHost.allCases, id: \.self) { host in

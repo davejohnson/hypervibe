@@ -31,7 +31,7 @@ const desiredServices = {
 const oldDomain = {
   name: hostname, proxied: false, providerDomainId: 'domain-cron',
   serviceName: 'cron', serviceId: 'service-cron', environmentId: 'staging-id',
-  zoneId: 'zone-id',
+  zoneId: 'zone-id', dnsEngineRemoved: true,
   records: [{ id: 'dns-old', name: hostname, type: 'CNAME', target: 'cron.example.net' }],
 };
 
@@ -70,7 +70,11 @@ describe('custom domain desired service plan/apply boundary', () => {
       provider: 'railway', projectId: 'project-id', environmentId: 'staging-id',
       services: Object.fromEntries(order.map(name => [name, { serviceId: `service-${name}`,
         ...(name === options.owner ? { customDomains: [hostname] } : {}) }])),
-      ...(options.boundDomain ? { domainDns: oldDomain } : {}),
+      ...(options.boundDomain ? { domainDns: oldDomain, dnsEngine: { version: 1,
+        zone: { provider: 'cloudflare', zoneId: 'zone-id', zoneName: 'example.com', scope: { accountId: 'account-id' } },
+        recordsEncrypted: ctx.secretStore.encryptObject([]), ownersEncrypted: ctx.secretStore.encryptObject({}),
+        configurationEncrypted: ctx.secretStore.encryptObject({}), ownedOwners: [],
+      } } : {}),
     } });
     const observed: ObservedState = {
       provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
@@ -222,6 +226,9 @@ describe('custom domain desired service plan/apply boundary', () => {
   it('retains confirmed DNS IDs when resolver hydration reads an older known-empty record set', async () => {
     const f = fixture();
     await f.apply((await f.plan()).action);
+    const attached = ctx.repos.environments.findById(f.environment.id)!.platformBindings.domainDns as Record<string, unknown>;
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: { ...attached, zoneId: 'zone-id',
+      records: [{ id: 'dns-new', name: hostname, type: 'CNAME', target: 'web.example.net' }] } });
     const local = ctx.repos.environments.findById(f.environment.id)!.platformBindings;
     await resolveWithStaleExport(f, { ...local,
       domainDns: { ...(local.domainDns as Record<string, unknown>), records: [] } });
@@ -250,7 +257,7 @@ describe('custom domain desired service plan/apply boundary', () => {
     const cleanup = await teardownCustomDomain({ project: f.project, environment: current, domain: hostname });
     expect(cleanup.success).toBe(true);
     expect(f.detach).toHaveBeenCalledTimes(1);
-    expect(f.deleteDns).toHaveBeenCalledWith('zone-id', 'dns-old');
+    expect(f.deleteDns).not.toHaveBeenCalled();
     ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: undefined });
     expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings).not.toHaveProperty('domainDns');
   });
@@ -301,6 +308,47 @@ describe('custom domain desired service plan/apply boundary', () => {
     expect(action.metadata?.blockedReason).toBeTruthy();
   });
 
+  it('adopts incomplete legacy DNS metadata after observing the exact public attachment', async () => {
+    const f = fixture({ owner: 'web' });
+    const legacy = { name: hostname, proxied: false, zoneId: 'zone-id', records: [
+      { id: 'legacy-dns', name: hostname, type: 'CNAME', target: 'web.example.net' },
+    ] };
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: legacy });
+    const { action } = await f.plan();
+    expect(action.metadata?.operation).toBe('customDomainAdopt');
+    expect(await f.apply(action)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toMatchObject({
+      ...legacy, providerDomainId: 'domain-web', serviceName: 'web', serviceId: 'service-web', environmentId: 'staging-id',
+    });
+    expect(f.attach).not.toHaveBeenCalled();
+    expect(f.detach).not.toHaveBeenCalled();
+    expect(f.deleteDns).not.toHaveBeenCalled();
+    expect(f.upsertDns).not.toHaveBeenCalled();
+  });
+
+  it.each(['serviceName', 'serviceId', 'environmentId', 'providerDomainId'])('never overwrites a retained conflicting %s during local domain adoption', async key => {
+    const f = fixture({ owner: 'web' });
+    const { action } = await f.plan();
+    expect(action.metadata?.operation).toBe('customDomainAdopt');
+    const retained = { name: hostname, [key]: 'different-identity', records: [] };
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: retained });
+    expect(await f.apply(action)).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toEqual(retained);
+    expect(f.attach).not.toHaveBeenCalled();
+    expect(f.detach).not.toHaveBeenCalled();
+    expect(f.upsertDns).not.toHaveBeenCalled();
+  });
+
+  it('does not accept DNS readiness for a hostname still owned by a different workload', async () => {
+    const f = fixture({ owner: 'cron', boundDomain: true });
+    const { action } = await f.plan();
+    const result = await f.apply({ ...action, type: 'update', requiresConfirm: false,
+      metadata: { ...action.metadata, operation: 'domainDnsReady', dnsEngineReady: true } });
+    expect(result).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.attach).not.toHaveBeenCalled();
+    expect(f.detach).not.toHaveBeenCalled();
+  });
+
   it('plans confirmation-gated retarget with exact old ownership and desired new web identity', async () => {
     const f = fixture({ owner: 'cron', boundDomain: true });
     const { action } = await f.plan();
@@ -336,6 +384,16 @@ describe('custom domain desired service plan/apply boundary', () => {
     expect(f.upsertDns).not.toHaveBeenCalled();
   });
 
+  it('blocks a saved retarget if its private DNS ownership is lost after planning', async () => {
+    const f = fixture({ owner: 'cron', boundDomain: true });
+    const { action } = await f.plan();
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: undefined });
+    expect(await f.apply(action)).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(f.detach).not.toHaveBeenCalled();
+    expect(f.attach).not.toHaveBeenCalled();
+    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toEqual(oldDomain);
+  });
+
   it('requires confirmation before retarget, then removes only the old attachment and retains pending new identity', async () => {
     const f = fixture({ owner: 'cron', boundDomain: true });
     const { action } = await f.plan();
@@ -345,14 +403,14 @@ describe('custom domain desired service plan/apply boundary', () => {
     await f.apply(action);
     expect(f.detach).toHaveBeenCalledExactlyOnceWith({ projectId: 'project-id', environmentId: 'staging-id',
       serviceId: 'service-cron', domain: hostname, customDomainId: 'domain-cron' });
-    expect(f.deleteDns).toHaveBeenCalledExactlyOnceWith('zone-id', 'dns-old');
+    expect(f.deleteDns).not.toHaveBeenCalled();
     expect(f.attach).toHaveBeenCalledExactlyOnceWith({ projectId: 'project-id', environmentId: 'staging-id',
       serviceId: 'service-web', domain: hostname, dnsZone: 'example.com' });
-    expect(f.detach.mock.invocationCallOrder[0]).toBeLessThan(f.deleteDns.mock.invocationCallOrder[0]!);
-    expect(f.deleteDns.mock.invocationCallOrder[0]).toBeLessThan(f.attach.mock.invocationCallOrder[0]!);
+    expect(f.detach.mock.invocationCallOrder[0]).toBeLessThan(f.attach.mock.invocationCallOrder[0]!);
+    expect(f.upsertDns).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings).toMatchObject({ domainDns: {
       name: hostname, providerDomainId: 'domain-web', serviceName: 'web', serviceId: 'service-web',
-      environmentId: 'staging-id', zoneId: 'zone-id', records: [{ id: 'dns-new' }],
+      environmentId: 'staging-id', records: [],
     }, services: { cron: { customDomains: [] }, web: { customDomains: [hostname] } } });
   });
 
@@ -376,7 +434,7 @@ describe('custom domain desired service plan/apply boundary', () => {
     const f = fixture({ owner: 'cron', boundDomain: true });
     const { action } = await f.plan();
     expect(action.type).toBe('replace');
-    f.deleteDns.mockRejectedValueOnce(new Error('Synthetic DNS deletion failure'));
+    f.detach.mockResolvedValueOnce({ success: false, message: 'Synthetic provider detach failure', data: { customDomainId: 'domain-cron' } });
     await f.apply(action);
     expect(f.detach).toHaveBeenCalledTimes(1);
     expect(f.attach).not.toHaveBeenCalled();
@@ -398,67 +456,7 @@ describe('custom domain desired service plan/apply boundary', () => {
     expect(f.attach).toHaveBeenCalledTimes(2);
   });
 
-  it('recovers after the first DNS delete succeeds and the second fails without deleting the provider attachment twice', async () => {
-    const f = fixture({ owner: 'cron', boundDomain: true });
-    const previousDomain = { ...oldDomain, records: [...oldDomain.records,
-      { id: 'dns-txt', name: '_verify.app.example.com', type: 'TXT', target: 'old-verification' }] };
-    ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: previousDomain });
-    const remainingRecords = previousDomain.records.map(record => ({ ...record, content: record.target }));
-    vi.mocked(CloudflareAdapter.prototype.listDnsRecords).mockImplementation(async (_zone, type) =>
-      remainingRecords.filter(record => record.type === type) as never);
-    let providerDeletes = 0;
-    f.detach.mockImplementation(async () => {
-      const oldOwner = f.observed.services[0]!;
-      if (oldOwner.customDomains.includes(hostname)) providerDeletes += 1;
-      oldOwner.customDomains = []; oldOwner.customDomainStatus = {};
-      return { success: true, message: 'Exact attachment absent', data: { customDomainId: 'domain-cron' } };
-    });
-    let failedOnce = false;
-    f.deleteDns.mockImplementation(async (_zone, id) => {
-      if (id === 'dns-txt' && !failedOnce) { failedOnce = true; throw new Error('Synthetic second DNS failure'); }
-      remainingRecords.splice(remainingRecords.findIndex(record => record.id === id), 1);
-      return { id };
-    });
-    const { action } = await f.plan();
-    await f.apply(action);
-    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toEqual(previousDomain);
-    expect(f.attach).not.toHaveBeenCalled();
-    const retry = await f.plan();
-    expect(retry.action).toMatchObject({ type: 'replace', requiresConfirm: true,
-      metadata: { operation: 'customDomainRetarget', previousDomain } });
-    await f.apply(retry.action);
-    expect(providerDeletes).toBe(1);
-    expect(f.deleteDns.mock.calls.map(call => call[1])).toEqual(['dns-old', 'dns-txt', 'dns-txt']);
-    expect(f.attach).toHaveBeenCalledTimes(1);
-  });
 
-  it('retains a new attachment and first DNS receipt when its second DNS write fails', async () => {
-    const f = fixture({ owner: 'cron', boundDomain: true });
-    f.attach.mockResolvedValueOnce({ success: true, message: 'Attached', data: {
-      customDomainId: 'domain-web', providerVerified: false, dnsRecords: [
-        { name: hostname, type: 'CNAME', value: 'web.example.net', purpose: 'traffic-route' },
-        { name: '_verify.app.example.com', type: 'TXT', value: 'new-verification', purpose: 'verification' },
-      ],
-    } });
-    f.upsertDns.mockResolvedValueOnce({ action: 'created', record: { id: 'dns-new', name: hostname } as never })
-      .mockRejectedValueOnce(new Error('Synthetic second write failure'));
-    const { action } = await f.plan();
-    await f.apply(action);
-    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toMatchObject({
-      serviceName: 'web', serviceId: 'service-web', providerDomainId: 'domain-web',
-      records: [{ id: 'dns-new', name: hostname, type: 'CNAME', target: 'web.example.net' }],
-    });
-    const web = f.observed.services.find(service => service.name === 'web')!;
-    web.customDomains = [hostname]; web.customDomainStatus = { [hostname]: {
-      providerDomainId: 'domain-web', providerVerified: false, dnsConfigured: false,
-    } };
-    f.upsertDns.mockRejectedValue(new Error('Synthetic retry fails before any new DNS receipt'));
-    const retry = await f.plan();
-    await f.apply(retry.action);
-    expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toMatchObject({
-      providerDomainId: 'domain-web', records: [{ id: 'dns-new', name: hostname, type: 'CNAME', target: 'web.example.net' }],
-    });
-  });
 
   it('retains a validated creation acknowledgement and waits for the same observed ID before retrying', async () => {
     const f = fixture({ owner: 'cron', boundDomain: true });
@@ -524,7 +522,7 @@ describe('custom domain desired service plan/apply boundary', () => {
     expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toEqual(binding);
   });
 
-  it('does not move previously recorded DNS IDs into a replacement Cloudflare zone', async () => {
+  it('preserves previously recorded DNS IDs without direct DNS writes during attachment refresh', async () => {
     const f = fixture({ owner: 'web' });
     const binding = { ...oldDomain, serviceName: 'web', serviceId: 'service-web', providerDomainId: 'domain-web' };
     ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainDns: binding });
@@ -534,7 +532,7 @@ describe('custom domain desired service plan/apply boundary', () => {
     });
     const { action } = await f.plan();
     await f.apply(action);
-    expect(f.attach).not.toHaveBeenCalled();
+    expect(f.attach).toHaveBeenCalledTimes(1);
     expect(f.upsertDns).not.toHaveBeenCalled();
     expect(ctx.repos.environments.findById(f.environment.id)?.platformBindings.domainDns).toEqual(binding);
   });
@@ -591,8 +589,8 @@ describe('custom domain desired service plan/apply boundary', () => {
 
   it('admits retarget only for explicitly reviewed hosting provider contracts', () => {
     const hosting = providerRegistry.all().map(provider => provider.metadata).filter(provider => provider.lifecycle?.hosting);
-    expect(Object.fromEntries(hosting.map(provider => [provider.name, provider.lifecycle!.hosting!.customDomainRetarget])))
-      .toEqual({ railway: 'managed', cloudrun: 'unsupported', digitalocean: 'unsupported',
-        vercel: 'unsupported', fly: 'unsupported', 'azure-container-apps': 'unsupported', ecs: 'unsupported' });
+    expect(hosting.filter(provider => provider.lifecycle!.hosting!.customDomainRetarget === 'managed').map(provider => provider.name))
+      .toEqual(['railway']);
+    expect(hosting.map(provider => provider.name)).not.toEqual(expect.arrayContaining(['digitalocean', 'vercel', 'fly']));
   });
 });

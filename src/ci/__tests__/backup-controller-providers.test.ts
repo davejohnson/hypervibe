@@ -48,10 +48,9 @@ describe('packaged backup controller provider and credential boundary', () => {
   it('requires hosting credentials only when a private database worker is used', async () => {
     await import('../backup-controller.js');
     const module = await import('../../domain/services/managed-backup-target.service.js');
-    const target = { hosting: { provider: 'vercel' }, destination: { identity: { provider: 's3' } },
+    const target = { hosting: { provider: 'cloudrun' }, destination: { identity: { provider: 's3' } },
       objects: [{ identity: { provider: 'gcs' } }, { identity: { provider: 'azureblob' } }, { identity: { provider: 's3' } }] };
     const selected = module.managedBackupProviderNames;
-    expect(typeof selected).toBe('function');
     expect(selected(target)).toEqual(['azureblob', 'gcs', 's3']);
     expect(selected({ ...target, hosting: { provider: 'railway' }, database: {} })).toEqual(['azureblob', 'gcs', 'railway', 's3']);
   });

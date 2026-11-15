@@ -56,6 +56,7 @@ beforeEach(() => {
       referencesVerified: converged, deploymentDeferred: true, authentication: 'unchecked' } };
   });
   vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: { credentialAliases: { inspect, repair } } as any });
+  vi.spyOn(adapterFactory, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: { credentialAliases: { inspect, repair } } as any });
   vi.spyOn(PlanService.prototype, 'observeEnvironment').mockRejectedValue(new Error('unrelated hosting must not be observed'));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(root, { recursive: true, force: true }); });

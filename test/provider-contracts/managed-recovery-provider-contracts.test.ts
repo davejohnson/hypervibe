@@ -1,3 +1,4 @@
+import { reviewedOperationProviders } from './operations-scope.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import '../../src/application/providers.js';
@@ -13,7 +14,7 @@ const evidence = JSON.parse(readFileSync(new URL('./managed-recovery-provider-ma
 
 describe('managed recovery provider evidence boundaries', () => {
   it.each(['hosting', 'storage'] as const)('covers every named %s adapter without extending native capability claims', resource => {
-    expect(evidence[resource].map(row => row.provider).sort()).toEqual(providerRegistry.namesFor(resource).sort());
+    expect(evidence[resource].map(row => row.provider).sort()).toEqual(reviewedOperationProviders(resource));
     for (const row of evidence[resource]) {
       expect(row.nativeContract.length).toBeGreaterThan(20); expect(row.limitations.length).toBeGreaterThan(20);
       expect(row.officialSources.length).toBeGreaterThan(0);

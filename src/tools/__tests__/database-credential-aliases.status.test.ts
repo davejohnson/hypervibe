@@ -70,6 +70,8 @@ async function statusFixture(state: 'drift' | 'unknown' | 'verified', declared =
   const repair = vi.fn();
   vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true,
     adapter: { credentialAliases: { inspect, repair } } as unknown as IDatabaseAdapter });
+  vi.spyOn(adapterFactory, 'getDatabaseOperations').mockResolvedValue({ success: true,
+    adapter: { credentialAliases: { inspect, repair } } as unknown as IDatabaseAdapter });
   const before = { runs: getDb().prepare('SELECT COUNT(*) AS count FROM runs').get(),
     bindings: ctx.repos.components.findById(component.id)!.bindings };
   const server = createServer();
@@ -114,13 +116,14 @@ describe('database credential aliases in public status', () => {
 
   it('reports verified references separately from unchecked SQL authentication', async () => {
     const { envelope } = await statusFixture('verified');
-    expect(envelope.data.inSync).toBe(true);
+    expect(envelope.data.inSync).toBe(false);
     expect(envelope.data.databaseAliases).toMatchObject({ state: 'verified', checkedNames: names, changeNames: [], authentication: 'unchecked' });
+    expect(envelope.data.databaseConsumers).toEqual(expect.arrayContaining([expect.objectContaining({ resolvedConfiguration: 'unknown', authentication: 'unchecked' })]));
   });
 
   it('does not inspect aliases without a declaration', async () => {
     const { envelope, inspect } = await statusFixture('unknown', false);
-    expect(envelope.data.inSync, JSON.stringify(envelope.data)).toBe(true);
+    expect(envelope.data.inSync, JSON.stringify(envelope.data)).toBe(false);
     expect(envelope.data.databaseAliases).toBeUndefined();
     expect(inspect).not.toHaveBeenCalled();
   });

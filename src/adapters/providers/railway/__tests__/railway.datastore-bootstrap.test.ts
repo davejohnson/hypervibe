@@ -65,151 +65,9 @@ function volumeInventory(
   };
 }
 
-describe('RailwayAdapter datastore bootstrap vars', () => {
+describe('RailwayAdapter Redis service bootstrap', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
-  });
-  it('creates persistent Redis with a generated password and internal REDIS_URL', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce({
-        project: {
-          environments: {
-            edges: [{ node: { id: 'rail-env-1', name: 'staging' } }],
-          },
-        },
-      })
-      .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({
-        serviceCreate: { id: 'rail-svc-redis-1', name: 'redis-db' },
-      })
-      .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-redis-1', 'rail-env-1'))
-      .mockResolvedValueOnce({ variableCollectionUpsert: true })
-      .mockResolvedValueOnce(volumeInventory('rail-env-1'))
-      .mockResolvedValueOnce({ volumeCreate: { id: 'redis-volume-1' } })
-      .mockResolvedValueOnce(volumeInventory('rail-env-1', [{
-        instanceId: 'redis-volume-instance-1',
-        volumeId: 'redis-volume-1',
-        serviceId: 'rail-svc-redis-1',
-        mountPath: '/bitnami/redis/data',
-      }]))
-      .mockResolvedValueOnce({ serviceInstanceRedeploy: true });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.ensureComponent('redis', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
-
-    expect(result.receipt.success).toBe(true);
-    expect(request.mock.calls[2]?.[1]).toEqual({
-      input: {
-        projectId: 'rail-proj-1',
-        environmentId: 'rail-env-1',
-        name: 'redis-db',
-        source: { image: 'bitnami/redis:7.4' },
-      },
-    });
-    const variables = request.mock.calls[4]?.[1]?.variables as Record<string, string>;
-    expect(variables.REDIS_PASSWORD).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(variables.ALLOW_EMPTY_PASSWORD).toBe('no');
-    expect(variables.REDIS_URL).toContain('@redis-db.railway.internal:6379');
-    expect(request.mock.calls[6]?.[1]?.input).toMatchObject({
-      serviceId: 'rail-svc-redis-1',
-      mountPath: '/bitnami/redis/data',
-    });
-    expect(result.component.bindings).toMatchObject({
-      providerScope: {
-        projectId: 'rail-proj-1',
-        environmentId: 'rail-env-1',
-      },
-      volumeId: 'redis-volume-1',
-      volumeTarget: {
-        projectId: 'rail-proj-1',
-        environmentId: 'rail-env-1',
-        serviceId: 'rail-svc-redis-1',
-        mountPath: '/bitnami/redis/data',
-      },
-    });
-  });
-
-  it('sets bootstrap vars, attaches a volume, and redeploys after datastore creation', async () => {
-    const request = vi.fn()
-      // resolveRailwayEnvironmentId -> listProjectEnvironments
-      .mockResolvedValueOnce({
-        project: {
-          environments: {
-            edges: [{ node: { id: 'rail-env-1', name: 'staging' } }],
-          },
-        },
-      })
-      // resolveServiceIdForProject -> listProjectServices (none exists yet)
-      .mockResolvedValueOnce({
-        project: {
-          services: {
-            edges: [],
-          },
-        },
-      })
-      // serviceCreate
-      .mockResolvedValueOnce({
-        serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' },
-      })
-      // ensureServiceInstanceForEnvironment
-      .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
-      // variableCollectionUpsert
-      .mockResolvedValueOnce({
-        variableCollectionUpsert: true,
-      })
-      // fully paginated volume preflight
-      .mockResolvedValueOnce(volumeInventory('rail-env-1'))
-      // volumeCreate
-      .mockResolvedValueOnce({
-        volumeCreate: { id: 'vol-1' },
-      })
-      // read-after-write volume identity verification
-      .mockResolvedValueOnce(volumeInventory('rail-env-1', [{
-        instanceId: 'volume-instance-1',
-        volumeId: 'vol-1',
-        serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
-      }]))
-      // serviceInstanceRedeploy
-      .mockResolvedValueOnce({
-        serviceInstanceRedeploy: true,
-      });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
-
-    expect(result.receipt.success).toBe(true);
-    expect(result.component.bindings).toMatchObject({ volumeId: 'vol-1' });
-    const upsertVars = request.mock.calls[4]?.[1]?.variables as Record<string, string>;
-    expect(upsertVars).toBeDefined();
-    expect(typeof upsertVars.POSTGRES_PASSWORD).toBe('string');
-    expect(upsertVars.POSTGRES_PASSWORD.length).toBeGreaterThan(0);
-    expect(upsertVars.POSTGRES_USER).toBe('postgres');
-    expect(upsertVars.POSTGRES_DB).toBe('postgres');
-    // PGDATA must be a subdirectory of the mount (lost+found breaks initdb).
-    expect(upsertVars.PGDATA).toBe('/var/lib/postgresql/data/pgdata');
-    expect(typeof upsertVars.DATABASE_URL).toBe('string');
-
-    // Volume attached at the postgres data dir.
-    expect(request.mock.calls[6]?.[1]).toEqual({
-      input: {
-        projectId: 'rail-proj-1',
-        environmentId: 'rail-env-1',
-        serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
-      },
-    });
-
-    // Redeploy so the container boots with vars + volume (serviceCreate with
-    // source.image already started a first deployment without them).
-    expect(request.mock.calls[8]?.[1]).toEqual({
-      serviceId: 'rail-svc-db-1',
-      environmentId: 'rail-env-1',
-    });
   });
 
   it('fails the provision when the volume cannot be attached', async () => {
@@ -223,7 +81,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { services: { edges: [] } },
       })
       .mockResolvedValueOnce({
-        serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' },
+        serviceCreate: { id: 'rail-svc-db-1', name: 'redis-db' },
       })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({
@@ -236,7 +94,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
-    const result = await adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
+    const result = await adapter.ensureComponent('redis', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
 
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.message).toContain('failed to attach a volume');
@@ -246,12 +104,12 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         provider: 'railway',
         providerScope: { projectId: 'rail-proj-1' },
         resourceKind: 'service',
-        pluginName: 'postgres-db',
+        pluginName: 'redis-db',
         volumeTarget: {
           projectId: 'rail-proj-1',
           environmentId: 'rail-env-1',
           serviceId: 'rail-svc-db-1',
-          mountPath: '/var/lib/postgresql/data',
+          mountPath: '/bitnami/redis/data',
         },
       },
     });
@@ -266,7 +124,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'redis-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1'))
@@ -275,7 +133,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         instanceId: 'volume-instance-recovered',
         volumeId: 'volume-recovered',
         serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
+        mountPath: '/bitnami/redis/data',
       }]))
       .mockResolvedValueOnce({ serviceInstanceRedeploy: true });
 
@@ -283,7 +141,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -294,7 +152,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         projectId: 'rail-proj-1',
         environmentId: 'rail-env-1',
         serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
+        mountPath: '/bitnami/redis/data',
       },
     });
     expect(request.mock.calls.filter(([query]) => String(query).includes('volumeCreate'))).toHaveLength(1);
@@ -308,7 +166,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'redis-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1'))
@@ -317,14 +175,14 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         instanceId: 'different-volume-instance',
         volumeId: 'different-volume',
         serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
+        mountPath: '/bitnami/redis/data',
       }]));
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -332,7 +190,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(result.receipt.error).toContain('acknowledged-volume');
     expect(result.component.bindings).toMatchObject({
       volumeId: 'different-volume',
-      volumeTarget: { serviceId: 'rail-svc-db-1', mountPath: '/var/lib/postgresql/data' },
+      volumeTarget: { serviceId: 'rail-svc-db-1', mountPath: '/bitnami/redis/data' },
     });
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceInstanceRedeploy'))).toBe(false);
   });
@@ -343,7 +201,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'redis-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1', [{
@@ -358,7 +216,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         instanceId: 'new-volume-instance',
         volumeId: 'new-volume',
         serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
+        mountPath: '/bitnami/redis/data',
       }]))
       .mockResolvedValueOnce({ serviceInstanceRedeploy: true });
 
@@ -366,7 +224,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -392,7 +250,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       projectId: 'rail-proj-1',
       environmentId: 'rail-env-1',
       serviceId: 'rail-svc-db-1',
-      mountPath: '/var/lib/postgresql/data',
+      mountPath: '/bitnami/redis/data',
     })).resolves.toEqual({ success: true, state: 'absent' });
   });
 
@@ -410,7 +268,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       projectId: 'rail-proj-1',
       environmentId: 'rail-env-1',
       serviceId: 'rail-svc-db-1',
-      mountPath: '/var/lib/postgresql/data',
+      mountPath: '/bitnami/redis/data',
     }, 'detached-volume');
 
     expect(result).toMatchObject({ success: false, error: expect.stringContaining('<detached>') });
@@ -432,7 +290,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       projectId: 'rail-proj-1',
       environmentId: 'rail-env-1',
       serviceId: 'rail-svc-db-1',
-      mountPath: '/var/lib/postgresql/data',
+      mountPath: '/bitnami/redis/data',
     });
 
     expect(result).toMatchObject({ success: false, error: expect.stringContaining('partial volume identity') });
@@ -444,74 +302,32 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'postgres-db' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: 'rail-svc-db-1', name: 'redis-db' } })
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-1', 'rail-env-1'))
       .mockResolvedValueOnce({ variableCollectionUpsert: true })
       .mockResolvedValueOnce(volumeInventory('rail-env-1', [{
         instanceId: 'volume-instance-a',
         volumeId: 'volume-a',
         serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
+        mountPath: '/bitnami/redis/data',
       }, {
         instanceId: 'volume-instance-b',
         volumeId: 'volume-b',
         serviceId: 'rail-svc-db-1',
-        mountPath: '/var/lib/postgresql/data',
+        mountPath: '/bitnami/redis/data',
       }]));
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.error).toContain('Multiple active Railway volumes');
     expect(request.mock.calls.filter(([query]) => String(query).includes('volumeCreate'))).toHaveLength(0);
-  });
-
-  it('recovers and retains the exact service id when the create response is lost after commit', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce({
-        project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
-      })
-      .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockRejectedValueOnce(new Error('connection closed after request transmission'))
-      .mockResolvedValueOnce({
-        project: {
-          services: {
-            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'postgres-db' } }],
-          },
-        },
-      })
-      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-recovered', ['rail-env-1']))
-      .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-recovered', 'rail-env-1'));
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.ensureComponent(
-      'postgres',
-      makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
-    );
-
-    expect(result.receipt.success).toBe(false);
-    expect(result.component).toMatchObject({
-      externalId: 'rail-svc-db-recovered',
-      bindings: {
-        provider: 'railway',
-        providerScope: { projectId: 'rail-proj-1' },
-        resourceKind: 'service',
-        pluginName: 'postgres-db',
-      },
-    });
-    expect(result.receipt.data).toMatchObject({
-      mutationAttempted: true,
-      recoveredServiceId: 'rail-svc-db-recovered',
-    });
-    expect(request).toHaveBeenCalledTimes(6);
   });
 
   it('retains a scoped unresolved marker when a transport failure cannot recover the service id', async () => {
@@ -529,7 +345,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -540,9 +356,9 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         provider: 'railway',
         providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
         unresolvedMutation: {
-          resourceKind: 'database',
+          resourceKind: 'cache',
           operation: 'create',
-          resourceName: 'postgres-db',
+          resourceName: 'redis-db',
           providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
         },
       },
@@ -605,7 +421,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -624,11 +440,11 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: { environments: { edges: [{ node: { id: 'rail-env-1', name: 'staging' } }] } },
       })
       .mockResolvedValueOnce({ project: { services: { edges: [] } } })
-      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'postgres-db' } })
+      .mockResolvedValueOnce({ serviceCreate: { id: '', name: 'redis-db' } })
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'postgres-db' } }],
+            edges: [{ node: { id: 'rail-svc-db-recovered', name: 'redis-db' } }],
           },
         },
       })
@@ -639,7 +455,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -648,7 +464,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(result.component).toMatchObject({
       externalId: 'rail-svc-db-recovered',
       bindings: {
-        pluginName: 'postgres-db',
+        pluginName: 'redis-db',
         resourceKind: 'service',
       },
     });
@@ -674,7 +490,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.ensureComponent(
-      'postgres',
+      'redis',
       makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' })
     );
 
@@ -687,7 +503,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     expect(request).toHaveBeenCalledTimes(3);
   });
 
-  it('blocks an existing unbound postgres service without modifying it', async () => {
+  it('blocks an existing unbound Redis service without modifying it', async () => {
     const request = vi.fn()
       // resolveRailwayEnvironmentId -> listProjectEnvironments
       .mockResolvedValueOnce({
@@ -701,7 +517,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db' } }],
+            edges: [{ node: { id: 'rail-svc-db-existing', name: 'redis-db' } }],
           },
         },
       })
@@ -710,13 +526,13 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-existing', 'rail-env-1'))
       // fetchServiceVariables — bootstrap vars are present
       .mockResolvedValueOnce({
-        variables: { POSTGRES_PASSWORD: 'already-set', DATABASE_URL: 'postgres://...' },
+        variables: { REDIS_PASSWORD: 'already-set', REDIS_URL: 'redis://...' },
       });
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
-    const result = await adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
+    const result = await adapter.ensureComponent('redis', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
 
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.error).toContain('hv_import');
@@ -740,14 +556,14 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce({
         project: {
           services: {
-            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db' } }],
+            edges: [{ node: { id: 'rail-svc-db-existing', name: 'redis-db' } }],
           },
         },
       })
       .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-existing', ['rail-env-1']))
       // Exact target instance verification
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-existing', 'rail-env-1'))
-      // fetchServiceVariables — POSTGRES_PASSWORD missing (crashlooping container)
+      // fetchServiceVariables — REDIS_PASSWORD missing (crashlooping container)
       .mockResolvedValueOnce({
         variables: {},
       })
@@ -763,7 +579,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
-    const result = await adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
+    const result = await adapter.ensureComponent('redis', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-1' }));
 
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.error).toContain('will not mutate or adopt');
@@ -775,72 +591,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     ))).toBe(false);
   });
 
-  it('creates an environment-scoped datastore when the matching service only exists elsewhere', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce({
-        project: {
-          environments: {
-            edges: [{ node: { id: 'rail-env-staging', name: 'staging' } }],
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        project: {
-          services: {
-            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db' } }],
-          },
-        },
-      })
-      // resolveServiceIdForEnvironment sees the matching service only in production.
-      .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-existing', ['rail-env-production']))
-      .mockResolvedValueOnce({
-        serviceCreate: {
-          id: 'rail-svc-db-staging',
-          name: 'postgres-db',
-        },
-      })
-      // ensureServiceInstanceForEnvironment verifies the newly created service.
-      .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-staging', 'rail-env-staging'))
-      .mockResolvedValueOnce({
-        variableCollectionUpsert: true,
-      })
-      .mockResolvedValueOnce(volumeInventory('rail-env-staging'))
-      .mockResolvedValueOnce({
-        volumeCreate: { id: 'vol-staging' },
-      })
-      .mockResolvedValueOnce(volumeInventory('rail-env-staging', [{
-        instanceId: 'vol-instance-staging',
-        volumeId: 'vol-staging',
-        serviceId: 'rail-svc-db-staging',
-        mountPath: '/var/lib/postgresql/data',
-      }]))
-      .mockResolvedValueOnce({
-        serviceInstanceRedeploy: true,
-      });
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    const result = await adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-staging' }));
-
-    expect(result.receipt.success).toBe(true);
-    expect(result.receipt.message).toContain('Created postgres datastore');
-    expect(result.component.externalId).toBe('rail-svc-db-staging');
-    expect(result.component.bindings).toMatchObject({ volumeId: 'vol-staging' });
-    expect(String(request.mock.calls[3]?.[0])).toContain('serviceCreate');
-    expect(request.mock.calls[3]?.[1]).toEqual({
-      input: {
-        projectId: 'rail-proj-1',
-        environmentId: 'rail-env-staging',
-        name: 'postgres-db',
-        source: {
-          image: 'postgres:16',
-        },
-      },
-    });
-  });
-
-  it.each(['postgres-db', 'postgres-db-staging'])('requires explicit adoption for scoped datastore %s after local bindings are missing', async (name) => {
+  it.each(['redis-db', 'redis-db-staging'])('requires explicit adoption for scoped datastore %s after local bindings are missing', async (name) => {
     const request = vi.fn()
       .mockResolvedValueOnce({
         project: {
@@ -853,7 +604,7 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
         project: {
           services: {
             edges: [
-              { node: { id: 'rail-svc-db-prod', name: 'postgres-db' } },
+              { node: { id: 'rail-svc-db-prod', name: 'redis-db' } },
               { node: { id: 'rail-svc-db-staging', name } },
             ],
           },
@@ -863,45 +614,18 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
       .mockResolvedValueOnce(serviceInstanceInventory('rail-proj-1', 'rail-svc-db-staging', ['rail-env-staging']))
       .mockResolvedValueOnce(serviceEnvironmentInstance('rail-svc-db-staging', 'rail-env-staging'))
       .mockResolvedValueOnce({
-        variables: { POSTGRES_PASSWORD: 'already-set', DATABASE_URL: 'postgres://...' },
+        variables: { REDIS_PASSWORD: 'already-set', REDIS_URL: 'redis://...' },
       });
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
-    const result = await adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-staging' }));
+    const result = await adapter.ensureComponent('redis', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-staging' }));
 
     expect(result.receipt.success).toBe(false);
     expect(result.receipt.data).toMatchObject({ adoptionCandidateServiceId: 'rail-svc-db-staging' });
     expect(result.component.externalId).toBeNull();
     expect(request).toHaveBeenCalledTimes(5);
-    expect(request.mock.calls.some(([query]) => String(query).includes('serviceCreate'))).toBe(false);
-  });
-
-  it('does not create a duplicate datastore when environment-instance observation fails', async () => {
-    const request = vi.fn()
-      .mockResolvedValueOnce({
-        project: {
-          environments: {
-            edges: [{ node: { id: 'rail-env-staging', name: 'staging' } }],
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        project: {
-          services: {
-            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db' } }],
-          },
-        },
-      })
-      .mockRejectedValueOnce(new Error('Railway service-instance read unavailable'));
-
-    const adapter = new RailwayAdapter();
-    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
-
-    await expect(adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1', environmentId: 'rail-env-staging' })))
-      .rejects.toThrow('Railway service-instance read unavailable');
-    expect(request).toHaveBeenCalledTimes(3);
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceCreate'))).toBe(false);
   });
 });

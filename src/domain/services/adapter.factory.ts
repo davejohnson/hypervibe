@@ -4,10 +4,9 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
-import { supportsDatabaseLifecycle, type IDatabaseAdapter } from '../ports/database.port.js';
+import { supportsDatabaseLifecycle, supportsDatabaseOperations, type IDatabaseAdapter, type IDatabaseOperations } from '../ports/database.port.js';
 import { supportsCacheLifecycle, type ICacheAdapter } from '../ports/cache.port.js';
-import { supportsStorageLifecycle, type IStorageAdapter } from '../ports/storage.port.js';
-import { supportsLoadBalancer, type ILoadBalancerAdapter } from '../ports/load-balancer.port.js';
+import { supportsStorageLifecycle, supportsStorageOperations, type IStorageAdapter, type IStorageOperations } from '../ports/storage.port.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 
@@ -103,6 +102,28 @@ export class AdapterFactory {
     return this.requireLifecyclePort(result, supportsCacheLifecycle, providerName, 'cache');
   }
 
+  /** Access an existing database without selecting a resource lifecycle writer. */
+  async getDatabaseOperations(providerName: string, project?: Project): Promise<AdapterResult<IDatabaseOperations>> {
+    const provider = providerRegistry.get(providerName);
+    const result = provider?.derivedAdapters?.database
+      ? await this.getDerivedAdapter<IDatabaseOperations>(providerName, 'database', project)
+      : await this.getAdapter<IDatabaseOperations>(providerName, 'database', project ? getProjectScopeHints(project) : undefined);
+    if (!result.success || !result.adapter) return result;
+    return supportsDatabaseOperations(result.adapter) ? result
+      : { success: false, error: `${providerName} does not implement database operations.` };
+  }
+
+  /** Transfer or inspect objects in an already-bound bucket without provisioning authority. */
+  async getStorageOperations(providerName: string, project?: Project): Promise<AdapterResult<IStorageOperations>> {
+    const provider = providerRegistry.get(providerName);
+    const result = provider?.derivedAdapters?.storage
+      ? await this.getDerivedAdapter<IStorageOperations>(providerName, 'storage', project)
+      : await this.getAdapter<IStorageOperations>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
+    if (!result.success || !result.adapter) return result;
+    return supportsStorageOperations(result.adapter) ? result
+      : { success: false, error: `${providerName} does not implement storage operations.` };
+  }
+
   async getStorageAdapter(providerName: string, project?: Project): Promise<AdapterResult<IStorageAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IStorageAdapter>(providerName, 'storage');
     if (maturityBlock) return maturityBlock;
@@ -111,21 +132,6 @@ export class AdapterFactory {
       ? await this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project)
       : await this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
     return this.requireLifecyclePort(result, supportsStorageLifecycle, providerName, 'storage');
-  }
-
-  async getLoadBalancerAdapter(
-    providerName: string,
-    project?: Project,
-    scopeHints?: string[]
-  ): Promise<AdapterResult<ILoadBalancerAdapter>> {
-    const maturityBlock = this.lifecycleMutationBlock<ILoadBalancerAdapter>(providerName, 'load-balancer');
-    if (maturityBlock) return maturityBlock;
-    const result = await this.getAdapter<ILoadBalancerAdapter>(
-      providerName,
-      undefined,
-      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
-    );
-    return this.requireLifecyclePort(result, supportsLoadBalancer, providerName, 'load-balancer');
   }
 
   /**
@@ -176,7 +182,7 @@ export class AdapterFactory {
 
   private lifecycleMutationBlock<T>(
     providerName: string,
-    capability: 'hosting' | 'database' | 'cache' | 'storage' | 'load-balancer'
+    capability: 'hosting' | 'database' | 'cache' | 'storage'
   ): AdapterResult<T> | undefined {
     if (!providerRegistry.supports(providerName, capability)) {
       return {
@@ -196,7 +202,7 @@ export class AdapterFactory {
     result: AdapterResult<T>,
     supports: (value: unknown) => value is T,
     providerName: string,
-    capability: 'database' | 'cache' | 'storage' | 'load-balancer'
+    capability: 'database' | 'cache' | 'storage'
   ): AdapterResult<T> {
     if (!result.success || !result.adapter) return result;
     if (supports(result.adapter)) return result;

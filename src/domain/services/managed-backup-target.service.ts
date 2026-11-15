@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { Environment } from '../entities/environment.entity.js';
-import type { IStorageAdapter, StorageObjectClient } from '../ports/storage.port.js';
+import type { IStorageOperations, StorageObjectClient } from '../ports/storage.port.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import type { BackupPolicyContext } from './backup-policy.service.js';
 import { resolveBackupStrategy, withBackupStorageDefaults } from './backup-strategy.service.js';
@@ -14,7 +14,7 @@ const logicalName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/);
 const selectedStorage = z.object({ name: logicalName, identity: objectRecoveryIdentitySchema }).strict();
 /** The published recurring authority names every source, destination, query and immutable runner. */
 export const managedBackupTargetSchema = z.object({ version: z.literal(1), project: logicalName, environment: logicalName,
-  hosting: z.object({ provider: z.string().min(1), providerScope: z.record(z.string().min(1)) }).strict(),
+  hosting: z.object({ provider: z.string().min(1), providerScope: z.record(z.string(), z.string().min(1)) }).strict(),
   runnerImage: z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/),
   destination: selectedStorage,
   database: z.object({ componentId: z.string().min(1), source: recoverySourceIdentitySchema }).strict().optional(),
@@ -95,7 +95,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
         primaryExternalId: components[0].externalId, providerScope: components[0].bindings.providerScope, resourceIdentity: {} });
       if (!bound.success) issues.push('The database binding lacks valid durable recovery scope; re-plan to review independently verifiable legacy scope. Malformed or unverifiable scope requires resolving the exact binding identity.');
       else try {
-        const adapter = await context.adapterFactory.getDatabaseAdapter(spec.database.provider, context.project);
+        const adapter = await context.adapterFactory.getDatabaseOperations(spec.database.provider, context.project);
         if (!adapter.success || adapter.adapter?.name !== bound.data.provider) throw new Error('Database adapter differs.');
         const observed = await adapter.adapter.dailyBackups?.observe({ environment, component: components[0] });
         const source = recoverySourceIdentitySchema.safeParse(observed?.state === 'known' ? observed.source : undefined);
@@ -114,7 +114,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
   const providers = destination ? managedBackupProviderNames({ hosting: spec.hosting, database, destination, objects }) : [];
   if (database) for (const provider of new Set([...objects.map(object => object.identity.provider), ...(destination ? [destination.identity.provider] : [])])) {
     try {
-      const selected = await context.adapterFactory.getStorageAdapter(provider, context.project);
+      const selected = await context.adapterFactory.getStorageOperations(provider, context.project);
       if (!selected.success || selected.adapter?.capabilities?.recoveryCredentialScope !== 'bucket' || !selected.adapter.getCredentials) issues.push(`${provider} has no reviewed private-worker credential handoff for combined SQL/files recovery.`);
     } catch { issues.push(`${provider} private-worker credential handoff could not be resolved.`); }
   }
@@ -133,7 +133,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
   return { state: 'ready', target: parsed.data, contractHash: managedBackupTargetHash(parsed.data), providerCredentialNames: [...credentialNames].sort() };
 }
 
-export async function openRecoveryStorage(adapter: IStorageAdapter, environment: Environment, identity: ObjectRecoveryIdentity): Promise<StorageObjectClient> {
+export async function openRecoveryStorage(adapter: IStorageOperations, environment: Environment, identity: ObjectRecoveryIdentity): Promise<StorageObjectClient> {
   if (adapter.name !== identity.provider) throw new Error('Backup storage adapter identity differs.');
   const observed = await adapter.observe(environment, identity.instanceScope, { externalId: identity.externalId });
   const candidates = observed.filter(item => item.externalId === identity.externalId && item.provider === identity.provider

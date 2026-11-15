@@ -5,15 +5,7 @@ import { APPLIED_SPEC_HASH_OPERATION } from '../../domain/services/deployment-co
 import {
   GITHUB_INFRASTRUCTURE_ACTION_ID,
   GITHUB_INFRASTRUCTURE_OPERATION,
-  GITHUB_OPENAI_SECRET_ACTION_ID,
-  OPENAI_ACTIONS_SECRET,
 } from '../../domain/services/github-infrastructure.service.js';
-import {
-  GITHUB_PAGES_ACTION_ID,
-  GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
-  GITHUB_PAGES_DNS_OPERATION,
-  GITHUB_PAGES_OPERATION,
-} from '../../domain/services/github-pages.service.js';
 import { IOS_OPERATIONS } from '../../domain/services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS } from '../../domain/services/queue-plan.service.js';
 import { STORAGE_OPERATIONS } from '../../domain/services/storage-plan.service.js';
@@ -31,31 +23,15 @@ import { PROVIDER_NATIVE_SOURCE_DISCONNECT_OPERATION } from '../../domain/servic
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
 import {
   GITHUB_ACTIONS_ROLLBACK_OPERATION,
-  GITLAB_CI_ROLLBACK_OPERATION,
-  GITLAB_ROLLBACK_REF_ENSURE_OPERATION,
 } from '../../domain/services/ci-rollback.contract.js';
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
-import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
 import { MAINTENANCE_OPERATIONS } from '../../domain/services/maintenance-plan.service.js';
-import { MESSAGING_OPERATIONS } from '../../domain/services/twilio-messaging.service.js';
 import { DOMAIN_DETACH_OPERATION } from '../../domain/services/domain-attach-policy.js';
 import {
   hasExactPlanActionConfirmationAuthority,
   resolvePlanActionAuthority,
   type PlanMutationCapability,
 } from '../../domain/plan/action-authority.js';
-import {
-  CI_APPLIED_SPEC_SYNC_OPERATION,
-  CI_BINDING_REMOVE_OPERATION,
-  CI_CONFIGURATION_SYNC_OPERATION,
-  CI_VARIABLE_DELETE_OPERATION,
-  CI_VARIABLE_SYNC_OPERATION,
-} from '../../domain/services/managed-ci.contract.js';
-import {
-  CODE_REPOSITORY_BINDING_REMOVE_OPERATION,
-  CODE_REPOSITORY_CREATE_OPERATION,
-  CODE_REPOSITORY_DESTROY_OPERATION,
-} from '../../domain/services/managed-code-repository.contract.js';
 
 function action(params: {
   id?: string;
@@ -163,55 +139,6 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
-    label: 'GitLab immutable rollback ref',
-    capability: 'gitlab.rollback-ref.ensure',
-    action: action({
-      id: 'repo:gitlab:rollback-ref:hypervibe-rollback-production-aaaaaaaaaaaa-17',
-      type: 'create',
-      kind: 'repo',
-      name: 'hypervibe-rollback-production-aaaaaaaaaaaa-17',
-      provider: 'gitlab',
-      operation: GITLAB_ROLLBACK_REF_ENSURE_OPERATION,
-      metadata: {
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        rollbackRef: 'hypervibe-rollback-production-aaaaaaaaaaaa-17',
-        targetSha: 'a'.repeat(40),
-        targetArtifactId: '17:.hypervibe-release.json',
-        targetJobId: '17',
-        targetPipelineId: '27',
-        observedLatestPipelineId: '37',
-      },
-    }),
-  },
-  {
-    label: 'GitLab exact-SHA rollback dispatch',
-    capability: 'gitlab.ci.rollback',
-    action: action({
-      id: 'ci:gitlab-ci:production:rollback',
-      type: 'update',
-      kind: 'ci',
-      name: 'deploy-branch:production',
-      provider: 'gitlab-ci',
-      operation: GITLAB_CI_ROLLBACK_OPERATION,
-      metadata: {
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        definition: '.gitlab-ci.yml',
-        environmentName: 'production',
-        rollbackRef: 'hypervibe-rollback-production-aaaaaaaaaaaa-17',
-        targetSha: 'a'.repeat(40),
-        targetArtifactId: '17:.hypervibe-release.json',
-        targetJobId: '17',
-        targetPipelineId: '27',
-        observedLatestPipelineId: '37',
-        programHash: 'b'.repeat(64),
-      },
-    }),
-  },
-  {
     label: 'GitHub Actions exact-SHA release',
     capability: 'github.ci.release',
     action: action({
@@ -244,116 +171,6 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
-    label: 'provider-neutral CI configuration sync',
-    capability: 'ci.configuration.sync',
-    action: action({
-      id: 'ci:gitlab-ci:configuration',
-      type: 'update',
-      kind: 'ci',
-      name: 'configuration',
-      provider: 'gitlab-ci',
-      operation: CI_CONFIGURATION_SYNC_OPERATION,
-      metadata: {
-        ciProvider: 'gitlab-ci',
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        baseSha: 'a'.repeat(40),
-        programHash: 'b'.repeat(64),
-      },
-    }),
-  },
-  {
-    label: 'provider-neutral CI variable sync',
-    capability: 'ci.variable.sync',
-    action: action({
-      id: 'ci:gitlab-ci:production:variable:RAILWAY_API_TOKEN',
-      type: 'create',
-      kind: 'secret',
-      name: 'production:RAILWAY_API_TOKEN',
-      provider: 'gitlab-ci',
-      operation: CI_VARIABLE_SYNC_OPERATION,
-      metadata: {
-        ciProvider: 'gitlab-ci',
-        repositoryId: '42',
-        environmentName: 'production',
-        environmentScope: 'production',
-        variableKey: 'RAILWAY_API_TOKEN',
-        valueHash: 'b'.repeat(64),
-        valueSource: 'connection:railway.apiToken',
-      },
-    }),
-  },
-  {
-    label: 'provider-neutral CI variable delete',
-    capability: 'ci.variable.delete',
-    action: action({
-      id: 'ci:gitlab-ci:production:variable:HYPERVIBE_ABC_TOKEN:destroy',
-      type: 'destroy',
-      kind: 'secret',
-      name: 'production:HYPERVIBE_ABC_TOKEN',
-      provider: 'gitlab-ci',
-      operation: CI_VARIABLE_DELETE_OPERATION,
-      dataBearing: true,
-      requiresConfirm: true,
-      metadata: {
-        ciProvider: 'gitlab-ci',
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        environmentName: 'production',
-        environmentScope: 'production',
-        variableKey: 'HYPERVIBE_ABC_TOKEN',
-        valueHash: 'b'.repeat(64),
-        programHash: 'c'.repeat(64),
-      },
-    }),
-  },
-  {
-    label: 'provider-neutral CI binding removal',
-    capability: 'ci.binding.remove',
-    action: action({
-      id: 'ci:gitlab-ci:production:binding:remove',
-      type: 'update',
-      kind: 'ci',
-      name: 'binding:production',
-      provider: 'gitlab-ci',
-      operation: CI_BINDING_REMOVE_OPERATION,
-      metadata: {
-        ciProvider: 'gitlab-ci',
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        environmentName: 'production',
-        programHash: 'c'.repeat(64),
-      },
-    }),
-  },
-  {
-    label: 'provider-neutral applied-spec variable sync',
-    capability: 'ci.applied-spec-hash.sync',
-    action: action({
-      id: 'ci:gitlab-ci:production:variable:HYPERVIBE_ABC_APPLIED_SPEC_HASH',
-      type: 'update',
-      kind: 'secret',
-      name: 'production:HYPERVIBE_ABC_APPLIED_SPEC_HASH',
-      provider: 'gitlab-ci',
-      operation: CI_APPLIED_SPEC_SYNC_OPERATION,
-      metadata: {
-        ciProvider: 'gitlab-ci',
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        environmentName: 'production',
-        environmentScope: '*',
-        variableKey: 'HYPERVIBE_ABC_APPLIED_SPEC_HASH',
-        valueHash: 'b'.repeat(64),
-        valueSource: 'desired:deployment-contract',
-        programHash: 'c'.repeat(64),
-      },
-    }),
-  },
-  {
     label: 'GitHub collaboration',
     capability: 'github.collaboration.sync',
     action: action({
@@ -367,70 +184,6 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
-    label: 'managed code repository create',
-    capability: 'code.repository.create',
-    action: action({
-      id: 'repo:gitlab:create',
-      type: 'create',
-      kind: 'repo',
-      name: 'https://gitlab.com/acme/app',
-      provider: 'gitlab',
-      operation: CODE_REPOSITORY_CREATE_OPERATION,
-      dataBearing: true,
-      requiresConfirm: true,
-      metadata: {
-        codeProvider: 'gitlab',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        repositoryConfigHash: 'a'.repeat(64),
-        desiredState: 'present',
-        management: 'managed',
-      },
-    }),
-  },
-  {
-    label: 'managed code repository destroy',
-    capability: 'code.repository.destroy',
-    action: action({
-      id: 'repo:gitlab:destroy',
-      type: 'destroy',
-      kind: 'repo',
-      name: 'https://gitlab.com/acme/app',
-      provider: 'gitlab',
-      operation: CODE_REPOSITORY_DESTROY_OPERATION,
-      dataBearing: true,
-      requiresConfirm: true,
-      metadata: {
-        codeProvider: 'gitlab',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        repositoryConfigHash: 'a'.repeat(64),
-        desiredState: 'absent',
-        management: 'managed',
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-      },
-    }),
-  },
-  {
-    label: 'managed code repository binding removal',
-    capability: 'code.repository.binding.remove',
-    action: action({
-      id: 'repo:gitlab:binding-remove',
-      type: 'update',
-      kind: 'repo',
-      name: 'https://gitlab.com/acme/app',
-      provider: 'gitlab',
-      operation: CODE_REPOSITORY_BINDING_REMOVE_OPERATION,
-      metadata: {
-        codeProvider: 'gitlab',
-        repositoryScope: 'https://gitlab.com/acme/app',
-        repositoryConfigHash: 'a'.repeat(64),
-        desiredState: 'absent',
-        repositoryId: '42',
-        instanceScope: 'https://gitlab.com',
-      },
-    }),
-  },
-  {
     label: 'GitHub infrastructure',
     capability: 'github.infrastructure.sync',
     action: action({
@@ -441,65 +194,6 @@ const authorized: AuthorizedCase[] = [
       provider: 'github',
       operation: GITHUB_INFRASTRUCTURE_OPERATION,
       metadata: { repository: 'owner/repo' },
-    }),
-  },
-  {
-    label: 'GitHub Pages',
-    capability: 'github.pages.sync',
-    action: action({
-      id: GITHUB_PAGES_ACTION_ID,
-      type: 'create',
-      kind: 'repo',
-      name: 'owner/repo',
-      provider: 'github',
-      operation: GITHUB_PAGES_OPERATION,
-      metadata: { repository: 'owner/repo', enabled: true },
-    }),
-  },
-  {
-    label: 'GitHub Pages DNS',
-    capability: 'github.pages-dns.sync',
-    action: action({
-      id: 'domain:example.com:github-pages-dns',
-      type: 'update',
-      kind: 'domain',
-      name: 'example.com',
-      provider: 'cloudflare',
-      operation: GITHUB_PAGES_DNS_OPERATION,
-      metadata: { repository: 'owner/repo', enabled: true, desiredRecords: [] },
-    }),
-  },
-  {
-    label: 'GitHub Pages local binding cleanup',
-    capability: 'github.pages-binding.cleanup',
-    action: action({
-      id: GITHUB_PAGES_ACTION_ID,
-      type: 'update',
-      kind: 'repo',
-      name: 'owner/repo',
-      provider: 'github',
-      operation: GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
-      metadata: {
-        repository: 'owner/repo',
-        observedCertificateAttempt: {
-          domain: 'example.com',
-          attemptedAt: '2026-08-08T00:00:00.000Z',
-          mode: 'reattach',
-        },
-      },
-    }),
-  },
-  {
-    label: 'GitHub OpenAI secret',
-    capability: 'github.openai-secret.sync',
-    action: action({
-      id: GITHUB_OPENAI_SECRET_ACTION_ID,
-      type: 'update',
-      kind: 'secret',
-      name: OPENAI_ACTIONS_SECRET,
-      provider: 'github',
-      operation: 'githubOpenAIActionsSecret',
-      metadata: { repository: 'owner/repo', secretName: OPENAI_ACTIONS_SECRET },
     }),
   },
   ...[
@@ -651,62 +345,6 @@ const authorized: AuthorizedCase[] = [
       },
     }),
   })),
-  ...Object.values(LOAD_BALANCER_OPERATIONS).map((operation): AuthorizedCase => {
-    const monitor = operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
-      || operation === LOAD_BALANCER_OPERATIONS.monitorDestroy;
-    const pool = operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-      || operation === LOAD_BALANCER_OPERATIONS.poolDestroy;
-    const destroy = operation === LOAD_BALANCER_OPERATIONS.destroy
-      || operation === LOAD_BALANCER_OPERATIONS.poolDestroy
-      || operation === LOAD_BALANCER_OPERATIONS.monitorDestroy;
-    const id = operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
-      ? 'load-balancer:monitor'
-      : operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-        ? 'load-balancer:pool'
-        : operation === LOAD_BALANCER_OPERATIONS.ensure
-          ? 'load-balancer:app.example.com'
-          : operation === LOAD_BALANCER_OPERATIONS.destroy
-            ? 'load-balancer:app.example.com:destroy'
-            : operation === LOAD_BALANCER_OPERATIONS.poolDestroy
-              ? 'load-balancer:pool:destroy'
-              : 'load-balancer:monitor:destroy';
-    return {
-      label: operation,
-      capability: monitor
-        ? 'load-balancer.monitor.mutate'
-        : pool
-          ? 'load-balancer.pool.mutate'
-          : 'load-balancer.mutate',
-      action: action({
-        id,
-        type: destroy ? 'destroy' : 'create',
-        kind: 'load-balancer',
-        name: 'app.example.com',
-        provider: 'cloudflare',
-        operation,
-        billable: operation === LOAD_BALANCER_OPERATIONS.poolEnsure
-          || operation === LOAD_BALANCER_OPERATIONS.ensure,
-        metadata: {
-          hostname: 'app.example.com',
-          accountId: 'account-1',
-          zoneId: 'zone-1',
-          configHash: 'config-hash',
-          ...(!destroy && monitor ? { externalName: 'monitor-name' } : {}),
-          ...(!destroy && pool ? {
-            externalName: 'pool-name',
-            services: ['web-a', 'web-b'],
-            origins: [
-              { name: 'web-a', address: 'a.example', hostHeader: 'a.example', enabled: true },
-              { name: 'web-b', address: 'b.example', hostHeader: 'b.example', enabled: true },
-            ],
-            originsHash: 'a'.repeat(64),
-          } : {}),
-          ...(!destroy && !monitor && !pool ? { services: ['web-a', 'web-b'] } : {}),
-          ...(destroy ? { externalId: 'external-1' } : {}),
-        },
-      }),
-    };
-  }),
   {
     label: 'delegated secret sync',
     capability: 'hosting.delegated-secret.sync',
@@ -1162,48 +800,6 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
-    label: 'Twilio Messaging Service mutate',
-    capability: 'messaging.service.mutate',
-    action: action({
-      id: 'messaging:twilio:service',
-      type: 'create',
-      kind: 'messaging',
-      name: 'app-production',
-      provider: 'twilio',
-      operation: MESSAGING_OPERATIONS.serviceEnsure,
-      metadata: { configHash: 'service-config' },
-    }),
-  },
-  {
-    label: 'Twilio sender mutate',
-    capability: 'messaging.sender.mutate',
-    action: action({
-      id: `messaging:twilio:sender:PN${'a'.repeat(32)}`,
-      type: 'create',
-      kind: 'messaging',
-      name: `PN${'a'.repeat(32)}`,
-      provider: 'twilio',
-      operation: MESSAGING_OPERATIONS.senderAttach,
-      metadata: {
-        configHash: 'service-config',
-        phoneNumberSid: `PN${'a'.repeat(32)}`,
-        serviceName: 'app-production',
-      },
-    }),
-  },
-  {
-    label: 'Twilio runtime sync',
-    capability: 'messaging.runtime.sync',
-    action: action({
-      id: 'messaging:twilio:runtime',
-      kind: 'messaging',
-      name: 'production',
-      provider: 'railway',
-      operation: MESSAGING_OPERATIONS.runtimeSync,
-      metadata: { configHash: 'runtime-config', services: ['web'] },
-    }),
-  },
-  {
     label: 'local environment record',
     capability: 'local.environment.record',
     action: action({ id: 'environment:production', type: 'create', kind: 'environment', name: 'production' }),
@@ -1255,7 +851,6 @@ describe('plan action mutation-authority contract', () => {
   it.each([
     ['queue metadata name', authorized.find((entry) => entry.label === QUEUE_OPERATIONS.ensure)!.action, { queueName: 'other' }],
     ['storage metadata name', authorized.find((entry) => entry.label === STORAGE_OPERATIONS.ensure)!.action, { storageName: 'other' }],
-    ['load-balancer hostname', authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action, { hostname: 'other.example.com' }],
     ['GitHub repository', authorized.find((entry) => entry.label === 'GitHub infrastructure')!.action, { repository: 'other/repo' }],
     ['Stripe service', authorized.find((entry) => entry.label === 'Stripe hosting env sync')!.action, { service: 'worker' }],
     ['iOS bundle id', authorized.find((entry) => entry.label === IOS_OPERATIONS.bundleIdRegister)!.action, { bundleId: 'com.other.app' }],
@@ -1273,11 +868,6 @@ describe('plan action mutation-authority contract', () => {
       expect(resolvePlanActionAuthority({ ...candidate, type: invalidType })).toBeNull();
     }
   );
-
-  it('rejects a load-balancer operation under a different action id', () => {
-    const candidate = authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action;
-    expect(resolvePlanActionAuthority({ ...candidate, id: 'load-balancer:other.example.com' })).toBeNull();
-  });
 
   it.each([
     { generator: undefined },
@@ -1546,14 +1136,6 @@ describe('plan action mutation-authority contract', () => {
     const candidate = authorized.find((entry) => entry.label === MAINTENANCE_OPERATIONS.edgeEnable)!.action;
     expect(resolvePlanActionAuthority({ ...candidate, billable: undefined })).toBeNull();
     expect(resolvePlanActionAuthority({ ...candidate, requiresConfirm: undefined })).toBeNull();
-  });
-
-  it.each([
-    LOAD_BALANCER_OPERATIONS.poolEnsure,
-    LOAD_BALANCER_OPERATIONS.ensure,
-  ])('rejects billable load-balancer mutation with a stripped billing flag for %s', (label) => {
-    const candidate = authorized.find((entry) => entry.label === label)!.action;
-    expect(resolvePlanActionAuthority({ ...candidate, billable: undefined })).toBeNull();
   });
 
   it('rejects private GitHub code scanning when billing confirmation is stripped', () => {

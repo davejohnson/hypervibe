@@ -26,7 +26,7 @@ export function resolveEmailCallbackTarget(
   spec: EnvironmentSpec,
   target: { service: string; path: string }
 ): EmailCallbackTarget {
-  if (spec.domain && !spec.loadBalancer) {
+  if (spec.domain) {
     const owner = desiredDomainServiceName(spec);
     if (!owner || owner === target.service) {
       const domainActionId = `domain:${spec.domain}`;

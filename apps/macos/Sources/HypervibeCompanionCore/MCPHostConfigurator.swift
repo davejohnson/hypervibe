@@ -19,21 +19,28 @@ public struct MCPHostConnectionStatus: Equatable, Sendable {
     public let connectedProjectCount: Int
     public let projectCount: Int
     public let configPath: String
+    public let skill: MCPHostSkillStatus
 
     public var isFullyConnected: Bool {
         projectCount > 0 && connectedProjectCount == projectCount
+    }
+
+    public var isReady: Bool {
+        isFullyConnected && (skill.state == .current || skill.state == .notSupported)
     }
 
     public init(
         host: MCPHost,
         connectedProjectCount: Int,
         projectCount: Int,
-        configPath: String
+        configPath: String,
+        skill: MCPHostSkillStatus = .init(state: .notSupported)
     ) {
         self.host = host
         self.connectedProjectCount = connectedProjectCount
         self.projectCount = projectCount
         self.configPath = configPath
+        self.skill = skill
     }
 }
 
@@ -66,6 +73,11 @@ public actor MCPHostConfigurator {
 
     private let fileManager: FileManager
 
+    public func updateSkill(for host: MCPHost, launcherURL: URL) async throws {
+        guard host == .codex else { return }
+        try await MCPHostSkillManager().install(launcherURL: launcherURL)
+    }
+
     public init(
         claudeConfigURL: URL = MCPHostConfigurator.defaultClaudeConfigURL(),
         codexConfigURL: URL = MCPHostConfigurator.defaultCodexConfigURL(),
@@ -96,7 +108,7 @@ public actor MCPHostConfigurator {
         for host: MCPHost,
         projects: [CompanionProject],
         launcherURL: URL
-    ) throws -> MCPHostConnectionStatus {
+    ) async throws -> MCPHostConnectionStatus {
         let connectedCount: Int
         switch host {
         case .claudeDesktop:
@@ -120,11 +132,16 @@ public actor MCPHostConfigurator {
             }.count
         }
 
+        let skill: MCPHostSkillStatus = host == .claudeDesktop
+            ? .init(state: .notSupported)
+            : projects.isEmpty ? .init(state: .unavailable)
+                : await MCPHostSkillManager().status(launcherURL: launcherURL)
         return MCPHostConnectionStatus(
             host: host,
             connectedProjectCount: connectedCount,
             projectCount: projects.count,
-            configPath: configURL(for: host).path
+            configPath: configURL(for: host).path,
+            skill: skill
         )
     }
 
@@ -132,13 +149,17 @@ public actor MCPHostConfigurator {
         _ host: MCPHost,
         projects: [CompanionProject],
         launcherURL: URL
-    ) throws {
+    ) async throws {
         try validate(projects: projects, launcherURL: launcherURL)
         switch host {
         case .claudeDesktop:
             try connectClaude(projects: projects, launcherURL: launcherURL)
         case .codex:
             try connectCodex(projects: projects, launcherURL: launcherURL)
+            let skill = await MCPHostSkillManager().status(launcherURL: launcherURL)
+            if skill.needsUpdate {
+                try await updateSkill(for: host, launcherURL: launcherURL)
+            }
         }
     }
 

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AzureManagedRedisCredentialsSchema,
   AzurePostgresCredentialsSchema,
 } from '../azure-datastore.credentials.js';
 
@@ -14,7 +13,6 @@ const authentication = {
 describe('Azure datastore credentials', () => {
   it.each([
     ['PostgreSQL', AzurePostgresCredentialsSchema],
-    ['Managed Redis', AzureManagedRedisCredentialsSchema],
   ])('keeps %s authentication-only while migrating known legacy placement keys', (_name, schema) => {
     expect(schema.parse({
       ...authentication,

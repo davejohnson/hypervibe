@@ -27,7 +27,7 @@ describe('compatible cloud connection reuse', () => {
     connectionRepo.updateStatus(connection.id, 'verified');
     const project = new ProjectRepository().create({ name: 'storage-auth-reuse' });
 
-    await expect(adapterFactory.getStorageAdapter('s3', project)).resolves.toMatchObject({
+    await expect(adapterFactory.getStorageOperations('s3', project)).resolves.toMatchObject({
       success: true,
       adapter: { name: 's3' },
     });
@@ -51,14 +51,14 @@ describe('compatible cloud connection reuse', () => {
     connectionRepo.updateStatus(connection.id, 'verified');
     const project = new ProjectRepository().create({ name: 'storage-auth-reuse-gcp' });
 
-    await expect(adapterFactory.getStorageAdapter('gcs', project)).resolves.toMatchObject({
+    await expect(adapterFactory.getStorageOperations('gcs', project)).resolves.toMatchObject({
       success: true,
       connectionProvider: 'cloudrun',
       adapter: { name: 'gcs' },
     });
   });
 
-  it('builds the Memorystore adapter from an existing verified Cloud Run connection', async () => {
+  it('does not revive retired Memorystore provisioning through a verified Cloud Run connection', async () => {
     const serviceAccount = {
       type: 'service_account',
       project_id: 'cloud-project',
@@ -77,8 +77,7 @@ describe('compatible cloud connection reuse', () => {
     const project = new ProjectRepository().create({ name: 'cache-auth-reuse-gcp' });
 
     await expect(adapterFactory.getCacheAdapter('memorystore', project)).resolves.toMatchObject({
-      success: true,
-      adapter: { name: 'memorystore' },
+      success: false,
     });
   });
 
@@ -96,7 +95,7 @@ describe('compatible cloud connection reuse', () => {
     connectionRepo.updateStatus(connection.id, 'verified');
     const project = new ProjectRepository().create({ name: 'storage-auth-reuse-azure' });
 
-    await expect(adapterFactory.getStorageAdapter('azureblob', project)).resolves.toMatchObject({
+    await expect(adapterFactory.getStorageOperations('azureblob', project)).resolves.toMatchObject({
       success: true,
       adapter: { name: 'azureblob' },
     });

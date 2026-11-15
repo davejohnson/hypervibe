@@ -1,3 +1,5 @@
+import '../../../application/providers.js';
+import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,7 +28,26 @@ import { applyScheduleActivation } from '../schedule-activation.service.js';
 import { managedCiReleaseArtifactName, MANAGED_CI_RELEASE_EVIDENCE_FILE } from '../managed-ci-evidence.js';
 import type { PlanAction } from '../../plan/plan.types.js';
 import { resolvePlanActionAuthority } from '../../plan/action-authority.js';
-import { actionRequiresBackupReadiness } from '../../plan/plan-stage.js';
+
+// Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
+const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
+providerRegistry.register({
+  metadata: {
+    ...fixtureHostingMetadata, name: 'fixture-hosting', displayName: 'Fixture hosting',
+    credentialsSchema: providerRegistry.getMetadata('cloudrun')!.credentialsSchema,
+    credentials: {},
+    lifecycle: { hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'unsupported', teardownBoundary: 'services' } },
+    maturity: { lifecycle: { hosting: { status: 'ready-for-live' } } },
+    orchestration: { ...fixtureHostingMetadata.orchestration, ci: {
+      ...fixtureHostingMetadata.orchestration!.ci!,
+      requiredSecrets: ['FIXTURE_CREDENTIALS', 'FIXTURE_PROJECT'],
+      secretCredentialKeys: { FIXTURE_CREDENTIALS: 'credentials', FIXTURE_PROJECT: 'projectId' },
+    } },
+  },
+  factory: () => ({}),
+  inspection: providerRegistry.get('cloudrun')!.inspection,
+});
+
 
 const SHA = 'a'.repeat(40);
 const IMAGE = `us-central1-docker.pkg.dev/gcp-test/app/image@sha256:${'b'.repeat(64)}`;
@@ -42,9 +63,9 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
 
 function setup() {
-  const project = new ProjectRepository().create({ name: 'cron-app', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/owner/app' });
+  const project = new ProjectRepository().create({ name: 'cron-app', defaultPlatform: "fixture-hosting", gitRemoteUrl: 'https://github.com/owner/app' });
   const selected = {
-    hosting: { provider: 'cloudrun', region: 'us-central1' },
+    hosting: { provider: "fixture-hosting", region: 'us-central1' },
     services: { cron: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 * * * *' } },
     deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
     email: { enabled: false }, envFile: { mode: 'off' },
@@ -54,11 +75,11 @@ function setup() {
   const { spec } = new SpecStore().replace(project, rawSpec);
   const environments = new EnvironmentRepository();
   const environment = environments.create({ projectId: project.id, name: 'staging', platformBindings: {
-    provider: 'cloudrun', projectId: 'gcp-test', providerScope: { projectId: 'gcp-test', region: 'us-central1' },
+    provider: "fixture-hosting", projectId: 'gcp-test', providerScope: { projectId: 'gcp-test', region: 'us-central1' },
     services: { cron: { serviceId: pending.jobName, jobName: pending.jobName, resourceUid: pending.jobUid, workloadKind: 'cron', resourceType: 'scheduledJob', scheduleActivation: pending } },
   } });
   const other = environments.create({ projectId: project.id, name: 'production', platformBindings: {
-    provider: 'cloudrun', projectId: 'gcp-other', providerScope: { projectId: 'gcp-other', region: 'us-central1' },
+    provider: "fixture-hosting", projectId: 'gcp-other', providerScope: { projectId: 'gcp-other', region: 'us-central1' },
     services: { cron: { serviceId: 'cron-production', jobName: 'cron-production', workloadKind: 'cron', resourceType: 'scheduledJob', scheduleActivation: { ...pending, jobName: 'cron-production', jobUid: 'uid-production' } } },
   } });
   new ServiceRepository().create({ projectId: project.id, name: 'cron' });
@@ -88,7 +109,7 @@ function setup() {
   } : realRequire(name);
   function emitEvidence(fingerprint = contract.ok ? contract.target.deploymentContractFingerprint : '') {
     new Function('require', 'process', producer.with.script)(requireFixture, { env: {
-    ...producer.env, GITHUB_REPOSITORY: 'owner/app', HYPERVIBE_RELEASE_SHA: SHA,
+    ...producer.env, HYPERVIBE_CREDENTIAL_OPERATIONS: '{}', HYPERVIBE_CREDENTIAL_DEPLOYMENTS: '[]', GITHUB_REPOSITORY: 'owner/app', HYPERVIBE_RELEASE_SHA: SHA,
     HYPERVIBE_RELEASE_IMAGE_URI: IMAGE,
     HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: fingerprint,
     } });
@@ -102,7 +123,7 @@ function setup() {
     capabilities: { supportsDeferredCronActivation: true }, activateSchedule,
   } as any });
   const action: PlanAction = { id: 'service:cron:activate-schedule', type: 'update', verified: true, billable: true, requiresConfirm: true,
-    resource: { kind: 'service', name: 'cron', provider: 'cloudrun' }, reason: 'Activate verified release',
+    resource: { kind: 'service', name: 'cron', provider: "fixture-hosting" }, reason: 'Activate verified release',
     metadata: { operation: 'hostingScheduleActivate', environmentName: 'staging', pending, grantJobInvoker: true, release: {
       repository: 'owner/app', workflow: contract.workflow.path, ref: contract.workflow.branch, targetSha: SHA,
       workflowInputHash: contract.inputHash, workflowContentHash: contract.renderedContentHash,
@@ -116,7 +137,6 @@ describe('post-release schedule activation contract', () => {
   it('admits actual emitted release evidence, calls the narrow capability, and preserves the other environment', async () => {
     const state = setup();
     expect(resolvePlanActionAuthority(state.action)?.capability).toBe('hosting.schedule.activate');
-    expect(actionRequiresBackupReadiness(state.action)).toBe(true);
     const result = await state.apply(); expect(result).toMatchObject({ success: true, data: { applied: 1, skipped: 0, sourceWorkflowRunId: 101 } });
     expect(state.activateSchedule).toHaveBeenCalledWith(expect.objectContaining({ name: 'cron', buildConfig: expect.objectContaining({ cronSchedule: '0 * * * *', startCommand: 'npm run cron' }) }),
       expect.objectContaining({ id: state.environment.id }), { expectedImage: IMAGE, expectedJobUid: pending.jobUid, sourceCommitSha: SHA });
@@ -224,7 +244,7 @@ describe('post-release schedule activation contract', () => {
     const state = setup();
     state.action.resource.provider = 'railway';
     expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });
-    state.action.resource.provider = 'cloudrun';
+    state.action.resource.provider = "fixture-hosting";
     state.action.metadata = { ...state.action.metadata, extraAuthority: 'unreviewed' };
     expect(resolvePlanActionAuthority(state.action)).toBeNull();
     expect(await state.apply()).toMatchObject({ success: false, status: 'blocked' });

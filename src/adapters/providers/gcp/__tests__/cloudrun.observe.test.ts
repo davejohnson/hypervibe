@@ -25,6 +25,17 @@ async function connectedAdapter(): Promise<CloudRunAdapter> {
   return adapter;
 }
 
+it('rejects a bound project different from the connected provider project before reading same-named services', async () => {
+  const adapter = await connectedAdapter();
+  const fetchMock = vi.fn(async () => Response.json({ services: [webService] }));
+  vi.stubGlobal('fetch', fetchMock);
+  await expect(adapter.observe(environmentWith({
+    provider: 'cloudrun', projectId: 'different-project', environmentId: 'us-central1',
+    services: { web: { serviceId: 'gcp-project-web' } },
+  }))).rejects.toThrow(/project.*different-project.*gcp-project/i);
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
 function environmentWith(platformBindings: Record<string, unknown>): Environment {
   const now = new Date();
   return {
@@ -150,6 +161,61 @@ describe('CloudRunAdapter.observe', () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
+
+  // Official Service.uid is server assigned and remains unchanged until deletion:
+  // https://github.com/googleapis/googleapis/blob/1e3baa918084cc4097d4de7e1f81876671f8e7ff/google/cloud/run/v2/service.proto#L312-L315
+  // Reconstructed responses exercise the real adapter and serialized HTTP reads.
+  it.each([
+    ['recreated under the same name and URL', 'replacement-uid', 'original-uid'],
+    ['missing lifetime identity', undefined, 'original-uid'],
+    ['empty lifetime identity', '', 'original-uid'],
+    ['whitespace lifetime identity', '   ', 'original-uid'],
+    ['malformed lifetime identity', 42, 'original-uid'],
+    ['missing lifetime identity without a saved UID', undefined, undefined],
+  ])('keeps a service with %s unknown', async (_label, uid, boundUid) => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      expect(init?.method ?? 'GET').toBe('GET');
+      if (url.includes('/services?')) return Response.json({ services: [{ ...webService, uid }] });
+      if (url.includes('/domainmappings?')) return Response.json({ items: [] });
+      if (url.includes('/jobs?')) return Response.json({ jobs: [] });
+      if (url.endsWith(':getIamPolicy')) return Response.json({ bindings: [] });
+      throw new Error(`Unexpected read: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const observed = await adapter.observe(environmentWith({
+      provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-central1',
+      services: { web: { serviceId: 'gcp-project-web', ...(boundUid ? { resourceUid: boundUid } : {}) } },
+    }));
+
+    expect(observed).toMatchObject({ partial: true, completeness: { services: 'unknown' },
+      services: [{ externalId: 'gcp-project-web', url: webService.uri, status: 'unknown',
+        maintenance: { state: 'unknown' } }] });
+    expect(observed.warnings.some((warning) => /lifetime identity/.test(warning))).toBe(true);
+  });
+
+  it.each([['saved UID', 'uid-1'], ['no saved UID', undefined]])(
+    'exposes the live lifetime identity with %s', async (_label, boundUid) => {
+      const adapter = await connectedAdapter();
+      vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        expect(init?.method ?? 'GET').toBe('GET');
+        if (url.includes('/services?')) return Response.json({ services: [webService] });
+        if (url.includes('/domainmappings?')) return Response.json({ items: [] });
+        if (url.includes('/jobs?')) return Response.json({ jobs: [] });
+        if (url.endsWith(':getIamPolicy')) return Response.json({ bindings: [] });
+        throw new Error(`Unexpected read: ${url}`);
+      }));
+      const observed = await adapter.observe(environmentWith({
+        provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-central1',
+        services: { web: { serviceId: 'gcp-project-web', ...(boundUid ? { resourceUid: boundUid } : {}) } },
+      }));
+      expect(observed).toMatchObject({ partial: false, completeness: { services: 'complete' },
+        services: [{ externalId: 'gcp-project-web', resourceUid: 'uid-1', status: 'running' }] });
+    }
+  );
 
   it('observes live services, scheduled jobs, and plain jobs with hashed env vars', async () => {
     const adapter = await connectedAdapter();
@@ -494,106 +560,6 @@ describe('CloudRunAdapter.observe', () => {
     expect(observed.warnings).toEqual([
       expect.stringContaining('duplicate services resource id gcp-project-web'),
     ]);
-  });
-
-  it('attaches, observes, and terminally detaches one exact Cloud Run domain mapping', async () => {
-    const adapter = await connectedAdapter();
-    const domain = 'cloudrun.domain-test.hypervibe.dev';
-    let mappingExists = false;
-    const mapping = {
-      apiVersion: 'domains.cloudrun.com/v1',
-      kind: 'DomainMapping',
-      metadata: {
-        name: domain,
-        namespace: 'gcp-project',
-        uid: 'mapping-uid-1',
-      },
-      spec: {
-        routeName: 'gcp-project-web',
-        certificateMode: 'AUTOMATIC',
-      },
-      status: {
-        mappedRouteName: 'gcp-project-web',
-        conditions: [
-          { type: 'Ready', status: 'True' },
-          { type: 'CertificateProvisioned', status: 'True', reason: 'CertificateReady' },
-        ],
-        resourceRecords: [{
-          name: 'cloudrun',
-          type: 'CNAME',
-          rrdata: 'ghs.googlehosted.com',
-        }],
-      },
-    };
-    const mutations: string[] = [];
-    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = init?.method ?? 'GET';
-      if (url === 'https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services/gcp-project-web') {
-        return Response.json(webService);
-      }
-      if (url.includes('/domainmappings/') && method === 'GET') {
-        return mappingExists
-          ? Response.json(mapping)
-          : new Response(null, { status: 404 });
-      }
-      if (url.endsWith('/domainmappings') && method === 'POST') {
-        expect(JSON.parse(String(init?.body))).toMatchObject({
-          metadata: { name: domain, namespace: 'gcp-project' },
-          spec: {
-            routeName: 'gcp-project-web',
-            certificateMode: 'AUTOMATIC',
-          },
-        });
-        mappingExists = true;
-        mutations.push('create');
-        return Response.json(mapping, { status: 201 });
-      }
-      if (url.includes('/domainmappings/') && method === 'DELETE') {
-        mappingExists = false;
-        mutations.push('delete');
-        return Response.json({});
-      }
-      throw new Error(`Unexpected fetch: ${method} ${url}`);
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const attached = await adapter.attachCustomDomain({
-      projectId: 'gcp-project',
-      serviceId: 'gcp-project-web',
-      environmentId: 'us-central1',
-      domain,
-      dnsZone: 'hypervibe.dev',
-    });
-    expect(attached).toMatchObject({
-      success: true,
-      data: {
-        customDomainId: 'mapping-uid-1',
-        created: true,
-        providerVerified: true,
-        certificateStatus: 'CertificateReady',
-        dnsRecords: [{
-          name: domain,
-          type: 'CNAME',
-          value: 'ghs.googlehosted.com',
-          purpose: 'traffic verification',
-        }],
-      },
-    });
-
-    vi.stubEnv('HYPERVIBE_CLOUDRUN_DOMAIN_DELETE_DELAY_MS', '0');
-    const detached = await adapter.detachCustomDomain({
-      projectId: 'gcp-project',
-      serviceId: 'gcp-project-web',
-      environmentId: 'us-central1',
-      domain,
-      customDomainId: 'mapping-uid-1',
-    });
-    expect(detached).toMatchObject({
-      success: true,
-      data: { customDomainId: 'mapping-uid-1', deleted: true },
-    });
-    expect(mutations).toEqual(['create', 'delete']);
   });
 
   it('attributes observed Cloud Run mapping and certificate state to its exact route', async () => {

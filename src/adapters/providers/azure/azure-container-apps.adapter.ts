@@ -1,25 +1,22 @@
+import type { ProviderEnvironmentVariablesRequest, ProviderEnvironmentVariablesResult } from '../../../domain/ports/provider-env-vars.port.js';
+import { createAzureRegistryCredentialLifecycle } from './azure-registry-credential.js';
 import { createHash } from 'node:crypto';
-import { resolve4, resolveCname, resolveTxt } from 'node:dns/promises';
 import { z } from 'zod';
-import type { ComponentType } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
-import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
+import { type Service } from '../../../domain/entities/service.entity.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import type {
   IWorkloadMaintenanceAdapter,
   MaintenanceWorkloadObservation,
   MaintenanceWorkloadSnapshot,
 } from '../../../domain/ports/maintenance.port.js';
-import { resourceName } from '../../../domain/services/resource-names.js';
 import {
   hashEnvValue,
   type ObservedService,
   type ObservedState,
 } from '../../../domain/ports/observe.port.js';
 import type {
-  ComponentResult,
   DeploymentMutationOptions,
-  DeployResult,
   IProviderAdapter,
   ProviderCapabilities,
   Receipt,
@@ -33,10 +30,9 @@ import {
   azureRegistryName,
   buildAzureContainerAppsGitHubActionsSteps,
 } from './azure-container-apps-ci.workflow.js';
-import { buildAzureContainerAppsPortableRecipe } from './azure-container-apps-ci.recipe.js';
 import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
-import { AzureServiceVolumes } from './azure-service-volumes.js';
 import { azureVolumeFingerprint } from './azure-volume-runtime.js';
+import { azureRuntimeIdentityFingerprint } from './azure-runtime-identity.js';
 import {
   azureEnvironmentResourceGroupScope,
   legacyAzureEnvironmentResourceGroupScope,
@@ -44,13 +40,10 @@ import {
 } from './azure-environment-scope.js';
 
 const RESOURCE_API = '2024-11-01';
-const RESOURCE_LIST_API = '2021-04-01';
-const PROVIDER_API = '2021-04-01';
 const REGISTRY_API = '2025-11-01';
 const CONTAINER_APPS_API = '2026-01-01';
 const AUTHORIZATION_API = '2022-04-01';
 const BOOTSTRAP_IMAGE = `mcr.microsoft.com/oss/nodejs/node:${HYPERVIBE_MANAGED_NODE_VERSION}-alpine`;
-const BOOTSTRAP_SCRIPT = "require('http').createServer((_,res)=>{res.writeHead(200);res.end('hypervibe bootstrap')}).listen(8080)";
 const ACR_PUSH_ROLE = '8311e382-0749-4cb8-b61a-304f252e45ec';
 const ACR_PULL_ROLE = '7f951dda-4ed3-4680-a7ca-43fe172d538d';
 const START_COMMAND_KEY = 'HYPERVIBE_START_COMMAND';
@@ -86,7 +79,7 @@ type AzureResource = {
   id: string;
   name: string;
   location?: string;
-  identity?: { principalId?: string; tenantId?: string; type?: string };
+  identity?: { principalId?: string; tenantId?: string; type?: string; userAssignedIdentities?: Record<string, unknown> };
   properties?: Record<string, any>;
   tags?: Record<string, string>;
 };
@@ -103,7 +96,7 @@ type AzureProject = {
 
 export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
-  readonly serviceVolumes = new AzureServiceVolumes(() => this.connected().client);
+  readonly registryCredentialLifecycle = createAzureRegistryCredentialLifecycle(() => this.connected().client);
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['dockerfile'],
@@ -115,7 +108,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     supportsMultiEnvironment: false,
     managedTls: true,
     supportsObserve: true,
-    supportsDeferredDeploy: true,
+    credentialUpdateActivation: 'provider-rollout',
+    credentialValueEvidence: 'readback',
     supportsMaintenance: true,
   };
 
@@ -155,215 +149,32 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     this.credentials = null;
   }
 
-  async ensureProject(projectName: string, environment: Environment): Promise<Receipt> {
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
     try {
-      const bindings = parseHostingBindings(environment);
-      const desired = bindings.projectId
-        ? this.projectFromResourceGroup(bindings.projectId, bindings.environmentId)
-        : this.desiredProject(projectName, environment);
-      if (!bindings.projectId) {
-        const legacy = this.desiredProject(projectName, environment, true);
-        if (await this.getResource(legacy.resourceGroupId, RESOURCE_API)) {
-          throw new Error(`Legacy Azure resource group ${legacy.resourceGroupId} exists without a durable binding; explicit import is required.`);
-        }
-      }
-      if (bindings.environmentId && bindings.environmentId !== desired.environmentId) {
-        throw new Error(`Bound Container Apps environment ${bindings.environmentId} does not match ${desired.environmentId}.`);
-      }
-      const existingGroup = await this.getResource(desired.resourceGroupId, RESOURCE_API);
-      const existingEnvironment = await this.getResource(desired.environmentId, CONTAINER_APPS_API);
-      if (!bindings.projectId && existingEnvironment) {
-        return this.failedReceipt(
-          'Failed to ensure Azure Container Apps project',
-          `Azure managed environment ${desired.environmentId} already exists. Hypervibe will not silently adopt it.`
-        );
-      }
-      if (!bindings.projectId && existingGroup && !this.isOwned(existingGroup, environment.id)) {
-        return this.failedReceipt(
-          'Failed to ensure Azure Container Apps project',
-          `Azure resource group ${desired.resourceGroupId} already exists but is not owned by this Hypervibe environment.`
-        );
-      }
-      if (bindings.projectId && !existingGroup) {
-        return this.failedReceipt(
-          'Failed to ensure Azure Container Apps project',
-          `Bound Azure resource group ${desired.resourceGroupId} was not found. Hypervibe will not create a replacement from a stale binding.`
-        );
-      }
-      if (bindings.projectId && existingGroup && !this.isOwned(existingGroup, environment.id)) {
-        return this.failedReceipt(
-          'Failed to ensure Azure Container Apps project',
-          `Bound Azure resource group ${desired.resourceGroupId} is not owned by this Hypervibe environment.`
-        );
-      }
-      if (bindings.projectId && existingEnvironment && !this.isOwned(existingEnvironment, environment.id)) {
-        return this.failedReceipt(
-          'Failed to ensure Azure Container Apps project',
-          `Bound Azure managed environment ${desired.environmentId} is not owned by this Hypervibe environment.`
-        );
-      }
-
-      await this.ensureProviderRegistration('Microsoft.App');
-      await this.ensureProviderRegistration('Microsoft.ContainerRegistry');
-      if (!existingGroup) {
-        await this.connected().client.request('PUT', desired.resourceGroupId, RESOURCE_API, {
-          location: this.connected().credentials.location,
-          tags: this.tags(environment),
-        });
-      }
-      await this.ensureRegistry(desired, environment);
-      await this.ensureRoleAssignment(
-        desired.registryId,
-        await this.connected().client.servicePrincipalId(),
-        ACR_PUSH_ROLE,
-        'ServicePrincipal'
-      );
-      if (!existingEnvironment) {
-        await this.connected().client.request('PUT', desired.environmentId, CONTAINER_APPS_API, {
-          location: this.connected().credentials.location,
-          tags: this.tags(environment),
-          properties: {},
-        });
-      }
-      const ready = await this.waitForProvisioning(desired.environmentId, CONTAINER_APPS_API);
-      return {
-        success: true,
-        message: existingEnvironment
-          ? `Verified Azure Container Apps project: ${desired.resourceGroupName}`
-          : `Created Azure Container Apps project: ${desired.resourceGroupName}`,
-        data: {
-          projectId: desired.resourceGroupId,
-          environmentId: ready.id,
-          projectName: desired.resourceGroupName,
-          created: !existingEnvironment,
-        },
-      };
-    } catch (error) {
-      return this.failedReceipt('Failed to ensure Azure Container Apps project', this.formatError(error));
-    }
-  }
-
-  async ensureComponent(type: ComponentType, environment: Environment): Promise<ComponentResult> {
-    return {
-      component: {
-        id: '',
-        environmentId: environment.id,
-        type,
-        bindings: {},
-        externalId: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-      receipt: {
-        success: false,
-        message: 'Azure datastores use separate provider adapters and explicit plan actions.',
-      },
-    };
-  }
-
-  async deploy(
-    service: Service,
-    environment: Environment,
-    envVars: Record<string, string>,
-    options: DeploymentMutationOptions = {}
-  ): Promise<DeployResult> {
-    if (serviceWorkloadKind(service) !== 'web') {
-      return this.failedDeploy(service, 'Azure Container Apps Jobs and workers require distinct lifecycle resources and are not yet supported.');
-    }
-    if (service.buildConfig.public === false) {
-      return this.failedDeploy(service, 'Private Container Apps ingress requires an explicit network resource and is not yet supported.');
-    }
-    const bindings = parseHostingBindings(environment);
-    if (!bindings.projectId || !bindings.environmentId) {
-      return this.failedDeploy(service, 'No bound Azure resource group and managed environment exist. The project action must complete first.');
-    }
-    let attemptedApp: AzureResource | null = null;
-    let createdService = false;
-    try {
-      const project = this.projectFromResourceGroup(bindings.projectId, bindings.environmentId);
-      if (project.environmentId !== bindings.environmentId) {
-        throw new Error(`Bound managed environment ${bindings.environmentId} is outside ${bindings.projectId}.`);
-      }
-      const existingEnvironment = await this.getResource(project.environmentId, CONTAINER_APPS_API);
-      if (!existingEnvironment) throw new Error(`Bound managed environment ${project.environmentId} was not found.`);
-      const boundId = bindings.services?.[service.name]?.serviceId;
-      let previousReadyRevision: string | undefined;
-      let app: AzureResource | null = null;
-      if (boundId) {
-        this.assertAppScope(boundId, project.resourceGroupId);
-        app = await this.getResource(boundId, CONTAINER_APPS_API);
-        if (!app) return this.failedDeploy(service, `Bound Container App ${boundId} was not found. Hypervibe will not create a replacement from a stale binding.`);
-        this.assertAppEnvironment(app, project.environmentId);
-        if (!this.isOwned(app, environment.id)) {
-          return this.failedDeploy(service, `Bound Container App ${boundId} is not owned by this Hypervibe environment.`);
-        }
-        attemptedApp = app;
-        previousReadyRevision = typeof app.properties?.latestReadyRevisionName === 'string'
-          ? app.properties.latestReadyRevisionName
-          : undefined;
-      } else {
-        const name = this.appName(service);
-        const legacyName = this.safeName(`hv-${service.name}`, 20, service.id);
-        const appId = `${project.resourceGroupId}/providers/Microsoft.App/containerApps/${name}`;
-        const duplicates = (await this.listApps(project.resourceGroupId)).filter(
-          (candidate) => [name, legacyName].includes(candidate.name.toLowerCase())
-        );
-        if (duplicates.length > 0) {
-          return this.failedDeploy(service, `Azure Container App "${name}" already exists (${duplicates.map((item) => item.id).join(', ')}). Hypervibe will not silently adopt it.`);
-        }
-        app = await this.connected().client.request<AzureResource>('PUT', appId, CONTAINER_APPS_API, this.appBody({
-          app: null,
-          environment,
-          environmentId: project.environmentId,
-          project,
-          service,
-          envVars,
-        }));
-        attemptedApp = app;
-        createdService = true;
-      }
-      if (!app) throw new Error('Azure Container App reconciliation returned no resource.');
-      const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
+      const binding = parseHostingBindings(request.environment);
+      const appId = binding.services?.[request.service.name]?.serviceId;
+      if (binding.provider !== this.name || !binding.projectId || !binding.environmentId || !appId) throw new Error();
+      const project = this.projectFromResourceGroup(binding.projectId, binding.environmentId);
+      this.assertAppScope(appId, project.resourceGroupId);
+      const app = await this.getResource(appId, CONTAINER_APPS_API);
+      if (!app || app.id.toLowerCase() !== appId.toLowerCase() || !this.isOwned(app, request.environment.id)) throw new Error();
       this.assertAppEnvironment(app, project.environmentId);
-      const principalId = app.identity?.principalId;
-      if (!principalId) throw new Error(`Container App ${app.id} did not return its system-assigned identity.`);
-      await this.ensureRoleAssignment(project.registryId, principalId, ACR_PULL_ROLE, 'ServicePrincipal');
-      app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, this.appBody({
-        app,
-        environment,
-        environmentId: project.environmentId,
-        project,
-        service,
-        envVars,
-      }));
-      app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
-      app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
-      if (azureVolumeFingerprint(app.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during runtime configuration.');
-      const url = this.appUrl(app);
-      return {
-        serviceId: service.id,
-        externalId: app.id,
-        ...(url ? { url } : {}),
-        status: 'configured',
-        receipt: {
-          success: true,
-          message: options.deferDeployment
-            ? `Prepared Azure Container App for exact-digest CI deployment: ${app.name}`
-            : `Configured Azure Container App; an exact-digest CI deployment is still required: ${app.name}`,
-          data: {
-            serviceId: app.id,
-            serviceName: app.name,
-            resourceType: 'web',
-            createdService,
-            deploymentDeferred: true,
-            pendingImage: this.container(app)?.image === BOOTSTRAP_IMAGE,
-            ...(url ? { url } : {}),
-          },
-        },
-      };
-    } catch (error) {
-      return this.failedDeploy(service, this.formatError(error), attemptedApp?.id, createdService);
-    }
+      const container = this.container(app);
+      if (!container?.image || !Array.isArray(container.env ?? [])) throw new Error();
+      const secrets = await this.listAppSecrets(appId);
+      if (secrets.some(secret => !secret.name) || new Set(secrets.map(secret => secret.name)).size !== secrets.length) throw new Error();
+      const references = new Set((app.properties?.configuration?.secrets ?? []).filter((secret: any) => secret.keyVaultUrl).map((secret: any) => secret.name));
+      const byName = new Map(secrets.map(secret => [secret.name, secret.value]));
+      const variables: Record<string, string> = {}; const unresolvedKeys: string[] = [];
+      const entries = container.env ?? [];
+      if (entries.some((entry: any) => typeof entry.name !== 'string') || new Set(entries.map((entry: any) => entry.name)).size !== entries.length) throw new Error();
+      for (const entry of entries) {
+        if (typeof entry.value === 'string' && !entry.secretRef) variables[entry.name] = entry.value;
+        else if (!references.has(entry.secretRef) && typeof byName.get(entry.secretRef) === 'string') variables[entry.name] = byName.get(entry.secretRef)!;
+        else unresolvedKeys.push(entry.name);
+      }
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys: unresolvedKeys.sort() } : {}) };
+    } catch { return { success: false, error: 'Exact Azure Container App configuration could not be verified.' }; }
   }
 
   async setEnvVars(
@@ -372,292 +183,78 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     vars: Record<string, string>,
     options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
-    return (await this.deploy(service, environment, vars, options)).receipt;
+    if (options.requireCredentialUpdate) return this.setCredentialEnvVars(environment, service, vars);
+    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is moving to OpenTofu.' };
   }
 
-  async deleteEnvVars(environment: Environment, service: Service, keys: string[]): Promise<Receipt> {
-    const appId = parseHostingBindings(environment).services?.[service.name]?.serviceId;
-    if (!appId) return { success: true, message: 'Azure Container App has no retired environment variables to delete.' };
+  private async setCredentialEnvVars(environment: Environment, service: Service, vars: Record<string, string>): Promise<Receipt> {
+    let attempted = false;
     try {
+      const binding = parseHostingBindings(environment);
+      const appId = binding.services?.[service.name]?.serviceId;
+      if (binding.provider !== this.name || !binding.projectId || !binding.environmentId || !appId) throw new Error();
+      const project = this.projectFromResourceGroup(binding.projectId, binding.environmentId);
+      this.assertAppScope(appId, project.resourceGroupId);
       const app = await this.getResource(appId, CONTAINER_APPS_API);
-      if (!app) return this.failedReceipt('Failed to delete Azure environment variables', `Bound Container App ${appId} was not found.`);
-      if (!this.isOwned(app, environment.id)) {
-        return this.failedReceipt('Failed to delete Azure environment variables', `Bound Container App ${appId} is not owned by this Hypervibe environment.`);
-      }
-      const retired = new Set(keys);
-      const previousReadyRevision = typeof app.properties?.latestReadyRevisionName === 'string'
-        ? app.properties.latestReadyRevisionName
-        : undefined;
+      if (!app || !app.location || app.id.toLowerCase() !== appId.toLowerCase() || !this.isOwned(app, environment.id)) throw new Error();
+      this.assertAppEnvironment(app, project.environmentId);
       const container = this.container(app);
-      const expectedVolumes = azureVolumeFingerprint(app.properties?.template);
+      if (!container?.image || !Array.isArray(container.env ?? [])) throw new Error();
       const secrets = await this.listAppSecrets(appId);
-      const secretRefs = new Set(
-        (container?.env ?? []).filter((item: any) => retired.has(item.name)).map((item: any) => item.secretRef).filter(Boolean)
-      );
-      await this.connected().client.request('PATCH', appId, CONTAINER_APPS_API, {
-        properties: {
-          configuration: {
-            ...app.properties?.configuration,
-            secrets: secrets.filter((secret: any) => !secretRefs.has(secret.name)),
-          },
-          template: {
-            ...app.properties?.template,
-            containers: [{
-              ...container,
-              env: (container?.env ?? []).filter((item: any) => !retired.has(item.name)),
-            }],
-          },
-        },
-      });
-      await this.waitForProvisioning(appId, CONTAINER_APPS_API);
-      const ready = await this.waitForContainerAppRevision(appId, previousReadyRevision);
-      if (azureVolumeFingerprint(ready.properties?.template) !== expectedVolumes) throw new Error('Azure volume mounts changed during environment variable removal.');
-      return { success: true, message: `Deleted ${keys.length} retired Azure environment variable${keys.length === 1 ? '' : 's'}.` };
-    } catch (error) {
-      return this.failedReceipt('Failed to delete Azure environment variables', this.formatError(error));
-    }
+      if (new Set(secrets.map(secret => secret.name)).size !== secrets.length || secrets.some(secret => !secret.name)) throw new Error();
+      const byName = new Map<string, any>((app.properties?.configuration?.secrets ?? []).map((secret: any) => [secret.name, secret]));
+      for (const secret of secrets) byName.set(secret.name!, { ...byName.get(secret.name!), ...secret });
+      if ([...byName.values()].some(secret => typeof secret.value !== 'string' && typeof secret.keyVaultUrl !== 'string')) throw new Error();
+      const remaining = new Map(Object.entries(vars));
+      const env = (container.env ?? []).map((entry: any) => {
+        if (!remaining.has(entry.name)) return entry;
+        remaining.delete(entry.name);
+        return { name: entry.name, secretRef: this.secretName(entry.name) };
+      }).concat([...remaining].map(([name]) => ({ name, secretRef: this.secretName(name) })));
+      if (new Set(env.map((entry: any) => entry.name)).size !== env.length) throw new Error();
+      for (const [key, value] of Object.entries(vars)) {
+        const name = this.secretName(key);
+        const previous = (container.env ?? []).find((entry: any) => entry.name === key);
+        // Never reuse an unreviewed secret slot that may belong to another input.
+        if (byName.has(name) && previous?.secretRef !== name) throw new Error();
+        if ((container.env ?? []).some((entry: any) => entry.secretRef === name && !Object.hasOwn(vars, entry.name))) throw new Error();
+        byName.set(name, { name, value });
+      }
+      const templateChanged = JSON.stringify(env) !== JSON.stringify(container.env ?? []);
+      // ARM uses JSON Merge Patch: omitted nested settings are preserved and
+      // explicit null removes an old suffix before Azure chooses a new revision.
+      const template = { containers: [{ ...container, env }], ...(app.properties?.template?.revisionSuffix ? { revisionSuffix: null } : {}) };
+      const patch = { location: app.location, properties: { configuration: { secrets: [...byName.values()] }, ...(templateChanged ? { template } : {}) } };
+      const identity = azureRuntimeIdentityFingerprint(app);
+      const volumes = azureVolumeFingerprint(app.properties?.template);
+      const beforeRevision = app.properties?.latestReadyRevisionName;
+      attempted = true;
+      await this.connected().client.request('PATCH', appId, CONTAINER_APPS_API, patch);
+      const after = await this.waitForProvisioning(appId, CONTAINER_APPS_API);
+      if (azureRuntimeIdentityFingerprint(after) !== identity || azureVolumeFingerprint(after.properties?.template) !== volumes) throw new Error();
+      const readback = new Map((await this.listAppSecrets(appId)).map(secret => [secret.name, secret.value]));
+      if (Object.entries(vars).some(([key, value]) => readback.get(this.secretName(key)) !== value)) throw new Error();
+      const observedEnv = this.container(after)?.env ?? [];
+      if (Object.keys(vars).some(key => observedEnv.find((entry: any) => entry.name === key)?.secretRef !== this.secretName(key))) throw new Error();
+      return { success: true, message: 'Selected Azure credential configuration verified; runtime activation requires revision evidence.', data: {
+        serviceId: appId, credentialValueEvidence: 'readback', credentialUpdateActivation: templateChanged ? 'provider-rollout' : 'deferred',
+        configurationUpdated: true, runtimeRolloutRequired: true, mutationAttempted: true,
+        rolloutBaseline: beforeRevision ? { state: 'present', deploymentId: beforeRevision } : { state: 'unknown' },
+        ...(templateChanged && after.properties?.latestRevisionName ? { deploymentId: after.properties.latestRevisionName } : {}),
+      } };
+    } catch { return { success: false, message: attempted ? 'Azure credential write requires readback recovery.' : 'Exact Azure credential target could not be verified; no write attempted.', data: { mutationAttempted: attempted } }; }
   }
 
-  async deleteService(serviceId: string): Promise<{ success: boolean; error?: string }> {
+  private async observedCredentialDeployment(app: AzureResource): Promise<ObservedService['deployment']> {
+    const id = app.properties?.latestReadyRevisionName;
+    if (typeof id !== 'string' || !id) return undefined;
+    const base = { id, status: app.properties?.provisioningState };
     try {
-      const app = await this.getResource(serviceId, CONTAINER_APPS_API);
-      if (!app) return { success: true };
-      if (!this.hasManagedTag(app)) {
-        return { success: false, error: `Container App ${serviceId} is not Hypervibe-managed.` };
-      }
-      const project = this.projectFromResourceGroup(this.resourceGroupIdFromChild(serviceId));
-      if (app.identity?.principalId) {
-        await this.deleteRoleAssignment(project.registryId, app.identity.principalId, ACR_PULL_ROLE);
-      }
-      await this.connected().client.deleteIfPresent(serviceId, CONTAINER_APPS_API);
-      if (await this.getResource(serviceId, CONTAINER_APPS_API)) {
-        return { success: false, error: `Container App ${serviceId} remained observable after deletion.` };
-      }
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: this.formatError(error) };
-    }
-  }
-
-  async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
-    try {
-      const project = this.projectFromResourceGroup(projectId);
-      const group = await this.getResource(projectId, RESOURCE_API);
-      if (!group) return { success: true };
-      if (!this.hasManagedTag(group)) {
-        return { success: false, error: `Azure resource group ${projectId} is not Hypervibe-managed.` };
-      }
-      const apps = await this.listApps(project.resourceGroupId);
-      if (apps.length > 0) {
-        return { success: false, error: `Azure resource group ${projectId} still contains Container Apps: ${apps.map((item) => item.id).join(', ')}.` };
-      }
-      const resources = await this.connected().client.listAll<AzureResource>(
-        `${project.resourceGroupId}/resources`,
-        RESOURCE_LIST_API
-      );
-      const expectedIds = new Set([
-        project.registryId.toLowerCase(),
-        project.environmentId.toLowerCase(),
-        `${project.resourceGroupId}/providers/Microsoft.App/managedEnvironments/runtime`.toLowerCase(),
-      ]);
-      if (resources.filter((resource) => /\/managedEnvironments\//i.test(resource.id)).length > 1) {
-        throw new Error('Multiple Azure managed environments require explicit cleanup identity selection.');
-      }
-      const unexpected = resources.filter((resource) => !expectedIds.has(resource.id.toLowerCase()));
-      if (unexpected.length > 0) {
-        return {
-          success: false,
-          error: `Azure resource group ${projectId} contains resources outside the reviewed Hypervibe project boundary: ${unexpected.map((resource) => resource.id).join(', ')}.`,
-        };
-      }
-      const unowned = resources.filter((resource) => !this.hasManagedTag(resource));
-      if (unowned.length > 0) {
-        return {
-          success: false,
-          error: `Azure project resources are not Hypervibe-managed: ${unowned.map((resource) => resource.id).join(', ')}.`,
-        };
-      }
-      await this.connected().client.deleteIfPresent(projectId, RESOURCE_API);
-      if (await this.getResource(projectId, RESOURCE_API)) {
-        return { success: false, error: `Azure resource group ${projectId} remained observable after deletion.` };
-      }
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: this.formatError(error) };
-    }
-  }
-
-  async attachCustomDomain(params: {
-    projectId?: string;
-    serviceId: string;
-    environmentId: string;
-    domain: string;
-    dnsZone?: string;
-  }): Promise<Receipt> {
-    try {
-      if (!params.projectId) throw new Error('Azure custom-domain attachment requires a bound resource group.');
-      const project = this.projectFromResourceGroup(params.projectId, params.environmentId);
-      if (params.environmentId !== project.environmentId) throw new Error('Azure custom-domain environment identity changed.');
-      this.assertAppScope(params.serviceId, project.resourceGroupId);
-      let app = await this.getResource(params.serviceId, CONTAINER_APPS_API);
-      if (!app) throw new Error(`Bound Container App ${params.serviceId} was not found.`);
-      if (!this.hasManagedTag(app)) throw new Error(`Bound Container App ${params.serviceId} is not Hypervibe-managed.`);
-      this.assertAppEnvironment(app, project.environmentId);
-      const environment = await this.getResource(project.environmentId, CONTAINER_APPS_API);
-      if (!environment) throw new Error(`Bound managed environment ${project.environmentId} was not found.`);
-      const records = this.azureDomainRecords(params.domain, params.dnsZone, app, environment);
-      const certificateId = this.managedCertificateId(project, params.domain);
-      const dnsReady = await this.azureDomainDnsReady(records);
-      if (!dnsReady) {
-        return {
-          success: true,
-          message: 'Azure Container Apps custom domain is waiting for DNS validation records',
-          data: {
-            domain: params.domain,
-            customDomainId: certificateId,
-            created: false,
-            providerVerified: false,
-            certificateStatus: 'DNS_REQUIRED',
-            dnsRecords: records,
-          },
-        };
-      }
-
-      let certificate = await this.getResource(certificateId, CONTAINER_APPS_API);
-      if (certificate && !this.isDomainCertificateOwned(certificate, params.serviceId)) {
-        throw new Error(`Azure managed-certificate identity ${certificateId} is not owned by this Hypervibe service.`);
-      }
-      const configuration = app.properties?.configuration ?? {};
-      const customDomains = this.withAzureCustomDomain(
-        configuration.ingress?.customDomains,
-        { name: params.domain, bindingType: 'Disabled' }
-      );
-      app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, {
-        properties: {
-          configuration: {
-            ...configuration,
-            ingress: { ...configuration.ingress, customDomains },
-          },
-        },
-      });
-      const created = !certificate;
-      if (!certificate) {
-        certificate = await this.connected().client.request<AzureResource>('PUT', certificateId, CONTAINER_APPS_API, {
-          location: this.connected().credentials.location,
-          properties: {
-            subjectName: params.domain,
-            domainControlValidation: this.isApex(params.domain, params.dnsZone) ? 'HTTP' : 'CNAME',
-          },
-          tags: { 'managed-by': 'hypervibe', 'hypervibe-service': this.hash(params.serviceId) },
-        });
-      }
-      const status = String(certificate.properties?.provisioningState ?? 'Pending');
-      if (['Failed', 'Canceled', 'DeleteFailed'].includes(status)) {
-        throw new Error(`Azure managed certificate ${certificateId} is ${status}.`);
-      }
-      const issued = status === 'Succeeded';
-      if (issued) {
-        const boundDomains = this.withAzureCustomDomain(customDomains, {
-          name: params.domain,
-          bindingType: 'SniEnabled',
-          certificateId,
-        });
-        app = await this.connected().client.request<AzureResource>('PATCH', app.id, CONTAINER_APPS_API, {
-          properties: {
-            configuration: {
-              ...app.properties?.configuration,
-              ingress: {
-                ...app.properties?.configuration?.ingress,
-                customDomains: boundDomains,
-              },
-            },
-          },
-        });
-      }
-      const attached = this.azureCustomDomains(app).some(
-        (domain) => domain.name === params.domain && domain.bindingType === 'SniEnabled' && domain.certificateId?.toLowerCase() === certificateId.toLowerCase()
-      );
-      return {
-        success: true,
-        message: issued && attached
-          ? 'Azure Container Apps custom domain attached with managed TLS'
-          : 'Azure Container Apps custom domain is waiting for managed certificate issuance',
-        data: {
-          domain: params.domain,
-          customDomainId: certificateId,
-          created,
-          providerVerified: issued && attached,
-          certificateStatus: status,
-          dnsRecords: records,
-        },
-      };
-    } catch (error) {
-      return this.failedReceipt('Failed to attach Azure Container Apps custom domain', this.formatError(error));
-    }
-  }
-
-  async detachCustomDomain(params: {
-    projectId?: string;
-    serviceId: string;
-    environmentId: string;
-    domain: string;
-    customDomainId?: string;
-  }): Promise<Receipt> {
-    try {
-      if (!params.projectId) throw new Error('Azure custom-domain detachment requires a bound resource group.');
-      const project = this.projectFromResourceGroup(params.projectId, params.environmentId);
-      if (params.environmentId !== project.environmentId) {
-        throw new Error('Azure custom-domain environment identity changed.');
-      }
-      this.assertAppScope(params.serviceId, project.resourceGroupId);
-      const certificateId = this.managedCertificateId(project, params.domain);
-      if (params.customDomainId && params.customDomainId.toLowerCase() !== certificateId.toLowerCase()) {
-        return this.failedReceipt('Azure custom-domain identity changed', `Reviewed certificate ${params.customDomainId} does not match ${certificateId}.`);
-      }
-      const app = await this.getResource(params.serviceId, CONTAINER_APPS_API);
-      if (!app) throw new Error(`Bound Container App ${params.serviceId} was not found, so domain absence cannot be verified.`);
-      if (!this.hasManagedTag(app)) throw new Error(`Bound Container App ${params.serviceId} is not Hypervibe-managed.`);
-      this.assertAppEnvironment(app, project.environmentId);
-      const domains = this.azureCustomDomains(app);
-      const certificate = await this.getResource(certificateId, CONTAINER_APPS_API);
-      if (certificate && !this.isDomainCertificateOwned(certificate, params.serviceId)) {
-        throw new Error(`Azure managed-certificate identity ${certificateId} is not owned by this Hypervibe service.`);
-      }
-      if (domains.some((domain) => domain.name === params.domain)) {
-        await this.connected().client.request('PATCH', app.id, CONTAINER_APPS_API, {
-          properties: {
-            configuration: {
-              ...app.properties?.configuration,
-              ingress: {
-                ...app.properties?.configuration?.ingress,
-                customDomains: domains.filter((domain) => domain.name !== params.domain),
-              },
-            },
-          },
-        });
-        const refreshed = await this.getResource(app.id, CONTAINER_APPS_API);
-        if (refreshed && this.azureCustomDomains(refreshed).some((domain) => domain.name === params.domain)) {
-          throw new Error(`${params.domain} remains attached to Container App ${app.id}.`);
-        }
-      }
-      if (certificate) await this.connected().client.deleteIfPresent(certificateId, CONTAINER_APPS_API);
-      if (await this.getResource(certificateId, CONTAINER_APPS_API)) {
-        throw new Error(`Azure managed certificate ${certificateId} remained observable after deletion.`);
-      }
-      return {
-        success: true,
-        message: certificate || domains.some((domain) => domain.name === params.domain)
-          ? 'Azure Container Apps custom domain detached'
-          : 'Azure Container Apps custom domain is already absent',
-        data: {
-          domain: params.domain,
-          customDomainId: certificateId,
-          ...(certificate ? { deleted: true } : { alreadyAbsent: true }),
-        },
-      };
-    } catch (error) {
-      return this.failedReceipt('Failed to detach Azure Container Apps custom domain', this.formatError(error));
-    }
+      const revisions = await this.connected().client.listAll<AzureResource>(`${app.id}/revisions`, CONTAINER_APPS_API);
+      if (!revisions.length || revisions.some(revision => !revision.name || revision.id.toLowerCase() !== `${app.id}/revisions/${revision.name}`.toLowerCase()
+        || typeof revision.properties?.active !== 'boolean' || !Number.isInteger(revision.properties?.replicas) || revision.properties.replicas < 0)) return base;
+      return { ...base, activeDeploymentIds: revisions.filter(revision => revision.properties?.active || revision.properties?.replicas > 0).map(revision => revision.name!).sort(), activeDeploymentCoverage: 'instances' };
+    } catch { return base; }
   }
 
   async observe(environment: Environment): Promise<ObservedState> {
@@ -713,6 +310,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       ) as Record<string, string>;
       const visible = Object.entries(envValues).filter(([key]) => !INTERNAL_ENV_KEYS.has(key));
       const customDomains = this.azureCustomDomains(app).map((domain) => domain.name).filter(Boolean) as string[];
+      const deployment = await this.observedCredentialDeployment(app);
       services.push({
         name,
         externalId: app.id,
@@ -726,8 +324,10 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           public: app.properties?.configuration?.ingress?.external === true,
         },
         sourceState: 'disconnected',
-        envVarKeys: visible.map(([key]) => key).sort(),
+        envVarKeys: (container?.env ?? []).map((entry: any) => entry.name).filter((name: unknown): name is string => typeof name === 'string' && !INTERNAL_ENV_KEYS.has(name)).sort(),
+        envVarState: (container?.env ?? []).some((entry: any) => typeof envValues[entry.name] !== 'string') ? 'unknown' : 'resolved',
         envVarHashes: Object.fromEntries(visible.map(([key, value]) => [key, hashEnvValue(value)])),
+        ...(deployment ? { deployment } : {}),
         status: app.properties?.provisioningState === 'Succeeded'
           ? (container?.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : app.properties?.provisioningState === 'Failed' ? 'failed' : 'unknown',
@@ -911,77 +511,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     };
   }
 
-  private async ensureProviderRegistration(namespace: string): Promise<void> {
-    const path = `/subscriptions/${this.connected().credentials.subscriptionId}/providers/${namespace}`;
-    const current = await this.connected().client.getNullable<AzureResource>(path, PROVIDER_API);
-    if (current?.properties?.registrationState === 'Registered') return;
-    await this.connected().client.request('POST', `${path}/register`, PROVIDER_API);
-    for (let attempt = 1; attempt <= 120; attempt += 1) {
-      const observed = await this.connected().client.getNullable<AzureResource>(path, PROVIDER_API);
-      if (observed?.properties?.registrationState === 'Registered') return;
-      if (attempt < 120) await this.delay();
-    }
-    throw new Error(`Azure resource provider ${namespace} did not become registered.`);
-  }
-
-  private async ensureRegistry(project: AzureProject, environment: Environment): Promise<void> {
-    const existing = await this.getResource(project.registryId, REGISTRY_API);
-    if (existing) {
-      if (!this.isOwned(existing, environment.id)) {
-        throw new Error(`Azure registry ${project.registryId} exists but is not owned by this Hypervibe environment.`);
-      }
-      if (existing.properties?.loginServer?.toLowerCase() !== project.registryServer) {
-        throw new Error(`Azure registry ${project.registryId} returned an unexpected login server.`);
-      }
-      return;
-    }
-    const created = await this.connected().client.request<AzureResource>('PUT', project.registryId, REGISTRY_API, {
-      location: this.connected().credentials.location,
-      sku: { name: 'Basic' },
-      tags: this.tags(environment),
-      properties: {
-        adminUserEnabled: false,
-        publicNetworkAccess: 'Enabled',
-        roleAssignmentMode: 'LegacyRegistryPermissions',
-      },
-    });
-    if (created.id.toLowerCase() !== project.registryId.toLowerCase()) {
-      throw new Error(`Azure returned registry ${created.id} outside ${project.registryId}.`);
-    }
-  }
-
-  private async ensureRoleAssignment(
-    scope: string,
-    principalId: string,
-    roleId: string,
-    principalType: string
-  ): Promise<void> {
-    const assignmentId = this.roleAssignmentId(scope, principalId, roleId);
-    const existing = await this.getResource(assignmentId, AUTHORIZATION_API);
-    if (existing) {
-      const properties = existing.properties ?? {};
-      if (String(properties.principalId).toLowerCase() !== principalId.toLowerCase()
-        || !String(properties.roleDefinitionId).toLowerCase().endsWith(`/roledefinitions/${roleId}`)) {
-        throw new Error(`Azure role assignment ${assignmentId} changed identity.`);
-      }
-      return;
-    }
-    await this.connected().client.request('PUT', assignmentId, AUTHORIZATION_API, {
-      properties: {
-        principalId,
-        principalType,
-        roleDefinitionId: `/subscriptions/${this.connected().credentials.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${roleId}`,
-      },
-    });
-  }
-
-  private async deleteRoleAssignment(scope: string, principalId: string, roleId: string): Promise<void> {
-    const id = this.roleAssignmentId(scope, principalId, roleId);
-    if (!await this.getResource(id, AUTHORIZATION_API)) return;
-    await this.connected().client.deleteIfPresent(id, AUTHORIZATION_API);
-    if (await this.getResource(id, AUTHORIZATION_API)) throw new Error(`Azure role assignment ${id} remained observable after deletion.`);
-  }
-
   private async roleAssignmentExists(scope: string, principalId: string, roleId: string): Promise<boolean> {
     const id = this.roleAssignmentId(scope, principalId, roleId);
     const assignment = await this.getResource(id, AUTHORIZATION_API);
@@ -1000,80 +529,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     return `${scope}/providers/Microsoft.Authorization/roleAssignments/${uuid}`;
   }
 
-  private appBody(params: {
-    app: AzureResource | null;
-    environment: Environment;
-    environmentId: string;
-    project: AzureProject;
-    service: Service;
-    envVars: Record<string, string>;
-  }): Record<string, unknown> {
-    const currentContainer = this.container(params.app);
-    const currentImage = currentContainer?.image ?? BOOTSTRAP_IMAGE;
-    const bootstrap = currentImage === BOOTSTRAP_IMAGE;
-    const secretEntries = Object.entries(params.envVars).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => ({
-      key,
-      name: this.secretName(key),
-      value,
-    }));
-    const configuration = params.app?.properties?.configuration ?? {};
-    const template = params.app?.properties?.template ?? {};
-    return {
-      location: params.app?.location ?? this.connected().credentials.location,
-      identity: { type: 'SystemAssigned' },
-      properties: {
-        managedEnvironmentId: params.environmentId,
-        configuration: {
-          ...configuration,
-          activeRevisionsMode: 'Single',
-          ingress: {
-            ...configuration.ingress,
-            external: true,
-            targetPort: 8080,
-            transport: 'auto',
-            allowInsecure: false,
-          },
-          registries: params.app
-            ? [{ server: params.project.registryServer, identity: 'system' }]
-            : (configuration.registries ?? []),
-          secrets: secretEntries.map(({ name, value }) => ({ name, value })),
-        },
-        template: {
-          ...template,
-          containers: [{
-            ...currentContainer,
-            name: 'main',
-            image: currentImage,
-            env: [
-              ...secretEntries.map(({ key, name }) => ({ name: key, secretRef: name })),
-              ...(params.service.buildConfig.startCommand ? [{ name: START_COMMAND_KEY, value: params.service.buildConfig.startCommand }] : []),
-              { name: HEALTH_CHECK_PATH_KEY, value: params.service.buildConfig.healthCheckPath ?? '/' },
-            ],
-            resources: { cpu: 0.25, memory: '0.5Gi' },
-            ...(bootstrap
-              ? { command: ['node'], args: ['-e', BOOTSTRAP_SCRIPT], probes: undefined }
-              : !params.service.buildConfig.startCommand
-                ? { command: undefined, args: undefined, probes: undefined }
-                : {
-                  command: ['sh'],
-                  args: ['-lc', params.service.buildConfig.startCommand],
-                  probes: [{
-                    type: 'Liveness',
-                    httpGet: { path: params.service.buildConfig.healthCheckPath ?? '/', port: 8080, scheme: 'HTTP' },
-                    initialDelaySeconds: 10,
-                    periodSeconds: 10,
-                    timeoutSeconds: 5,
-                    failureThreshold: 6,
-                  }],
-                }),
-          }],
-          scale: { ...template.scale, minReplicas: 1, maxReplicas: 4 },
-        },
-      },
-      tags: params.app?.tags ?? this.tags(params.environment),
-    };
-  }
-
   private async waitForProvisioning(id: string, apiVersion: string): Promise<AzureResource> {
     for (let attempt = 1; attempt <= 180; attempt += 1) {
       const resource = await this.getResource(id, apiVersion);
@@ -1084,35 +539,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       if (attempt < 180) await this.delay();
     }
     throw new Error(`Azure resource ${id} did not finish provisioning.`);
-  }
-
-  private async waitForContainerAppRevision(
-    id: string,
-    previousReadyRevision?: string
-  ): Promise<AzureResource> {
-    for (let attempt = 1; attempt <= 180; attempt += 1) {
-      const app = await this.getResource(id, CONTAINER_APPS_API);
-      if (!app) throw new Error(`Azure Container App ${id} disappeared during revision rollout.`);
-      const provisioningState = String(app.properties?.provisioningState ?? 'unknown');
-      if (['Failed', 'Canceled', 'DeleteFailed'].includes(provisioningState)) {
-        throw new Error(`Azure Container App ${id} is ${provisioningState}.`);
-      }
-      const latestRevision = typeof app.properties?.latestRevisionName === 'string'
-        ? app.properties.latestRevisionName
-        : undefined;
-      const latestReadyRevision = typeof app.properties?.latestReadyRevisionName === 'string'
-        ? app.properties.latestReadyRevisionName
-        : undefined;
-      if (
-        latestRevision
-        && latestReadyRevision === latestRevision
-        && (!previousReadyRevision || latestReadyRevision !== previousReadyRevision)
-      ) {
-        return app;
-      }
-      if (attempt < 180) await this.delay();
-    }
-    throw new Error(`Azure Container App ${id} did not activate a new ready revision.`);
   }
 
   private async waitForRunningStatus(id: string, expected: 'Running' | 'Stopped'): Promise<boolean> {
@@ -1179,57 +605,8 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     }
   }
 
-  private resourceGroupIdFromChild(id: string): string {
-    const match = id.match(/^(\/subscriptions\/[^/]+\/resourceGroups\/[^/]+)\/providers\//i);
-    if (!match) throw new Error(`Invalid Azure child resource ID: ${id}`);
-    return match[1]!;
-  }
-
   private managedCertificateId(project: AzureProject, domain: string): string {
     return `${project.environmentId}/managedCertificates/hv-${this.hash(domain).slice(0, 24)}`;
-  }
-
-  private azureDomainRecords(
-    domain: string,
-    dnsZone: string | undefined,
-    app: AzureResource,
-    environment: AzureResource
-  ): Array<{ name: string; type: string; value: string; purpose: string; proxied: false }> {
-    const verificationId = app.properties?.customDomainVerificationId;
-    if (typeof verificationId !== 'string' || !verificationId) throw new Error(`Container App ${app.id} returned no domain verification ID.`);
-    if (this.isApex(domain, dnsZone)) {
-      const staticIp = environment.properties?.staticIp;
-      if (typeof staticIp !== 'string' || !staticIp) throw new Error(`Managed environment ${environment.id} returned no static ingress IP.`);
-      return [
-        { name: domain, type: 'A', value: staticIp, purpose: 'routing', proxied: false },
-        { name: `asuid.${domain}`, type: 'TXT', value: verificationId, purpose: 'ownership-verification', proxied: false },
-      ];
-    }
-    const fqdn = app.properties?.configuration?.ingress?.fqdn;
-    if (typeof fqdn !== 'string' || !fqdn) throw new Error(`Container App ${app.id} returned no ingress FQDN.`);
-    return [
-      { name: domain, type: 'CNAME', value: fqdn, purpose: 'routing', proxied: false },
-      { name: `asuid.${domain}`, type: 'TXT', value: verificationId, purpose: 'ownership-verification', proxied: false },
-    ];
-  }
-
-  private async azureDomainDnsReady(records: Array<{ name: string; type: string; value: string }>): Promise<boolean> {
-    for (const record of records) {
-      try {
-        if (record.type === 'CNAME') {
-          if (!(await resolveCname(record.name)).some((value) => value.replace(/\.$/, '').toLowerCase() === record.value.toLowerCase())) return false;
-        } else if (record.type === 'A') {
-          if (!(await resolve4(record.name)).includes(record.value)) return false;
-        } else if (record.type === 'TXT') {
-          if (!(await resolveTxt(record.name)).some((parts) => parts.join('') === record.value)) return false;
-        }
-      } catch (error) {
-        const code = error && typeof error === 'object' ? String((error as { code?: unknown }).code ?? '') : '';
-        if (['ENODATA', 'ENOTFOUND', 'ESERVFAIL', 'ETIMEOUT', 'EAI_AGAIN'].includes(code)) return false;
-        throw error;
-      }
-    }
-    return true;
   }
 
   private azureCustomDomains(app: AzureResource): Array<{ name?: string; bindingType?: string; certificateId?: string }> {
@@ -1238,14 +615,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       ?? [];
     if (!Array.isArray(domains)) throw new Error(`Azure returned invalid custom domains for ${app.id}.`);
     return domains;
-  }
-
-  private withAzureCustomDomain(
-    domains: unknown,
-    desired: { name: string; bindingType: string; certificateId?: string }
-  ) {
-    const current = Array.isArray(domains) ? domains as Array<{ name?: string }> : [];
-    return [...current.filter((domain) => domain.name !== desired.name), desired];
   }
 
   private async observeAzureDomains(
@@ -1269,14 +638,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     return result;
   }
 
-  private isApex(domain: string, dnsZone?: string): boolean {
-    return Boolean(dnsZone) && domain.toLowerCase() === dnsZone!.toLowerCase();
-  }
-
-  private appName(service: Service): string {
-    return resourceName(service.name, { maxLength: 32, minLength: 2 });
-  }
-
   private secretName(key: string): string {
     return `hv-${this.hash(key).slice(0, 24)}`;
   }
@@ -1286,10 +647,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     return `${prefix}-${this.hash(salt).slice(0, 8)}`;
   }
 
-  private tags(environment: Environment): Record<string, string> {
-    return { 'managed-by': 'hypervibe', 'hypervibe-environment-id': environment.id };
-  }
-
   private isOwned(resource: AzureResource, environmentId: string): boolean {
     return resource.tags?.['managed-by'] === 'hypervibe'
       && resource.tags?.['hypervibe-environment-id'] === environmentId;
@@ -1297,11 +654,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
 
   private hasManagedTag(resource: AzureResource): boolean {
     return resource.tags?.['managed-by'] === 'hypervibe';
-  }
-
-  private isDomainCertificateOwned(resource: AzureResource, serviceId: string): boolean {
-    return this.hasManagedTag(resource)
-      && resource.tags?.['hypervibe-service'] === this.hash(serviceId);
   }
 
   private hash(value: string): string {
@@ -1323,27 +675,6 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       completeness: { project: 'complete', environment: 'complete', services: 'complete', databases: 'complete' },
       partial: false,
       warnings: [],
-    };
-  }
-
-  private failedDeploy(
-    service: Service,
-    error: string,
-    externalId?: string,
-    createdService = false
-  ): DeployResult {
-    return {
-      serviceId: service.id,
-      ...(externalId ? { externalId } : {}),
-      status: 'failed',
-      receipt: {
-        success: false,
-        message: `Azure Container Apps deployment failed for ${service.name}`,
-        error,
-        ...(externalId ? {
-          data: { serviceId: externalId, createdService, mutationAttempted: true },
-        } : {}),
-      },
     };
   }
 
@@ -1373,7 +704,7 @@ providerRegistry.register({
     },
     maturity: {
       lifecycle: {
-        hosting: { status: 'ready-for-live' },
+        hosting: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
       },
     },
     orchestration: {
@@ -1381,6 +712,7 @@ providerRegistry.register({
       diff: { workloadKindObservation: 'exact' },
       ci: {
         displayName: 'Azure Container Apps',
+        rendererRevision: 1,
         requiredSecrets: AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           AZURE_TENANT_ID: 'tenantId',
@@ -1389,12 +721,7 @@ providerRegistry.register({
           AZURE_CLIENT_SECRET: 'clientSecret',
         },
         buildGitHubActionsSteps: buildAzureContainerAppsGitHubActionsSteps,
-        buildPortableRecipe: buildAzureContainerAppsPortableRecipe,
-        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
-    },
-    lifecycle: {
-      hosting: { workloadKinds: ['web'], serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' }, customDomains: 'managed', customDomainRetarget: 'unsupported', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
     },
   },
   factory: async (credentials) => {

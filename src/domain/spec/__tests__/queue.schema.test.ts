@@ -51,13 +51,4 @@ describe('environmentSpecSchema queues', () => {
     expect(result.success).toBe(true);
   });
 
-  it('accepts railway queues when a database is declared', () => {
-    const result = envWithQueues({ database: { provider: 'railway' } });
-    expect(result.success).toBe(true);
-  });
-
-  it('accepts cloudrun queues without a database', () => {
-    const result = envWithQueues({ hosting: { provider: 'cloudrun' } });
-    expect(result.success).toBe(true);
-  });
 });

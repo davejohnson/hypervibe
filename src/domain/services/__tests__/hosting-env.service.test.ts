@@ -417,4 +417,10 @@ describe('hosting env var tools', () => {
       error: 'The exact service binding is incomplete',
     });
   });
+  it('retains unresolved provider references as present keys without inventing a value', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
+    const { adapter } = stubCloudRunHostingAdapter();
+    vi.spyOn(adapter, 'readProviderEnvironmentVariables').mockResolvedValue({ success: true, variables: { PUBLIC_VALUE: 'visible' }, unresolvedKeys: ['API_KEY'] });
+    expect(await readHostingEnvVars({ project, environment, service })).toMatchObject({ success: true, variables: { PUBLIC_VALUE: 'visible' }, unresolvedKeys: ['API_KEY'] });
+  });
 });

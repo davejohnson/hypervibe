@@ -300,9 +300,9 @@ function secretShapedPaths(document: unknown): string[] {
   return Array.from(found).sort();
 }
 
-function safeDocumentPath(path: Array<string | number>): string {
+function safeDocumentPath(path: PropertyKey[]): string {
   return path
-    .map((segment) => String(segment).replace(/[^A-Za-z0-9_.-]/g, '?').slice(0, 80))
+    .map((segment) => typeof segment === 'symbol' ? '?' : String(segment).replace(/[^A-Za-z0-9_.-]/g, '?').slice(0, 80))
     .join('.')
     .slice(0, 512);
 }
@@ -428,17 +428,11 @@ function environmentProviders(environment: EnvironmentSpec): DeclaredProviderCap
   if (environment.cache) {
     providers.push({ capability: 'cache', provider: environment.cache.provider });
   }
-  if (environment.loadBalancer) {
-    providers.push({ capability: 'load-balancer', provider: environment.loadBalancer.provider });
-  }
   if (environment.domainRegistration) {
     providers.push({ capability: 'domain-registration', provider: environment.domainRegistration.provider });
   }
   for (const [name, storage] of Object.entries(environment.storage ?? {})) {
     providers.push({ capability: 'storage', provider: storage.provider, resource: name });
-  }
-  if (environment.messaging) {
-    providers.push({ capability: 'messaging', provider: environment.messaging.provider });
   }
   return sortCapabilities(providers);
 }
@@ -455,9 +449,8 @@ function environmentFeatures(environment: EnvironmentSpec): string[] {
   if (environment.cache) features.add('cache');
   if (environment.domain) features.add('custom-domain');
   if (environment.domainRegistration) features.add('domain-registration');
-  if (environment.loadBalancer) features.add('load-balancer');
   if (environment.email.enabled) features.add('email');
-  if (environment.messaging) features.add('messaging');
+  if (Object.keys(environment.webhooks ?? {}).length > 0) features.add('webhooks');
   if (Object.keys(environment.queues ?? {}).length > 0) features.add('queue');
   if (Object.keys(environment.storage ?? {}).length > 0) features.add('storage');
   if (environment.dataMigration) features.add('data-migration');

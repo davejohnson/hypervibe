@@ -23,9 +23,12 @@ describe('DevOpsProviderRegistry', () => {
         dispatch: async () => { throw new Error('not used'); },
       }),
       lifecycle: {
-        planDeploy: async () => ({ warnings: [] }),
+        planDeploy: async () => ({ actions: [], warnings: [] }),
         applyDeploy: async () => ({ success: false, status: 'blocked', message: 'not implemented' }),
+        planAppliedSpecHash: async () => ({ actions: [], warnings: [] }),
+        applyAppliedSpecHash: async () => ({ success: false, status: 'blocked', message: 'not implemented' }),
       },
+      rollback: async () => ({ ok: false, reason: 'unsupported', error: 'not implemented' }),
     });
 
     expect(registry.codeHostIds()).toEqual(['bitbucket']);

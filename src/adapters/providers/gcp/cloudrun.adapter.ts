@@ -1,27 +1,17 @@
+import { createCloudRunRegistryCredentialLifecycle } from './cloudrun-registry-credential.js';
 import { z } from 'zod';
 import type {
   IProviderAdapter,
+  DeploymentMutationOptions,
   Receipt,
-  ComponentResult,
-  DeployResult,
   JobResult,
   ProviderCapabilities,
-  DeploymentMutationOptions,
   ProviderRuntimeIdentity,
 } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
-import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
-import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from './cloudrun-ci.workflow.js';
-import { buildCloudRunPortableRecipe } from './cloudrun-ci.recipe.js';
-import { createHostingServiceCreateRecovery, parseHostingBindings, pendingScheduleActivationSchema, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
-import * as pubsub from './pubsub.api.js';
-import { CloudRunServiceVolumes } from './cloudrun-service-volume.js';
-import { cloudRunFilesystemIdentity } from './cloudrun-volume-runtime.js';
-import { cloudRunJobUpdateBody } from './cloudrun-job-request.js';
-import { parseServiceVolumeBindings } from '../../../domain/services/service-volume.service.js';
-import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
+import { parseHostingBindings, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
 import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
 import type {
@@ -29,7 +19,6 @@ import type {
   MaintenanceWorkloadObservation,
   MaintenanceWorkloadSnapshot,
 } from '../../../domain/ports/maintenance.port.js';
-import type { IQueueAdapter } from '../../../domain/ports/queue.port.js';
 import type {
   IProviderDeploymentsAdapter,
   IProviderRuntimeLogsAdapter,
@@ -48,12 +37,10 @@ import type {
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
-  CLOUD_RUN_SOURCE_COMMIT_ANNOTATION,
   cloudRunMigrationJobName,
-  cloudRunReleaseJobConfigurationMismatch,
-  cloudRunReleaseCommandHash,
 } from './cloudrun-release-command.js';
 
 // Credentials schema for self-registration
@@ -85,41 +72,6 @@ const DEFAULT_CLOUD_RUN_REGION = 'us-central1';
 const CloudRunRegionSchema = z.string().trim().min(1, 'GCP region is required');
 type ConnectedCloudRunCredentials = CloudRunCredentials & { region: string };
 
-const MANAGED_DATABASE_ENV_KEYS = new Set([
-  'DATABASE_URL',
-  'DIRECT_URL',
-  'DATABASE_POOLER_URL',
-  'DATABASE_SSL',
-  'CLOUD_SQL_CONNECTION_NAME',
-  'INSTANCE_CONNECTION_NAME',
-  'DATABASE_HOST',
-  'DB_HOST',
-  'PGHOST',
-  'DATABASE_PORT',
-  'DB_PORT',
-  'PGPORT',
-  'DATABASE_USER',
-  'DB_USER',
-  'PGUSER',
-  'DATABASE_PASSWORD',
-  'DB_PASSWORD',
-  'PGPASSWORD',
-  'DATABASE_NAME',
-  'DB_NAME',
-  'PGDATABASE',
-]);
-
-const MANAGED_DATABASE_SYNC_KEYS = new Set([
-  'DATABASE_URL',
-  'DIRECT_URL',
-  'DATABASE_POOLER_URL',
-  'DATABASE_HOST',
-  'DB_HOST',
-  'PGHOST',
-  'CLOUD_SQL_CONNECTION_NAME',
-  'INSTANCE_CONNECTION_NAME',
-]);
-
 interface CloudRunService {
   name: string;
   uid: string;
@@ -130,6 +82,8 @@ interface CloudRunService {
   annotations?: Record<string, string>;
   uri?: string;
   ingress?: string;
+  latestReadyRevision?: string;
+  trafficStatuses?: Array<{ revision?: string; percent?: number; tag?: string }>;
   scaling?: {
     scalingMode?: string;
     manualInstanceCount?: number;
@@ -179,19 +133,6 @@ interface CloudRunJob {
   conditions?: CloudRunCondition[];
 }
 
-interface DeferredWorkloadEvidence {
-  expectedExisting: boolean;
-  observedExisting: boolean;
-  imageUri?: string;
-  runtimeServiceAccountEmail?: string;
-}
-
-interface DeferredWorkloadProblem {
-  phase: 'adoption_required' | 'binding_missing' | 'image_evidence' | 'runtime_identity_evidence' | 'stale_provider_state';
-  error: string;
-}
-
-class CloudRunReleaseJobAdoptionRequiredError extends Error {}
 
 interface CloudRunVpcAccess {
   networkInterfaces?: Array<{
@@ -227,6 +168,9 @@ interface CloudRunRevision {
 
 interface CloudRunExecution {
   name?: string;
+  job?: string;
+  runningCount?: number;
+  template?: { containers?: CloudRunContainer[] };
   createTime?: string;
   startTime?: string;
   completionTime?: string;
@@ -314,23 +258,13 @@ interface CloudRunContainer {
   livenessProbe?: { httpGet?: { path?: string } };
 }
 
-interface CloudBuildResult {
+export interface CloudBuildResult {
   success: boolean;
   imageUri?: string;
   buildId?: string;
   logsUrl?: string;
   resolvedCommitSha?: string;
   error?: string;
-}
-
-interface DirectCloudRunServiceExpectation {
-  resourceName: string;
-  imageUri: string;
-  runtimeServiceAccountEmail: string;
-  releaseCommandHash?: string;
-  sourceCommitSha?: string;
-  startCommand: string | null;
-  healthCheckPath: string | null;
 }
 
 interface CloudBuildStatus {
@@ -453,28 +387,37 @@ interface ServiceAccountCredentials {
 export class CloudRunAdapter implements
   IProviderAdapter,
   IWorkloadMaintenanceAdapter,
-  IQueueAdapter,
   IProviderRuntimeLogsAdapter,
   IProviderDeploymentsAdapter,
   IProviderEnvironmentVariablesAdapter,
   IDeploySourceCredentialAdapter {
   readonly name = 'cloudrun';
+  readonly registryCredentialLifecycle = createCloudRunRegistryCredentialLifecycle(async (environment, service) => {
+    if (!this.credentials) throw new Error();
+    const binding = parseHostingBindings(environment); const workload = binding.services?.[service];
+    if (binding.provider !== this.name || binding.projectId !== this.credentials.projectId || binding.environmentId !== this.credentials.region || !workload) throw new Error();
+    const id = workload.jobName ?? workload.serviceId;
+    if (!id || !/^[a-z][a-z0-9-]*$/.test(id)) throw new Error();
+    const name = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/${workload.jobName ? 'jobs' : 'services'}/${id}`;
+    return { name, projectId: this.credentials.projectId, environmentId: this.credentials.region, resourceUid: workload.resourceUid };
+  }, () => this.getAccessToken());
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['dockerfile'],
     supportedComponents: [], // Cloud SQL is separate
     supportsAutoWiring: false, // Manual connection needed
     supportsHealthChecks: true,
-    supportsCronSchedule: true, // Cloud Scheduler
-    supportsReleaseCommand: true,
+    supportsCronSchedule: false,
+    supportsReleaseCommand: false,
     supportsMultiEnvironment: false, // Separate services per env
     managedTls: true,
     supportsObserve: true,
-    queues: { backend: 'pubsub' },
-    supportsOneOffTasks: true,
-    supportsDeferredDeploy: true,
-    supportsDeferredCronActivation: true,
-    supportsMaintenance: true,
+    supportsOneOffTasks: false,
+    supportsDeferredDeploy: false,
+    credentialUpdateActivation: 'provider-rollout',
+    credentialValueEvidence: 'readback',
+    supportsDeferredCronActivation: false,
+    supportsMaintenance: false,
   };
 
   readonly deploySourceCredentialProjection: DeploySourceCredentialProjection = {
@@ -493,10 +436,6 @@ export class CloudRunAdapter implements
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
-  readonly serviceVolumes = new CloudRunServiceVolumes(() => {
-    if (!this.credentials) throw new Error('Cloud Run filesystem requires a verified connection.');
-    return { projectId: this.credentials.projectId, region: this.credentials.region };
-  }, () => this.getAccessToken());
 
   async connect(credentials: unknown): Promise<void> {
     const parsed = CloudRunCredentialsSchema.parse(credentials);
@@ -509,6 +448,101 @@ export class CloudRunAdapter implements
     } catch {
       throw new Error('Invalid service account JSON');
     }
+  }
+
+  /**
+   * OpenTofu engine integration only: the connection's deployment credential
+   * for the engine process environment. Callers must redact it from every output.
+   */
+  engineConnection(): { projectId: string; credentials: string; runtimeServiceAccountEmail?: string } {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId, credentials, runtimeServiceAccountEmail } = this.credentials;
+    return { projectId, credentials, ...(runtimeServiceAccountEmail ? { runtimeServiceAccountEmail } : {}) };
+  }
+
+  /** OpenTofu engine integration only: short-lived token for retained operational calls. */
+  async engineAccessToken(): Promise<string> {
+    return this.getAccessToken();
+  }
+
+  /**
+   * OpenTofu engine integration only: a short-lived token limited to Google
+   * Site Verification, used to prove domain ownership as the deployment identity.
+   */
+  async siteVerificationAccessToken(): Promise<string> {
+    if (!this.serviceAccountCreds) throw new Error('No service account credentials');
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await this.createJwt({ alg: 'RS256', typ: 'JWT' }, {
+      iss: this.serviceAccountCreds.client_email,
+      sub: this.serviceAccountCreds.client_email,
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 600,
+      scope: 'https://www.googleapis.com/auth/siteverification',
+    }, this.serviceAccountCreds.private_key);
+    const response = await fetchWithRetry('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }),
+    }, 4, true);
+    if (!response.ok) throw new Error(`Site Verification token exchange failed: HTTP ${response.status}`);
+    return ((await response.json()) as { access_token: string }).access_token;
+  }
+
+  /** The deployment identity's email, which becomes the verified domain owner. */
+  engineDeploymentIdentity(): string {
+    if (!this.serviceAccountCreds) throw new Error('No service account credentials');
+    return this.serviceAccountCreds.client_email;
+  }
+
+  /**
+   * Builds from an archive of the user's local repository (an exact commit),
+   * so private repositories need no git credentials. The archive is uploaded
+   * to the project's private build-source bucket prepared during GCP setup.
+   */
+  async buildReleaseImageFromArchive(
+    service: Service,
+    environment: Environment,
+    source: { archive: Buffer; commitSha: string; bucket: string }
+  ): Promise<CloudBuildResult> {
+    if (!this.credentials) return { success: false, error: 'Not connected. Call connect() first.' };
+    try {
+      const token = await this.getAccessToken();
+      const { projectId, region } = this.credentials;
+      const repository = 'hypervibe';
+      await this.verifyArtifactRepository(repository, token);
+      const object = `source/${environment.name}/${service.name}/${source.commitSha}-${Date.now()}.tar.gz`;
+      const upload = await fetch(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(source.bucket)}/o?uploadType=media&name=${encodeURIComponent(object)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/gzip' },
+        body: new Uint8Array(source.archive),
+      });
+      if (upload.status === 403 || upload.status === 404) {
+        return { success: false, error: 'The private build-source bucket is not ready. Re-run GCP setup (hv_connections action="prepare" for cloudrun), then retry.' };
+      }
+      if (!upload.ok) return { success: false, error: `Uploading the source archive failed (HTTP ${upload.status}).` };
+      const imageName = this.sanitizeName(`${environment.name}-${service.name}`);
+      const imageUri = `${region}-docker.pkg.dev/${projectId}/${repository}/${imageName}:${source.commitSha.slice(0, 12)}-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}`;
+      const build = await this.submitCloudBuild({
+        token, service, sourceRepoUrl: '', revision: source.commitSha, imageUri,
+        storageSource: { bucket: source.bucket, object },
+      });
+      return { success: true, imageUri: build.imageUri, buildId: build.id, logsUrl: build.logsUrl, resolvedCommitSha: source.commitSha };
+    } catch (error) {
+      return { success: false, error: this.formatError(error) };
+    }
+  }
+
+  /** Builds an immutable image in the configured region without touching any Cloud Run resource. */
+  async buildReleaseImage(
+    service: Service,
+    environment: Environment,
+    source: { repoUrl: string; revision: string }
+  ): Promise<CloudBuildResult> {
+    return this.buildImageForService(service, environment, {
+      HYPERVIBE_SOURCE_REPO_URL: source.repoUrl,
+      HYPERVIBE_SOURCE_REVISION: source.revision,
+    });
   }
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
@@ -583,7 +617,7 @@ export class CloudRunAdapter implements
             success: false,
             error: [
               'Cloud Run Admin API probe failed with 403.',
-              `Grant roles/run.admin to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId} — deploys are impossible without it.`,
+              `Review and apply the GCP setup plan to grant roles/run.admin deployment access for serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId}.`,
               `Original error: ${text}`,
             ].join(' '),
           };
@@ -620,1552 +654,12 @@ export class CloudRunAdapter implements
   }
 
   async repairLoggingAccess(): Promise<Receipt> {
-    if (!this.credentials || !this.serviceAccountCreds) {
-      return { success: false, message: 'Not connected', error: 'Call connect() first.' };
-    }
-
-    const roles = ['roles/logging.viewer', 'roles/logging.viewAccessor'];
-    const member = `serviceAccount:${this.serviceAccountCreds.client_email}`;
-    try {
-      const token = await this.getAccessToken();
-      const updatedRoles = await this.ensureProjectIamBindings({
-        token,
-        member,
-        roles,
-      });
-      return {
-        success: true,
-        message: updatedRoles.length > 0
-          ? `Granted Cloud Logging read roles to ${member}`
-          : `Cloud Logging read roles already present for ${member}`,
-        data: {
-          member,
-          roles,
-          updatedRoles,
-        },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: 'Failed to repair Cloud Logging IAM access',
-        error: error instanceof Error ? error.message : String(error),
-        data: {
-          member,
-          roles,
-          requiredPermission: 'resourcemanager.projects.setIamPolicy',
-        },
-      };
-    }
-  }
-
-  async ensureProject(_projectName: string, environment: Environment): Promise<Receipt> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    // Cloud Run doesn't have "projects" in the deployment sense
-    // The GCP project is the container
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      provider?: string;
-    };
-
-    const projectId = bindings.projectId || this.credentials.projectId;
-    const data: Record<string, unknown> = {
-      projectId,
-      gcpProjectId: this.credentials.projectId,
-      region: this.credentials.region,
-      environmentId: this.credentials.region,
-      providerBindings: {
-        providerScope: {
-          projectId: this.credentials.projectId,
-          region: this.credentials.region,
-        },
-      },
-    };
-    const loggingRepair = await this.repairLoggingAccess();
-    data.loggingIamRepair = {
-      success: loggingRepair.success,
-      message: loggingRepair.message,
-      ...(loggingRepair.data ? { data: loggingRepair.data } : {}),
-    };
-    if (!loggingRepair.success) {
-      data.loggingIamRepairWarning = loggingRepair.error || loggingRepair.message;
-    }
-
     return {
-      success: true,
-      message: `Using GCP project: ${this.credentials.projectId}`,
-      data,
+      success: false,
+      message: 'Cloud Logging access changes require an infrastructure plan.',
+      error: 'Review and apply the GCP setup plan with hv_connections action="prepare". Logging diagnostics do not change project IAM or enable APIs.',
+      data: { applied: 0, skipped: 1, mutationAttempted: false, code: 'ENGINE_PLAN_REQUIRED' },
     };
-  }
-
-  async ensureComponent(type: ComponentType, environment: Environment): Promise<ComponentResult> {
-    // Cloud Run doesn't provision databases
-    // Users should use Cloud SQL separately
-    const emptyComponent: Component = {
-      id: '',
-      environmentId: environment.id,
-      type,
-      bindings: {},
-      externalId: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    return {
-      component: emptyComponent,
-      receipt: {
-        success: false,
-        message: `Cloud Run does not provision databases. Use the Cloud SQL adapter separately, then pass DATABASE_URL as an env var.`,
-      },
-    };
-  }
-
-  async deploy(
-    service: Service,
-    environment: Environment,
-    envVars: Record<string, string>,
-    options: DeploymentMutationOptions = {}
-  ): Promise<DeployResult> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const workloadKind = serviceWorkloadKind(service);
-    const deferredTarget = options.deferDeployment
-      ? await this.currentImageForDeferredDeployment(service, environment)
-      : undefined;
-    const deferredProblem = deferredTarget
-      ? this.deferredWorkloadProblem(deferredTarget, workloadKind === 'cron' ? 'scheduled job' : 'service')
-      : undefined;
-    if (deferredProblem) {
-      return this.deferredDeployFailure(service, deferredProblem);
-    }
-    if (deferredTarget?.expectedExisting && !deferredTarget.imageUri) {
-      return {
-        serviceId: service.id,
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Cloud Run could not preserve the current image for ${service.name}`,
-          error: 'The service is bound but its current image could not be read. Refusing to build branch code during an exact-SHA CI-managed apply.',
-          data: {
-            provider: this.name,
-            phase: 'defer_code_deployment',
-          },
-        },
-      };
-    }
-    const deferredImageUri = deferredTarget?.imageUri;
-    const bootstrapDeployment = Boolean(
-      options.deferDeployment
-      && deferredTarget
-      && !deferredTarget.expectedExisting
-      && !deferredTarget.imageUri
-    );
-    const deploymentDeferred = Boolean(deferredImageUri || bootstrapDeployment);
-    const expectedBootstrapSourceCommitSha = options.expectedSourceCommitSha?.trim().toLowerCase();
-    if (bootstrapDeployment && !/^[0-9a-f]{40}$/.test(expectedBootstrapSourceCommitSha ?? '')) {
-      return {
-        serviceId: service.id,
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Cloud Run could not authorize the first CI-managed release for service ${service.name}`,
-          error: 'A full 40-character expectedSourceCommitSha is required before building a brand-new deferred Cloud Run service.',
-          data: {
-            provider: this.name,
-            phase: 'bootstrap_source_authority',
-          },
-        },
-      };
-    }
-    const explicitImageUri = bootstrapDeployment
-      ? undefined
-      : deferredImageUri ?? this.imageUriForService(service, envVars);
-    const buildResult = bootstrapDeployment
-      ? await this.buildHoldingImageForService(service, environment, envVars)
-      : explicitImageUri
-        ? undefined
-        : await this.buildImageForService(service, environment, envVars);
-    const imageUri = explicitImageUri ?? buildResult?.imageUri;
-    if (!imageUri) {
-      return {
-        serviceId: service.id,
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Cloud Run could not build an image for service ${service.name}`,
-          error: buildResult?.error ?? 'Project gitRemoteUrl is required so Cloud Build can build and publish the service image automatically.',
-          data: {
-            provider: this.name,
-            phase: 'image_build',
-            missing: buildResult?.error?.includes('gitRemoteUrl') ? ['HYPERVIBE_SOURCE_REPO_URL'] : undefined,
-          },
-        },
-      };
-    }
-    if ((bootstrapDeployment || !deploymentDeferred) && !this.isImmutableContainerImage(imageUri)) {
-      return {
-        serviceId: service.id,
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Cloud Run could not prove an immutable image for service ${service.name}`,
-          error: 'Direct Cloud Run deployment requires an exact image digest in repo@sha256 form. Refusing to deploy a mutable tag.',
-          data: {
-            provider: this.name,
-            phase: 'image_evidence',
-          },
-        },
-      };
-    }
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, {
-        serviceId?: string;
-        jobName?: string;
-        schedulerJobName?: string;
-        releaseJobName?: string;
-        resourceType?: string;
-      }>;
-    };
-
-    const isCron = workloadKind === 'cron';
-    const serviceBinding = bindings.services?.[service.name];
-    const serviceName = isCron
-      ? this.workloadResourceName(environment, service.name, serviceBinding?.jobName)
-      : this.workloadResourceName(environment, service.name, serviceBinding?.serviceId);
-
-    if (isCron) {
-      return this.deployScheduledJob({
-        service,
-        environment,
-        envVars,
-        imageUri,
-        buildResult,
-        jobName: serviceName,
-        schedulerJobName: this.schedulerResourceName(serviceName, serviceBinding?.schedulerJobName),
-        deploymentDeferred,
-        deferredExpectedImageUri: deferredImageUri,
-        bootstrapDeployment,
-      });
-    }
-
-    let createdUnboundReleaseJobName: string | undefined;
-    let createdUnboundReleaseJobUid: string | undefined;
-    let createdUnboundReleaseJobEtag: string | undefined;
-    let releaseJobMutationToken: string | undefined;
-    try {
-      const token = await this.getAccessToken();
-      const { projectId, region } = this.credentials;
-
-      // Only a provider-confirmed 404 means the service does not exist.
-      // Permission, transport, and server failures must not authorize a create.
-      const cloudRunService = await this.getService(serviceName);
-      if (options.deferDeployment) {
-        const freshDeferredProblem = this.deferredWorkloadProblem({
-          expectedExisting: Boolean(serviceBinding?.serviceId),
-          observedExisting: Boolean(cloudRunService),
-          imageUri: this.primaryContainer(cloudRunService)?.image,
-          runtimeServiceAccountEmail: this.serviceRuntimeIdentity(cloudRunService),
-        }, 'service', deferredImageUri);
-        if (freshDeferredProblem) {
-          return this.deferredDeployFailure(service, freshDeferredProblem);
-        }
-      }
-      const vpcAccess = await this.resolveVpcAccess(
-        environment,
-        this.serviceVpcAccess(cloudRunService),
-        token
-      );
-
-      // Build environment variables config. Cloud Run env vars live on the
-      // revision, so merge with the live container's env — a deploy that
-      // doesn't re-pass every var (e.g. DATABASE_URL injected at database
-      // provision time) must not silently wipe it. Passed vars always win.
-      const runtimeVars = this.runtimeEnvVarsForService(service, envVars);
-      const existingContainer = cloudRunService ? this.primaryContainer(cloudRunService) : undefined;
-      const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
-      const env = this.mergeEnvVars(existingContainer?.env, runtimeVars, { replaceManagedDatabaseVars });
-      const cloudSqlNames = replaceManagedDatabaseVars
-        ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
-        : Array.from(new Set([
-            ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
-            ...this.cloudSqlConnectionNamesFromEnvVars(existingContainer?.env),
-          ]));
-      const cloudSql = this.cloudSqlVolumeConfig(cloudSqlNames);
-      const volumeMounts = cloudSql
-        ? this.mergeVolumeMounts(existingContainer?.volumeMounts, [cloudSql.volumeMount])
-        : replaceManagedDatabaseVars
-          ? this.removeCloudSqlVolumeMounts(existingContainer?.volumeMounts)
-          : existingContainer?.volumeMounts;
-      const templateVolumes = cloudSql
-        ? this.mergeVolumes(this.cloudRunServiceVolumes(cloudRunService), [cloudSql.volume])
-        : replaceManagedDatabaseVars
-          ? this.removeCloudSqlVolumes(this.cloudRunServiceVolumes(cloudRunService))
-          : this.cloudRunServiceVolumes(cloudRunService);
-
-      const isWorker = workloadKind === 'worker';
-      const desiredStartCommand = service.buildConfig.startCommand?.trim() || null;
-      const desiredHealthCheckPath = service.buildConfig.healthCheckPath?.trim() || null;
-      const preserveLiveRuntime = deploymentDeferred && !bootstrapDeployment;
-
-      // Build container spec
-      const containerSpec = {
-        image: imageUri,
-        ports: [{ containerPort: parseInt(envVars['PORT'] || '8080', 10) }],
-        env,
-        ...(preserveLiveRuntime && existingContainer?.command !== undefined
-          ? { command: existingContainer.command }
-          : {}),
-        ...(preserveLiveRuntime && existingContainer?.args !== undefined
-          ? { args: existingContainer.args }
-          : {}),
-        ...(!deploymentDeferred && desiredStartCommand
-          ? { command: ['/bin/sh'], args: ['-lc', desiredStartCommand] }
-          : {}),
-        ...(preserveLiveRuntime && existingContainer?.startupProbe !== undefined
-          ? { startupProbe: existingContainer.startupProbe }
-          : {}),
-        ...(preserveLiveRuntime && existingContainer?.livenessProbe !== undefined
-          ? { livenessProbe: existingContainer.livenessProbe }
-          : {}),
-        ...(!deploymentDeferred && desiredHealthCheckPath
-          ? { startupProbe: { httpGet: { path: desiredHealthCheckPath } } }
-          : {}),
-        ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
-        resources: {
-          limits: {
-            cpu: envVars['CPU'] || '1',
-            memory: envVars['MEMORY'] || '512Mi',
-          },
-          // Cloud Run v2 requires this to be explicit when resources are set.
-          // Workers need instance-based CPU so they can process without requests.
-          cpuIdle: !isWorker,
-        },
-      };
-
-      const labels = {
-        'infraprint-environment': this.labelValue(environment.name),
-        'infraprint-service': this.labelValue(service.name),
-      };
-
-      // Cloud Run Admin API v2 Service shape. Workers get internal-only
-      // ingress and min one instance: with no inbound traffic they would
-      // otherwise scale to zero and never process work.
-      const releaseCommand = service.buildConfig.releaseCommand?.trim();
-      const releaseCommandHash = releaseCommand
-        ? cloudRunReleaseCommandHash(releaseCommand)
-        : undefined;
-      const annotations = { ...(cloudRunService?.annotations ?? {}) };
-      if (
-        releaseCommandHash
-        && annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] !== releaseCommandHash
-      ) {
-        delete annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
-      }
-      if (!deploymentDeferred) {
-        if (buildResult?.resolvedCommitSha) {
-          annotations[CLOUD_RUN_SOURCE_COMMIT_ANNOTATION] = buildResult.resolvedCommitSha;
-        } else {
-          delete annotations[CLOUD_RUN_SOURCE_COMMIT_ANNOTATION];
-        }
-        if (!releaseCommandHash) {
-          delete annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
-        }
-      }
-      const liveServiceAccount = cloudRunService?.template?.serviceAccount
-        ?? cloudRunService?.template?.serviceAccountName
-        ?? cloudRunService?.spec?.template?.spec?.serviceAccountName;
-      const serviceAccount = cloudRunService
-        ? liveServiceAccount
-        : this.requiredRuntimeServiceAccountEmail('service');
-      if (!deploymentDeferred && cloudRunService && !serviceAccount) {
-        throw new Error(
-          `Cloud Run service ${serviceName} did not expose its runtime service account; refusing to mutate code without exact runtime identity evidence.`
-        );
-      }
-      const serviceSpec = {
-        labels,
-        annotations,
-        ingress: isWorker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL',
-        template: {
-          labels,
-          ...(isWorker ? { scaling: { minInstanceCount: 1 } } : {}),
-          containers: [containerSpec],
-          ...(templateVolumes && (templateVolumes.length > 0 || replaceManagedDatabaseVars)
-            ? { volumes: templateVolumes }
-            : {}),
-          ...(serviceAccount
-            ? { serviceAccount }
-            : {}),
-          ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
-        },
-      };
-
-      let releaseExecution: CloudRunExecution | undefined;
-      let releaseJobName: string | undefined;
-      if (releaseCommand) {
-        const boundReleaseJobName = serviceBinding?.releaseJobName?.trim();
-        const jobName = boundReleaseJobName || this.migrationJobName(serviceName);
-        if (!/^[a-z][a-z0-9-]{0,62}$/.test(jobName)) {
-          throw new Error(`Cloud Run release job binding for ${serviceName} is invalid.`);
-        }
-        releaseJobName = jobName;
-        const jobSpec = this.cloudRunJobSpec({
-          imageUri,
-          command: releaseCommand,
-          env,
-          resources: containerSpec.resources,
-          serviceAccount,
-          existingVolumes: this.cloudRunServiceVolumes(cloudRunService),
-          existingVolumeMounts: existingContainer?.volumeMounts,
-          cloudSqlConnectionNames: cloudSqlNames,
-          replaceManagedDatabaseVars,
-          ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
-        });
-        const { created, job } = await this.upsertCloudRunJob({
-          token,
-          jobName,
-          jobSpec,
-          description: 'release job',
-          bindingAuthority: boundReleaseJobName ? 'bound' : 'unbound',
-        });
-        if (created && !boundReleaseJobName) {
-          createdUnboundReleaseJobName = jobName;
-          createdUnboundReleaseJobUid = job.uid;
-          createdUnboundReleaseJobEtag = job.etag;
-          releaseJobMutationToken = token;
-        }
-        this.assertReleaseJobConfiguration(job, jobName, jobSpec);
-        this.assertVpcAccess(job, vpcAccess, `Cloud Run job ${jobName}`);
-        if (!deploymentDeferred) {
-          const run = await this.executeCloudRunJob(jobName, token);
-          if (!run.execution) {
-            throw new Error(`Cloud Run release command execution for ${jobName} did not finish before timeout`);
-          }
-          releaseExecution = run.execution;
-          const status = this.executionStatus(run.execution);
-          if (status !== 'completed') {
-            throw new Error(
-              `Cloud Run release command execution ${this.lastPathSegment(run.execution.name) ?? run.operation.name ?? jobName} ended with status ${status}`
-            );
-          }
-          annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] = releaseCommandHash!;
-        }
-      }
-
-      const baseUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services`;
-      const serviceResourceName = `projects/${projectId}/locations/${region}/services/${serviceName}`;
-      const creatingService = !cloudRunService;
-      let serviceOperation: CloudRunOperation;
-
-      if (cloudRunService) {
-        // Update existing service
-        const response = await fetch(`${baseUrl}/${serviceName}?updateMask=labels,annotations,ingress,template`, {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(serviceSpec),
-        });
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`Cloud Run API error: ${response.status} ${text}`);
-        }
-
-        serviceOperation = await response.json() as CloudRunOperation;
-      } else {
-        // Create new service
-        const response = await fetch(`${baseUrl}?serviceId=${encodeURIComponent(serviceName)}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(serviceSpec),
-        });
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`Cloud Run API error: ${response.status} ${text}`);
-        }
-
-        serviceOperation = await response.json() as CloudRunOperation;
-      }
-
-      await this.waitForCloudRunOperation(
-        token,
-        serviceOperation,
-        `service ${creatingService ? 'create' : 'update'}`,
-        serviceResourceName
-      );
-
-      // Get service URL
-      const serviceInfo = await this.waitForCloudRunServiceReady(
-        serviceName,
-        token,
-        (!deploymentDeferred || bootstrapDeployment)
-          ? {
-              resourceName: serviceResourceName,
-              imageUri,
-              runtimeServiceAccountEmail: serviceAccount!,
-              startCommand: bootstrapDeployment ? null : desiredStartCommand,
-              healthCheckPath: bootstrapDeployment ? null : desiredHealthCheckPath,
-              ...(!deploymentDeferred && releaseCommandHash ? { releaseCommandHash } : {}),
-              ...(!bootstrapDeployment && buildResult?.resolvedCommitSha
-                ? { sourceCommitSha: buildResult.resolvedCommitSha }
-                : {}),
-            }
-          : undefined
-      );
-      this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
-      this.assertPreservedFilesystem(cloudRunService, serviceInfo);
-      const url = serviceInfo?.uri;
-      const publicAccess = this.shouldAllowUnauthenticated(service);
-      const publicInvokerBindingUpdated = publicAccess
-        ? await this.ensurePublicInvoker(serviceName, token)
-        : false;
-
-      return {
-        serviceId: service.id,
-        externalId: serviceName,
-        url,
-        status: options.deferDeployment ? 'configured' : 'deployed',
-        receipt: {
-          success: true,
-          message: bootstrapDeployment
-            ? `Prepared ${serviceName} with a digest-pinned holding image; managed CI owns the first application release`
-            : deploymentDeferred
-              ? `Prepared ${serviceName} for exact-SHA CI deployment using its current image`
-              : `Deployed ${serviceName} to Cloud Run`,
-          data: {
-            serviceName,
-            url,
-            imageUri,
-            createdService: creatingService,
-            public: publicAccess,
-            publicAccessConfigured: publicAccess,
-            publicInvokerBindingUpdated,
-            environmentId: region,
-            ...(releaseJobName ? { releaseJobName } : {}),
-            ...(bootstrapDeployment
-              ? {
-                  bootstrapDeployment: {
-                    expectedSourceCommitSha: expectedBootstrapSourceCommitSha,
-                    imageUri,
-                    holdingImage: true,
-                    releaseCommandDeferred: Boolean(releaseCommand),
-                  },
-                }
-              : {}),
-            ...(releaseExecution
-              ? {
-                  releaseCommand: {
-                    executionName: releaseExecution.name,
-                    status: this.executionStatus(releaseExecution),
-                  },
-                }
-              : {}),
-            ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
-            ...(buildResult
-              ? {
-                  build: {
-                    id: buildResult.buildId,
-                    logsUrl: buildResult.logsUrl,
-                    resolvedCommitSha: buildResult.resolvedCommitSha,
-                    imageUri: buildResult.imageUri,
-                  },
-                }
-              : {}),
-          },
-        },
-      };
-    } catch (error) {
-      let releaseJobCleanupWarning: string | undefined;
-      if (createdUnboundReleaseJobName && releaseJobMutationToken) {
-        try {
-          releaseJobCleanupWarning = await this.deleteCloudRunJobIfExists(
-            createdUnboundReleaseJobName,
-            releaseJobMutationToken,
-            {
-              uid: createdUnboundReleaseJobUid,
-              etag: createdUnboundReleaseJobEtag,
-            }
-          );
-        } catch (cleanupError) {
-          releaseJobCleanupWarning = `Could not clean up newly-created Cloud Run release job ${createdUnboundReleaseJobName}: ${this.formatError(cleanupError)}`;
-        }
-      }
-      if (error instanceof CloudRunReleaseJobAdoptionRequiredError) {
-        return {
-          serviceId: service.id,
-          status: 'failed',
-          receipt: {
-            success: false,
-            message: `Cloud Run release job configuration is blocked for ${service.name}`,
-            error: error.message,
-            data: { provider: this.name, phase: 'adoption_required' },
-          },
-        };
-      }
-      return {
-        serviceId: service.id,
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Deployment failed for ${service.name}`,
-          error: [this.formatError(error), releaseJobCleanupWarning]
-            .filter((value): value is string => Boolean(value))
-            .join('; '),
-          ...(releaseJobCleanupWarning
-            ? {
-                data: {
-                  provider: this.name,
-                  phase: 'release_job_cleanup_required',
-                  releaseJobName: createdUnboundReleaseJobName,
-                },
-              }
-            : {}),
-        },
-      };
-    }
-  }
-
-  private async deployScheduledJob(params: {
-    service: Service;
-    environment: Environment;
-    envVars: Record<string, string>;
-    imageUri: string;
-    buildResult?: CloudBuildResult;
-    jobName: string;
-    schedulerJobName: string;
-    deploymentDeferred?: boolean;
-    deferredExpectedImageUri?: string;
-    bootstrapDeployment?: boolean;
-  }): Promise<DeployResult> {
-    const {
-      service,
-      environment,
-      envVars,
-      imageUri,
-      buildResult,
-      jobName,
-      schedulerJobName,
-      deploymentDeferred,
-      deferredExpectedImageUri,
-      bootstrapDeployment,
-    } = params;
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    let createAttempted = false;
-    let createdIdentity: { name: string; uid?: string } | undefined;
-    try {
-      if (!service.buildConfig.cronSchedule?.trim()) {
-        return {
-          serviceId: service.id,
-          status: 'failed',
-          receipt: {
-            success: false,
-            message: `Scheduled job ${service.name} is missing cronSchedule`,
-            error: 'Cron workloads require buildConfig.cronSchedule.',
-          },
-        };
-      }
-
-      const token = await this.getAccessToken();
-      const { region } = this.credentials;
-      const runtimeVars = this.runtimeEnvVarsForService(service, envVars);
-      // Merge with the live job container env so redeploys don't wipe vars
-      // injected outside this call (e.g. DATABASE_URL at provision time).
-      const currentJob = await this.getCloudRunJob(jobName, token);
-      const serviceBinding = parseHostingBindings(environment).services?.[service.name];
-      const pendingActivation = serviceBinding?.scheduleActivation;
-      if (deploymentDeferred) {
-        const freshDeferredProblem = this.deferredWorkloadProblem({
-          expectedExisting: Boolean(serviceBinding?.jobName),
-          observedExisting: Boolean(currentJob),
-          imageUri: this.primaryJobContainer(currentJob)?.image,
-          runtimeServiceAccountEmail: this.jobRuntimeIdentity(currentJob),
-        }, 'scheduled job', deferredExpectedImageUri);
-        if (freshDeferredProblem) {
-          return this.deferredDeployFailure(service, freshDeferredProblem);
-        }
-      }
-      if (pendingActivation && (pendingActivation.jobName !== jobName || currentJob?.uid !== pendingActivation.jobUid)) {
-        throw new Error('The pending scheduled workload identity changed; refusing to configure or activate it.');
-      }
-      if (bootstrapDeployment || pendingActivation) {
-        if (await this.getCloudSchedulerJob(schedulerJobName, token)) {
-          throw new Error('A pending scheduled workload has an existing trigger; explicit reconciliation is required before mutation.');
-        }
-      }
-      const vpcAccess = await this.resolveVpcAccess(
-        environment,
-        currentJob?.template?.template?.vpcAccess,
-        token
-      );
-      const currentJobContainer = currentJob ? this.primaryJobContainer(currentJob) : undefined;
-      const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
-      const env = this.mergeEnvVars(currentJobContainer?.env, runtimeVars, { replaceManagedDatabaseVars });
-      const labels = {
-        'infraprint-environment': this.labelValue(environment.name),
-        'infraprint-service': this.labelValue(service.name),
-        'infraprint-resource': 'scheduled-job',
-      };
-      const command = this.requiredScheduledJobCommand(service);
-      const cloudSqlConnectionNames = replaceManagedDatabaseVars
-        ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
-        : Array.from(new Set([
-            ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
-            ...this.cloudSqlConnectionNamesFromEnvVars(currentJobContainer?.env),
-          ]));
-      const jobSpec = this.cloudRunJobSpec({
-        imageUri,
-        command,
-        env,
-        resources: {
-          limits: {
-            cpu: envVars['CPU'] || '1',
-            memory: envVars['MEMORY'] || '512Mi',
-          },
-        },
-        serviceAccount: currentJob?.template?.template?.serviceAccount
-          ?? currentJob?.template?.template?.serviceAccountName,
-        labels,
-        existingVolumes: currentJob?.template?.template?.volumes,
-        existingVolumeMounts: currentJobContainer?.volumeMounts,
-        cloudSqlConnectionNames,
-        replaceManagedDatabaseVars,
-        ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
-      });
-
-      const { created: createdJob, job: readyJob } = await this.upsertCloudRunJob({
-        token,
-        jobName,
-        jobSpec,
-        description: 'scheduled job',
-        ...(deploymentDeferred ? { bindingAuthority: serviceBinding?.jobName ? 'bound' as const : 'unbound' as const } : {}),
-        onCreateAttempt: () => { createAttempted = true; },
-        onCreateAccepted: (identity) => { createdIdentity = identity; },
-        ...(serviceBinding?.resourceUid || pendingActivation ? { expectedUid: serviceBinding?.resourceUid ?? pendingActivation!.jobUid } : {}),
-      });
-      this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
-      this.assertVpcAccess(
-        readyJob,
-        vpcAccess,
-        `Cloud Run job ${jobName}`
-      );
-
-      if (bootstrapDeployment || pendingActivation) {
-        const scheduleActivation = pendingScheduleActivationSchema.parse(pendingActivation ?? {
-          version: 1, state: 'pending', jobName, jobUid: readyJob.uid, holdingImage: imageUri,
-        });
-        return {
-          serviceId: service.id, externalId: jobName, status: 'configured',
-          receipt: {
-            success: true,
-            message: `Prepared untriggered scheduled job ${jobName}; schedule activation requires a verified CI release and reviewed apply`,
-            data: {
-              resourceType: 'scheduledJob', resourceUid: scheduleActivation.jobUid, jobName, imageUri, environmentId: region,
-              createdJob, createdScheduler: false, deploymentDeferred: true, scheduleActivation,
-            },
-          },
-        };
-      }
-
-      const { created: createdScheduler } = await this.upsertCloudSchedulerJob({
-        token,
-        schedulerJobName,
-        jobName,
-        schedule: service.buildConfig.cronSchedule.trim(),
-        timeZone: envVars['HYPERVIBE_CRON_TIME_ZONE']?.trim() || 'Etc/UTC',
-        runtimeServiceAccountEmail: readyJob.template?.template?.serviceAccount
-          ?? readyJob.template?.template?.serviceAccountName
-          ?? this.requiredRuntimeServiceAccountEmail('scheduled job'),
-      });
-
-      const cleanupWarning = serviceBinding?.resourceUid
-        ? undefined : await this.deleteCloudRunServiceIfExists(jobName, token);
-
-      return {
-        serviceId: service.id,
-        externalId: serviceBinding?.serviceId === jobName ? jobName : schedulerJobName,
-        status: deploymentDeferred ? 'configured' : 'deployed',
-        receipt: {
-          success: true,
-          message: deploymentDeferred
-            ? `Prepared scheduled job ${jobName} for exact-SHA CI deployment using its current image`
-            : `Deployed scheduled job ${jobName} to Cloud Run and Cloud Scheduler`,
-          data: {
-            resourceType: 'scheduledJob',
-            ...(serviceBinding?.resourceUid ? { resourceUid: serviceBinding.resourceUid } : {}),
-            jobName,
-            schedulerJobName,
-            schedule: service.buildConfig.cronSchedule.trim(),
-            imageUri,
-            environmentId: region,
-            createdJob,
-            createdScheduler,
-            ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
-            ...(cleanupWarning ? { cleanupWarning } : {}),
-            ...(buildResult
-              ? {
-                  build: {
-                    id: buildResult.buildId,
-                    logsUrl: buildResult.logsUrl,
-                    resolvedCommitSha: buildResult.resolvedCommitSha,
-                    imageUri: buildResult.imageUri,
-                  },
-                }
-              : {}),
-          },
-        },
-      };
-    } catch (error) {
-      return {
-        serviceId: service.id,
-        ...(createdIdentity ? { externalId: jobName } : {}),
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Scheduled job deployment failed for ${service.name}`,
-          error: this.formatError(error),
-          ...(createAttempted ? { data: {
-            environmentId: this.credentials.region,
-            serviceCreateRecovery: createHostingServiceCreateRecovery({
-              provider: this.name, resourceName: jobName,
-              providerScope: { projectId: this.credentials.projectId, environmentId: this.credentials.region },
-              state: createdIdentity ? 'identified' : 'unresolved',
-              ...(createdIdentity ? { serviceId: jobName, returnedName: jobName } : {}),
-            }),
-          } } : {}),
-        },
-      };
-    }
-  }
-
-  async activateSchedule(
-    service: Service,
-    environment: Environment,
-    options: { expectedImage: string; expectedJobUid: string; sourceCommitSha: string }
-  ): Promise<DeployResult> {
-    try {
-      if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-      const bindings = parseHostingBindings(environment);
-      if (bindings.projectId !== this.credentials.projectId
-        || (bindings.environmentId && bindings.environmentId !== this.credentials.region)) {
-        throw new Error('Schedule activation requires the exact bound provider project and region.');
-      }
-      const binding = bindings.services?.[service.name];
-      const pending = binding?.scheduleActivation;
-      if (serviceWorkloadKind(service) !== 'cron' || !pending
-        || pending.jobName !== binding?.jobName || binding.serviceId !== pending.jobName
-        || (binding.resourceUid !== undefined && binding.resourceUid !== options.expectedJobUid)
-        || pending.jobUid !== options.expectedJobUid || !/^[a-f0-9]{40}$/.test(options.sourceCommitSha)
-        || !this.isImmutableContainerImage(options.expectedImage) || options.expectedImage === pending.holdingImage) {
-        throw new Error('Schedule activation requires the exact pending workload and a verified immutable application release.');
-      }
-      const token = await this.getAccessToken();
-      const jobName = pending.jobName;
-      const job = await this.getCloudRunJob(jobName, token);
-      const expectedName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`;
-      const runtimeIdentity = this.requiredRuntimeServiceAccountEmail('scheduled job activation');
-      if (!job || job.name !== expectedName || job.uid !== options.expectedJobUid
-        || !this.cloudRunJobReadiness(job).ready
-        || this.primaryJobContainer(job)?.image !== options.expectedImage
-        || this.containerStartCommand(this.primaryJobContainer(job)) !== this.requiredScheduledJobCommand(service)
-        || this.jobRuntimeIdentity(job) !== runtimeIdentity) {
-        throw new Error('The live scheduled workload does not match the verified release identity, image, command, or runtime principal.');
-      }
-      const schedulerJobName = this.schedulerResourceName(jobName, binding.schedulerJobName);
-      const schedulerSpec = this.cloudSchedulerJobSpec({
-        schedulerJobName, jobName, schedule: service.buildConfig.cronSchedule?.trim() ?? '',
-        timeZone: 'Etc/UTC', runtimeServiceAccountEmail: runtimeIdentity,
-      });
-      const existing = await this.getCloudSchedulerJob(schedulerJobName, token);
-      if (existing && !this.cloudSchedulerMatches(existing, schedulerSpec)) {
-        throw new Error('The existing scheduler does not match the exact reviewed trigger.');
-      }
-      const invokerGrantApplied = await this.ensureScheduledJobInvoker(expectedName, runtimeIdentity, token);
-      // IAM reconciliation takes time. Recheck the exact released Job before
-      // publishing a trigger that can execute it immediately.
-      const latestJob = await this.getCloudRunJob(jobName, token);
-      if (!latestJob || latestJob.name !== expectedName || latestJob.uid !== options.expectedJobUid
-        || !this.cloudRunJobReadiness(latestJob).ready
-        || this.primaryJobContainer(latestJob)?.image !== options.expectedImage
-        || this.containerStartCommand(this.primaryJobContainer(latestJob)) !== this.requiredScheduledJobCommand(service)
-        || this.jobRuntimeIdentity(latestJob) !== runtimeIdentity) {
-        throw new Error('The released Job changed before schedule activation.');
-      }
-      if (!existing) {
-        const response = await fetch(`https://cloudscheduler.googleapis.com/v1/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs`, {
-          method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(schedulerSpec),
-        });
-        // A conflicting name is never updated or adopted. A lost response can
-        // be reconciled by a later reviewed apply using exact read-back below.
-        if (!response.ok) throw new Error(`Cloud Scheduler activation failed with status ${response.status}.`);
-      }
-      const observed = existing ?? await this.getCloudSchedulerJob(schedulerJobName, token);
-      if (!this.cloudSchedulerMatches(observed, schedulerSpec)) {
-        throw new Error('The scheduler does not match the exact reviewed trigger; refusing to mark activation complete.');
-      }
-      return {
-        serviceId: service.id, externalId: jobName, status: 'configured', receipt: {
-          success: true, message: `Activated schedule for the verified application release of ${service.name}`,
-          data: { jobName, schedulerJobName, scheduleActivated: true, createdScheduler: !existing, invokerGrantApplied, invokerPermissionVerified: true },
-        },
-      };
-    } catch (error) {
-      return { serviceId: service.id, status: 'failed', receipt: { success: false,
-        message: `Schedule activation did not complete for ${service.name}`, error: this.formatError(error) } };
-    }
-  }
-
-  async deleteService(serviceId: string): Promise<{ success: boolean; error?: string; message?: string }> {
-    if (!this.credentials) {
-      return { success: false, error: 'Not connected. Call connect() first.' };
-    }
-
-    try {
-      const token = await this.getAccessToken();
-      const schedulerJobName = serviceId.endsWith('-schedule')
-        ? serviceId
-        : this.schedulerResourceName(serviceId);
-      const jobName = serviceId.endsWith('-schedule') ? serviceId.replace(/-schedule$/, '') : serviceId;
-      const warnings = [
-        await this.deleteCloudSchedulerJobIfExists(schedulerJobName, token),
-        await this.deleteCloudRunJobIfExists(jobName, token),
-        await this.deleteCloudRunServiceIfExists(serviceId, token),
-        serviceId === jobName ? undefined : await this.deleteCloudRunServiceIfExists(jobName, token),
-      ].filter((warning): warning is string => Boolean(warning));
-
-      if (warnings.length > 0) {
-        return {
-          success: false,
-          error: warnings.join('; '),
-        };
-      }
-
-      return {
-        success: true,
-        message: `Deleted Cloud Run resources for ${serviceId}`,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: this.formatError(error),
-      };
-    }
-  }
-
-  async attachCustomDomain(params: {
-    projectId?: string;
-    serviceId: string;
-    environmentId: string;
-    domain: string;
-    dnsZone?: string;
-  }): Promise<Receipt> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    try {
-      this.assertDomainMappingScope(params);
-      const token = await this.getAccessToken();
-      const service = await this.getCloudRunServiceStrict(params.serviceId, token);
-      if (!service) {
-        throw new Error(`Bound Cloud Run service ${params.serviceId} was not found.`);
-      }
-      const readiness = this.cloudRunServiceReadiness(service);
-      if (!readiness.ready) {
-        throw new Error(`Cloud Run service ${params.serviceId} is not ready${readiness.error ? `: ${readiness.error}` : '.'}`);
-      }
-
-      const existing = await this.getCloudRunDomainMapping(params.domain, token);
-      let mapping = existing;
-      if (existing) {
-        this.assertDomainMappingIdentity(existing, params.domain);
-        const route = existing.spec?.routeName ?? existing.status?.mappedRouteName;
-        if (route !== params.serviceId) {
-          throw new Error(`Cloud Run domain ${params.domain} is already mapped to ${route ?? 'an unknown route'}; Hypervibe will not force-override it.`);
-        }
-      } else {
-        mapping = await this.createCloudRunDomainMapping(
-          params.domain,
-          params.serviceId,
-          token
-        );
-      }
-      this.assertDomainMappingIdentity(mapping!, params.domain);
-      const ready = this.domainMappingReady(mapping!);
-      return {
-        success: true,
-        message: existing
-          ? 'Cloud Run custom domain already mapped'
-          : 'Cloud Run custom domain mapped',
-        data: {
-          domain: params.domain,
-          customDomainId: mapping!.metadata!.uid,
-          created: !existing,
-          providerVerified: ready,
-          certificateStatus: this.domainMappingCertificateStatus(mapping!),
-          dnsRecords: this.domainMappingDnsRecords(mapping!, params.domain),
-        },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: 'Failed to attach Cloud Run custom domain',
-        error: this.formatError(error),
-      };
-    }
-  }
-
-  async detachCustomDomain(params: {
-    projectId?: string;
-    serviceId: string;
-    environmentId: string;
-    domain: string;
-    customDomainId?: string;
-  }): Promise<Receipt> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    try {
-      this.assertDomainMappingScope(params);
-      const token = await this.getAccessToken();
-      const mapping = await this.getCloudRunDomainMapping(params.domain, token);
-      if (!mapping) {
-        return {
-          success: true,
-          message: 'Cloud Run custom domain is already absent',
-          data: { domain: params.domain, customDomainId: params.customDomainId, alreadyAbsent: true },
-        };
-      }
-      this.assertDomainMappingIdentity(mapping, params.domain);
-      if (params.customDomainId && mapping.metadata!.uid !== params.customDomainId) {
-        return {
-          success: false,
-          message: 'Cloud Run custom-domain identity changed',
-          error: `Reviewed mapping uid ${params.customDomainId} does not match observed uid ${mapping.metadata!.uid}.`,
-        };
-      }
-      const route = mapping.spec?.routeName ?? mapping.status?.mappedRouteName;
-      if (route !== params.serviceId) {
-        throw new Error(`Cloud Run domain ${params.domain} now maps to ${route ?? 'an unknown route'}, not reviewed service ${params.serviceId}.`);
-      }
-      await this.deleteCloudRunDomainMapping(params.domain, token);
-      const attempts = this.positiveIntegerEnv(
-        'HYPERVIBE_CLOUDRUN_DOMAIN_DELETE_ATTEMPTS',
-        60
-      );
-      const delayMs = this.nonNegativeIntegerEnv(
-        'HYPERVIBE_CLOUDRUN_DOMAIN_DELETE_DELAY_MS',
-        1000
-      );
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        if (!await this.getCloudRunDomainMapping(params.domain, token)) {
-          return {
-            success: true,
-            message: 'Cloud Run custom domain detached',
-            data: {
-              domain: params.domain,
-              customDomainId: mapping.metadata!.uid,
-              deleted: true,
-            },
-          };
-        }
-        if (attempt < attempts) await this.delay(delayMs);
-      }
-      throw new Error(`Cloud Run domain mapping ${params.domain} remained observable after ${attempts} deletion checks.`);
-    } catch (error) {
-      return {
-        success: false,
-        message: 'Failed to detach Cloud Run custom domain',
-        error: this.formatError(error),
-      };
-    }
-  }
-
-  private unappliedRuntimeEnvKeys(container: CloudRunContainer | undefined, vars: Record<string, string>): string[] {
-    const observed = new Map(
-      (container?.env ?? [])
-        .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
-        .map((entry) => [entry.name, entry.value])
-    );
-    return Object.entries(vars).filter(([key, value]) => observed.get(key) !== value).map(([key]) => key);
-  }
-
-  async setEnvVars(
-    environment: Environment,
-    service: Service,
-    vars: Record<string, string>,
-    options: DeploymentMutationOptions = {}
-  ): Promise<Receipt> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
-    };
-
-    const workloadKind = serviceWorkloadKind(service);
-    const isCron = workloadKind === 'cron';
-    const serviceName = isCron
-      ? this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.jobName)
-      : this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.serviceId);
-
-    try {
-      const token = await this.getAccessToken();
-      const { projectId, region } = this.credentials;
-
-      if (isCron) {
-        const runtimeVars = this.runtimeEnvVarsForService(service, vars);
-        if (Object.keys(runtimeVars).length === 0) {
-          return {
-            success: true,
-            message: 'No runtime environment variables to set',
-            data: { variableCount: 0 },
-          };
-        }
-
-        const currentJob = await this.getCloudRunJob(serviceName, token);
-        if (options.deferDeployment) {
-          const deferredProblem = this.deferredWorkloadProblem({
-            expectedExisting: Boolean(bindings.services?.[service.name]?.jobName),
-            observedExisting: Boolean(currentJob),
-            imageUri: this.primaryJobContainer(currentJob)?.image,
-            runtimeServiceAccountEmail: this.jobRuntimeIdentity(currentJob),
-          }, 'scheduled job');
-          if (deferredProblem) {
-            return this.deferredReceiptFailure('scheduled job environment update', deferredProblem);
-          }
-        }
-        const vpcAccess = await this.resolveVpcAccess(
-          environment,
-          currentJob?.template?.template?.vpcAccess,
-          token
-        );
-        const currentContainer = this.primaryJobContainer(currentJob);
-        if (!currentContainer?.image) {
-          return {
-            success: true,
-            message: `Skipped scheduled job env var pre-sync because ${serviceName} does not have an existing image; deploy will create/update the job`,
-            data: {
-              skipped: true,
-              reason: 'missing_existing_job_image',
-              variableCount: Object.keys(runtimeVars).length,
-            },
-          };
-        }
-
-        const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
-        const jobSpec = this.cloudRunJobSpec({
-          imageUri: currentContainer.image,
-          command: this.requiredScheduledJobCommand(service),
-          env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
-          resources: currentContainer.resources,
-          serviceAccount: currentJob?.template?.template?.serviceAccount
-            ?? currentJob?.template?.template?.serviceAccountName,
-          existingVolumes: currentJob?.template?.template?.volumes,
-          existingVolumeMounts: currentContainer.volumeMounts,
-          cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnv(runtimeVars),
-          replaceManagedDatabaseVars,
-          ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
-        });
-        const { job: readyJob } = await this.upsertCloudRunJob({
-          token,
-          jobName: serviceName,
-          jobSpec,
-          description: 'scheduled job env update',
-          expectedUid: parseHostingBindings(environment).services?.[service.name]?.resourceUid
-            ?? parseHostingBindings(environment).services?.[service.name]?.scheduleActivation?.jobUid,
-          bindingAuthority: 'bound',
-        });
-        this.assertVpcAccess(
-          readyJob,
-          vpcAccess,
-          `Cloud Run job ${serviceName}`
-        );
-        const unapplied = this.unappliedRuntimeEnvKeys(this.primaryJobContainer(readyJob), runtimeVars);
-        if (unapplied.length > 0) {
-          return {
-            success: false,
-            message: 'Cloud Run accepted the scheduled job update but runtime variables were not verified on the ready job',
-            error: `Failed to verify: ${unapplied.join(', ')}`,
-          };
-        }
-
-        return {
-          success: true,
-          message: `Set ${Object.keys(runtimeVars).length} environment variables`,
-          data: {
-            variableCount: Object.keys(runtimeVars).length,
-            ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
-          },
-        };
-      }
-
-      // Get current service
-      const currentService = await this.getService(serviceName);
-      if (options.deferDeployment) {
-        const deferredProblem = this.deferredWorkloadProblem({
-          expectedExisting: Boolean(bindings.services?.[service.name]?.serviceId),
-          observedExisting: Boolean(currentService),
-          imageUri: this.primaryContainer(currentService)?.image,
-          runtimeServiceAccountEmail: this.serviceRuntimeIdentity(currentService),
-        }, 'service');
-        if (deferredProblem) {
-          return this.deferredReceiptFailure('service environment update', deferredProblem);
-        }
-      }
-      if (!currentService) {
-        return { success: false, message: `Service ${serviceName} not found` };
-      }
-      const vpcAccess = await this.resolveVpcAccess(
-        environment,
-        this.serviceVpcAccess(currentService),
-        token
-      );
-
-      const runtimeVars = this.runtimeEnvVarsForService(service, vars);
-      if (Object.keys(runtimeVars).length === 0) {
-        return {
-          success: true,
-          message: 'No runtime environment variables to set',
-          data: { variableCount: 0 },
-        };
-      }
-
-      const currentContainer = this.primaryContainer(currentService);
-      if (!currentContainer?.image) {
-        return {
-          success: false,
-          message: `Service ${serviceName} does not have an image to preserve while updating environment variables`,
-        };
-      }
-
-      const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
-      const cloudSqlNames = replaceManagedDatabaseVars
-        ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
-        : Array.from(new Set([
-            ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
-            ...this.cloudSqlConnectionNamesFromEnvVars(currentContainer.env),
-          ]));
-      const cloudSql = this.cloudSqlVolumeConfig(cloudSqlNames);
-      const volumeMounts = cloudSql
-        ? this.mergeVolumeMounts(currentContainer.volumeMounts, [cloudSql.volumeMount])
-        : replaceManagedDatabaseVars
-          ? this.removeCloudSqlVolumeMounts(currentContainer.volumeMounts)
-          : currentContainer.volumeMounts;
-      const templateVolumes = cloudSql
-        ? this.mergeVolumes(this.cloudRunServiceVolumes(currentService), [cloudSql.volume])
-        : replaceManagedDatabaseVars
-          ? this.removeCloudSqlVolumes(this.cloudRunServiceVolumes(currentService))
-          : this.cloudRunServiceVolumes(currentService);
-      const containerSpec = {
-        ...(currentContainer.name ? { name: currentContainer.name } : {}),
-        image: currentContainer.image,
-        ...(currentContainer.ports ? { ports: currentContainer.ports } : {}),
-        ...(currentContainer.command ? { command: currentContainer.command } : {}),
-        ...(currentContainer.args ? { args: currentContainer.args } : {}),
-        ...(currentContainer.startupProbe ? { startupProbe: currentContainer.startupProbe } : {}),
-        ...(currentContainer.livenessProbe ? { livenessProbe: currentContainer.livenessProbe } : {}),
-        ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
-        ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
-        env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
-      };
-      const templateUpdate: Record<string, unknown> = {
-        containers: [containerSpec],
-      };
-      const updateMask = ['template.containers'];
-      if (cloudSql || replaceManagedDatabaseVars) {
-        templateUpdate.volumes = templateVolumes ?? [];
-        updateMask.push('template.volumes');
-      }
-      if (vpcAccess.managed) {
-        templateUpdate.vpcAccess = vpcAccess.apiValue ?? {};
-        updateMask.push('template.vpcAccess');
-      }
-
-      const response = await fetch(
-        `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}?updateMask=${updateMask.join(',')}`,
-        {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            template: templateUpdate,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Cloud Run API error: ${response.status} ${text}`);
-      }
-
-      const operation = await response.json() as CloudRunOperation;
-      await this.waitForCloudRunOperation(
-        token,
-        operation,
-        'service env update',
-        `projects/${projectId}/locations/${region}/services/${serviceName}`
-      );
-      const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
-      this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
-      this.assertPreservedFilesystem(currentService, updatedService);
-      const unapplied = this.unappliedRuntimeEnvKeys(this.primaryContainer(updatedService), runtimeVars);
-      if (unapplied.length > 0) {
-        return {
-          success: false,
-          message: 'Cloud Run accepted the service update but runtime variables were not verified on the ready revision',
-          error: `Failed to verify: ${unapplied.join(', ')}`,
-        };
-      }
-
-      return {
-        success: true,
-        message: `Set ${Object.keys(runtimeVars).length} environment variables`,
-        data: {
-          variableCount: Object.keys(runtimeVars).length,
-          ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
-        },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: 'Failed to set environment variables',
-        error: this.formatError(error),
-      };
-    }
-  }
-
-  async deleteEnvVars(
-    environment: Environment,
-    service: Service,
-    keys: string[]
-  ): Promise<Receipt> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const uniqueKeys = [...new Set(keys)].sort();
-    const invalidKey = uniqueKeys.find((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
-    if (invalidKey || uniqueKeys.length === 0) {
-      return {
-        success: false,
-        message: 'Failed to delete environment variables',
-        error: invalidKey
-          ? `Invalid environment variable name: ${invalidKey}`
-          : 'No environment variable names were supplied',
-      };
-    }
-
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
-    };
-    const isCron = serviceWorkloadKind(service) === 'cron';
-    const serviceName = isCron
-      ? this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.jobName)
-      : this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.serviceId);
-
-    try {
-      const token = await this.getAccessToken();
-      const retired = new Set(uniqueKeys);
-
-      if (isCron) {
-        const currentJob = await this.getCloudRunJob(serviceName, token);
-        const currentContainer = this.primaryJobContainer(currentJob);
-        if (!currentContainer?.image) {
-          return {
-            success: false,
-            message: `Scheduled job ${serviceName} does not have an image to preserve while deleting environment variables`,
-          };
-        }
-        const existingEnv = currentContainer.env ?? [];
-        const vpcAccess = await this.resolveVpcAccess(
-          environment,
-          currentJob?.template?.template?.vpcAccess,
-          token
-        );
-        const vpcNeedsChange = vpcAccess.managed
-          && JSON.stringify(this.normalizedVpcAccess(currentJob?.template?.template?.vpcAccess))
-            !== JSON.stringify(vpcAccess.desired);
-        const deletedKeys = uniqueKeys.filter((key) =>
-          existingEnv.some((entry) => entry.name === key)
-        );
-        if (deletedKeys.length === 0 && !vpcNeedsChange) {
-          return {
-            success: true,
-            message: 'Explicitly retired environment variables are already absent',
-            data: { deletedKeys: [], variableCount: 0, redeployMayBeTriggered: false },
-          };
-        }
-
-        const jobSpec = this.cloudRunJobSpec({
-          imageUri: currentContainer.image,
-          command: this.requiredScheduledJobCommand(service),
-          env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
-          resources: currentContainer.resources,
-          serviceAccount: currentJob?.template?.template?.serviceAccount
-            ?? currentJob?.template?.template?.serviceAccountName,
-          existingVolumes: currentJob?.template?.template?.volumes,
-          existingVolumeMounts: currentContainer.volumeMounts,
-          cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnvVars(currentContainer.env),
-          ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
-        });
-        const { job: readyJob } = await this.upsertCloudRunJob({
-          token,
-          jobName: serviceName,
-          jobSpec,
-          description: 'scheduled job env removal',
-          expectedUid: parseHostingBindings(environment).services?.[service.name]?.resourceUid
-            ?? parseHostingBindings(environment).services?.[service.name]?.scheduleActivation?.jobUid,
-          bindingAuthority: 'bound',
-        });
-        const updatedJob = readyJob;
-        this.assertVpcAccess(updatedJob, vpcAccess, `Cloud Run job ${serviceName}`);
-        const remainingJobKeys = new Set(
-          (this.primaryJobContainer(updatedJob)?.env ?? [])
-            .map((entry) => entry.name)
-            .filter((name): name is string => typeof name === 'string')
-        );
-        const failedJobKeys = deletedKeys.filter((key) => remainingJobKeys.has(key));
-        if (failedJobKeys.length > 0) {
-          return {
-            success: false,
-            message: 'Cloud Run accepted the scheduled job update but retired variables remain live',
-            error: `Failed to remove: ${failedJobKeys.join(', ')}`,
-          };
-        }
-
-        return {
-          success: true,
-          message: `Deleted ${deletedKeys.length} explicitly retired environment variables`,
-          data: {
-            deletedKeys,
-            variableCount: deletedKeys.length,
-            redeployMayBeTriggered: false,
-            scheduledJobConfigUpdated: true,
-          },
-        };
-      }
-
-      const currentService = await this.getService(serviceName);
-      const currentContainer = this.primaryContainer(currentService);
-      if (!currentService || !currentContainer?.image) {
-        return {
-          success: false,
-          message: `Service ${serviceName} does not have an image to preserve while deleting environment variables`,
-        };
-      }
-      const existingEnv = currentContainer.env ?? [];
-      const vpcAccess = await this.resolveVpcAccess(
-        environment,
-        this.serviceVpcAccess(currentService),
-        token
-      );
-      const vpcNeedsChange = vpcAccess.managed
-        && JSON.stringify(this.normalizedVpcAccess(this.serviceVpcAccess(currentService)))
-          !== JSON.stringify(vpcAccess.desired);
-      const deletedKeys = uniqueKeys.filter((key) =>
-        existingEnv.some((entry) => entry.name === key)
-      );
-      if (deletedKeys.length === 0 && !vpcNeedsChange) {
-        return {
-          success: true,
-          message: 'Explicitly retired environment variables are already absent',
-          data: { deletedKeys: [], variableCount: 0, redeployMayBeTriggered: false },
-        };
-      }
-
-      const containerSpec = {
-        ...(currentContainer.name ? { name: currentContainer.name } : {}),
-        image: currentContainer.image,
-        ...(currentContainer.ports ? { ports: currentContainer.ports } : {}),
-        ...(currentContainer.command ? { command: currentContainer.command } : {}),
-        ...(currentContainer.args ? { args: currentContainer.args } : {}),
-        ...(currentContainer.startupProbe ? { startupProbe: currentContainer.startupProbe } : {}),
-        ...(currentContainer.livenessProbe ? { livenessProbe: currentContainer.livenessProbe } : {}),
-        ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
-        ...(currentContainer.volumeMounts ? { volumeMounts: currentContainer.volumeMounts } : {}),
-        env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
-      };
-      const { projectId, region } = this.credentials;
-      const updateMask = ['template.containers'];
-      const template: Record<string, unknown> = { containers: [containerSpec] };
-      if (vpcAccess.managed) {
-        template.vpcAccess = vpcAccess.apiValue ?? {};
-        updateMask.push('template.vpcAccess');
-      }
-      const response = await fetch(
-        `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}?updateMask=${updateMask.join(',')}`,
-        {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            template,
-          }),
-        }
-      );
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Cloud Run API error: ${response.status} ${text}`);
-      }
-      const operation = await response.json() as CloudRunOperation;
-      await this.waitForCloudRunOperation(
-        token,
-        operation,
-        'service env removal',
-        `projects/${projectId}/locations/${region}/services/${serviceName}`
-      );
-      const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
-      this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
-      this.assertPreservedFilesystem(currentService, updatedService);
-      const remainingKeys = new Set(
-        (this.primaryContainer(updatedService)?.env ?? [])
-          .map((entry) => entry.name)
-          .filter((name): name is string => typeof name === 'string')
-      );
-      const failedKeys = deletedKeys.filter((key) => remainingKeys.has(key));
-      if (failedKeys.length > 0) {
-        return {
-          success: false,
-          message: 'Cloud Run accepted the service update but retired variables remain live',
-          error: `Failed to remove: ${failedKeys.join(', ')}`,
-        };
-      }
-
-      return {
-        success: true,
-        message: `Deleted ${deletedKeys.length} explicitly retired environment variables`,
-        data: {
-          deletedKeys,
-          variableCount: deletedKeys.length,
-          // Cloud Run service configuration is revision-scoped; this PATCH
-          // necessarily creates a revision with the already-compatible image.
-          redeployMayBeTriggered: true,
-        },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: 'Failed to delete environment variables',
-        error: this.formatError(error),
-      };
-    }
   }
 
   async getDeployStatus(
@@ -2285,9 +779,9 @@ export class CloudRunAdapter implements
   }
 
   async runJob(
-    environment: Environment,
-    service: Service,
-    command: string,
+    _environment: Environment,
+    _service: Service,
+    _command: string,
     options?: EnvironmentTaskOptions
   ): Promise<JobResult> {
     if (options?.managedRecoveryTask) return {
@@ -2295,314 +789,14 @@ export class CloudRunAdapter implements
         message: 'The Cloud Run adapter does not implement managed recovery tasks.',
         data: { applied: 0, skipped: 1, mutationAttempted: false } },
     };
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-    const startedAt = Date.now();
-
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; imageUri?: string }>;
-    };
-    const serviceBinding = bindings.services?.[service.name];
-    const serviceName = this.workloadResourceName(
-      environment,
-      service.name,
-      serviceBinding?.serviceId ?? serviceBinding?.jobName
-    );
-    const sourceService = await this.getService(serviceName);
-    const sourceContainer = this.primaryContainer(sourceService);
-    const imageUri = sourceContainer?.image ?? bindings.services?.[service.name]?.imageUri;
-
-    if (!imageUri) {
-      return {
-        jobId: '',
-        status: 'failed',
-        receipt: {
-          success: false,
-          message: `Cloud Run environment task requires an image for service ${service.name}`,
-          error: 'Deploy the service first so Hypervibe can build and record its Cloud Run image before running one-off environment tasks.',
-          data: {
-            provider: this.name,
-            missing: ['services.' + service.name + '.imageUri'],
-            pendingDeploy: true,
-          },
-        },
-      };
-    }
-
-    try {
-      const token = await this.getAccessToken();
-      const vpcAccess = await this.resolveVpcAccess(
-        environment,
-        this.serviceVpcAccess(sourceService),
-        token
-      );
-      const jobName = this.migrationJobName(serviceName);
-      const jobSpec = this.cloudRunJobSpec({
-        imageUri,
-        command,
-        env: sourceContainer?.env ?? [],
-        resources: sourceContainer?.resources,
-        serviceAccount: sourceService?.template?.serviceAccount
-          ?? sourceService?.template?.serviceAccountName
-          ?? sourceService?.spec?.template?.spec?.serviceAccountName,
-        existingVolumes: this.cloudRunServiceVolumes(sourceService),
-        existingVolumeMounts: sourceContainer?.volumeMounts,
-        cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnvVars(sourceContainer?.env),
-        ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
-      });
-
-      const { job: readyJob } = await this.upsertCloudRunJob({
-        token,
-        jobName,
-        jobSpec,
-        description: 'environment task',
-      });
-      this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
-      this.assertVpcAccess(
-        readyJob,
-        vpcAccess,
-        `Cloud Run job ${jobName}`
-      );
-
-      const run = await this.executeCloudRunJob(jobName, token);
-      const { operation, execution } = run;
-      const status = execution ? this.executionStatus(execution) : 'failed';
-      const jobId = execution?.name ?? operation.name ?? jobName;
-      if (status !== 'completed') {
-        return {
-          jobId,
-          status: execution ? 'failed' : 'timeout',
-          runner: 'cloudrun-job',
-          durationMs: Date.now() - startedAt,
-          receipt: {
-            success: false,
-            message: `Cloud Run environment task failed for ${service.name}`,
-            error: execution
-              ? `Cloud Run execution ${this.lastPathSegment(execution.name) ?? jobId} ended with status ${status}`
-              : `Cloud Run execution for ${jobName} did not finish before timeout`,
-            data: {
-              jobName,
-              operationName: operation.name,
-              executionName: execution?.name,
-              serviceName,
-              imageUri,
-            },
-          },
-        };
-      }
-      return {
-        jobId,
-        status: 'completed',
-        runner: 'cloudrun-job',
-        durationMs: Date.now() - startedAt,
-        receipt: {
-          success: true,
-          message: `Completed Cloud Run environment task ${jobName}`,
-          data: {
-            jobName,
-            operationName: operation.name,
-            executionName: execution?.name,
-            serviceName,
-            imageUri,
-          },
-        },
-      };
-    } catch (error) {
-      return {
-        jobId: '',
-        status: 'failed',
-        runner: 'cloudrun-job',
-        durationMs: Date.now() - startedAt,
-        receipt: {
-          success: false,
-          message: `Cloud Run environment task failed for ${service.name}`,
-          error: this.formatError(error),
-        },
-      };
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Queues (Pub/Sub) — the hosting provider owns its queue backend.
-  // ---------------------------------------------------------------------------
-
-  /** Deterministic Pub/Sub resource ids for a spec queue name (shared with queue-env). */
-  queueResourceNames(environment: Environment, queueName: string): { topicId: string; subscriptionId: string } {
-    return pubsubQueueResourceIds(environment, queueName, this.queueProviderScope().projectId);
-  }
-
-  /** Current provider-native Pub/Sub scope, for plan/apply stale checks. */
-  queueProviderScope(): { projectId: string } {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    return { projectId: this.credentials.projectId };
-  }
-
-  /** Hypervibe-owned topics for this environment (label-filtered). */
-  async listQueueTopics(environment: Environment): Promise<pubsub.PubSubTopic[]> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const token = await this.getAccessToken();
-    const topics = await pubsub.listTopics(token, this.credentials.projectId);
-    const environmentLabel = this.labelValue(environment.name);
-    return topics.filter((topic) => topic.labels?.['infraprint-environment'] === environmentLabel);
-  }
-
-  async getQueueSubscription(environment: Environment, queueName: string): Promise<pubsub.PubSubSubscription | null> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    this.assertQueueBindingScope(environment, queueName, false);
-    const token = await this.getAccessToken();
-    await this.assertNoUnboundLegacyQueue(environment, queueName, token);
-    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
-    const [topic, subscription] = await Promise.all([
-      pubsub.getTopic(token, this.credentials.projectId, topicId),
-      pubsub.getSubscription(token, this.credentials.projectId, subscriptionId),
-    ]);
-    if (topic) this.assertManagedQueueTopic(environment, queueName, topic);
-    if (subscription) this.assertManagedQueueSubscription(environment, queueName, subscription);
-    if (subscription && !topic) {
-      throw new Error(
-        `Pub/Sub subscription ${subscription.name} exists but its exact managed topic is absent; queue observation is incomplete.`
-      );
-    }
-    return subscription;
-  }
-
-  async ensureQueue(
-    environment: Environment,
-    queueName: string,
-    options: { ackDeadlineSeconds?: number } = {}
-  ): Promise<{ topicName: string; subscriptionName: string; createdTopic: boolean; createdSubscription: boolean }> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    this.assertQueueBindingScope(environment, queueName, false);
-    const token = await this.getAccessToken();
-    await this.assertNoUnboundLegacyQueue(environment, queueName, token);
-    const gcpProjectId = this.credentials.projectId;
-    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
-    const labels = {
-      'infraprint-environment': this.labelValue(environment.name),
-      'infraprint-queue': this.labelValue(queueName),
-    };
-
-    let existingTopic = await pubsub.getTopic(token, gcpProjectId, topicId);
-    if (existingTopic) this.assertManagedQueueTopic(environment, queueName, existingTopic);
-    let createdTopic = false;
-    if (!existingTopic) {
-      const result = await pubsub.ensureTopic(token, gcpProjectId, topicId, labels);
-      createdTopic = result.created;
-      existingTopic = await this.waitForQueueTopic(token, topicId);
-      this.assertManagedQueueTopic(environment, queueName, existingTopic);
-    }
-
-    let existing = await pubsub.getSubscription(token, gcpProjectId, subscriptionId);
-    if (existing) this.assertManagedQueueSubscription(environment, queueName, existing);
-    let createdSubscription = false;
-    if (!existing) {
-      const result = await pubsub.ensureSubscription(token, gcpProjectId, subscriptionId, topicId, {
-        ackDeadlineSeconds: options.ackDeadlineSeconds,
-        labels,
-      });
-      createdSubscription = result.created;
-      existing = await this.waitForQueueSubscription(token, subscriptionId);
-      this.assertManagedQueueSubscription(environment, queueName, existing);
-    } else if (
-      options.ackDeadlineSeconds !== undefined
-      && existing.ackDeadlineSeconds !== options.ackDeadlineSeconds
-    ) {
-      await pubsub.patchSubscriptionAckDeadline(token, gcpProjectId, subscriptionId, options.ackDeadlineSeconds);
-      existing = await this.waitForQueueSubscription(token, subscriptionId, options.ackDeadlineSeconds);
-      this.assertManagedQueueSubscription(environment, queueName, existing);
-    }
-
     return {
-      topicName: `projects/${gcpProjectId}/topics/${topicId}`,
-      subscriptionName: `projects/${gcpProjectId}/subscriptions/${subscriptionId}`,
-      createdTopic,
-      createdSubscription,
+      jobId: '', status: 'failed', receipt: {
+        success: false,
+        message: 'Arbitrary Cloud Run environment tasks are not supported by the infrastructure engine.',
+        error: 'For deployment migrations, declare releaseCommand in hv_spec, review hv_plan, and approve hv_apply. Hypervibe executes that command using the job created by the approved infrastructure plan.',
+        data: { applied: 0, skipped: 1, mutationAttempted: false, code: 'ENGINE_TASK_UNSUPPORTED' },
+      },
     };
-  }
-
-  async destroyQueue(environment: Environment, queueName: string): Promise<void> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    this.assertQueueBindingScope(environment, queueName, true);
-    const token = await this.getAccessToken();
-    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
-    const [topic, subscription] = await Promise.all([
-      pubsub.getTopic(token, this.credentials.projectId, topicId),
-      pubsub.getSubscription(token, this.credentials.projectId, subscriptionId),
-    ]);
-    // Resolve and validate every target before the first destructive request so
-    // a same-name unmanaged resource can never be partially torn down.
-    if (topic) this.assertManagedQueueTopic(environment, queueName, topic);
-    if (subscription) this.assertManagedQueueSubscription(environment, queueName, subscription);
-    if (subscription) {
-      await pubsub.deleteSubscription(token, this.credentials.projectId, subscriptionId);
-      await this.waitForQueueAbsence(
-        `subscription ${subscription.name}`,
-        () => pubsub.getSubscription(token, this.credentials!.projectId, subscriptionId)
-      );
-    }
-    if (topic) {
-      await pubsub.deleteTopic(token, this.credentials.projectId, topicId);
-      await this.waitForQueueAbsence(
-        `topic ${topic.name}`,
-        () => pubsub.getTopic(token, this.credentials!.projectId, topicId)
-      );
-    }
-  }
-
-  private async assertNoUnboundLegacyQueue(environment: Environment, queueName: string, token: string): Promise<void> {
-    const bindings = environment.platformBindings as { projectId?: string; queues?: Record<string, unknown> };
-    if (bindings.queues?.[queueName]) return;
-    const legacy = `${bindings.projectId || 'hypervibe'}-${queueName}`.toLowerCase()
-      .replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 63);
-    const projectId = this.queueProviderScope().projectId;
-    const [topic, subscription] = await Promise.all([
-      pubsub.getTopic(token, projectId, legacy),
-      pubsub.getSubscription(token, projectId, `${legacy}-sub`),
-    ]);
-    if (topic || subscription) throw new Error(`Legacy Pub/Sub queue "${queueName}" exists without a durable binding; explicitly import or clean up that scoped identity before creating another queue.`);
-  }
-
-  private assertQueueBindingScope(
-    environment: Environment,
-    queueName: string,
-    required: boolean
-  ): void {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const rawQueues = environment.platformBindings.queues;
-    const queues = rawQueues && typeof rawQueues === 'object' && !Array.isArray(rawQueues)
-      ? rawQueues as Record<string, unknown>
-      : {};
-    const rawBinding = queues[queueName];
-    const binding = rawBinding && typeof rawBinding === 'object' && !Array.isArray(rawBinding)
-      ? rawBinding as Record<string, unknown>
-      : null;
-    if (!binding) {
-      if (!required) return;
-      throw new Error(
-        `Pub/Sub queue ${queueName} is missing its durable binding; re-run hv_plan before destroying it.`
-      );
-    }
-    if (binding.backend !== 'pubsub') {
-      throw new Error(`Queue ${queueName} is not bound as a Pub/Sub queue; refusing Cloud Run queue access.`);
-    }
-    const rawScope = binding.providerScope;
-    const scope = rawScope && typeof rawScope === 'object' && !Array.isArray(rawScope)
-      ? rawScope as Record<string, unknown>
-      : null;
-    const boundProjectId = typeof scope?.projectId === 'string' ? scope.projectId : undefined;
-    if (!boundProjectId) {
-      throw new Error(`Pub/Sub queue ${queueName} binding is missing its durable GCP project scope; re-import or re-plan it.`);
-    }
-    if (boundProjectId !== this.credentials.projectId) {
-      throw new Error(
-        `Pub/Sub queue ${queueName} is bound to GCP project ${boundProjectId}, but the connected Cloud Run credentials target ${this.credentials.projectId}; refusing queue access in a different project.`
-      );
-    }
-    // The shared resolver validates both exact scoped IDs and preserves legacy
-    // names; runtime wiring must use the very same identity decision.
-    this.queueResourceNames(environment, queueName);
   }
 
   async readProviderLogs(request: ProviderRuntimeLogsRequest): Promise<ProviderRuntimeLogsResult> {
@@ -2692,13 +886,28 @@ export class CloudRunAdapter implements
     return vars;
   }
 
-  async readProviderEnvironmentVariables(
-    request: ProviderEnvironmentVariablesRequest
-  ): Promise<ProviderEnvironmentVariablesResult> {
-    return {
-      success: true,
-      variables: await this.getServiceVariables(request.environment, request.service.name),
-    };
+  async readProviderEnvironmentVariables(request: ProviderEnvironmentVariablesRequest): Promise<ProviderEnvironmentVariablesResult> {
+    try {
+      if (!this.credentials) throw new Error();
+      const binding = parseHostingBindings(request.environment);
+      const target = binding.services?.[request.service.name];
+      const id = target?.jobName ?? target?.serviceId;
+      if (binding.provider !== this.name || binding.projectId !== this.credentials.projectId || binding.environmentId !== this.credentials.region
+        || !id || !/^[a-z][a-z0-9-]*$/.test(id) || !target?.resourceUid) throw new Error();
+      const token = await this.getAccessToken(); const job = Boolean(target.jobName);
+      const current = job ? await this.getCloudRunJob(id, token) : await this.getCloudRunService(id, token);
+      const expectedName = `projects/${binding.projectId}/locations/${this.credentials.region}/${job ? 'jobs' : 'services'}/${id}`;
+      if (!current || current.name !== expectedName || current.uid !== target.resourceUid) throw new Error();
+      const container = job ? this.primaryJobContainer(current as CloudRunJob) : this.primaryContainer(current as CloudRunService);
+      const entries = container?.env ?? [];
+      if (!container || !Array.isArray(entries) || entries.some(entry => typeof entry.name !== 'string') || new Set(entries.map(entry => entry.name)).size !== entries.length) throw new Error();
+      const variables: Record<string, string> = {}; const unresolvedKeys: string[] = [];
+      for (const entry of entries) {
+        if (typeof entry.value === 'string' && !entry.valueSource) variables[String(entry.name)] = entry.value;
+        else unresolvedKeys.push(String(entry.name));
+      }
+      return { success: true, variables, ...(unresolvedKeys.length ? { unresolvedKeys: unresolvedKeys.sort() } : {}) };
+    } catch { return { success: false, error: 'Exact Cloud Run workload configuration could not be verified.' }; }
   }
 
   async listDeployments(
@@ -2802,6 +1011,47 @@ export class CloudRunAdapter implements
     return deployments.slice(0, limit);
   }
 
+  private async observedJobDeployment(job: CloudRunJob, token: string): Promise<Pick<ObservedService, 'deployment'>> {
+    if (!job.name || !this.credentials) return {};
+    const prefix = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/`;
+    if (!job.name.startsWith(prefix) || job.name.slice(prefix.length).includes('/')) return {};
+    try {
+      const executions = await this.listCloudRunJobExecutionsStrict(job.name.slice(prefix.length), token);
+      const ids = new Set<string>();
+      if (executions.some(execution => !execution.name?.startsWith(`${job.name}/executions/`)
+        || execution.name.slice(`${job.name}/executions/`.length).includes('/') || execution.job !== job.name
+        || !execution.createTime || !Number.isFinite(Date.parse(execution.createTime))
+        || ids.has(execution.name) || !ids.add(execution.name))) return {};
+      const latest = [...executions].sort((left, right) => Date.parse(right.createTime!) - Date.parse(left.createTime!))[0];
+      if (!latest?.name) return {};
+      const container = latest.template?.containers?.[0];
+      const values = this.observedEnvFromContainer(container);
+      return { deployment: { id: latest.name, createdAt: latest.createTime,
+        status: this.executionStatus(latest),
+        activeDeploymentIds: executions.filter(execution => (execution.runningCount ?? 0) > 0 || !execution.completionTime && this.executionStatus(execution) === 'running').map(execution => execution.name!).sort(),
+        activeDeploymentCoverage: 'instances',
+        envVarHashes: values.envVarHashes,
+        configurationState: container && values.envVarKeys.every(key => Object.hasOwn(values.envVarHashes, key)) ? 'resolved' : 'unknown',
+      } };
+    } catch { return {}; }
+  }
+
+  private observedServiceDeployment(service: CloudRunService): Pick<ObservedService, 'deployment'> {
+    const prefix = `${service.name}/revisions/`;
+    const revisionId = (id: unknown): string | undefined => typeof id === 'string' && id.length > 0
+      ? id.startsWith(prefix) && !id.slice(prefix.length).includes('/') ? id
+        : !id.includes('/') ? `${prefix}${id}` : undefined
+      : undefined;
+    const id = revisionId(service.latestReadyRevision);
+    if (!id) return {};
+    const traffic = service.trafficStatuses;
+    const known = Array.isArray(traffic) && traffic.every(target => revisionId(target.revision)
+      && (target.percent === undefined || Number.isInteger(target.percent) && target.percent >= 0 && target.percent <= 100));
+    return { deployment: { id, status: this.cloudRunServiceReadiness(service).ready ? 'ready' : 'unknown',
+      ...(known ? { activeDeploymentIds: [...new Set(traffic!.filter(target => (target.percent ?? 0) > 0 || Boolean(target.tag)).map(target => revisionId(target.revision)!))].sort(), activeDeploymentCoverage: 'traffic' as const } : {}),
+    } };
+  }
+
   async observe(environment: Environment): Promise<ObservedState> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -2825,6 +1075,9 @@ export class CloudRunAdapter implements
       throw new Error(
         `Bound Cloud Run environment is in ${bindings.environmentId}, but desired hosting.region is ${this.credentials.region}. Region changes require an explicit teardown and recreate; Hypervibe will not create a cross-region replacement over existing bindings.`
       );
+    }
+    if (bindings.projectId !== this.credentials.projectId) {
+      throw new Error(`Bound Cloud Run project ${bindings.projectId} does not match connected project ${this.credentials.projectId}. Reconnect the exact target before observing workloads.`);
     }
 
     const token = await this.getAccessToken();
@@ -2874,6 +1127,14 @@ export class CloudRunAdapter implements
         continue;
       }
 
+      const liveUid = typeof liveService.uid === 'string' && liveService.uid.trim().length > 0
+        && liveService.uid === liveService.uid.trim() ? liveService.uid : undefined;
+      const boundUid = bindingKey ? serviceBindings[bindingKey]?.resourceUid : undefined;
+      const identityKnown = liveUid !== undefined && (boundUid === undefined || boundUid === liveUid);
+      if (!identityKnown) {
+        serviceObservationKnown = false;
+        warnings.push(`Cloud Run workload ${externalId} has a missing or different provider lifetime identity.`);
+      }
       const container = this.primaryContainer(liveService);
       const readiness = this.cloudRunServiceReadiness(liveService);
       const startCommand = this.containerStartCommand(container);
@@ -2891,6 +1152,7 @@ export class CloudRunAdapter implements
       services.push({
         name: this.observedServiceName(externalId, liveService.labels, bindingKey, prefix),
         externalId,
+        ...(liveUid ? { resourceUid: liveUid } : {}),
         // Workers deploy with internal-only ingress; classify by it so the
         // diff can converge a manually flipped ingress back to the spec.
         workloadKind: liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web',
@@ -2917,9 +1179,10 @@ export class CloudRunAdapter implements
           ...(cacheNetwork ? { cacheNetwork } : {}),
         },
         ...this.observedEnvFromContainer(container),
-        status: readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
+        ...this.observedServiceDeployment(liveService),
+        status: !identityKnown ? 'unknown' : readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
         maintenance: {
-          state: liveService.scaling?.scalingMode === 'MANUAL'
+          state: !identityKnown ? 'unknown' : liveService.scaling?.scalingMode === 'MANUAL'
             && liveService.scaling.manualInstanceCount === 0
             ? 'suspended'
             : readiness.ready ? 'running' : 'unknown',
@@ -2992,6 +1255,7 @@ export class CloudRunAdapter implements
           ...(cacheNetwork ? { cacheNetwork } : {}),
         },
         ...this.observedEnvFromContainer(container),
+        ...await this.observedJobDeployment(liveJob, token),
         status: scheduleActivationPending && !schedulerJob ? 'empty' : readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
         maintenance: {
           state: schedulerJob?.state === 'PAUSED'
@@ -3268,68 +1532,6 @@ export class CloudRunAdapter implements
     };
   }
 
-  async destroyRetainedArtifactRepository(target: {
-    resource: string;
-    id: string;
-    providerScope: Record<string, string>;
-  }): Promise<Receipt> {
-    if (!this.credentials) return { success: false, message: 'Not connected' };
-    const location = target.providerScope.location;
-    if (location) this.configureTarget({ region: location });
-    if (
-      target.resource !== 'artifact'
-      || target.providerScope.projectId !== this.credentials.projectId
-      || target.providerScope.location !== this.credentials.region
-      || !this.isArtifactRepositoryName(target.id)
-    ) {
-      return {
-        success: false,
-        message: 'Artifact Registry deletion target is invalid',
-        error: 'The exact repository id, project, or location does not match the connected provider scope.',
-      };
-    }
-    try {
-      const before = await this.getArtifactRepository(target.id);
-      if (!before) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
-      if (before.name !== target.id) {
-        return { success: false, message: 'Artifact Registry returned a different repository identity', error: 'No deletion was attempted.' };
-      }
-      const token = await this.getAccessToken();
-      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${target.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (response.status === 404) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Artifact Registry repository delete failed: ${response.status} ${body}`);
-      }
-      const operation = await response.json() as CloudRunOperation;
-      await this.waitForArtifactRegistryOperation(token, operation, 'repository delete');
-      const attempts = Math.max(1, Number(process.env.HYPERVIBE_ARTIFACT_DELETE_ATTEMPTS ?? 60));
-      const delayMs = Math.max(0, Number(process.env.HYPERVIBE_ARTIFACT_DELETE_DELAY_MS ?? 1000));
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (!await this.getArtifactRepository(target.id)) {
-          return { success: true, message: `Deleted Artifact Registry repository: ${target.id}` };
-        }
-        if (attempt < attempts - 1 && delayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-      }
-      return {
-        success: false,
-        message: 'Artifact Registry accepted repository deletion but it remains present',
-        error: `${target.id} remained observable after ${attempts} checks.`,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: 'Failed to delete Artifact Registry repository',
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   async observeMaintenanceWorkload(
     environment: Environment,
     serviceId: string,
@@ -3344,25 +1546,43 @@ export class CloudRunAdapter implements
       return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_unbound' };
     }
     if (workloadKind === 'cron') {
-      const schedulerJobName = binding.schedulerJobName
-        ?? this.schedulerResourceName(binding.jobName ?? binding.serviceId ?? serviceId);
-      const scheduler = await this.getCloudSchedulerJob(schedulerJobName, token);
-      if (!scheduler) {
-        return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_scheduler_missing' };
+      try {
+        const { schedulerJobName, jobName } = binding;
+        if (!this.credentials || !schedulerJobName || !jobName
+          || !/^[a-zA-Z0-9_-]+$/.test(schedulerJobName) || !/^[a-zA-Z0-9_-]+$/.test(jobName)
+          || parseHostingBindings(environment).projectId !== this.credentials.projectId) {
+          throw new Error('The scheduled workload identities are missing.');
+        }
+        const parent = `projects/${this.credentials.projectId}/locations/${this.credentials.region}`;
+        const schedulerTarget = `https://run.googleapis.com/v2/${parent}/jobs/${jobName}:run`;
+        const scheduler = await this.getCloudSchedulerJob(schedulerJobName, token);
+        if (!scheduler || scheduler.name !== `${parent}/jobs/${schedulerJobName}`
+          || typeof scheduler.schedule !== 'string' || !scheduler.schedule.trim()
+          || (scheduler.timeZone !== undefined && typeof scheduler.timeZone !== 'string')
+          || scheduler.httpTarget?.uri !== schedulerTarget || scheduler.httpTarget.httpMethod !== 'POST'
+          || !['PAUSED', 'ENABLED'].includes(scheduler.state ?? '')) {
+          throw new Error('The scheduled workload configuration could not be verified.');
+        }
+        const executions = await this.listCloudRunJobExecutionsStrict(jobName, token);
+        // Scheduler pause stops future triggers. Execution completion is a separate
+        // observation; an absent completion timestamp includes pending executions.
+        const draining = executions.some((execution) => !execution.completionTime
+          || execution.reconciling === true || (execution.runningCount ?? 0) > 0);
+        return {
+          serviceId,
+          workloadKind,
+          wasRunning: scheduler.state === 'ENABLED',
+          cronSchedule: scheduler.schedule,
+          state: scheduler.state === 'PAUSED' && !draining ? 'suspended' : 'running',
+          ...(scheduler.state === 'PAUSED' && draining ? { reason: 'maintenance_executions_draining' } : {}),
+          providerState: {
+            schedulerJobName, schedulerState: scheduler.state, jobName,
+            schedulerTimeZone: scheduler.timeZone || 'UTC', schedulerTarget,
+          },
+        };
+      } catch {
+        return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_cron_observation_failed' };
       }
-      return {
-        serviceId,
-        workloadKind,
-        wasRunning: scheduler.state === 'ENABLED',
-        cronSchedule: scheduler.schedule,
-        state: scheduler.state === 'PAUSED' ? 'suspended'
-          : scheduler.state === 'ENABLED' ? 'running' : 'unknown',
-        providerState: {
-          schedulerJobName,
-          schedulerState: scheduler.state ?? 'unknown',
-          jobName: binding.jobName,
-        },
-      };
     }
     const serviceName = binding.serviceId ?? serviceId;
     const service = await this.getCloudRunService(serviceName, token);
@@ -3382,96 +1602,26 @@ export class CloudRunAdapter implements
   }
 
   async suspendMaintenanceWorkload(
-    environment: Environment,
-    expected: MaintenanceWorkloadSnapshot
+    _environment: Environment,
+    _expected: MaintenanceWorkloadSnapshot
   ): Promise<Receipt> {
-    const current = await this.observeMaintenanceWorkload(environment, expected.serviceId, expected.workloadKind);
-    if (current.state === 'suspended') {
-      return { success: true, message: `Cloud Run workload ${expected.serviceId} is already suspended`, data: { applied: 0, skipped: 1 } };
-    }
-    if (current.state !== 'running') {
-      return { success: false, message: 'Cloud Run workload was not suspended', error: 'The bound workload state is unknown.' };
-    }
-    const token = await this.getAccessToken();
-    if (expected.workloadKind === 'cron') {
-      await this.mutateSchedulerState(String(current.providerState?.schedulerJobName ?? ''), 'pause', token);
-      await this.quiesceCloudRunJob(String(current.providerState?.jobName ?? ''), token);
-    } else {
-      await this.updateMaintenanceScaling(expected.serviceId, { scalingMode: 'MANUAL', manualInstanceCount: 0 }, token);
-    }
-    const verified = await this.waitForMaintenanceState(environment, expected, 'suspended');
-    return verified
-      ? { success: true, message: `Suspended Cloud Run workload ${expected.serviceId}`, data: { applied: 1, skipped: 0 } }
-      : { success: false, message: 'Cloud Run suspension was not verified', error: 'The provider did not report a suspended workload before the verification deadline.' };
+    return this.maintenanceEnginePlanRequired();
   }
 
   async resumeMaintenanceWorkload(
-    environment: Environment,
-    snapshot: MaintenanceWorkloadSnapshot
+    _environment: Environment,
+    _snapshot: MaintenanceWorkloadSnapshot
   ): Promise<Receipt> {
-    const current = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
-    if (!snapshot.wasRunning) {
-      return current.state === 'suspended'
-        ? { success: true, message: `Cloud Run workload ${snapshot.serviceId} was stopped before maintenance`, data: { applied: 0, skipped: 1 } }
-        : { success: false, message: 'Cloud Run restoration was blocked', error: 'A workload that was previously stopped is now running.' };
-    }
-    if (current.state === 'running') {
-      return { success: true, message: `Cloud Run workload ${snapshot.serviceId} is already running`, data: { applied: 0, skipped: 1 } };
-    }
-    if (current.state !== 'suspended') {
-      return { success: false, message: 'Cloud Run workload was not restored', error: 'The bound workload state is unknown.' };
-    }
-    const token = await this.getAccessToken();
-    if (snapshot.workloadKind === 'cron') {
-      await this.mutateSchedulerState(String(snapshot.providerState?.schedulerJobName ?? ''), 'resume', token);
-    } else {
-      const prior = snapshot.providerState?.scaling;
-      if (!prior || typeof prior !== 'object' || Array.isArray(prior)) {
-        return { success: false, message: 'Cloud Run workload was not restored', error: 'The exact pre-maintenance scaling configuration is missing.' };
-      }
-      await this.updateMaintenanceScaling(snapshot.serviceId, prior as Record<string, unknown>, token);
-    }
-    const verified = await this.waitForMaintenanceState(environment, snapshot, 'running');
-    return verified
-      ? { success: true, message: `Restored Cloud Run workload ${snapshot.serviceId}`, data: { applied: 1, skipped: 0 } }
-      : { success: false, message: 'Cloud Run restoration was not verified', error: 'The provider did not report a running workload before the verification deadline.' };
+    return this.maintenanceEnginePlanRequired();
   }
 
-  private async updateMaintenanceScaling(
-    serviceName: string,
-    scaling: Record<string, unknown>,
-    token: string
-  ): Promise<void> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const automatic = scaling.scalingMode === 'AUTOMATIC' || scaling.scalingMode === undefined;
-    const body = automatic
-      ? { launchStage: 'BETA', scaling: { ...scaling, scalingMode: 'AUTOMATIC', manualInstanceCount: null } }
-      : { scaling };
-    const updateMask = automatic
-      ? 'launchStage,scaling.scalingMode,scaling.manualInstanceCount,scaling.minInstanceCount,scaling.maxInstanceCount'
-      : 'scaling.scalingMode,scaling.manualInstanceCount,scaling.minInstanceCount,scaling.maxInstanceCount';
-    const response = await fetch(
-      `https://run.googleapis.com/v2/projects/${this.credentials.projectId}/locations/${this.credentials.region}/services/${encodeURIComponent(serviceName)}?updateMask=${encodeURIComponent(updateMask)}`,
-      {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }
-    );
-    if (!response.ok) throw new Error(`Cloud Run maintenance scaling failed (${response.status}).`);
-  }
-
-  private async mutateSchedulerState(
-    schedulerJobName: string,
-    operation: 'pause' | 'resume',
-    token: string
-  ): Promise<void> {
-    if (!this.credentials || !schedulerJobName) throw new Error('Cloud Scheduler identity is missing.');
-    const response = await fetch(
-      `https://cloudscheduler.googleapis.com/v1/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${encodeURIComponent(schedulerJobName)}:${operation}`,
-      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' }
-    );
-    if (!response.ok) throw new Error(`Cloud Scheduler ${operation} failed (${response.status}).`);
+  private maintenanceEnginePlanRequired(): Receipt {
+    return {
+      success: false,
+      message: 'Cloud Run maintenance mutations are unavailable in the infrastructure engine.',
+      error: 'Service scaling and schedule changes require a reviewed infrastructure plan. Hypervibe cannot perform this maintenance operation until engine support is available; read-only workload status remains available.',
+      data: { applied: 0, skipped: 1, mutationAttempted: false, code: 'ENGINE_MAINTENANCE_UNSUPPORTED' },
+    };
   }
 
   private async listCloudRunJobExecutionsStrict(
@@ -3480,6 +1630,10 @@ export class CloudRunAdapter implements
   ): Promise<CloudRunExecution[]> {
     if (!this.credentials || !jobName) throw new Error('Cloud Run job identity is missing.');
     const executions: CloudRunExecution[] = [];
+    const jobResourceName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`;
+    const executionPrefix = `${jobResourceName}/executions/`;
+    const executionNames = new Set<string>();
+    const pageTokens = new Set<string>();
     let pageToken: string | undefined;
     for (let page = 1; page <= 20; page += 1) {
       const query = new URLSearchParams({ pageSize: '1000' });
@@ -3491,59 +1645,42 @@ export class CloudRunAdapter implements
       if (!response.ok) {
         throw new Error(`Cloud Run execution observation failed (${response.status}).`);
       }
-      const body = await response.json() as {
-        executions?: CloudRunExecution[];
-        nextPageToken?: string;
-      };
-      executions.push(...(body.executions ?? []));
-      pageToken = body.nextPageToken;
+      const rawBody: unknown = await response.json();
+      if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
+        throw new Error('Cloud Run execution inventory is malformed.');
+      }
+      const body = rawBody as Record<string, unknown>;
+      if (body.executions !== undefined && !Array.isArray(body.executions)) {
+        throw new Error('Cloud Run execution inventory is malformed.');
+      }
+      for (const rawExecution of body.executions ?? []) {
+        if (!rawExecution || typeof rawExecution !== 'object' || Array.isArray(rawExecution)) {
+          throw new Error('Cloud Run execution is malformed.');
+        }
+        const execution = rawExecution as CloudRunExecution;
+        if (typeof execution.name !== 'string' || !execution.name.startsWith(executionPrefix)
+          || !/^[a-zA-Z0-9_-]+$/.test(execution.name.slice(executionPrefix.length))
+          || executionNames.has(execution.name)
+          || (execution.job !== undefined && execution.job !== jobResourceName)
+          || (execution.reconciling !== undefined && typeof execution.reconciling !== 'boolean')
+          || (execution.runningCount !== undefined && (!Number.isSafeInteger(execution.runningCount) || execution.runningCount < 0))
+          || (execution.completionTime !== undefined && (typeof execution.completionTime !== 'string'
+            || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(execution.completionTime)
+            || !Number.isFinite(Date.parse(execution.completionTime))))) {
+          throw new Error('Cloud Run execution identity or completion could not be verified.');
+        }
+        executionNames.add(execution.name);
+        executions.push(execution);
+      }
+      if (body.nextPageToken !== undefined && typeof body.nextPageToken !== 'string') {
+        throw new Error('Cloud Run execution pagination is malformed.');
+      }
+      pageToken = body.nextPageToken as string | undefined;
       if (!pageToken) return executions;
+      if (pageTokens.has(pageToken)) throw new Error('Cloud Run execution pagination repeated.');
+      pageTokens.add(pageToken);
     }
     throw new Error('Cloud Run execution observation exceeded the safe pagination bound.');
-  }
-
-  private async quiesceCloudRunJob(jobName: string, token: string): Promise<void> {
-    if (!this.credentials || !jobName) throw new Error('Cloud Run job identity is missing.');
-    const cancelled = new Set<string>();
-    for (let attempt = 1; attempt <= 120; attempt += 1) {
-      const executions = await this.listCloudRunJobExecutionsStrict(jobName, token);
-      const running = executions.filter((execution) => this.executionStatus(execution) === 'running');
-      if (running.length === 0) return;
-      for (const execution of running) {
-        const executionName = this.lastPathSegment(execution.name);
-        if (!executionName || cancelled.has(executionName)) continue;
-        const response = await fetch(
-          `https://run.googleapis.com/v2/projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${encodeURIComponent(jobName)}/executions/${encodeURIComponent(executionName)}:cancel`,
-          {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: '{}',
-          }
-        );
-        if (!response.ok && response.status !== 409) {
-          throw new Error(`Cloud Run execution cancellation failed (${response.status}).`);
-        }
-        cancelled.add(executionName);
-      }
-      if (attempt < 120) {
-        await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
-      }
-    }
-    throw new Error('Cloud Run job executions did not reach terminal state before the verification deadline.');
-  }
-
-  private async waitForMaintenanceState(
-    environment: Environment,
-    snapshot: MaintenanceWorkloadSnapshot,
-    expected: 'running' | 'suspended'
-  ): Promise<boolean> {
-    for (let attempt = 1; attempt <= 120; attempt += 1) {
-      const observed = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
-      if (observed.state === expected) return true;
-      if (observed.state === 'unknown') return false;
-      if (attempt < 120) await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
-    }
-    return false;
   }
 
   // Helper methods
@@ -3555,53 +1692,6 @@ export class CloudRunAdapter implements
 
   private domainMappingRegionSupported(): boolean {
     return CLOUD_RUN_DOMAIN_MAPPING_REGIONS.has(this.credentials!.region);
-  }
-
-  private assertDomainMappingScope(params: {
-    environmentId: string;
-    serviceId: string;
-    domain: string;
-  }): void {
-    if (!this.domainMappingRegionSupported()) {
-      throw new Error(`Cloud Run native domain mappings are unavailable in ${this.credentials!.region}. Use a declarative external Application Load Balancer instead; DNS was not changed for ${params.domain}.`);
-    }
-    if (params.environmentId !== this.credentials!.region) {
-      throw new Error(`Cloud Run environment binding ${params.environmentId} does not match configured region ${this.credentials!.region}.`);
-    }
-    if (!params.serviceId || params.serviceId.includes('/')) {
-      throw new Error(`Cloud Run service binding ${params.serviceId} is invalid.`);
-    }
-  }
-
-  private async getCloudRunServiceStrict(
-    serviceName: string,
-    token: string
-  ): Promise<CloudRunService | null> {
-    const { projectId, region } = this.credentials!;
-    const response = await fetch(
-      `https://run.googleapis.com/v2/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(region)}/services/${encodeURIComponent(serviceName)}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw new Error(`Cloud Run service observation failed with HTTP ${response.status}.`);
-    }
-    return await response.json() as CloudRunService;
-  }
-
-  private async getCloudRunDomainMapping(
-    domain: string,
-    token: string
-  ): Promise<CloudRunDomainMapping | null> {
-    const response = await fetch(
-      `${this.domainMappingBaseUrl()}/${encodeURIComponent(domain)}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw new Error(`Cloud Run domain-mapping observation failed with HTTP ${response.status}.`);
-    }
-    return await response.json() as CloudRunDomainMapping;
   }
 
   private async listCloudRunDomainMappings(
@@ -3641,50 +1731,6 @@ export class CloudRunAdapter implements
       continuation = body.metadata?.continue || undefined;
     } while (continuation);
     return mappings;
-  }
-
-  private async createCloudRunDomainMapping(
-    domain: string,
-    serviceId: string,
-    token: string
-  ): Promise<CloudRunDomainMapping> {
-    const response = await fetch(this.domainMappingBaseUrl(), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        apiVersion: 'domains.cloudrun.com/v1',
-        kind: 'DomainMapping',
-        metadata: {
-          name: domain,
-          namespace: this.credentials!.projectId,
-        },
-        spec: {
-          routeName: serviceId,
-          certificateMode: 'AUTOMATIC',
-        },
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Cloud Run domain-mapping create failed with HTTP ${response.status}. Verify base-domain ownership and run.domainmappings.create permission.`);
-    }
-    return await response.json() as CloudRunDomainMapping;
-  }
-
-  private async deleteCloudRunDomainMapping(
-    domain: string,
-    token: string
-  ): Promise<void> {
-    const response = await fetch(
-      `${this.domainMappingBaseUrl()}/${encodeURIComponent(domain)}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (response.status === 404) return;
-    if (!response.ok) {
-      throw new Error(`Cloud Run domain-mapping delete failed with HTTP ${response.status}.`);
-    }
   }
 
   private assertDomainMappingIdentity(
@@ -3826,7 +1872,7 @@ export class CloudRunAdapter implements
       'Cloud Logging API error: 403 Permission denied for all log views.',
       'Cloud Run deploys can continue, but logs_service will fail until the Cloud Run connection service account has Cloud Logging read access.',
       'Required roles: roles/logging.viewer and roles/logging.viewAccessor.',
-      `Commands: gcloud projects add-iam-policy-binding ${projectId} --member="${member}" --role="roles/logging.viewer"; gcloud projects add-iam-policy-binding ${projectId} --member="${member}" --role="roles/logging.viewAccessor"`,
+      `Review and apply the GCP setup plan with hv_connections action="prepare" for ${member} on project ${projectId}.`,
       `Original error: ${text}`,
     ].join(' ');
   }
@@ -3983,15 +2029,6 @@ export class CloudRunAdapter implements
     return externalId.startsWith(`${prefix}-`) ? externalId.slice(prefix.length + 1) : externalId;
   }
 
-  private requiredScheduledJobCommand(service: Service): string {
-    const command = service.buildConfig.startCommand?.trim();
-    if (command) return command;
-    throw new Error(
-      `Scheduled job ${service.name} has no explicit startCommand. `
-      + 'Hypervibe will not substitute an application-language command.'
-    );
-  }
-
   private containerStartCommand(container: CloudRunContainer | undefined): string | undefined {
     if (!container) {
       return undefined;
@@ -4080,105 +2117,6 @@ export class CloudRunAdapter implements
     return 'running';
   }
 
-  private async executeCloudRunJob(
-    jobName: string,
-    token: string
-  ): Promise<{ operation: CloudRunOperation; execution: CloudRunExecution | null }> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const { projectId, region } = this.credentials;
-    const response = await fetch(
-      `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}:run`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      }
-    );
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Cloud Run Jobs run error: ${response.status} ${text}`);
-    }
-
-    const operation = await response.json() as CloudRunOperation;
-    const execution = await this.waitForCloudRunJobExecution(operation, jobName, token);
-    return { operation, execution };
-  }
-
-  private async waitForCloudRunJobExecution(
-    operation: CloudRunOperation,
-    jobName: string,
-    token: string,
-    timeoutMs = 10 * 60 * 1000
-  ): Promise<CloudRunExecution | null> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const deadline = Date.now() + timeoutMs;
-    let current = operation;
-    const { projectId, region } = this.credentials;
-    const operationPrefix = `projects/${projectId}/locations/${region}/operations/`;
-    const executionPrefix = `projects/${projectId}/locations/${region}/jobs/${jobName}/executions/`;
-    if (!operation.name?.startsWith(operationPrefix) || operation.name.length <= operationPrefix.length) {
-      throw new Error('Cloud Run Jobs run response did not include a trackable operation identity.');
-    }
-    const operationName = operation.name;
-
-    while (Date.now() < deadline) {
-      if (current.name !== operationName) {
-        throw new Error('Cloud Run job execution status returned a different operation identity.');
-      }
-      if (current.done) {
-        if (current.error) {
-          throw new Error(
-            `Cloud Run job execution operation failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim()
-          );
-        }
-        if (!current.response) {
-          throw new Error('Cloud Run job execution operation completed without returning its exact execution.');
-        }
-
-        let execution = current.response;
-        if (!execution.name?.startsWith(executionPrefix) || execution.name.length <= executionPrefix.length) {
-          throw new Error(`Cloud Run job execution operation returned a different execution identity for ${jobName}.`);
-        }
-        const exactExecutionName = execution.name;
-        while (Date.now() < deadline) {
-          const status = this.executionStatus(execution);
-          if (status === 'completed' || status === 'failed') return execution;
-          if (!execution.name) {
-            throw new Error('Cloud Run job execution response did not include an execution name.');
-          }
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          const response = await fetch(`https://run.googleapis.com/v2/${execution.name}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`Cloud Run execution status check failed: ${response.status} ${text}`);
-          }
-          execution = await response.json() as CloudRunExecution;
-          if (execution.name !== exactExecutionName) {
-            throw new Error(`Cloud Run execution lookup returned a different execution identity for ${jobName}.`);
-          }
-        }
-        return null;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      const response = await fetch(`https://run.googleapis.com/v2/${operationName}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Cloud Run job execution operation status check failed: ${response.status} ${text}`);
-      }
-      current = await response.json() as CloudRunOperation;
-    }
-
-    return null;
-  }
-
   private lastPathSegment(value?: string): string | undefined {
     if (!value) return undefined;
     const parts = value.split('/').filter(Boolean);
@@ -4233,24 +2171,6 @@ export class CloudRunAdapter implements
 
   private migrationJobName(serviceName: string): string {
     return cloudRunMigrationJobName(serviceName);
-  }
-
-  private assertReleaseJobConfiguration(
-    job: CloudRunJob,
-    jobName: string,
-    jobSpec: Record<string, unknown>
-  ): void {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const mismatch = cloudRunReleaseJobConfigurationMismatch(
-      job,
-      `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`,
-      jobSpec
-    );
-    if (mismatch) {
-      throw new Error(
-        `Cloud Run release job ${jobName} did not converge to the exact candidate ${mismatch}; refusing to execute it.`
-      );
-    }
   }
 
   private isArtifactRepositoryName(name: string): boolean {
@@ -4328,7 +2248,11 @@ export class CloudRunAdapter implements
       const body = await response.text();
       throw new Error(`Artifact Registry repository lookup failed: ${response.status} ${body}`);
     }
-    return await response.json() as ArtifactRepository;
+    const repository = await response.json() as ArtifactRepository | null;
+    if (repository?.name !== name) {
+      throw new Error(`Artifact Registry returned a different repository identity; expected ${name}.`);
+    }
+    return repository;
   }
 
   private assertArtifactRepository(
@@ -4368,90 +2292,8 @@ export class CloudRunAdapter implements
     };
   }
 
-  private async waitForArtifactRegistryOperation(
-    token: string,
-    operation: CloudRunOperation,
-    description: string,
-    expectedResponseName?: string
-  ): Promise<void> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const operationPrefix = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/operations/`;
-    if (
-      !operation.name?.startsWith(operationPrefix)
-      || operation.name.length <= operationPrefix.length
-      || operation.name.slice(operationPrefix.length).includes('/')
-    ) {
-      throw new Error(`Artifact Registry ${description} response did not include an exact operation identity.`);
-    }
-    const operationName = operation.name;
-    let current = operation;
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      if (current.name !== operationName) {
-        throw new Error(`Artifact Registry ${description} status returned a different operation identity.`);
-      }
-      if (current.done) {
-        if (current.error) {
-          throw new Error(`Artifact Registry ${description} failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim());
-        }
-        if (expectedResponseName && current.response !== undefined) {
-          if (current.response?.name !== expectedResponseName) {
-            throw new Error(`Artifact Registry ${description} returned a different repository identity.`);
-          }
-        }
-        return;
-      }
-      await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
-      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${operationName}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Artifact Registry ${description} operation lookup failed: ${response.status} ${body}`);
-      }
-      current = await response.json() as CloudRunOperation;
-    }
-    throw new Error(`Artifact Registry ${description} did not finish before timeout`);
-  }
-
   private escapeLoggingValue(value: string): string {
     return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  }
-
-  private shouldAllowUnauthenticated(service: Service): boolean {
-    if (typeof service.buildConfig.public === 'boolean') {
-      return service.buildConfig.public;
-    }
-    return serviceWorkloadKind(service) === 'web';
-  }
-
-  private async ensurePublicInvoker(serviceName: string, token: string): Promise<boolean> {
-    const role = 'roles/run.invoker';
-    const member = 'allUsers';
-    const resource = this.cloudRunServiceResource(serviceName);
-    const policy = await this.getServiceIamPolicy(resource, token);
-    const bindings = (policy.bindings ?? []).map((binding) => ({
-      ...binding,
-      members: [...(binding.members ?? [])],
-    }));
-
-    const alreadyPublic = this.hasIamBinding(bindings, role, member);
-    if (alreadyPublic) {
-      return false;
-    }
-
-    const invokerBinding = bindings.find((binding) => binding.role === role && !binding.condition);
-    if (invokerBinding) {
-      invokerBinding.members = Array.from(new Set([...(invokerBinding.members ?? []), member]));
-    } else {
-      bindings.push({ role, members: [member] });
-    }
-
-    await this.setServiceIamPolicy(resource, { ...policy, bindings }, token);
-    const updatedPolicy = await this.getServiceIamPolicy(resource, token);
-    if (!this.hasIamBinding(updatedPolicy.bindings ?? [], role, member)) {
-      throw new Error(`Cloud Run IAM policy update for ${serviceName} completed but ${member} is still missing ${role}`);
-    }
-    return true;
   }
 
   private hasIamBinding(bindings: IamBinding[], role: string, member: string): boolean {
@@ -4460,197 +2302,6 @@ export class CloudRunAdapter implements
       && !binding.condition
       && (binding.members ?? []).includes(member)
     );
-  }
-
-  private async ensureProjectIamBindings(params: {
-    token: string;
-    member: string;
-    roles: string[];
-  }): Promise<string[]> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    let policy: IamPolicy;
-    try {
-      policy = await this.getProjectIamPolicy(params.token);
-    } catch (error) {
-      if (!this.isDisabledApiError(error, 'cloudresourcemanager.googleapis.com')) {
-        throw error;
-      }
-      await this.enableGoogleService(params.token, 'cloudresourcemanager.googleapis.com');
-      policy = await this.getProjectIamPolicy(params.token);
-    }
-    const bindings = (policy.bindings ?? []).map((binding) => ({
-      ...binding,
-      members: [...(binding.members ?? [])],
-    }));
-    const updatedRoles: string[] = [];
-
-    for (const role of params.roles) {
-      const existing = bindings.find((binding) => binding.role === role && !binding.condition);
-      if (existing?.members?.includes(params.member)) {
-        continue;
-      }
-      if (existing) {
-        existing.members = Array.from(new Set([...(existing.members ?? []), params.member]));
-      } else {
-        bindings.push({ role, members: [params.member] });
-      }
-      updatedRoles.push(role);
-    }
-
-    if (updatedRoles.length > 0) {
-      await this.setProjectIamPolicy({ ...policy, bindings }, params.token);
-    }
-
-    return updatedRoles;
-  }
-
-  private async getProjectIamPolicy(token: string): Promise<IamPolicy> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${this.credentials.projectId}:getIamPolicy`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({}),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`GCP project IAM policy lookup failed: ${response.status} ${text}`);
-    }
-
-    return await response.json() as IamPolicy;
-  }
-
-  private async enableGoogleService(token: string, serviceName: string): Promise<void> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const response = await fetch(
-      `https://serviceusage.googleapis.com/v1/projects/${this.credentials.projectId}/services/${serviceName}:enable`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      }
-    );
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(
-        `Cloud Resource Manager API is disabled and Hypervibe could not enable ${serviceName}: ${response.status} ${text}. ` +
-        'Grant the connection service account serviceusage.services.enable permission or enable the API once in GCP.'
-      );
-    }
-
-    const operation = await response.json() as CloudRunOperation;
-    if (operation.name) {
-      await this.waitForServiceUsageOperation(token, operation, `enable ${serviceName}`);
-    }
-  }
-
-  private async waitForServiceUsageOperation(
-    token: string,
-    operation: CloudRunOperation,
-    description: string
-  ): Promise<void> {
-    if (!operation.name || !operation.name.includes('/')) {
-      return;
-    }
-
-    let current = operation;
-    for (let attempt = 0; attempt < 60; attempt++) {
-      if (current.done) {
-        if (current.error) {
-          throw new Error(
-            `Service Usage ${description} operation failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim()
-          );
-        }
-        return;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      const response = await fetch(`https://serviceusage.googleapis.com/v1/${operation.name}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Service Usage ${description} operation status check failed: ${response.status} ${text}`);
-      }
-      current = await response.json() as CloudRunOperation;
-    }
-
-    throw new Error(`Service Usage ${description} operation did not finish before timeout`);
-  }
-
-  private isDisabledApiError(error: unknown, serviceName: string): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return this.isDisabledApiMessage(message, serviceName);
-  }
-
-  private isDisabledApiMessage(message: string, serviceName: string): boolean {
-    return message.includes(serviceName) && /disabled|has not been used/i.test(message);
-  }
-
-  private async setProjectIamPolicy(policy: IamPolicy, token: string): Promise<void> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${this.credentials.projectId}:setIamPolicy`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ policy }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`GCP project IAM policy update failed: ${response.status} ${text}`);
-    }
-  }
-
-  private async ensureScheduledJobInvoker(resource: string, principal: string, token: string): Promise<boolean> {
-    const read = async () => {
-      const value = await this.getServiceIamPolicy(resource, token, 3);
-      const policy = z.object({
-        etag: z.string().min(1), version: z.number().int().optional(),
-        bindings: z.array(z.object({ role: z.string().min(1), members: z.array(z.string().min(1)),
-          condition: z.object({ expression: z.string().min(1) }).passthrough().optional(),
-        }).passthrough()).optional(),
-      }).passthrough().parse(value);
-      if (policy.bindings?.some(binding => binding.condition) && policy.version !== 3) {
-        throw new Error('Conditional Job IAM bindings require policy version 3.');
-      }
-      return policy;
-    };
-    const policy = await read();
-    const role = 'roles/run.invoker';
-    const member = `serviceAccount:${principal}`;
-    if (this.hasIamBinding(policy.bindings ?? [], role, member)) return false;
-    const bindings = (policy.bindings ?? []).map(binding => ({ ...binding, members: [...binding.members] }));
-    const existing = bindings.find(binding => binding.role === role && !binding.condition);
-    if (existing) existing.members.push(member);
-    else bindings.push({ role, members: [member] });
-    await this.setServiceIamPolicy(resource, { ...policy, version: 3, bindings }, token, 'bindings,etag,version');
-    const verified = await read();
-    if (!this.hasIamBinding(verified.bindings ?? [], role, member)) {
-      throw new Error('The scheduled Job invocation grant could not be verified.');
-    }
-    return true;
   }
 
   private async getServiceIamPolicy(resource: string, token: string, policyVersion?: number): Promise<IamPolicy> {
@@ -4669,94 +2320,12 @@ export class CloudRunAdapter implements
     return await response.json() as IamPolicy;
   }
 
-  private async setServiceIamPolicy(resource: string, policy: IamPolicy, token: string, updateMask?: string): Promise<void> {
-    const response = await fetch(`https://run.googleapis.com/v2/${resource}:setIamPolicy`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ policy, ...(updateMask ? { updateMask } : {}) }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Cloud Run IAM policy update failed: ${response.status} ${text}`);
-    }
-  }
-
   private cloudRunServiceResource(serviceName: string): string {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
     const { projectId, region } = this.credentials;
     return `projects/${projectId}/locations/${region}/services/${serviceName}`;
-  }
-
-  private async buildHoldingImageForService(
-    service: Service,
-    environment: Environment,
-    envVars: Record<string, string>
-  ): Promise<CloudBuildResult> {
-    if (!this.credentials) {
-      return { success: false, error: 'Not connected. Call connect() first.' };
-    }
-
-    try {
-      const token = await this.getAccessToken();
-      const { projectId, region } = this.credentials;
-      const repository = this.sanitizeName(envVars['HYPERVIBE_ARTIFACT_REPOSITORY']?.trim() || 'hypervibe');
-      const imageName = this.sanitizeName(`${environment.name}-${service.name}-bootstrap`);
-      const imageUri = `${region}-docker.pkg.dev/${projectId}/${repository}/${imageName}:holding-v1`;
-
-      await this.ensureArtifactRepository(repository, token);
-      const dockerfile = [
-        'FROM node:24-slim',
-        'ENV PORT=8080',
-        'EXPOSE 8080',
-        'CMD ["node", "-e", "require(\'http\').createServer((_request,response)=>{response.statusCode=503;response.end(\'Deployment pending\');}).listen(process.env.PORT||8080)"]',
-        '',
-      ].join('\n');
-      const dockerfileBase64 = Buffer.from(dockerfile, 'utf8').toString('base64');
-      const buildRequest = {
-        steps: [{
-          name: 'gcr.io/cloud-builders/docker',
-          entrypoint: 'bash',
-          args: [
-            '-lc',
-            [
-              'set -euo pipefail',
-              `printf '%s' '${dockerfileBase64}' | base64 --decode > Dockerfile.hypervibe-bootstrap`,
-              `docker build --pull -t ${JSON.stringify(imageUri)} -f Dockerfile.hypervibe-bootstrap .`,
-            ].join('\n'),
-          ],
-        }],
-        images: [imageUri],
-        timeout: '1200s',
-      };
-      const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(buildRequest),
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Cloud Build holding-image submission failed: ${response.status} ${text}`);
-      }
-      const build = await response.json() as CloudBuildStatus | CloudBuildOperation;
-      const result = await this.waitForCloudBuild(token, build, imageUri);
-      return {
-        success: true,
-        imageUri: result.imageUri,
-        buildId: result.id,
-        logsUrl: result.logsUrl,
-      };
-    } catch (error) {
-      return { success: false, error: this.formatError(error) };
-    }
   }
 
   private async buildImageForService(
@@ -4793,7 +2362,7 @@ export class CloudRunAdapter implements
       );
       const imageUri = `${region}-docker.pkg.dev/${projectId}/${repository}/${imageName}:${tag}`;
 
-      await this.ensureArtifactRepository(repository, token);
+      await this.verifyArtifactRepository(repository, token);
       const build = await this.submitCloudBuild({
         token,
         service,
@@ -4817,68 +2386,16 @@ export class CloudRunAdapter implements
     }
   }
 
-  private async ensureArtifactRepository(repository: string, token: string): Promise<void> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
+  /** Releases may use an existing repository, but never create infrastructure. */
+  private async verifyArtifactRepository(repository: string, token: string): Promise<void> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const { projectId, region } = this.credentials;
-    const baseUrl = `https://artifactregistry.googleapis.com/v1/projects/${projectId}/locations/${region}/repositories`;
     const repositoryName = `projects/${projectId}/locations/${region}/repositories/${repository}`;
-    const existing = await fetch(`${baseUrl}/${repository}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (existing.ok) {
-      this.assertArtifactRepository(
-        await existing.json() as ArtifactRepository,
-        repositoryName
-      );
-      return;
+    const existing = await this.getArtifactRepository(repositoryName, token);
+    if (!existing) {
+      throw new Error(`Artifact Registry repository ${repositoryName} is not ready. Review and apply the project infrastructure setup plan, then retry the release.`);
     }
-
-    if (existing.status !== 404) {
-      const text = await existing.text();
-      throw new Error(`Artifact Registry lookup failed: ${existing.status} ${text}`);
-    }
-
-    const created = await fetch(`${baseUrl}?repositoryId=${encodeURIComponent(repository)}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        format: 'DOCKER',
-        description: 'Container images built by Hypervibe',
-      }),
-    });
-
-    if (!created.ok) {
-      const text = await created.text();
-      throw new Error(`Artifact Registry repository creation failed: ${created.status} ${text}`);
-    }
-
-    const operation = await created.json() as CloudRunOperation;
-    await this.waitForArtifactRegistryOperation(
-      token,
-      operation,
-      'repository create',
-      repositoryName
-    );
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      const ready = await this.getArtifactRepository(repositoryName, token);
-      if (ready) {
-        this.assertArtifactRepository(ready, repositoryName);
-        return;
-      }
-      if (attempt < 119) {
-        await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
-      }
-    }
-    throw new Error(
-      `Artifact Registry repository ${repositoryName} remained absent after its create operation completed.`
-    );
+    this.assertArtifactRepository(existing, repositoryName);
   }
 
   private async submitCloudBuild(params: {
@@ -4887,6 +2404,8 @@ export class CloudRunAdapter implements
     sourceRepoUrl: string;
     revision: string;
     imageUri: string;
+    /** Build from an uploaded archive instead of cloning a git URL. */
+    storageSource?: { bucket: string; object: string };
   }): Promise<{
     id?: string;
     logsUrl?: string;
@@ -4898,19 +2417,21 @@ export class CloudRunAdapter implements
     }
 
     const { projectId } = this.credentials;
-    const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
+    const submit = (buildIdentity?: string) => fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${params.token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        source: {
-          gitSource: {
-            url: params.sourceRepoUrl,
-            revision: params.revision,
+        source: params.storageSource
+          ? { storageSource: params.storageSource }
+          : {
+            gitSource: {
+              url: params.sourceRepoUrl,
+              revision: params.revision,
+            },
           },
-        },
         steps: [{
           name: 'gcr.io/cloud-builders/docker',
           entrypoint: 'bash',
@@ -4918,9 +2439,27 @@ export class CloudRunAdapter implements
         }],
         images: [params.imageUri],
         timeout: '1200s',
+        // A user-specified build identity requires an explicit logging mode.
+        ...(buildIdentity
+          ? { serviceAccount: `projects/${projectId}/serviceAccounts/${buildIdentity}`, options: { logging: 'CLOUD_LOGGING_ONLY' } }
+          : {}),
       }),
     });
 
+    let response = await submit();
+    if (response.status === 403) {
+      const text = await response.text();
+      const deployIdentity = this.serviceAccountCreds?.client_email;
+      // Newer projects build as the Compute Engine default account (Editor).
+      // Never act as it; build as the deployment identity instead.
+      if (!/act as service account/i.test(text) || !deployIdentity) {
+        throw new Error(`Cloud Build submission failed: ${response.status} ${text}`);
+      }
+      response = await submit(deployIdentity);
+      if (response.status === 403) {
+        throw new Error('Cloud Build cannot run as the Hypervibe deployment identity yet. Re-run GCP setup (hv_connections action="prepare" for cloudrun) to grant the build permissions, then retry.');
+      }
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`Cloud Build submission failed: ${response.status} ${text}`);
@@ -5041,6 +2580,8 @@ export class CloudRunAdapter implements
 
     return [
       'set -euo pipefail',
+      // Generated Dockerfiles mount the optional package token as a build secret.
+      'export DOCKER_BUILDKIT=1',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
       `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,
@@ -5121,14 +2662,14 @@ export class CloudRunAdapter implements
     const jwt = await this.createJwt(header, payload, this.serviceAccountCreds.private_key);
 
     // Exchange JWT for access token
-    const response = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await fetchWithRetry('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
         assertion: jwt,
       }),
-    });
+    }, 4, true);
 
     if (!response.ok) {
       const text = await response.text();
@@ -5216,125 +2757,8 @@ export class CloudRunAdapter implements
     return (await response.json()) as CloudRunService;
   }
 
-  private async currentImageForDeferredDeployment(
-    service: Service,
-    environment: Environment
-  ): Promise<DeferredWorkloadEvidence> {
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
-    };
-    const serviceBinding = bindings.services?.[service.name];
-    if (serviceWorkloadKind(service) === 'cron') {
-      const expectedExisting = Boolean(serviceBinding?.jobName);
-      const jobName = this.workloadResourceName(environment, service.name, serviceBinding?.jobName);
-      const token = await this.getAccessToken();
-      const job = await this.getCloudRunJob(jobName, token);
-      if (!expectedExisting && !job) {
-        const scheduler = await this.getCloudSchedulerJob(this.schedulerResourceName(jobName), token);
-        if (scheduler) {
-          throw new Error('An unbound scheduler already targets the fresh workload namespace; explicit reconciliation is required before bootstrap.');
-        }
-      }
-      const imageUri = this.primaryJobContainer(job)?.image;
-      return {
-        expectedExisting,
-        observedExisting: Boolean(job),
-        ...(imageUri ? { imageUri } : {}),
-        ...(this.jobRuntimeIdentity(job)
-          ? { runtimeServiceAccountEmail: this.jobRuntimeIdentity(job) }
-          : {}),
-      };
-    }
-
-    const expectedExisting = Boolean(serviceBinding?.serviceId);
-    const serviceName = this.workloadResourceName(environment, service.name, serviceBinding?.serviceId);
-    const current = await this.getService(serviceName);
-    const imageUri = this.primaryContainer(current)?.image;
-    return {
-      expectedExisting,
-      observedExisting: Boolean(current),
-      ...(imageUri ? { imageUri } : {}),
-      ...(this.serviceRuntimeIdentity(current)
-        ? { runtimeServiceAccountEmail: this.serviceRuntimeIdentity(current) }
-        : {}),
-    };
-  }
-
-  private deferredWorkloadProblem(
-    evidence: DeferredWorkloadEvidence,
-    resource: 'service' | 'scheduled job',
-    expectedImageUri?: string
-  ): DeferredWorkloadProblem | undefined {
-    if (!evidence.expectedExisting && evidence.observedExisting) {
-      return {
-        phase: 'adoption_required',
-        error: `An unbound same-name Cloud Run ${resource} already exists; explicit adoption with hv_import is required before Hypervibe can mutate it.`,
-      };
-    }
-    if (evidence.expectedExisting && !evidence.observedExisting) {
-      return {
-        phase: 'binding_missing',
-        error: `The bound Cloud Run ${resource} is no longer observable; re-run hv_plan before mutation.`,
-      };
-    }
-    if (!evidence.observedExisting) return undefined;
-    if (!evidence.imageUri || !this.isImmutableContainerImage(evidence.imageUri)) {
-      return {
-        phase: 'image_evidence',
-        error: `The provider-observed Cloud Run ${resource} image must be an immutable repo@sha256 digest before a deferred revision can be created.`,
-      };
-    }
-    if (expectedImageUri && evidence.imageUri !== expectedImageUri) {
-      return {
-        phase: 'stale_provider_state',
-        error: `The provider-observed Cloud Run ${resource} image changed during deferred reconciliation; re-run hv_plan before mutation.`,
-      };
-    }
-    const expectedRuntimeIdentity = this.credentials?.runtimeServiceAccountEmail?.trim();
-    if (!expectedRuntimeIdentity || evidence.runtimeServiceAccountEmail !== expectedRuntimeIdentity) {
-      return {
-        phase: 'runtime_identity_evidence',
-        error: `The Cloud Run ${resource} does not use the exact runtime service account from the verified connection; refusing to create a deferred revision.`,
-      };
-    }
-    return undefined;
-  }
-
-  private deferredDeployFailure(
-    service: Service,
-    problem: DeferredWorkloadProblem
-  ): DeployResult {
-    return {
-      serviceId: service.id,
-      status: 'failed',
-      receipt: {
-        success: false,
-        message: `Cloud Run deferred configuration is blocked for ${service.name}`,
-        error: problem.error,
-        data: { provider: this.name, phase: problem.phase },
-      },
-    };
-  }
-
-  private deferredReceiptFailure(
-    operation: string,
-    problem: DeferredWorkloadProblem
-  ): Receipt {
-    return {
-      success: false,
-      message: `Cloud Run deferred ${operation} is blocked`,
-      error: problem.error,
-      data: { provider: this.name, phase: problem.phase },
-    };
-  }
-
   private primaryContainer(service: CloudRunService | null): CloudRunContainer | undefined {
     return service?.template?.containers?.[0] ?? service?.spec?.template?.spec?.containers?.[0];
-  }
-
-  private isImmutableContainerImage(imageUri: string): boolean {
-    return /^[^@\s]+@sha256:[0-9a-f]{64}$/i.test(imageUri);
   }
 
   private serviceRuntimeIdentity(service: CloudRunService | null): string | undefined {
@@ -5360,16 +2784,6 @@ export class CloudRunAdapter implements
   private jobRuntimeIdentity(job: CloudRunJob | null): string | undefined {
     return job?.template?.template?.serviceAccount
       ?? job?.template?.template?.serviceAccountName;
-  }
-
-  private cloudRunServiceVolumes(service: CloudRunService | null): Array<Record<string, unknown>> | undefined {
-    return service?.template?.volumes ?? service?.spec?.template?.spec?.volumes;
-  }
-
-  private assertPreservedFilesystem(before: CloudRunService | null, after: CloudRunService | null): void {
-    const expected = cloudRunFilesystemIdentity(before?.template ?? before?.spec?.template?.spec);
-    const observed = cloudRunFilesystemIdentity(after?.template ?? after?.spec?.template?.spec);
-    if (expected !== null && expected !== observed) throw new Error('Cloud Run filesystem mount or network identity changed during runtime configuration.');
   }
 
   private serviceVpcAccess(service: CloudRunService | null): CloudRunVpcAccess | undefined {
@@ -5414,270 +2828,6 @@ export class CloudRunAdapter implements
     };
   }
 
-  private async resolveVpcAccess(
-    environment: Environment,
-    current: CloudRunVpcAccess | undefined,
-    token: string
-  ): Promise<ResolvedCloudRunVpcAccess> {
-    const bindings = environment.platformBindings as Record<string, unknown>;
-    const retainedVolumes = parseServiceVolumeBindings(environment);
-    if (!retainedVolumes) throw new Error('Malformed retained filesystem bindings prevent network changes.');
-    const currentNetwork = this.normalizedVpcAccess(current);
-    const filesystemUsesCurrentNetwork = Object.values(retainedVolumes).some((volume) => {
-      if (volume.provider !== 'cloudrun' || volume.state !== 'staged' || !volume.components.attachment?.externalId) return false;
-      const scope = volume.target.instanceScope;
-      if (!scope || scope.projectId !== this.credentials!.projectId || scope.region !== this.credentials!.region) throw new Error('Retained filesystem network scope differs from the current cloud connection.');
-      return currentNetwork?.network === `projects/${scope.projectId}/global/networks/${scope.network}`
-        && currentNetwork.subnetwork === `projects/${scope.projectId}/regions/${scope.region}/subnetworks/${scope.subnetwork}`;
-    });
-    if (filesystemUsesCurrentNetwork && bindings.cacheNetwork === null) {
-      return { managed: false, desired: currentNetwork, ...(current ? { apiValue: current } : {}) };
-    }
-    if (!Object.prototype.hasOwnProperty.call(bindings, 'cacheNetwork')) {
-      return {
-        managed: false,
-        desired: this.normalizedVpcAccess(current),
-        ...(current ? { apiValue: current } : {}),
-      };
-    }
-    if (bindings.cacheNetwork === null) {
-      return { managed: true, apiValue: {} };
-    }
-    const raw = bindings.cacheNetwork;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error('Cloud Run cacheNetwork binding is invalid; re-run hv_plan before mutating a service.');
-    }
-    const binding = raw as Record<string, unknown>;
-    if (
-      binding.provider !== 'cloudrun'
-      || binding.projectId !== this.credentials!.projectId
-      || binding.region !== this.credentials!.region
-      || typeof binding.network !== 'string'
-      || typeof binding.subnetwork !== 'string'
-      || binding.egress !== 'PRIVATE_RANGES_ONLY'
-    ) {
-      throw new Error(
-        `Cloud Run cacheNetwork must identify cloudrun/${this.credentials!.projectId}/${this.credentials!.region} with exact network, subnetwork, and PRIVATE_RANGES_ONLY egress.`
-      );
-    }
-    const desired = {
-      network: this.normalizeCloudRunNetwork(binding.network),
-      subnetwork: this.normalizeCloudRunSubnetwork(binding.subnetwork),
-      egress: 'PRIVATE_RANGES_ONLY',
-    };
-    if (filesystemUsesCurrentNetwork && (desired.network !== currentNetwork?.network || desired.subnetwork !== currentNetwork?.subnetwork)) {
-      throw new Error('Cache networking cannot replace a VPC retained by a filesystem consumer.');
-    }
-    await this.verifyVpcResources(desired, token);
-    return {
-      managed: true,
-      desired,
-      apiValue: {
-        networkInterfaces: [{ network: desired.network, subnetwork: desired.subnetwork }],
-        egress: desired.egress,
-      },
-    };
-  }
-
-  private async verifyVpcResources(
-    desired: NonNullable<ResolvedCloudRunVpcAccess['desired']>,
-    token: string
-  ): Promise<void> {
-    const networkName = desired.network.split('/').at(-1)!;
-    const subnetworkName = desired.subnetwork.split('/').at(-1)!;
-    const base = `https://compute.googleapis.com/compute/v1/projects/${this.credentials!.projectId}`;
-    const [networkResponse, subnetworkResponse] = await Promise.all([
-      fetch(`${base}/global/networks/${encodeURIComponent(networkName)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }),
-      fetch(`${base}/regions/${encodeURIComponent(this.credentials!.region)}/subnetworks/${encodeURIComponent(subnetworkName)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }),
-    ]);
-    for (const [label, response] of [
-      [`VPC network ${desired.network}`, networkResponse],
-      [`subnetwork ${desired.subnetwork}`, subnetworkResponse],
-    ] as const) {
-      if (response.ok) continue;
-      const detail = (await response.text()).slice(0, 500);
-      if (response.status === 404) {
-        throw new Error(`${label} does not exist or is not visible. Hypervibe will not create networking implicitly.`);
-      }
-      throw new Error(`Google Compute API could not verify ${label}: ${response.status}${detail ? ` ${detail}` : ''}`);
-    }
-    const subnet = await subnetworkResponse.json() as { network?: string };
-    if (!subnet.network || this.normalizeCloudRunNetwork(subnet.network) !== desired.network) {
-      throw new Error(`Subnetwork ${desired.subnetwork} is not attached to exact VPC ${desired.network}.`);
-    }
-  }
-
-  private assertVpcAccess(
-    resource: CloudRunService | CloudRunJob | null,
-    expected: ResolvedCloudRunVpcAccess,
-    description: string
-  ): void {
-    const nestedJobTemplate = (resource as CloudRunJob | null)?.template?.template;
-    const actual = nestedJobTemplate
-      ? this.normalizedVpcAccess(nestedJobTemplate.vpcAccess)
-      : this.normalizedVpcAccess(this.serviceVpcAccess(resource as CloudRunService | null));
-    if (JSON.stringify(actual) !== JSON.stringify(expected.desired)) {
-      throw new Error(`${description} became ready without the reviewed Direct VPC egress configuration.`);
-    }
-  }
-
-  private cloudRunJobSpec(params: {
-    imageUri: string;
-    command: string;
-    env: Array<Record<string, unknown>>;
-    resources?: Record<string, unknown>;
-    serviceAccount?: string;
-    labels?: Record<string, string>;
-    existingVolumes?: Array<Record<string, unknown>>;
-    existingVolumeMounts?: Array<Record<string, unknown>>;
-    cloudSqlConnectionNames?: string[];
-    replaceManagedDatabaseVars?: boolean;
-    vpcAccess?: CloudRunVpcAccess;
-  }): Record<string, unknown> {
-    const cloudSql = this.cloudSqlVolumeConfig(params.cloudSqlConnectionNames);
-    const volumeMounts = cloudSql
-      ? this.mergeVolumeMounts(params.existingVolumeMounts, [cloudSql.volumeMount])
-      : params.replaceManagedDatabaseVars
-        ? this.removeCloudSqlVolumeMounts(params.existingVolumeMounts)
-        : params.existingVolumeMounts;
-    const resources = params.resources
-      ? Object.fromEntries(Object.entries(params.resources).filter(([key]) => key !== 'cpuIdle'))
-      : undefined;
-    const container = {
-      image: params.imageUri,
-      command: ['/bin/sh'],
-      args: ['-lc', params.command],
-      env: params.env,
-      ...(resources && Object.keys(resources).length > 0 ? { resources } : {}),
-      ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
-    };
-    const volumes = cloudSql
-      ? this.mergeVolumes(params.existingVolumes, [cloudSql.volume])
-      : params.replaceManagedDatabaseVars
-        ? this.removeCloudSqlVolumes(params.existingVolumes)
-        : params.existingVolumes;
-
-    return {
-      ...(params.labels ? { labels: params.labels } : {}),
-      template: {
-        ...(params.labels ? { labels: params.labels } : {}),
-        template: {
-          containers: [container],
-          ...(volumes && (volumes.length > 0 || params.replaceManagedDatabaseVars) ? { volumes } : {}),
-          ...(params.serviceAccount ? { serviceAccount: params.serviceAccount } : {}),
-          ...(params.vpcAccess !== undefined ? { vpcAccess: params.vpcAccess } : {}),
-          maxRetries: 1,
-          timeout: '3600s',
-        },
-      },
-    };
-  }
-
-  private async upsertCloudRunJob(params: {
-    token: string;
-    jobName: string;
-    jobSpec: Record<string, unknown>;
-    description: string;
-    bindingAuthority?: 'bound' | 'unbound';
-    onCreateAttempt?: () => void;
-    onCreateAccepted?: (identity: { name: string; uid?: string }) => void;
-    expectedUid?: string;
-  }): Promise<{ created: boolean; job: CloudRunJob }> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const { projectId, region } = this.credentials;
-    const headers = {
-      Authorization: `Bearer ${params.token}`,
-      'Content-Type': 'application/json',
-    };
-    const jobsBaseUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs`;
-    const existingJob = await fetch(`${jobsBaseUrl}/${params.jobName}`, {
-      headers: { Authorization: `Bearer ${params.token}` },
-    });
-    const creatingJob = existingJob.status === 404;
-    if (!existingJob.ok && !creatingJob) {
-      const text = (await existingJob.text()).slice(0, 500);
-      throw new Error(`Cloud Run job observation failed: ${existingJob.status}${text ? ` ${text}` : ''}`);
-    }
-    const liveJob = creatingJob ? null : await existingJob.json() as CloudRunJob;
-    if (params.bindingAuthority === 'unbound' && liveJob) {
-      throw new CloudRunReleaseJobAdoptionRequiredError(
-        `An unbound same-name Cloud Run release job ${params.jobName} already exists; explicit adoption is required before Hypervibe can mutate it.`
-      );
-    }
-    const expectedJobName = `projects/${projectId}/locations/${region}/jobs/${params.jobName}`;
-    if (params.bindingAuthority && liveJob && liveJob.name !== expectedJobName) {
-      throw new Error(`Cloud Run ${params.description} lookup returned a different resource identity.`);
-    }
-    if (params.expectedUid && (!liveJob || liveJob.uid !== params.expectedUid || !liveJob.etag)) {
-      throw new Error('The bound scheduled workload identity or update precondition changed.');
-    }
-    const runtimeServiceAccountEmail = liveJob
-      ? liveJob.template?.template?.serviceAccount ?? liveJob.template?.template?.serviceAccountName
-      : this.requiredRuntimeServiceAccountEmail(params.description);
-    if (!runtimeServiceAccountEmail) {
-      throw new Error(
-        `Cloud Run job ${params.jobName} did not expose its runtime service account; refusing to change its identity.`
-      );
-    }
-    const candidateTask = (params.jobSpec.template as { template?: Record<string, unknown> } | undefined)?.template;
-    if (!candidateTask) {
-      throw new Error(`Cloud Run ${params.description} candidate did not include a task template.`);
-    }
-    candidateTask.serviceAccount = runtimeServiceAccountEmail;
-    delete candidateTask.serviceAccountName;
-    if (params.expectedUid) params.jobSpec.etag = liveJob!.etag;
-    if (creatingJob) params.onCreateAttempt?.();
-    const upsertResponse = !creatingJob
-      ? await fetch(`${jobsBaseUrl}/${params.jobName}`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify(cloudRunJobUpdateBody(liveJob, params.jobSpec)),
-        })
-      : await fetch(`${jobsBaseUrl}?jobId=${encodeURIComponent(params.jobName)}`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(params.jobSpec),
-        });
-
-    if (!upsertResponse.ok) {
-      const text = await upsertResponse.text();
-      throw new Error(`Cloud Run Jobs API error: ${upsertResponse.status} ${text}`);
-    }
-
-    const operation = await upsertResponse.json() as CloudRunOperation;
-    if (creatingJob && operation.response?.name === expectedJobName) {
-      params.onCreateAccepted?.({ name: expectedJobName });
-    }
-    await this.waitForCloudRunOperation(
-      params.token,
-      operation,
-      `${params.description} ${creatingJob ? 'create' : 'update'}`,
-      `projects/${projectId}/locations/${region}/jobs/${params.jobName}`
-    );
-    const job = await this.waitForCloudRunJobReady(params.jobName, params.token);
-    const jobResourceName = `projects/${projectId}/locations/${region}/jobs/${params.jobName}`;
-    if (job.name !== jobResourceName) {
-      throw new Error(`Cloud Run ${params.description} became ready with a different resource identity.`);
-    }
-    if (params.expectedUid && job.uid !== params.expectedUid) {
-      throw new Error(`Cloud Run ${params.description} became ready with a different resource UID.`);
-    }
-    const readyRuntimeServiceAccountEmail = job.template?.template?.serviceAccount
-      ?? job.template?.template?.serviceAccountName;
-    if (readyRuntimeServiceAccountEmail !== runtimeServiceAccountEmail) {
-      throw new Error(`Cloud Run ${params.description} became ready without the expected runtime service account.`);
-    }
-
-    return { created: creatingJob, job };
-  }
-
   private async getCloudSchedulerJob(
     schedulerJobName: string,
     token: string
@@ -5705,242 +2855,6 @@ export class CloudRunAdapter implements
     return await response.json() as CloudSchedulerJob;
   }
 
-  private cloudSchedulerJobSpec(params: {
-    schedulerJobName: string;
-    jobName: string;
-    schedule: string;
-    timeZone: string;
-    runtimeServiceAccountEmail: string;
-  }): CloudSchedulerJob {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    const { projectId, region } = this.credentials;
-    if (!params.schedule) throw new Error('Schedule activation requires the reviewed cron schedule.');
-    const jobPath = `projects/${projectId}/locations/${region}/jobs/${params.schedulerJobName}`;
-    const runUri = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${params.jobName}:run`;
-    return {
-      name: jobPath,
-      description: `Run Cloud Run job ${params.jobName}`,
-      schedule: params.schedule,
-      timeZone: params.timeZone,
-      httpTarget: {
-        uri: runUri,
-        httpMethod: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: btoa('{}'),
-        oauthToken: {
-          serviceAccountEmail: params.runtimeServiceAccountEmail,
-          scope: 'https://www.googleapis.com/auth/cloud-platform',
-        },
-      },
-    };
-  }
-
-  private cloudSchedulerMatches(observed: CloudSchedulerJob | null, expected: CloudSchedulerJob): boolean {
-    return Boolean(observed && observed.name === expected.name && observed.state === 'ENABLED'
-      && observed.schedule === expected.schedule && observed.timeZone === expected.timeZone
-      && observed.httpTarget?.uri === expected.httpTarget?.uri
-      && observed.httpTarget?.httpMethod === expected.httpTarget?.httpMethod
-      && observed.httpTarget?.body === expected.httpTarget?.body
-      && observed.httpTarget?.oauthToken?.serviceAccountEmail === expected.httpTarget?.oauthToken?.serviceAccountEmail
-      && observed.httpTarget?.oauthToken?.scope === expected.httpTarget?.oauthToken?.scope);
-  }
-
-  private async upsertCloudSchedulerJob(params: {
-    token: string;
-    schedulerJobName: string;
-    jobName: string;
-    schedule: string;
-    timeZone: string;
-    runtimeServiceAccountEmail: string;
-  }): Promise<{ created: boolean }> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const { projectId, region } = this.credentials;
-    return this.upsertCloudSchedulerJobOnce({
-      ...params,
-      baseUrl: `https://cloudscheduler.googleapis.com/v1/projects/${projectId}/locations/${region}/jobs`,
-      schedulerSpec: this.cloudSchedulerJobSpec(params) as Record<string, unknown>,
-      retriedAfterEnable: false,
-    });
-  }
-
-  private async upsertCloudSchedulerJobOnce(params: {
-    token: string;
-    schedulerJobName: string;
-    baseUrl: string;
-    schedulerSpec: Record<string, unknown>;
-    retriedAfterEnable: boolean;
-  }): Promise<{ created: boolean }> {
-    const existing = await this.getCloudSchedulerJob(params.schedulerJobName, params.token);
-    const headers = {
-      Authorization: `Bearer ${params.token}`,
-      'Content-Type': 'application/json',
-    };
-    const response = existing
-      ? await fetch(`${params.baseUrl}/${params.schedulerJobName}?updateMask=description,schedule,timeZone,httpTarget`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify(params.schedulerSpec),
-        })
-      : await fetch(params.baseUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(params.schedulerSpec),
-        });
-
-    if (!response.ok) {
-      const text = await response.text();
-      if (
-        !params.retriedAfterEnable
-        && this.isDisabledApiMessage(text, 'cloudscheduler.googleapis.com')
-      ) {
-        await this.enableGoogleService(params.token, 'cloudscheduler.googleapis.com');
-        return this.upsertCloudSchedulerJobOnce({
-          ...params,
-          retriedAfterEnable: true,
-        });
-      }
-      throw new Error(`Cloud Scheduler API error: ${response.status} ${text}`);
-    }
-
-    return { created: !existing };
-  }
-
-  private async deleteCloudRunServiceIfExists(serviceName: string, token: string): Promise<string | undefined> {
-    if (!this.credentials) {
-      return undefined;
-    }
-
-    const { projectId, region } = this.credentials;
-    const headers = { Authorization: `Bearer ${token}` };
-    const serviceUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}`;
-    const existing = await fetch(serviceUrl, { headers });
-    if (existing.status === 404) {
-      return undefined;
-    }
-    if (!existing.ok) {
-      const text = await existing.text();
-      return `Could not verify whether Cloud Run service ${serviceName} exists: ${existing.status} ${text}`;
-    }
-
-    const deleted = await fetch(serviceUrl, { method: 'DELETE', headers });
-    if (deleted.status === 404) {
-      return undefined;
-    }
-    if (!deleted.ok) {
-      const text = await deleted.text();
-      return `Skipped stale Cloud Run service cleanup for ${serviceName}: ${deleted.status} ${text}`;
-    }
-
-    try {
-      const operation = await deleted.json() as CloudRunOperation;
-      await this.waitForCloudRunOperation(token, operation, 'stale service delete');
-    } catch (error) {
-      return `Stale Cloud Run service cleanup for ${serviceName} may still be in progress: ${error instanceof Error ? error.message : String(error)}`;
-    }
-
-    return this.verifyCloudRunResourceDeleted(serviceUrl, headers, `Cloud Run service ${serviceName}`);
-  }
-
-  private async deleteCloudRunJobIfExists(
-    jobName: string,
-    token: string,
-    expectedCreatedIdentity?: { uid?: string; etag?: string }
-  ): Promise<string | undefined> {
-    if (!this.credentials) {
-      return undefined;
-    }
-
-    const { projectId, region } = this.credentials;
-    const headers = { Authorization: `Bearer ${token}` };
-    const jobUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}`;
-    const existing = await fetch(jobUrl, { headers });
-    if (existing.status === 404) {
-      return undefined;
-    }
-    if (!existing.ok) {
-      const text = await existing.text();
-      return `Could not verify whether Cloud Run job ${jobName} exists: ${existing.status} ${text}`;
-    }
-
-    let deleteUrl = jobUrl;
-    if (expectedCreatedIdentity) {
-      const observed = await existing.json() as CloudRunJob;
-      const expectedName = `projects/${projectId}/locations/${region}/jobs/${jobName}`;
-      if (
-        !expectedCreatedIdentity.uid
-        || !expectedCreatedIdentity.etag
-        || observed.name !== expectedName
-        || observed.uid !== expectedCreatedIdentity.uid
-        || observed.etag !== expectedCreatedIdentity.etag
-      ) {
-        return `Skipped Cloud Run job cleanup for ${jobName}: the exact newly-created resource identity could not be verified`;
-      }
-      deleteUrl = `${jobUrl}?etag=${encodeURIComponent(expectedCreatedIdentity.etag)}`;
-    }
-
-    const deleted = await fetch(deleteUrl, { method: 'DELETE', headers });
-    if (deleted.status === 404) {
-      return undefined;
-    }
-    if (!deleted.ok) {
-      const text = await deleted.text();
-      return `Skipped Cloud Run job cleanup for ${jobName}: ${deleted.status} ${text}`;
-    }
-
-    try {
-      const operation = await deleted.json() as CloudRunOperation;
-      await this.waitForCloudRunOperation(token, operation, 'job delete');
-    } catch (error) {
-      return `Cloud Run job cleanup for ${jobName} may still be in progress: ${error instanceof Error ? error.message : String(error)}`;
-    }
-
-    return this.verifyCloudRunResourceDeleted(jobUrl, headers, `Cloud Run job ${jobName}`);
-  }
-
-  private async verifyCloudRunResourceDeleted(
-    url: string,
-    headers: Record<string, string>,
-    label: string
-  ): Promise<string | undefined> {
-    const attempts = Number(process.env.HYPERVIBE_CLOUDRUN_DELETE_ATTEMPTS ?? 20);
-    const delayMs = Number(process.env.HYPERVIBE_CLOUDRUN_DELETE_DELAY_MS ?? 500);
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const response = await fetch(url, { headers });
-      if (response.status === 404) return undefined;
-      if (!response.ok) {
-        const text = await response.text();
-        return `Could not verify deletion of ${label}: ${response.status} ${text}`;
-      }
-      if (attempt < attempts - 1) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-    }
-    return `${label} is still present after ${attempts} deletion checks`;
-  }
-
-  private async deleteCloudSchedulerJobIfExists(schedulerJobName: string, token: string): Promise<string | undefined> {
-    if (!this.credentials) {
-      return undefined;
-    }
-
-    const { projectId, region } = this.credentials;
-    const headers = { Authorization: `Bearer ${token}` };
-    const schedulerUrl = `https://cloudscheduler.googleapis.com/v1/projects/${projectId}/locations/${region}/jobs/${schedulerJobName}`;
-    const deleted = await fetch(schedulerUrl, { method: 'DELETE', headers });
-    if (deleted.status === 404) {
-      return undefined;
-    }
-    if (!deleted.ok) {
-      const text = await deleted.text();
-      return `Skipped Cloud Scheduler cleanup for ${schedulerJobName}: ${deleted.status} ${text}`;
-    }
-
-    return undefined;
-  }
-
   private cloudBuildStatusFromResponse(response: CloudBuildStatus | CloudBuildOperation): CloudBuildStatus | undefined {
     if ('status' in response || 'id' in response) {
       return response as CloudBuildStatus;
@@ -5960,92 +2874,6 @@ export class CloudRunAdapter implements
 
   private isCloudBuildOperation(response: CloudBuildStatus | CloudBuildOperation): response is CloudBuildOperation {
     return 'done' in response || 'metadata' in response || 'response' in response || 'error' in response;
-  }
-
-  private async waitForCloudRunServiceReady(
-    serviceName: string,
-    token: string,
-    expectation?: DirectCloudRunServiceExpectation
-  ): Promise<CloudRunService | null> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-    const resourceName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/services/${serviceName}`;
-    for (let attempt = 0; attempt < 120; attempt++) {
-      const service = await this.getCloudRunService(serviceName, token);
-      const readiness = this.cloudRunServiceReadiness(service);
-      if (readiness.ready) {
-        if (service?.name !== resourceName) {
-          throw new Error(
-            `Cloud Run service ${serviceName} became ready with a different resource identity: ${service?.name ?? 'missing'}.`
-          );
-        }
-        if (expectation) {
-          this.assertDirectCloudRunServiceEvidence(service, expectation);
-        }
-        return service;
-      }
-      if (readiness.error) {
-        throw new Error(`Cloud Run service ${serviceName} is not ready: ${readiness.error}`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
-    throw new Error(`Cloud Run service ${serviceName} was not ready before timeout`);
-  }
-
-  private assertDirectCloudRunServiceEvidence(
-    service: CloudRunService,
-    expectation: DirectCloudRunServiceExpectation
-  ): void {
-    if (service.name !== expectation.resourceName) {
-      throw new Error(
-        `Cloud Run service deployment returned a different resource identity: ${service.name || 'missing'}.`
-      );
-    }
-    if (!this.isImmutableContainerImage(expectation.imageUri)) {
-      throw new Error('Cloud Run service deployment expected image is not an immutable image digest.');
-    }
-    const imageUri = this.primaryContainer(service)?.image;
-    if (imageUri !== expectation.imageUri) {
-      throw new Error(
-        `Cloud Run service became ready without the expected immutable image digest; observed ${imageUri ?? 'missing'}.`
-      );
-    }
-    const runtimeServiceAccountEmail = service.template?.serviceAccount
-      ?? service.template?.serviceAccountName
-      ?? service.spec?.template?.spec?.serviceAccountName;
-    if (runtimeServiceAccountEmail !== expectation.runtimeServiceAccountEmail) {
-      throw new Error(
-        `Cloud Run service became ready without the expected runtime service account; observed ${runtimeServiceAccountEmail ?? 'missing'}.`
-      );
-    }
-    const releaseCommandHash = service.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
-    if (releaseCommandHash !== expectation.releaseCommandHash) {
-      throw new Error('Cloud Run service became ready without the expected release-command annotation.');
-    }
-    const sourceCommitSha = service.annotations?.[CLOUD_RUN_SOURCE_COMMIT_ANNOTATION];
-    if (sourceCommitSha !== expectation.sourceCommitSha) {
-      throw new Error('Cloud Run service became ready without the expected source-commit annotation.');
-    }
-    const container = this.primaryContainer(service);
-    const startCommand = this.containerStartCommand(container) ?? null;
-    if (startCommand !== expectation.startCommand) {
-      throw new Error(
-        `Cloud Run service became ready without the expected start command; observed ${startCommand ?? 'none'}.`
-      );
-    }
-    const startupHealthCheckPath = container?.startupProbe?.httpGet?.path ?? null;
-    const livenessHealthCheckPath = container?.livenessProbe?.httpGet?.path ?? null;
-    if (
-      startupHealthCheckPath !== expectation.healthCheckPath
-      || livenessHealthCheckPath !== null
-    ) {
-      throw new Error(
-        `Cloud Run service became ready without the expected health probe; observed ${startupHealthCheckPath ?? livenessHealthCheckPath ?? 'none'}.`
-      );
-    }
   }
 
   private async getCloudRunService(serviceName: string, token: string): Promise<CloudRunService | null> {
@@ -6213,240 +3041,6 @@ export class CloudRunAdapter implements
     return { ready: false };
   }
 
-  private cloudSqlConnectionNamesFromEnv(envVars: Record<string, string>): string[] {
-    const raw = envVars.CLOUD_SQL_CONNECTION_NAME ?? envVars.INSTANCE_CONNECTION_NAME;
-    return this.parseCloudSqlConnectionNames(raw);
-  }
-
-  private cloudSqlConnectionNamesFromEnvVars(env: Array<Record<string, unknown>> | undefined): string[] {
-    const byName = new Map<string, string>();
-    for (const entry of env ?? []) {
-      if (typeof entry.name === 'string' && typeof entry.value === 'string') {
-        byName.set(entry.name, entry.value);
-      }
-    }
-    return this.parseCloudSqlConnectionNames(byName.get('CLOUD_SQL_CONNECTION_NAME') ?? byName.get('INSTANCE_CONNECTION_NAME'));
-  }
-
-  private parseCloudSqlConnectionNames(raw: string | undefined): string[] {
-    if (!raw) return [];
-    return Array.from(new Set(
-      raw
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter((entry) => /^[^:]+:[^:]+:[^:]+$/.test(entry))
-    ));
-  }
-
-  private cloudSqlVolumeConfig(connectionNames: string[] | undefined): { volume: Record<string, unknown>; volumeMount: Record<string, unknown> } | undefined {
-    if (!connectionNames || connectionNames.length === 0) {
-      return undefined;
-    }
-    return {
-      volume: {
-        name: 'cloudsql',
-        cloudSqlInstance: {
-          instances: connectionNames,
-        },
-      },
-      volumeMount: {
-        name: 'cloudsql',
-        mountPath: '/cloudsql',
-      },
-    };
-  }
-
-  private mergeVolumes(
-    existing: Array<Record<string, unknown>> | undefined,
-    updates: Array<Record<string, unknown>>
-  ): Array<Record<string, unknown>> {
-    const byName = new Map<string, Record<string, unknown>>();
-    for (const entry of existing ?? []) {
-      if (typeof entry.name === 'string') {
-        byName.set(entry.name, { ...entry });
-      }
-    }
-    for (const entry of updates) {
-      if (typeof entry.name === 'string') {
-        byName.set(entry.name, { ...entry });
-      }
-    }
-    return [...byName.values()];
-  }
-
-  private mergeVolumeMounts(
-    existing: Array<Record<string, unknown>> | undefined,
-    updates: Array<Record<string, unknown>>
-  ): Array<Record<string, unknown>> {
-    const byName = new Map<string, Record<string, unknown>>();
-    for (const entry of existing ?? []) {
-      if (typeof entry.name === 'string') {
-        byName.set(entry.name, { ...entry });
-      }
-    }
-    for (const entry of updates) {
-      if (typeof entry.name === 'string') {
-        byName.set(entry.name, { ...entry });
-      }
-    }
-    return [...byName.values()];
-  }
-
-  private removeCloudSqlVolumeMounts(
-    existing: Array<Record<string, unknown>> | undefined
-  ): Array<Record<string, unknown>> {
-    return (existing ?? []).filter((entry) => entry.name !== 'cloudsql');
-  }
-
-  private removeCloudSqlVolumes(
-    existing: Array<Record<string, unknown>> | undefined
-  ): Array<Record<string, unknown>> {
-    return (existing ?? []).filter((entry) => entry.name !== 'cloudsql');
-  }
-
-  private positiveIntegerEnv(name: string, fallback: number): number {
-    const value = Number(process.env[name] ?? fallback);
-    return Number.isInteger(value) && value > 0 ? value : fallback;
-  }
-
-  private nonNegativeIntegerEnv(name: string, fallback: number): number {
-    const value = Number(process.env[name] ?? fallback);
-    return Number.isInteger(value) && value >= 0 ? value : fallback;
-  }
-
-  private async delay(ms: number): Promise<void> {
-    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private queueLabels(environment: Environment, queueName: string): Record<string, string> {
-    return {
-      'infraprint-environment': this.labelValue(environment.name),
-      'infraprint-queue': this.labelValue(queueName),
-    };
-  }
-
-  private assertQueueLabels(
-    resource: string,
-    labels: Record<string, string> | undefined,
-    environment: Environment,
-    queueName: string
-  ): void {
-    const expected = this.queueLabels(environment, queueName);
-    if (Object.entries(expected).some(([key, value]) => labels?.[key] !== value)) {
-      throw new Error(
-        `${resource} is not owned by Hypervibe queue "${queueName}" in environment "${environment.name}"; explicit adoption or cleanup is required.`
-      );
-    }
-  }
-
-  private assertManagedQueueTopic(
-    environment: Environment,
-    queueName: string,
-    topic: pubsub.PubSubTopic
-  ): void {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const { topicId } = this.queueResourceNames(environment, queueName);
-    const expectedName = `projects/${this.credentials.projectId}/topics/${topicId}`;
-    if (topic.name !== expectedName) {
-      throw new Error(`Pub/Sub returned topic ${topic.name}, not exact queue topic ${expectedName}.`);
-    }
-    this.assertQueueLabels(`Pub/Sub topic ${topic.name}`, topic.labels, environment, queueName);
-  }
-
-  private assertManagedQueueSubscription(
-    environment: Environment,
-    queueName: string,
-    subscription: pubsub.PubSubSubscription
-  ): void {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
-    const expectedName = `projects/${this.credentials.projectId}/subscriptions/${subscriptionId}`;
-    const expectedTopic = `projects/${this.credentials.projectId}/topics/${topicId}`;
-    if (subscription.name !== expectedName || subscription.topic !== expectedTopic) {
-      throw new Error(
-        `Pub/Sub subscription ${subscription.name} does not match exact queue subscription ${expectedName} and topic ${expectedTopic}.`
-      );
-    }
-    this.assertQueueLabels(
-      `Pub/Sub subscription ${subscription.name}`,
-      subscription.labels,
-      environment,
-      queueName
-    );
-  }
-
-  private async waitForQueueTopic(token: string, topicId: string): Promise<pubsub.PubSubTopic> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const attempts = this.positiveIntegerEnv('HYPERVIBE_PUBSUB_CONVERGE_ATTEMPTS', 20);
-    const intervalMs = this.nonNegativeIntegerEnv('HYPERVIBE_PUBSUB_POLL_INTERVAL_MS', 500);
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const topic = await pubsub.getTopic(token, this.credentials.projectId, topicId);
-      if (topic) return topic;
-      if (attempt < attempts) await this.delay(intervalMs);
-    }
-    throw new Error(`Pub/Sub topic ${topicId} remained absent after its create acknowledgement.`);
-  }
-
-  private async waitForQueueSubscription(
-    token: string,
-    subscriptionId: string,
-    ackDeadlineSeconds?: number
-  ): Promise<pubsub.PubSubSubscription> {
-    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
-    const attempts = this.positiveIntegerEnv('HYPERVIBE_PUBSUB_CONVERGE_ATTEMPTS', 20);
-    const intervalMs = this.nonNegativeIntegerEnv('HYPERVIBE_PUBSUB_POLL_INTERVAL_MS', 500);
-    let last: pubsub.PubSubSubscription | null = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      last = await pubsub.getSubscription(token, this.credentials.projectId, subscriptionId);
-      if (last && (ackDeadlineSeconds === undefined || last.ackDeadlineSeconds === ackDeadlineSeconds)) {
-        return last;
-      }
-      if (attempt < attempts) await this.delay(intervalMs);
-    }
-    throw new Error(
-      last
-        ? `Pub/Sub subscription ${subscriptionId} did not converge to acknowledgement deadline ${ackDeadlineSeconds}.`
-        : `Pub/Sub subscription ${subscriptionId} remained absent after its create acknowledgement.`
-    );
-  }
-
-  private async waitForQueueAbsence(
-    resource: string,
-    observe: () => Promise<unknown | null>
-  ): Promise<void> {
-    const attempts = this.positiveIntegerEnv('HYPERVIBE_PUBSUB_DELETE_ATTEMPTS', 20);
-    const intervalMs = this.nonNegativeIntegerEnv('HYPERVIBE_PUBSUB_POLL_INTERVAL_MS', 500);
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      if ((await observe()) === null) return;
-      if (attempt < attempts) await this.delay(intervalMs);
-    }
-    throw new Error(`${resource} remained observable after its delete acknowledgement.`);
-  }
-
-  private mergeEnvVars(
-    existing: Array<Record<string, unknown>> | undefined,
-    updates: Record<string, string>,
-    options: { replaceManagedDatabaseVars?: boolean } = {}
-  ): Array<Record<string, unknown>> {
-    const byName = new Map<string, Record<string, unknown>>();
-    for (const entry of existing ?? []) {
-      if (typeof entry.name === 'string') {
-        if (options.replaceManagedDatabaseVars && MANAGED_DATABASE_ENV_KEYS.has(entry.name)) {
-          continue;
-        }
-        byName.set(entry.name, { ...entry });
-      }
-    }
-    for (const [name, value] of Object.entries(updates)) {
-      byName.set(name, { name, value });
-    }
-    return [...byName.values()];
-  }
-
-  private isManagedDatabaseEnvSync(updates: Record<string, string>): boolean {
-    return Object.keys(updates).some((key) => MANAGED_DATABASE_SYNC_KEYS.has(key));
-  }
-
   private formatError(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
     const cause = error instanceof Error
@@ -6468,34 +3062,6 @@ export class CloudRunAdapter implements
     return details.length > 0 ? `${message} (${details.join(', ')})` : message;
   }
 
-  private imageUriForService(service: Service, envVars: Record<string, string>): string | undefined {
-    return envVars[this.imageEnvKey(service)]?.trim() || envVars['IMAGE_URI']?.trim() || undefined;
-  }
-
-  private runtimeEnvVarsForService(service: Service, envVars: Record<string, string>): Record<string, string> {
-    const internalKeys = new Set([
-      'IMAGE_URI',
-      this.imageEnvKey(service),
-      'HYPERVIBE_SOURCE_REPO_URL',
-      'HYPERVIBE_SOURCE_REVISION',
-      'HYPERVIBE_ARTIFACT_REPOSITORY',
-      'HYPERVIBE_GITHUB_TOKEN',
-      'HYPERVIBE_CRON_TIME_ZONE',
-    ]);
-    return Object.fromEntries(
-      Object.entries(envVars).filter(([key]) => !internalKeys.has(key))
-    );
-  }
-
-  private imageEnvKey(service: Service): string {
-    const serviceKey = service.name
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '');
-    return `IMAGE_URI_${serviceKey}`;
-  }
-
   private sanitizeName(name: string): string {
     // Cloud Run service names must be lowercase, alphanumeric with hyphens
     return name
@@ -6515,6 +3081,108 @@ export class CloudRunAdapter implements
       .substring(0, 63);
     return normalized || 'unknown';
   }
+
+  /** Only selected, reviewed credential updates remain outside the infrastructure engine. */
+  async setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options: DeploymentMutationOptions = {}): Promise<Receipt> {
+    if (options.requireCredentialUpdate) return this.setCredentialEnvVars(environment, service, vars);
+    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is moving to OpenTofu.' };
+  }
+
+  private async setCredentialEnvVars(environment: Environment, service: Service, vars: Record<string, string>): Promise<Receipt> {
+    let attempted = false;
+    try {
+      if (!this.credentials) throw new Error();
+      const binding = parseHostingBindings(environment);
+      const target = binding.services?.[service.name];
+      const job = serviceWorkloadKind(service) === 'cron';
+      const id = job ? target?.jobName : target?.serviceId;
+      if (binding.provider !== this.name || binding.projectId !== this.credentials.projectId || binding.environmentId !== this.credentials.region || !id || !/^[a-z][a-z0-9-]*$/.test(id)) throw new Error();
+      const token = await this.getAccessToken();
+      const resource = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/${job ? 'jobs' : 'services'}/${id}`;
+      const current: any = job ? await this.getCloudRunJob(id, token) : await this.getCloudRunService(id, token);
+      const template = job ? current?.template?.template : current?.template;
+      if (current?.name !== resource || !current.uid || !current.etag || (target?.resourceUid && current.uid !== target.resourceUid)
+        || !Array.isArray(template?.containers) || !template.containers.length || !template.containers[0].image) throw new Error();
+      const original = template.containers[0];
+      const keys = new Set(Object.keys(vars));
+      const oldEnv = original.env ?? [];
+      if (!Array.isArray(oldEnv) || oldEnv.some((entry: any) => typeof entry.name !== 'string') || new Set(oldEnv.map((entry: any) => entry.name)).size !== oldEnv.length) throw new Error();
+      const remaining = new Map(Object.entries(vars));
+      const env = oldEnv.map((entry: any) => {
+        if (!keys.has(entry.name)) return entry;
+        remaining.delete(entry.name);
+        return { name: entry.name, value: vars[entry.name] };
+      }).concat([...remaining].map(([name, value]) => ({ name, value })));
+      const containers = [{ ...original, env }, ...template.containers.slice(1)];
+      // Jobs have no updateMask in their public REST contract, so preserve the
+      // complete writable job and execution template. Services have a field mask.
+      const body = job ? { ...Object.fromEntries(['name', 'etag', 'labels', 'annotations', 'launchStage', 'binaryAuthorization'].filter(key => current[key] !== undefined).map(key => [key, current[key]])),
+        template: { ...current.template, template: { ...template, containers } } }
+        : { name: resource, etag: current.etag, template: { containers } };
+      attempted = true;
+      const response = await fetch(`https://run.googleapis.com/v2/${resource}${job ? '' : '?updateMask=template.containers'}`, {
+        method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error();
+      await this.waitForCloudRunOperation(token, await response.json() as CloudRunOperation, 'credential update', resource);
+      const after: any = job ? await this.waitForCloudRunJobReady(id, token) : await this.waitForCloudRunServiceReady(id, token);
+      const afterTemplate = job ? after?.template?.template : after?.template;
+      if (after?.name !== resource || after.uid !== current.uid || this.unappliedRuntimeEnvKeys(afterTemplate?.containers?.[0], vars).length) throw new Error();
+      const preserves = (expected: any, actual: any): boolean => Array.isArray(expected)
+        ? expected.length === 0 && actual === undefined || Array.isArray(actual) && expected.length === actual.length
+          && expected.every((entry, index) => preserves(entry, entry?.name ? actual.find((candidate: any) => candidate.name === entry.name) : actual[index]))
+        : expected && typeof expected === 'object'
+          ? Boolean(actual) && Object.entries(expected).every(([key, value]) => preserves(value, actual[key]))
+          : expected === actual || actual === undefined && [false, 0, ''].includes(expected);
+      if (!preserves({ ...template, containers }, afterTemplate)) throw new Error();
+      const beforeDeployment = job ? undefined : this.observedServiceDeployment(current).deployment?.id;
+      const afterDeployment = job ? undefined : this.observedServiceDeployment(after).deployment?.id;
+      return { success: true, message: 'Selected Cloud Run credential configuration verified; runtime and application use require separate evidence.', data: {
+        credentialValueEvidence: 'readback', credentialUpdateActivation: job ? 'deferred' : 'provider-rollout',
+        serviceId: id, resourceUid: current.uid, configurationUpdated: true, runtimeRolloutRequired: true,
+        ...(beforeDeployment ? { rolloutBaseline: { state: 'present', deploymentId: beforeDeployment } } : { rolloutBaseline: { state: 'unknown' } }),
+        ...(afterDeployment ? { deploymentId: afterDeployment } : {}), mutationAttempted: true,
+      } };
+    } catch { return { success: false, message: attempted ? 'Cloud Run credential write requires readback recovery.' : 'Exact Cloud Run credential target could not be verified; no write attempted.', data: { mutationAttempted: attempted } }; }
+  }
+
+  private unappliedRuntimeEnvKeys(container: CloudRunContainer | undefined, vars: Record<string, string>): string[] {
+    const observed = new Map(
+      (container?.env ?? [])
+        .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
+        .map((entry) => [entry.name, entry.value])
+    );
+    return Object.entries(vars).filter(([key, value]) => observed.get(key) !== value).map(([key]) => key);
+  }
+
+  private async waitForCloudRunServiceReady(
+    serviceName: string,
+    token: string
+  ): Promise<CloudRunService | null> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const resourceName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/services/${serviceName}`;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const service = await this.getCloudRunService(serviceName, token);
+      const readiness = this.cloudRunServiceReadiness(service);
+      if (readiness.ready) {
+        if (service?.name !== resourceName) {
+          throw new Error(
+            `Cloud Run service ${serviceName} became ready with a different resource identity: ${service?.name ?? 'missing'}.`
+          );
+        }
+        return service;
+      }
+      if (readiness.error) {
+        throw new Error(`Cloud Run service ${serviceName} is not ready: ${readiness.error}`);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    throw new Error(`Cloud Run service ${serviceName} was not ready before timeout`);
+  }
 }
 
 // Self-register with provider registry
@@ -6530,23 +3198,11 @@ providerRegistry.register({
     },
     maturity: {
       lifecycle: {
-        hosting: { status: 'ready-for-live' },
-        queue: {
-          status: 'ready-for-live',
-          reason: 'Mocked Pub/Sub lifecycle is complete; live promotion evidence has not been recorded.',
+        hosting: {
+          status: 'planned',
+          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
         },
       },
-    },
-    lifecycle: {
-      hosting: {
-        workloadKinds: ['web', 'worker', 'cron'],
-        serviceVolumes: { workloadKinds: ['web', 'worker'], retention: 'retain-only', attachmentTiming: 'service-update' },
-        customDomains: 'managed', customDomainRetarget: 'unsupported',
-        domainTrafficProxy: 'dns-only',
-        maintenance: 'managed',
-        teardownBoundary: 'services',
-      },
-      queue: { backend: 'pubsub', resources: 'managed' },
     },
     orchestration: {
       diff: {
@@ -6555,18 +3211,6 @@ providerRegistry.register({
       logs: {
         runtime: true,
         deployments: true,
-      },
-      ci: {
-        displayName: 'Cloud Run',
-        rendererRevision: 1,
-        requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
-        secretCredentialKeys: {
-          GCP_SERVICE_ACCOUNT_JSON: 'credentials',
-          GCP_PROJECT_ID: 'projectId',
-        },
-        buildGitHubActionsSteps: buildCloudRunGitHubActionsSteps,
-        buildPortableRecipe: buildCloudRunPortableRecipe,
-        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
     },
   },
@@ -6592,9 +3236,5 @@ providerRegistry.register({
     inspect: (adapter, request) => request.resource === 'artifact'
       ? (adapter as CloudRunAdapter).inspectArtifactResources(request)
       : (adapter as CloudRunAdapter).inspectEnvironmentResources(request),
-  },
-  retainedCleanup: {
-    resources: ['artifact'],
-    destroy: (adapter, target) => (adapter as CloudRunAdapter).destroyRetainedArtifactRepository(target),
   },
 });

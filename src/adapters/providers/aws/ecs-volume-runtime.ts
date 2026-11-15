@@ -1,4 +1,11 @@
 /** Shared by direct reconciliation and emitted CI; retain all registered runtime settings. */
+export function ecsCurrentConfiguration(service: any): any {
+  const matches = (service?.activeConfigurations ?? []).filter((config: any) => config.serviceRevisionArn === service?.currentDeployment);
+  if (!service?.currentDeployment || matches.length !== 1) throw new Error('ECS current deployment configuration is missing or ambiguous.');
+  return matches[0];
+}
+
+/** Shared by direct reconciliation and emitted CI; retain all registered runtime settings. */
 export function ecsTaskDefinitionInput(task: any, mainPatch: Record<string, unknown>, family?: string): any {
   if (!task?.family || task.networkMode !== 'awsvpc' || !task.requiresCompatibilities?.includes('FARGATE')
     || !Array.isArray(task.containerDefinitions)) throw new Error('ECS task definition is not an observable Fargate workload.');

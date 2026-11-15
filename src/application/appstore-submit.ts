@@ -9,7 +9,7 @@ import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
 import { resolveManagedWorkflowContract, workflowFiles, workflowFilesContentHash } from '../domain/services/ci-deploy.service.js';
 import { environmentDeploymentContractHash } from '../domain/services/deployment-contract.service.js';
-import { managedCiReleaseArtifactPrefix, MANAGED_CI_RELEASE_EVIDENCE_VERSION } from '../domain/services/managed-ci-evidence.js';
+import { managedCiReleaseArtifactPrefix, MANAGED_CI_RELEASE_EVIDENCE_VERSION, normalizeCredentialActivation } from '../domain/services/managed-ci-evidence.js';
 import { iosBuildContractFingerprint, IOS_RELEASE_EVIDENCE_VERSION } from '../domain/services/ios-release-evidence.js';
 import { assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt } from '../domain/services/ios-release-attempt.js';
 import { iosReleaseWorkflowPath } from '../domain/services/ios-release-workflow.service.js';
@@ -36,15 +36,23 @@ const serverManifestSchema = z.object({
   version: z.literal(MANAGED_CI_RELEASE_EVIDENCE_VERSION), provider: string, environment: string,
   source: identity, programFingerprint: hash, deploymentContractFingerprint: hash,
   target: z.object({
-    scope: z.record(z.unknown()), bindingsFingerprint: hash,
+    scope: z.record(z.string(), z.unknown()), bindingsFingerprint: hash,
     resources: z.array(z.object({
       logicalName: string, workloadKind: z.enum(['web', 'worker', 'cron']),
       providerResourceType: z.enum(['service', 'job']), providerResourceId: string,
       imageUri: z.string().regex(/^[^\s@]+@sha256:[0-9a-f]{64}$/).nullable(),
     }).strict()).min(1),
   }).strict(),
+  credentialActivation: z.unknown().optional(),
   verifiedAt: z.string().datetime(),
-}).strict();
+}).strict().superRefine((manifest, context) => {
+  if (manifest.credentialActivation === undefined) return;
+  try {
+    normalizeCredentialActivation(manifest.credentialActivation, manifest.target.resources);
+  } catch {
+    context.addIssue({ code: 'custom', path: ['credentialActivation'], message: 'Credential activation evidence is malformed.' });
+  }
+});
 
 export type IosSubmissionManifest = z.infer<typeof iosManifestSchema>;
 export type ServerSubmissionManifest = z.infer<typeof serverManifestSchema>;

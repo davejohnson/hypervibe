@@ -16,7 +16,6 @@ import { planDatabaseScopeBinding } from '../../domain/services/database-scope-b
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { resolvePlanActionAuthority } from '../../domain/plan/action-authority.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
-import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.js';
 import { projectRecoveryDatabases } from '../../domain/services/recovery-database-bindings.js';
 import { createUnresolvedDatabaseMutation } from '../../domain/ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -26,7 +25,7 @@ import { railwayHttpFixture, projectId, stagingId } from '../../adapters/provide
 
 // Real SQLite and graphql-request against the pinned official Railway SDL.
 // Synthetic scope/volume state, not a recording or live provider certification.
-describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope binding with %s backups', backupMode => {
+describe('reviewed legacy database scope binding', () => {
   let directory: string;
   let ctx: CommandContext;
   beforeEach(() => {
@@ -41,12 +40,14 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true });
   });
 
-  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, credentialAliases = false) {
+  async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}, credentialAliases = false, backupMode: 'daily' | 'disabled' = 'daily') {
     const http = await railwayHttpFixture(options);
     const nativeService = http.addService('staging-postgres', 'postgres', stagingId);
     Object.assign(nativeService.instances.get(stagingId)!, { source: { image: 'ghcr.io/railwayapp-templates/postgres-ssl:16' },
       latestDeployment: { id: 'database-deployment', status: 'SUCCESS', createdAt: '2026-10-01T00:00:00Z' } });
     const volume = http.addVolume('staging-postgres', stagingId, '/var/lib/postgresql/data');
+    http.variables.set(`staging-postgres/${stagingId}`, { PGDATA: '/var/lib/postgresql/data/pgdata',
+    DATABASE_URL: 'postgresql://synthetic:private@database.railway.internal/postgres' });
     http.backupSchedules.set(String(volume.instance.id), [{ id: 'daily', kind: 'DAILY', name: 'Daily',
       cron: '0 0 * * *', retentionSeconds: 6 * 86400, createdAt: '2026-10-01T00:00:00Z' }]);
     if (backupMode === 'disabled') http.backupSchedules.clear();
@@ -67,13 +68,14 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
       databaseCheckpoints: checkpoints,
     } });
     const component = ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: 'staging-postgres',
-      bindings: { provider: 'railway', resourceKind: 'service', projectId, environmentId: stagingId,
+      bindings: { provider: 'railway', resourceKind: 'service', projectId, environmentId: stagingId, pluginName: 'postgres', directUrlVariable: 'DATABASE_URL',
         connectionUrl: 'postgres://synthetic:private@database.internal/app',
         resilience: { checkpoints } } });
     const service = ctx.repos.services.create({ projectId: project.id, name: 'web',
       buildConfig: { startCommand: 'npm start' }, envVarSpec: { required: ['PRESERVED'] } });
     const database = createRailwayDatabaseAdapter({ hostingAdapter: http.adapter, envRepo: ctx.repos.environments });
     vi.spyOn(AdapterFactory.prototype, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: http.adapter });
+    vi.spyOn(AdapterFactory.prototype, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: database });
     vi.spyOn(AdapterFactory.prototype, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: database });
     vi.spyOn(AdapterFactory.prototype, 'getStorageAdapter').mockResolvedValue({ success: false, error: 'Unrelated archive is not configured' });
     vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
@@ -86,8 +88,8 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     return { http, volume, project, spec, stored, environment, component, service, database, plan, context };
   }
 
-  it('plans a local-only scope repair and preserves accepted project state through apply', async () => {
-    const f = await fixture();
+  it.each(['daily', 'disabled'] as const)('repairs scope locally and preserves accepted state with %s backups', async backupMode => {
+    const f = await fixture({}, false, backupMode);
     const result = await f.plan();
     expect(result).not.toHaveProperty('error');
     if ('error' in result) throw new Error(result.error);
@@ -125,10 +127,13 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(next.actions.find(action => action.resource.kind === 'database')).toMatchObject({ type: 'noop' });
     expect(f.http.mutations).toEqual([]);
     expect(f.http.contractErrors).toEqual([]);
+    expect(f.http.backupSchedules.size).toBe(backupMode === 'disabled' ? 0 : 1);
   });
 
   it.each(['missing', 'provided'] as const)('normalizes legacy scope, repairs aliases and resumes %s deployment input', async input => {
     const f = await fixture({ renderVariableReferences: true }, true);
+    const { directUrlVariable: _direct, ...legacyBindings } = f.component.bindings;
+    ctx.repos.components.update(f.component.id, { bindings: { ...legacyBindings, providerScope: { projectId } } });
     f.spec = projectSpecSchema.parse({ ...f.spec, secrets: {
       ANTHROPIC_API_KEY: { principal: 'github:tester', environments: ['staging'] },
     } });
@@ -136,7 +141,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     vi.stubEnv('ALIAS_TEST_DELEGATED', 'synthetic-delegated-secret');
     const options = { envVarOverrides: { FEATURE_FLAG: 'reviewed' },
       ...(input === 'provided' ? { secretRefs: { ANTHROPIC_API_KEY: 'env:ALIAS_TEST_DELEGATED' } } : {}) };
-    f.http.variables.set(`staging-postgres/${stagingId}`, { POSTGRES_PASSWORD: 'synthetic-current',
+    f.http.variables.set(`staging-postgres/${stagingId}`, { PGDATA: '/var/lib/postgresql/data/pgdata', POSTGRES_PASSWORD: 'synthetic-current',
       PGPASSWORD: 'synthetic-previous', DATABASE_URL: 'postgresql://postgres:synthetic-previous@database.internal:5432/postgres' });
     const bindingPlan = await f.plan(options);
     if ('error' in bindingPlan) throw new Error(bindingPlan.error);
@@ -151,6 +156,7 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
       .toMatchObject({ kind: 'executed', result: { success: true } });
     expect(f.http.mutations).toEqual([]);
     expect(ctx.repos.components.findById(f.component.id)?.bindings.providerScope).toEqual({ projectId, environmentId: stagingId });
+    expect(ctx.repos.components.findById(f.component.id)?.bindings.directUrlVariable).toBe('DATABASE_URL');
     const aliases = await f.plan(options);
     if ('error' in aliases) throw new Error(aliases.error);
     expect(aliases.scope).toBe('database-credential-aliases');
@@ -167,31 +173,31 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     const resumed = await f.plan(options);
     if ('error' in resumed) throw new Error(resumed.error);
     const resumedDocument = ctx.repos.runs.findById(resumed.planRunId)!.plan as Record<string, any>;
-    if (backupMode === 'daily') {
-      // Configured schedules without an available recovery point still gate rollout.
-      expect(resumed.scope).toBe('backup-readiness');
-      expect(resumedDocument).not.toHaveProperty('overrides');
+    // Identity/alias repair resumes the same deployment input contract regardless
+    // of optional backup policy; backup health belongs to explicit diagnostics.
+    expect(resumed.scope).toBe('full');
+    expect(resumed).not.toHaveProperty('backupReadiness');
+    expect(resumed).not.toHaveProperty('backupCoverage');
+    expect(resumedDocument).not.toHaveProperty('backupReadiness');
+    expect(resumedDocument).not.toHaveProperty('backupCoverage');
+    expect(getSecretStore().decryptObject(resumedDocument.overrides.envVarsEncrypted)).toEqual({ FEATURE_FLAG: 'reviewed' });
+    if (input === 'missing') {
+      expect(resumed.inputRequired).toContainEqual(expect.objectContaining({ key: 'ANTHROPIC_API_KEY' }));
     } else {
-      expect(resumed.scope).toBe('full');
-      expect(getSecretStore().decryptObject(resumedDocument.overrides.envVarsEncrypted)).toEqual({ FEATURE_FLAG: 'reviewed' });
-      if (input === 'missing') {
-        expect(resumed.inputRequired).toContainEqual(expect.objectContaining({ key: 'ANTHROPIC_API_KEY' }));
-      } else {
-        expect(resumed.inputRequired).toEqual([]);
-        expect(getSecretStore().decryptObject(resumedDocument.overrides.delegatedSecretVarsEncrypted))
-          .toEqual({ ANTHROPIC_API_KEY: 'synthetic-delegated-secret' });
-      }
+      expect(resumed.inputRequired).toEqual([]);
+      expect(getSecretStore().decryptObject(resumedDocument.overrides.delegatedSecretVarsEncrypted))
+        .toEqual({ ANTHROPIC_API_KEY: 'synthetic-delegated-secret' });
     }
     expect(f.http.mutations).toHaveLength(1);
     expect(f.http.contractErrors).toEqual([]);
   });
 
-  it.each(['unknown', 'partial', 'malformed', 'unsupported', 'rotation'] as const)('keeps %s scope blocked when aliases are declared', async state => {
+  it.each(['unknown', 'conflicting-partial', 'malformed', 'unsupported', 'rotation'] as const)('keeps %s scope blocked when aliases are declared', async state => {
     const f = await fixture(state === 'unknown' ? { responseOverride: ({ query }) => query.includes('DatabaseCheckpointTarget')
       ? Response.json({ errors: [{ message: 'synthetic unavailable scope' }] }, { status: 403 }) : undefined } : {}, true);
-    if (state === 'partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    if (state === 'conflicting-partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId: 'different-project' } });
     if (state === 'malformed') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
-    if (state === 'unsupported') vi.mocked(AdapterFactory.prototype.getDatabaseAdapter)
+    if (state === 'unsupported') vi.mocked(AdapterFactory.prototype.getDatabaseOperations)
       .mockResolvedValue({ success: true, adapter: { ...f.database, credentialAliases: undefined } });
     if (state === 'rotation') ctx.repos.components.updateBindings(f.component.id, { credentialRotation: { phase: 'attempted' } });
     const planned = await f.plan();
@@ -273,7 +279,6 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect((await planDatabaseScopeBinding(f.context())).actions).toEqual([]);
     expect(await r.apply()).toMatchObject({ success: true, data: { applied: 0, skipped: 1, providerMutations: 0 } });
     expect(new SpecStore().get(f.project)?.spec).toEqual(f.spec);
-    if (backupMode === 'disabled') expect(f.http.backupSchedules.size).toBe(0);
     expect(f.http.contractErrors).toEqual([]);
     expect(f.http.mutations).toEqual([]);
   });
@@ -316,9 +321,9 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(f.http.mutations).toEqual([]);
   });
 
-  it.each(['explicit-scope', 'malformed-scope', 'unfinished-create', 'malformed-create', 'retained', 'duplicate'])('preserves %s state without adopting it', async change => {
+  it.each(['conflicting-scope', 'malformed-scope', 'unfinished-create', 'malformed-create', 'retained', 'duplicate'])('preserves %s state without adopting it', async change => {
     const f = await fixture();
-    if (change === 'explicit-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    if (change === 'conflicting-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId: 'different-project' } });
     if (change === 'malformed-scope') ctx.repos.components.updateBindings(f.component.id, { providerScope: null });
     if (change === 'unfinished-create') ctx.repos.components.updateBindings(f.component.id, {
       unresolvedMutation: createUnresolvedDatabaseMutation('postgres', { projectId, environmentId: stagingId }) });
@@ -380,31 +385,25 @@ describe.each(['daily', 'disabled'] as const)('reviewed legacy database scope bi
     expect(f.http.mutations).toEqual([]);
   });
 
-  it.each(['railway', 'cloudsql', 'rds', 'supabase', 'azure-postgres', 'neon', 'fly', 'digitalocean'])('keeps %s recovery-scope support explicit', async provider => {
+  it.each(['railway', 'cloudsql', 'rds', 'azure-postgres'])('keeps %s recovery-scope support explicit', async provider => {
     const f = await fixture();
     f.spec.environments.staging.database!.provider = provider;
     ctx.repos.components.updateBindings(f.component.id, { provider });
-    if (provider === 'cloudsql') {
-      const cloudsql = new CloudSqlAdapter();
-      await cloudsql.connect({ projectId: 'gcp-project', credentials: JSON.stringify({ client_email: 'synthetic@example.invalid', private_key: 'synthetic-key' }) });
-      Object.assign(cloudsql, { accessToken: 'synthetic-token', tokenExpiry: new Date(Date.now() + 60_000) });
-      vi.mocked(AdapterFactory.prototype.getDatabaseAdapter).mockResolvedValue({ success: true, adapter: cloudsql });
-    }
     const readsBefore = f.http.requests.length;
-    vi.mocked(AdapterFactory.prototype.getDatabaseAdapter).mockClear();
+    vi.mocked(AdapterFactory.prototype.getDatabaseOperations).mockClear();
     expect(providerRegistry.getMetadata(provider)?.lifecycle?.dailyBackups?.database === true)
-      .toBe(provider === 'railway' || provider === 'cloudsql');
+      .toBe(provider === 'railway');
     const result = await planDatabaseScopeBinding(f.context());
     expect(result.actions).toHaveLength(provider === 'railway' ? 1 : 0);
     if (provider !== 'railway') expect(result.warnings.join(' ')).toContain('could not be independently verified');
     if (provider !== 'railway') expect(f.http.requests).toHaveLength(readsBefore);
-    if (provider !== 'railway' && provider !== 'cloudsql') expect(AdapterFactory.prototype.getDatabaseAdapter).not.toHaveBeenCalled();
+    if (provider !== 'railway') expect(AdapterFactory.prototype.getDatabaseOperations).not.toHaveBeenCalled();
     expect(ctx.repos.components.findById(f.component.id)?.bindings).not.toHaveProperty('providerScope');
     expect(f.http.mutations).toEqual([]);
   });
 
   it('covers every registered database provider in the named repair review', () => {
     expect(providerRegistry.namesFor('database').sort())
-      .toEqual(['railway', 'cloudsql', 'rds', 'supabase', 'azure-postgres', 'neon', 'fly', 'digitalocean'].sort());
+      .toEqual(['railway']);
   });
 });

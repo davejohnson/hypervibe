@@ -135,7 +135,13 @@ export function planDataMigration(params: {
 
   const actions: PlanAction[] = [];
   const sourceName = migration.fromEnvironment;
-  const maintenanceBlockedReason = params.sourceSpec.maintenance?.enabled !== true
+  const applicationMaintenance = params.sourceSpec.maintenance?.mode === 'application'
+    || params.targetSpec.maintenance?.mode === 'application'
+    || params.sourceMaintenance?.mode === 'application'
+    || params.targetMaintenance?.mode === 'application';
+  const maintenanceBlockedReason = applicationMaintenance
+    ? 'data_migration_requires_data_maintenance'
+    : params.sourceSpec.maintenance?.enabled !== true
     ? 'source_maintenance_not_desired'
     : params.targetSpec.maintenance?.enabled !== true
       ? 'target_maintenance_not_desired'

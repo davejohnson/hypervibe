@@ -26,6 +26,7 @@ import { resolveManagedWorkflowContract, workflowFiles } from '../../domain/serv
 import { iosBuildContractFingerprint } from '../../domain/services/ios-release-evidence.js';
 import { environmentDeploymentContractHash } from '../../domain/services/deployment-contract.service.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION, managedCiReleaseArtifactPrefix } from '../../domain/services/managed-ci-evidence.js';
+import { extractGitHubScript, installReleaseEvidenceValidator, releaseEvidenceValidatorRequire } from '../../domain/services/__tests__/managed-ci-workflow.test-utils.js';
 
 let tempDir: string;
 
@@ -347,6 +348,42 @@ const SUBMIT_INPUT = {
   appIdentifier: 'com.example.app',
 };
 
+async function emitSubmissionServerEvidence(fixture: ReturnType<typeof seedConnection>, role: 'target' | 'original', activation: 'empty' | 'nonempty') {
+  const server = role === 'target' ? fixture.server : fixture.sourceServer;
+  const workflow = fixture.workflows.get(fixture.run(role === 'target' ? 101 : 103).path)!;
+  const validator = installReleaseEvidenceValidator(workflow, tempDir);
+  const resources = server.target.resources.map(({ imageUri: _image, ...resource }) => resource);
+  const serviceId = role === 'target' ? 'rail-web' : 'stage-web';
+  let output = '';
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  await new AsyncFunction('require', 'process', 'core', extractGitHubScript(workflow, 'Write server release evidence'))(
+    releaseEvidenceValidatorRequire(validator, { writeFileSync: (_file, content) => { output = String(content); } }),
+    { env: {
+      HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath, HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+      HYPERVIBE_RELEASE_SHA: server.source.sha, GITHUB_REPOSITORY: 'davejohnson/example',
+      HYPERVIBE_RELEASE_PROVIDER: 'railway', HYPERVIBE_RELEASE_ENVIRONMENT: server.environment,
+      HYPERVIBE_RELEASE_SERVICES: '["web"]', HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(server.target.scope),
+      HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(resources), HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: server.target.bindingsFingerprint,
+      HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: server.programFingerprint,
+      HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: server.deploymentContractFingerprint,
+      HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'true', HYPERVIBE_RELEASE_IMAGE_URI: server.target.resources[0].imageUri,
+      // Real generated push defaults are strings, including the empty object.
+      HYPERVIBE_CREDENTIAL_OPERATIONS: activation === 'empty' ? '{}' : JSON.stringify({ web: { serviceId, operationId: 'reviewed-operation', configurationVersion: 42 } }),
+      HYPERVIBE_CREDENTIAL_DEPLOYMENTS: activation === 'empty' ? '[]' : JSON.stringify([{ serviceId, deploymentIds: ['deployment-new'], configurationVersion: 42 }]),
+    } }, {},
+  );
+  Object.assign(server, JSON.parse(output));
+  refreshSubmissionServerDigests(fixture);
+  return server as typeof server & { credentialActivation: unknown };
+}
+
+function refreshSubmissionServerDigests(fixture: ReturnType<typeof seedConnection>) {
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value, null, 2) + '\n').digest('hex');
+  fixture.mobile.server.evidenceSha256 = digest(fixture.sourceServer);
+  if (fixture.targetApi) fixture.targetApi.serverEvidenceSha256 = digest(fixture.server);
+  if (fixture.sourceApi) fixture.sourceApi.serverEvidenceSha256 = digest(fixture.sourceServer);
+}
+
 describe('hv_appstore_submit', () => {
   function stubSubmittableVersion() {
     vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(APP);
@@ -354,6 +391,47 @@ describe('hv_appstore_submit', () => {
     vi.spyOn(AppStoreConnectAdapter.prototype, 'getAppStoreVersionBuild').mockResolvedValue({ id: 'build-1', version: '42' });
     return getEditableVersion;
   }
+
+  it.each([
+    ['target', 'empty'], ['target', 'nonempty'], ['original', 'empty'], ['original', 'nonempty'],
+  ] as const)('accepts the emitted %s server artifact with %s credential activation', async (role, activation) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    await emitSubmissionServerEvidence(fixture, role, activation);
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+    expect(submit).not.toHaveBeenCalled();
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(1);
+    await t.close();
+  });
+
+  it.each([
+    ['target', 'malformed'], ['target', 'wrong resource'], ['target', 'unknown field'],
+    ['original', 'malformed'], ['original', 'wrong resource'], ['original', 'unknown field'],
+  ] as const)('rejects %s server activation with %s before Apple access', async (role, invalid) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true });
+    const server = await emitSubmissionServerEvidence(fixture, role, 'nonempty');
+    if (invalid === 'malformed') server.credentialActivation = null;
+    else if (invalid === 'wrong resource') server.credentialActivation = {
+      version: 1, operations: [{ service: 'web', serviceId: role === 'target' ? 'stage-web' : 'rail-web', operationId: 'reviewed-operation', deploymentIds: ['deployment-new'] }],
+    };
+    else Object.assign(server, { unexpectedReleaseField: true });
+    refreshSubmissionServerDigests(fixture);
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(AppStoreConnectAdapter.prototype.findAppByBundleId).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
 
   it('requires a reviewed exact-build confirmation before submitting', async () => {
     seedConnection();

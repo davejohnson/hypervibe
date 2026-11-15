@@ -1,5 +1,7 @@
+import { isEngineManaged, releaseEngineServices } from '../application/infrastructure-engine.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
+import { localRepositoryFor } from '../application/local-repository.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -75,10 +77,10 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       project: projectField,
       env: envField,
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
-      envVars: z.record(z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
+      envVars: z.record(z.string(), z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
-      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
+      secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
       confirm: confirmField,
     },
     wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs, confirm }) => {
@@ -92,7 +94,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           next: ['hv_spec', 'hv_inspect', 'hv_import'],
         });
       }
-      const providerValidation = firstProviderSpecValidationFailure(specResult.spec);
+      const providerValidation = firstProviderSpecValidationFailure(specResult.spec, env?.trim() || 'staging');
       if (providerValidation) {
         return commandError('VALIDATION', providerValidation.message, {
           hint: providerValidation.hint,
@@ -119,6 +121,42 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ?? ctx.repos.environments.create({ projectId: project.id, name: envName });
 
       assertConfirmed(project, environment, confirm, 'hv_deploy');
+
+      if (isEngineManaged(envSpec)) {
+        const supplied = [envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined);
+        if (supplied) {
+          return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
+        }
+        const sourceDirectory = localRepositoryFor(project, specResult.source);
+        const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });
+        if ('blocked' in released) {
+          return commandError('VALIDATION', released.blocked, {
+            next: ['hv_plan'],
+            agentInstruction: { action: 'stop_and_report', message: 'Report the blocker. Releases never create infrastructure.' },
+          });
+        }
+        const failed = released.results.filter((result) => result.status !== 'released');
+        if (failed.length) {
+          return commandError('PROVIDER_ERROR', 'The release did not complete.', {
+            details: { environment: envName, results: released.results },
+            hint: failed.some((result) => result.status === 'unknown') ? 'Check hv_status before retrying; the outcome is not yet known.' : 'Fix the reported problem, then re-run hv_deploy.',
+            next: ['hv_status', 'hv_logs'],
+          });
+        }
+        return commandSuccess({
+          status: 'succeeded',
+          environment: envName,
+          applyRunId: released.applyRunId,
+          ...(released.source ? { source: released.source } : {}),
+          results: released.results,
+          serviceUrls: Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url])),
+          message: `Released ${released.results.length} service(s).`,
+        }, {
+          ...(released.source?.uncommittedChangesExcluded
+            ? { warnings: ['Only committed code was deployed; uncommitted changes in this repository were not included.'] } : {}),
+          next: ['hv_health'],
+        });
+      }
 
       const ciDeploy = ciBranchDeployGuidance(project, envName);
       if (ciDeploy) {

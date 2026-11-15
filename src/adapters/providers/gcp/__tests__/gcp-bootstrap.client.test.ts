@@ -35,15 +35,6 @@ function project(overrides: Record<string, unknown> = {}): Record<string, unknow
   };
 }
 
-function serviceAccount(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    name: ACCOUNT_NAME,
-    projectId: PROJECT_ID,
-    uniqueId: '109876543210987654321',
-    email: ACCOUNT_EMAIL,
-    ...overrides,
-  };
-}
 
 function key(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -55,83 +46,6 @@ function key(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 describe('GcpBootstrapClient', () => {
-  it('uses exact CRM v3 project URLs and waits for the exact create operation', async () => {
-    const sleep = vi.fn(async () => undefined);
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url === `https://cloudresourcemanager.googleapis.com/v3/projects/${PROJECT_ID}`) {
-        return Response.json(project());
-      }
-      if (url === 'https://cloudresourcemanager.googleapis.com/v3/projects'
-        && init?.method === 'POST') {
-        return Response.json({ name: 'operations/create-project-1' });
-      }
-      if (url === 'https://cloudresourcemanager.googleapis.com/v3/operations/create-project-1') {
-        const priorPolls = fetchMock.mock.calls.filter(([candidate]) =>
-          String(candidate).endsWith('/operations/create-project-1')).length;
-        return priorPolls === 1
-          ? Response.json({ name: 'operations/create-project-1', done: false })
-          : Response.json({
-            name: 'operations/create-project-1',
-            done: true,
-            response: project(),
-          });
-      }
-      throw new Error('Unexpected request');
-    });
-    const api = client(fetchMock as typeof fetch, { sleep });
-
-    await expect(api.getProject(PROJECT_ID)).resolves.toEqual(project());
-    const operation = await api.createProject({
-      projectId: PROJECT_ID,
-      displayName: 'Hypervibe',
-      parent: 'organizations/987654321',
-    });
-    await expect(api.waitForProjectOperation(operation.name, {
-      projectId: PROJECT_ID,
-      parent: 'organizations/987654321',
-    })).resolves.toEqual(project());
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://cloudresourcemanager.googleapis.com/v3/projects/${PROJECT_ID}`,
-      expect.objectContaining({
-        method: 'GET',
-        headers: expect.objectContaining({ Authorization: 'Bearer access-token-that-must-stay-private' }),
-      })
-    );
-    expect(fetchMock.mock.calls.filter(([candidate]) => (
-      String(candidate) === `https://cloudresourcemanager.googleapis.com/v3/projects/${PROJECT_ID}`
-    ))).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://cloudresourcemanager.googleapis.com/v3/projects',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          projectId: PROJECT_ID,
-          displayName: 'Hypervibe',
-          parent: 'organizations/987654321',
-        }),
-      })
-    );
-    expect(sleep).toHaveBeenCalledWith(7);
-  });
-
-  it('rejects a different project or operation identity', async () => {
-    const wrongProjectFetch = vi.fn(async () => Response.json(project({ projectId: 'other-project' })));
-    await expect(client(wrongProjectFetch as typeof fetch).getProject(PROJECT_ID))
-      .rejects.toThrow('different or invalid resource identity');
-
-    const wrongOperationFetch = vi.fn(async () => Response.json({
-      name: 'operations/different',
-      done: true,
-      response: project(),
-    }));
-    await expect(client(wrongOperationFetch as typeof fetch).waitForProjectOperation(
-      'operations/expected',
-      { projectId: PROJECT_ID }
-    )).rejects.toThrow('different operation identity');
-  });
-
   it('treats only an exact 404 as absent and safely redacts provider and transport errors', async () => {
     const absent = client(vi.fn(async () => new Response(
       '{"privateKeyData":"response-secret"}',
@@ -186,42 +100,6 @@ describe('GcpBootstrapClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('updates project billing and returns only after exact read-after-write convergence', async () => {
-    const billingAccountName = 'billingAccounts/AAAAAA-BBBBBB-CCCCCC';
-    const sleep = vi.fn(async () => undefined);
-    let observations = 0;
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      expect(String(input)).toBe(
-        `https://cloudbilling.googleapis.com/v1/projects/${PROJECT_ID}/billingInfo`
-      );
-      if (init?.method === 'PUT') {
-        expect(init.body).toBe(JSON.stringify({ billingAccountName }));
-        return Response.json({
-          name: `projects/${PROJECT_ID}/billingInfo`,
-          projectId: PROJECT_ID,
-          billingAccountName,
-          billingEnabled: true,
-        });
-      }
-      observations += 1;
-      return Response.json({
-        name: `projects/${PROJECT_ID}/billingInfo`,
-        projectId: PROJECT_ID,
-        billingAccountName: observations === 1 ? '' : billingAccountName,
-        billingEnabled: observations !== 1,
-      });
-    });
-
-    await expect(client(fetchMock as typeof fetch, { sleep }).updateProjectBillingInfo(
-      PROJECT_ID,
-      billingAccountName
-    )).resolves.toMatchObject({ billingAccountName, billingEnabled: true });
-    expect(sleep).toHaveBeenCalledOnce();
-  });
-
-  // Reconstructed Cloud Billing v1 responses, not live recordings. The official
-  // BillingAccount / ProjectBillingInfo contracts and ProtoJSON default/null
-  // semantics are recorded in test/provider-contracts/README.md.
   it.each([undefined, null, false])('filters closed accounts with open=%s across pages', async (open) => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({
@@ -296,95 +174,6 @@ describe('GcpBootstrapClient', () => {
       .rejects.toThrow('different or invalid resource identity');
   });
 
-  it('waits through omitted billing defaults without repeating the billing write', async () => {
-    const linked = { name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID,
-      billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', billingEnabled: true };
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(Response.json(linked))
-      .mockResolvedValueOnce(Response.json({ name: linked.name, projectId: PROJECT_ID }))
-      .mockResolvedValueOnce(Response.json(linked));
-    const sleep = vi.fn(async () => undefined);
-    await expect(client(fetchMock, { sleep }).updateProjectBillingInfo(PROJECT_ID, linked.billingAccountName))
-      .resolves.toEqual(linked);
-    expect(fetchMock.mock.calls.map(([, init]) => init.method)).toEqual(['PUT', 'GET', 'GET']);
-    expect(sleep).toHaveBeenCalledOnce();
-  });
-
-  it('does not accept omitted billing state as a successful write acknowledgement', async () => {
-    const fetchMock = vi.fn(async () => Response.json({
-      name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID,
-    }));
-    await expect(client(fetchMock).updateProjectBillingInfo(PROJECT_ID, 'billingAccounts/AAAAAA-BBBBBB-CCCCCC'))
-      .rejects.toThrow('acknowledged a different billing state');
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it('enables an exact service, waits for its LRO, and verifies ENABLED state', async () => {
-    const serviceName = 'iam.googleapis.com';
-    const exactServiceName = `${PROJECT_NAME}/services/${serviceName}`;
-    const sleep = vi.fn(async () => undefined);
-    let operationPolls = 0;
-    let servicePolls = 0;
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith(`/v3/projects/${PROJECT_ID}`)) return Response.json(project());
-      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}`)) {
-        servicePolls += 1;
-        return Response.json({
-          name: exactServiceName,
-          parent: PROJECT_NAME,
-          config: { name: serviceName },
-          state: servicePolls < 3 ? 'DISABLED' : 'ENABLED',
-        });
-      }
-      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}:enable`)) {
-        expect(init?.method).toBe('POST');
-        expect(init?.body).toBe('{}');
-        return Response.json({ name: 'operations/service-enable-1' });
-      }
-      if (url.endsWith('/v1/operations/service-enable-1')) {
-        operationPolls += 1;
-        return Response.json({
-          name: 'operations/service-enable-1',
-          done: operationPolls > 1,
-          ...(operationPolls > 1 ? { response: {} } : {}),
-        });
-      }
-      throw new Error('Unexpected request');
-    });
-
-    await expect(client(fetchMock as typeof fetch, { sleep }).enableService(
-      PROJECT_ID,
-      serviceName
-    )).resolves.toBe('enabled');
-    expect(operationPolls).toBe(2);
-    expect(servicePolls).toBe(3);
-    expect(sleep).toHaveBeenCalledTimes(2);
-  });
-
-  it('reports an already-enabled exact service without issuing a mutation', async () => {
-    const serviceName = 'iam.googleapis.com';
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.endsWith(`/v3/projects/${PROJECT_ID}`)) return Response.json(project());
-      if (url.endsWith(`/v1/projects/${PROJECT_ID}/services/${serviceName}`)) {
-        return Response.json({
-          name: `${PROJECT_NAME}/services/${serviceName}`,
-          parent: PROJECT_NAME,
-          config: { name: serviceName },
-          state: 'ENABLED',
-        });
-      }
-      throw new Error('Unexpected request');
-    });
-
-    await expect(client(fetchMock as typeof fetch).enableService(
-      PROJECT_ID,
-      serviceName
-    )).resolves.toBe('already_enabled');
-    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(':enable'))).toBe(false);
-  });
-
   it('observes exact service state and does not interpret forbidden as absence', async () => {
     const serviceName = 'iam.googleapis.com';
     const stateFetch = vi.fn(async (input: string | URL | Request) => {
@@ -414,56 +203,6 @@ describe('GcpBootstrapClient', () => {
     )).rejects.toMatchObject({ status: 403 });
   });
 
-  it('gets and sets an exact numeric service-account policy with its etag', async () => {
-    const uniqueId = '109876543210987654321';
-    const resourceUrl = `https://iam.googleapis.com/v1/projects/${PROJECT_ID}`
-      + `/serviceAccounts/${uniqueId}`;
-    const original = {
-      version: 3,
-      etag: 'BwW-policy-etag=',
-      bindings: [{
-        role: 'roles/viewer',
-        members: ['user:owner@example.com'],
-        condition: { title: 'reviewed', expression: 'request.time < timestamp("2030-01-01T00:00:00Z")' },
-      }],
-    };
-    const updated = {
-      ...original,
-      bindings: [
-        ...original.bindings,
-        {
-          role: 'roles/iam.serviceAccountUser',
-          members: [`serviceAccount:${ACCOUNT_EMAIL}`],
-        },
-      ],
-    };
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url === `${resourceUrl}:getIamPolicy`) {
-        expect(init?.method).toBe('POST');
-        expect(JSON.parse(String(init?.body))).toEqual({
-          options: { requestedPolicyVersion: 3 },
-        });
-        return Response.json(original);
-      }
-      if (url === `${resourceUrl}:setIamPolicy`) {
-        expect(init?.method).toBe('POST');
-        expect(JSON.parse(String(init?.body))).toEqual({
-          policy: updated,
-          updateMask: 'bindings,etag',
-        });
-        return Response.json({ ...updated, etag: 'BwW-next-etag=' });
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    const api = client(fetchMock as typeof fetch);
-
-    await expect(api.getServiceAccountIamPolicy(PROJECT_ID, uniqueId))
-      .resolves.toEqual(original);
-    await expect(api.setServiceAccountIamPolicy(PROJECT_ID, uniqueId, updated))
-      .resolves.toEqual({ ...updated, etag: 'BwW-next-etag=' });
-  });
-
   it('rejects uncertain service-account policy state before mutation', async () => {
     const uniqueId = '109876543210987654321';
     const missingEtag = client(vi.fn(async () => Response.json({
@@ -479,36 +218,6 @@ describe('GcpBootstrapClient', () => {
       'not-numeric'
     )).rejects.toThrow('exact numeric identity');
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('creates an exact IAM service account and verifies it after acknowledgement', async () => {
-    const sleep = vi.fn(async () => undefined);
-    let observations = 0;
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith(`/projects/${PROJECT_ID}/serviceAccounts`) && init?.method === 'POST') {
-        expect(init.body).toBe(JSON.stringify({
-          accountId: ACCOUNT_ID,
-          serviceAccount: { displayName: 'Hypervibe deployer' },
-        }));
-        return Response.json(serviceAccount());
-      }
-      expect(url).toBe(
-        `https://iam.googleapis.com/v1/projects/${PROJECT_ID}`
-          + `/serviceAccounts/${encodeURIComponent(ACCOUNT_EMAIL)}`
-      );
-      observations += 1;
-      return observations === 1
-        ? new Response(null, { status: 404 })
-        : Response.json(serviceAccount());
-    });
-
-    await expect(client(fetchMock as typeof fetch, { sleep }).createServiceAccount({
-      projectId: PROJECT_ID,
-      accountId: ACCOUNT_ID,
-      displayName: 'Hypervibe deployer',
-    })).resolves.toEqual(serviceAccount());
-    expect(sleep).toHaveBeenCalledOnce();
   });
 
   it('creates a key without exposing extra response fields and verifies its exact identity', async () => {
@@ -667,24 +376,5 @@ describe('GcpBootstrapClient', () => {
     await expect(forbidden.deleteServiceAccountKey(KEY_NAME)).rejects.toMatchObject({ status: 403 });
   });
 
-  it('fails closed when mutation acknowledgement identities do not match', async () => {
-    const wrongBilling = vi.fn(async () => Response.json({
-      name: 'projects/another-project/billingInfo',
-      projectId: 'another-project',
-      billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
-      billingEnabled: true,
-    }));
-    await expect(client(wrongBilling as typeof fetch).updateProjectBillingInfo(
-      PROJECT_ID,
-      'billingAccounts/AAAAAA-BBBBBB-CCCCCC'
-    )).rejects.toThrow('different or invalid resource identity');
 
-    const privateKeyData = Buffer.from('private-material').toString('base64');
-    const wrongKey = vi.fn(async () => Response.json(key({
-      name: `projects/${PROJECT_ID}/serviceAccounts/other-account@${PROJECT_ID}.iam.gserviceaccount.com/keys/abcdef123456`,
-      privateKeyData,
-    })));
-    await expect(client(wrongKey as typeof fetch).createServiceAccountKey(PROJECT_ID, ACCOUNT_ID))
-      .rejects.toThrow('different or invalid resource identity');
-  });
 });

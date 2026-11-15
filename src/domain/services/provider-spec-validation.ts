@@ -1,3 +1,4 @@
+import { engineEnvironmentProblems, engineSelectionProblem, isEngineManaged } from './infrastructure-engine-selection.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import {
@@ -6,10 +7,11 @@ import {
   type ProviderLifecycleCapability,
 } from '../registry/provider.registry.js';
 import { devOpsProviderRegistry } from '../registry/devops.registry.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 
 export interface ProviderSpecIssue {
   environment: string;
-  field: 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'loadBalancer.provider' | 'devops.code.provider' | 'devops.ci.provider';
+  field: 'hosting.engine' | 'hosting.provider' | 'services.workloadKind' | 'services.volume' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'storage.provider' | 'queues' | 'devops.code.provider' | 'devops.ci.provider';
   provider: string;
   service?: string;
   workloadKind?: WorkloadKind;
@@ -66,7 +68,7 @@ function hostingCompatibilityIssue(params: {
 
 function mutationMaturityIssue(params: {
   environment: string;
-  field: Extract<ProviderSpecIssue['field'], 'hosting.provider' | 'database.provider' | 'cache.provider' | 'storage.provider' | 'queues' | 'loadBalancer.provider'>;
+  field: Extract<ProviderSpecIssue['field'], 'hosting.provider' | 'database.provider' | 'cache.provider' | 'storage.provider' | 'queues'>;
   provider: string;
   capability: ProviderLifecycleCapability;
 }): ProviderSpecIssue | undefined {
@@ -136,7 +138,12 @@ function queueConfigurationIssues(params: {
  * without editing a central enum while still rejecting specs that cannot be
  * executed by this Hypervibe installation.
  */
-export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIssue[] {
+/**
+ * Validates project-level providers plus each environment's providers. Pass
+ * `environment` to validate only that environment: an operation on one
+ * environment must not be blocked by an unrelated environment's providers.
+ */
+export function validateProjectSpecProviders(spec: ProjectSpec, environment?: string): ProviderSpecIssue[] {
   const issues: ProviderSpecIssue[] = [];
   if (spec.devops && !devOpsProviderRegistry.codeHost(spec.devops.code.provider)) {
     issues.push({
@@ -168,13 +175,33 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         .filter((provider) => devOpsProviderRegistry.compatible(spec.devops!.code.provider, provider)),
     });
   }
-  for (const [environment, environmentSpec] of Object.entries(spec.environments)) {
+  const environments = environment === undefined
+    ? Object.entries(spec.environments)
+    : Object.entries(spec.environments).filter(([name]) => name === environment);
+  for (const [environment, environmentSpec] of environments) {
+    const selectionProblem = engineSelectionProblem(environmentSpec);
+    const engineProblems = selectionProblem ? [selectionProblem]
+      : isEngineManaged(environmentSpec) ? engineEnvironmentProblems(spec, environment) : [];
+    for (const message of engineProblems) {
+      issues.push({
+        environment, field: 'hosting.engine', provider: environmentSpec.hosting.provider,
+        capability: 'hosting', engine: 'opentofu', available: [],
+        configuration: {
+          path: `environments.${environment}.hosting`, message,
+          hint: 'Review the declared capabilities with hv_spec. Cloud Run infrastructure uses OpenTofu.',
+        },
+      });
+    }
+    // Engine capabilities are independent of the unshipped legacy provider writers.
+    // Do not promote those writers to mutation-ready to admit an engine environment.
+    if (selectionProblem || isEngineManaged(environmentSpec)) continue;
     if (!providerRegistry.supports(environmentSpec.hosting.provider, 'hosting')) {
       issues.push({
         environment,
         field: 'hosting.provider',
         provider: environmentSpec.hosting.provider,
         capability: 'hosting',
+        ...providerRegistry.lifecycleMaturity(environmentSpec.hosting.provider, 'hosting'),
         available: providerRegistry.namesForMutation('hosting'),
       });
     } else {
@@ -238,6 +265,7 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         field: 'database.provider',
         provider: environmentSpec.database.provider,
         capability: 'database',
+        ...providerRegistry.lifecycleMaturity(environmentSpec.database.provider, 'database'),
         available: providerRegistry.namesForMutation('database'),
       });
     } else if (
@@ -369,34 +397,43 @@ export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIss
         }));
       }
     }
-    if (environmentSpec.loadBalancer) {
-      const loadBalancerProvider = environmentSpec.loadBalancer.provider;
-      if (!providerRegistry.supports(loadBalancerProvider, 'load-balancer')) {
-        issues.push({
-          environment,
-          field: 'loadBalancer.provider',
-          provider: loadBalancerProvider,
-          capability: 'load-balancer',
-          available: providerRegistry.namesForMutation('load-balancer'),
-        });
-      } else {
-        const maturityIssue = mutationMaturityIssue({
-          environment,
-          field: 'loadBalancer.provider',
-          provider: loadBalancerProvider,
-          capability: 'load-balancer',
-        });
-        if (maturityIssue) issues.push(maturityIssue);
-      }
-    }
   }
-  return issues;
+  // OpenTofu-engine environments: the engine owns these resources and blocks what it cannot
+  // build at plan time, so the legacy lifecycle's "planned" status does not apply to them.
+  return issues.filter((issue) => !(issue.status === 'planned'
+    && spec.environments[issue.environment]?.hosting.engine === 'opentofu'
+    && ['hosting.provider', 'database.provider', 'storage.provider'].includes(issue.field)));
 }
 
 export function firstProviderSpecValidationFailure(
-  spec: ProjectSpec
+  spec: ProjectSpec,
+  environment?: string
 ): ProviderSpecValidationFailure | undefined {
-  const issue = validateProjectSpecProviders(spec)[0];
+  return providerSpecValidationFailure(validateProjectSpecProviders(spec, environment)[0]);
+}
+
+/**
+ * For spec writes: report only issues in what the write changed (new or
+ * modified environments, or project-level devops). A write that leaves an
+ * environment untouched must not be rejected for that environment's
+ * providers; plans and applies still gate it when it is the target.
+ */
+export function introducedProviderSpecValidationFailure(
+  previous: ProjectSpec | null,
+  candidate: ProjectSpec
+): ProviderSpecValidationFailure | undefined {
+  if (!previous) return firstProviderSpecValidationFailure(candidate);
+  const changed = (before: unknown, after: unknown) =>
+    canonicalJsonSha256(before ?? null) !== canonicalJsonSha256(after ?? null);
+  return providerSpecValidationFailure(validateProjectSpecProviders(candidate).find(issue =>
+    issue.environment === 'project'
+      ? changed(previous.devops, candidate.devops)
+      : changed(previous.environments[issue.environment], candidate.environments[issue.environment])));
+}
+
+function providerSpecValidationFailure(
+  issue: ProviderSpecIssue | undefined
+): ProviderSpecValidationFailure | undefined {
   if (!issue) return undefined;
 
   const label = issue.capability;

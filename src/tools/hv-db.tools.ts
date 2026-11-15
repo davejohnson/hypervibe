@@ -151,7 +151,7 @@ async function resolveTemporaryExternalTarget(
 export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_db_query',
-    'Run one bounded SQL statement against a database. Hypervibe uses an existing reachable endpoint or acquires provider-owned operation-scoped access (such as a connector, TCP proxy, or temporary firewall rule), then releases only access it created and reports cleanup status. SELECT is database-enforced read-only by default; allowMutations=true enables INSERT/UPDATE/DELETE/DDL. Multi-statement SQL is always rejected.',
+    'Run one bounded SQL statement against a database. Hypervibe uses an existing reachable endpoint or acquires provider-owned operation-scoped access (such as a private connector or temporary firewall rule), then releases only access it created and reports cleanup status. SELECT is database-enforced read-only by default; allowMutations=true enables INSERT/UPDATE/DELETE/DDL. Multi-statement SQL is always rejected.',
     {
       project: projectField,
       env: envField,

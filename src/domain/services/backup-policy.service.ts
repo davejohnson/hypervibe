@@ -51,7 +51,7 @@ export interface BackupPolicyContext {
   environment?: Environment | null;
   components: Component[];
   project?: Project;
-  adapterFactory: Pick<AdapterFactory, 'getDatabaseAdapter' | 'getProviderAdapter' | 'getStorageAdapter'>;
+  adapterFactory: Pick<AdapterFactory, 'getDatabaseOperations' | 'getProviderAdapter' | 'getStorageOperations'>;
 }
 
 const record = (value: unknown): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -125,7 +125,8 @@ function policyFor(spec: EnvironmentSpec | undefined, environment?: Environment 
   if (recovery !== undefined && (!record(recovery) || Object.keys(record(recovery)!).length)) resources.push({ kind: 'storage', name: '__create-recovery__', provider: 'unknown', retained: true, bindingState: 'unknown', reason: 'Unresolved object-storage creation may have left additional data-bearing resources.' });
   const migrationCandidates = environment?.platformBindings.dataMigrationCandidates;
   if (migrationCandidates !== undefined && (!record(migrationCandidates) || Object.keys(record(migrationCandidates)!).length)) resources.push({ kind: 'storage', name: '__migration-candidates__', provider: 'unknown', retained: true, bindingState: 'unknown', reason: 'Retained object-storage migration candidates have unverified backup coverage.' });
-  return { mode: spec?.backups?.mode ?? 'daily', source: spec?.backups ? 'explicit' : 'default',
+  return { mode: spec?.backups?.mode ?? 'disabled', source: spec?.backups ? 'explicit' : 'default',
+    ...(!spec?.backups ? { reason: 'No backup policy is requested; existing provider schedules are unchanged.' } : {}),
     ...(spec?.backups?.mode === 'disabled' ? { reason: spec.backups.reason } : {}), resources };
 }
 
@@ -160,7 +161,7 @@ export async function resolveBackupTarget(context: BackupPolicyContext, resource
     if (resource.kind === 'database') {
       const component = context.components.find(component => component.id === resource.componentId && component.environmentId === environment.id && component.bindings.provider === resource.provider);
       if (!component || !externalId(component)) return unknown;
-      const result = await context.adapterFactory.getDatabaseAdapter(resource.provider, context.project);
+      const result = await context.adapterFactory.getDatabaseOperations(resource.provider, context.project);
       if (!result.success || !result.adapter || result.adapter.name !== resource.provider) return unknown;
       return bind(result.adapter.dailyBackups, { environment, component });
     }
@@ -180,7 +181,7 @@ export async function resolveBackupTarget(context: BackupPolicyContext, resource
     const instanceScope = scope(binding?.instanceScope);
     const id = identity(binding?.externalId);
     if (!id || !instanceScope || binding?.provider !== resource.provider) return unknown;
-    const result = await context.adapterFactory.getStorageAdapter(resource.provider, context.project);
+    const result = await context.adapterFactory.getStorageOperations(resource.provider, context.project);
     if (!result.success || !result.adapter || result.adapter.name !== resource.provider) return unknown;
     return bind(result.adapter.dailyBackups, { environment, context: instanceScope, externalId: id });
   } catch { return unknown; }

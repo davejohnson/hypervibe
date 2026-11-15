@@ -1,10 +1,12 @@
 import type { EnvironmentSpec, ProjectRuntimeSpec, ServiceSpec } from '../spec/spec.schema.js';
+import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
 import { createHash } from 'crypto';
 import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
 import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
+import { databaseSeedGeneration } from '../services/database-seed-generation.js';
 import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
@@ -959,7 +961,15 @@ export function diffEnvironment(input: {
     }
   }
 
-  if (databaseProvisioningIncomplete) {
+  if (localDbBindings && hasPendingDatabaseInitialization(localDbBindings)) {
+    const provider = localDbProvider ?? spec.database?.provider ?? 'unknown';
+    activeDatabaseActionId = spec.database ? `database:${provider}` : undefined;
+    actions.push({ id: `database:${provider}`, type: 'update', resource: {
+      kind: 'database', name: localDb?.type ?? spec.database?.engine ?? 'postgres', provider }, verified: false,
+      reason: 'The exact database initialization attempt has not completed verification',
+      metadata: { blockedReason: 'database_initialization_pending' } });
+    warnings.push('Recover the isolated database initialization before dependent changes; previous deployment success does not prove the new storage is active.');
+  } else if (databaseProvisioningIncomplete) {
     const retainedProvider = localDbProvider ?? spec.database?.provider ?? 'unknown';
     const retainedId = `database:${retainedProvider}`;
     activeDatabaseActionId = spec.database ? retainedId : undefined;
@@ -1120,6 +1130,33 @@ export function diffEnvironment(input: {
           detail: `${database.provider} datastore ${database.externalId} does not match the durable local binding ${localDbExternalId ?? '(missing)'}`,
         });
       }
+    } else if (observedDb && currentDbProvider === wanted && observedDb.persistence
+      && observedDb.persistence.state !== 'configured') {
+      const persistence = observedDb.persistence;
+      actions.push({
+        id: createId,
+        type: 'update',
+        resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+        verified: persistence.state === 'missing',
+        reason: persistence.state === 'missing'
+          ? 'The bound database has no verified persistent storage for its configured data directory'
+          : 'Persistent storage for the bound database could not be verified',
+        metadata: {
+          blockedReason: `database_persistence_${persistence.state}`,
+          externalId: observedDb.externalId,
+          ...(observedDb.providerScope ? { providerScope: observedDb.providerScope } : {}),
+        },
+      });
+      warnings.push(`${persistence.reason ?? 'Database persistence is unverified.'} Preserve the existing database and recover its data before any storage change; Hypervibe will not attach a volume, restart, or replace it automatically.`);
+    } else if (observedDb && currentDbProvider === wanted && observedDb.runtimeReferenceBinding
+      && observedDb.runtimeReferenceBinding.state !== 'configured') {
+      actions.push({ id: createId, type: 'update',
+        resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+        verified: observedDb.runtimeReferenceBinding.state === 'missing',
+        reason: 'The existing database runtime URL variable needs verified binding metadata before dependent changes',
+        metadata: { blockedReason: `database_runtime_reference_${observedDb.runtimeReferenceBinding.state}`,
+          externalId: observedDb.externalId } });
+      warnings.push('Run hv_plan to review the existing database runtime reference binding; uncertain provider evidence blocks repair.');
     } else if (
       observedDb
       && currentDbProvider === wanted
@@ -1275,7 +1312,10 @@ export function diffEnvironment(input: {
       const seedRecord = localDbBindings?.seed && typeof localDbBindings.seed === 'object' && !Array.isArray(localDbBindings.seed)
         ? localDbBindings.seed as Record<string, unknown>
         : {};
+      const databaseGeneration = localDb ? databaseSeedGeneration(localDb, local.bindings ?? {}) : undefined;
       const seeded = currentDbProvider === wanted
+        && databaseGeneration !== null
+        && seedRecord.databaseGeneration === databaseGeneration
         && seedRecord.commandHash === commandHash
         && typeof seedRecord.seededAt === 'string';
       const serviceDeps = actions
@@ -1298,6 +1338,8 @@ export function diffEnvironment(input: {
           command: spec.database.seedCommand,
           commandHash,
           mode: 'once',
+          ...(databaseGeneration ? { databaseGeneration } : {}),
+          ...(databaseGeneration === null ? { blockedReason: 'database_initialization_generation_unverified' } : {}),
         },
       });
     }
@@ -1454,7 +1496,7 @@ export function diffEnvironment(input: {
 
   // ---- domain ---------------------------------------------------------------
   const boundDomainDns = local.bindings?.domainDns;
-  if (spec.domain && !spec.loadBalancer) {
+  if (spec.domain) {
     const id = `domain:${spec.domain}`;
     const serviceName = desiredDomainServiceName(spec);
     const serviceId = serviceName ? localServiceBindings[serviceName]?.serviceId : undefined;
@@ -1610,7 +1652,7 @@ export function diffEnvironment(input: {
           : {}),
       },
     });
-  } else if (!spec.domain && !spec.loadBalancer && boundDomainDns?.name) {
+  } else if (!spec.domain && boundDomainDns?.name) {
     const domain = boundDomainDns.name;
     const id = `domain:${domain}`;
     const attachedService = observed && serviceObservationKnown
@@ -1627,13 +1669,15 @@ export function diffEnvironment(input: {
     const dnsRecordIds = (boundDomainDns.records ?? []).map((record) => record.id);
     const customDomainsManaged = input.customDomainManagement === 'managed';
     const observationKnown = observed !== null && serviceObservationKnown;
+    const cancellationPending = boundDomainDns.dnsStagePending === true && Boolean(boundDomainDns.dnsSelection)
+      && !zoneId && Array.isArray(boundDomainDns.records) && boundDomainDns.records.length === 0;
     const bindingComplete = Boolean(
       projectId
       && serviceName
       && serviceId
       && environmentId
       && providerDomainId
-      && zoneId
+      && (zoneId || boundDomainDns.dnsEngineRemoved === true || cancellationPending)
       && Array.isArray(boundDomainDns.records)
     );
     const blockedReason = !customDomainsManaged
@@ -1642,7 +1686,7 @@ export function diffEnvironment(input: {
         ? 'domain_observation_unknown'
         : !bindingComplete
           ? 'domain_detach_binding_incomplete'
-          : undefined;
+          : cancellationPending ? 'domain_dns_cancellation_unverified' : undefined;
     actions.push({
       id,
       type: 'destroy',
@@ -1655,6 +1699,8 @@ export function diffEnvironment(input: {
           ? `Cannot safely detach ${domain} because provider domain observation is unknown`
           : blockedReason === 'domain_detach_binding_incomplete'
             ? `Cannot safely detach ${domain} because its durable provider or DNS identities are incomplete`
+            : blockedReason === 'domain_dns_cancellation_unverified'
+              ? `Confirm traffic DNS is absent before releasing the pending hosting claim for ${domain}`
             : attachedService
               ? `Domain ${domain} is no longer desired and remains attached to ${attachedService.name}`
               : `Domain ${domain} is no longer desired; remove its verified provider attachment and managed DNS records`,
@@ -1666,6 +1712,8 @@ export function diffEnvironment(input: {
         ...(environmentId ? { environmentId } : {}),
         ...(providerDomainId ? { providerDomainId } : {}),
         ...(zoneId ? { zoneId } : {}),
+        ...(boundDomainDns.dnsEngineRemoved === true ? { dnsEngineRemoved: true } : {}),
+        ...(cancellationPending ? { dnsCancellationRequired: true } : {}),
         dnsRecordIds,
         ...(blockedReason ? { blockedReason } : {}),
       },

@@ -34,13 +34,14 @@ function fixture() {
 
 describe('reviewed recurring backup authority', () => {
   afterEach(() => vi.restoreAllMocks());
-  it.each(['matching', 'missing', 'replaced', 'duplicate', 'wrong-component', 'wrong-provider', 'secret-shaped-extra'])(
+  it.each(['matching', 'omitted-provider', 'missing', 'replaced', 'duplicate', 'wrong-component', 'wrong-provider', 'secret-shaped-extra'])(
     'checks the exported database binding before recurring execution: %s', async change => {
       const { input, target, spec, bindings, files } = fixture();
       target.database = { componentId: 'component-database', source: { provider: 'railway', primaryExternalId: 'database-service',
         providerScope: { projectId: 'p', environmentId: 'e' }, resourceIdentity: { volumeId: 'volume', volumeInstanceId: 'instance' } } };
       target.fileReferenceQueries = [{ storageName: 'documents', query: 'SELECT key FROM files' }];
       Object.assign(spec.environments.production, { database: { provider: 'railway', engine: 'postgres' } });
+      if (change === 'omitted-provider') Object.assign(spec.environments.production, { database: { engine: 'postgres' } });
       Object.assign(spec.environments.production.backups, { fileReferenceQueries: target.fileReferenceQueries });
       const row = { componentId: 'component-database', provider: 'railway', engine: 'postgres', externalId: 'database-service' };
       const platform = bindings.environments.production.platformBindings as Record<string, unknown>;
@@ -55,9 +56,34 @@ describe('reviewed recurring backup authority', () => {
       for (const file of compileBackupWorkflow({ project: target.project, environment: target.environment,
         contractHash: input.contractHash, runnerImage: target.runnerImage, providerCredentialNames: ['RAILWAY_API_TOKEN'], contract: target })) files.set(file.path, file.content);
       files.set('.hypervibe/spec.json', JSON.stringify(spec)); files.set('.hypervibe/bindings.json', JSON.stringify(bindings));
-      if (change === 'matching') expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target });
+      if (change === 'matching' || change === 'omitted-provider') expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target });
       else await expect(verifyManagedBackupAuthority(input)).rejects.toThrow();
     });
+  it('is not blocked by fields a newer spec writer added to another environment', async () => {
+    const { input, spec, files } = fixture();
+    Object.assign(spec.environments, { gcp: { hosting: { provider: 'cloudrun', futureEngineField: 'opentofu' }, services: {} } });
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
+  });
+  it('keeps other environments so cross-environment references still resolve', async () => {
+    const { input, spec, files } = fixture();
+    Object.assign(spec.environments, { staging: { hosting: { provider: 'railway' }, services: {},
+      deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' }, futureMaintenance: { mode: 'application' } } });
+    Object.assign(spec.environments.production, { deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', promoteFrom: 'staging' } });
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });
+  });
+  it('still rejects unrecognized project-level fields', async () => {
+    const { input, spec, files } = fixture();
+    files.set('.hypervibe/spec.json', JSON.stringify({ ...spec, futureProjectField: true }));
+    await expect(verifyManagedBackupAuthority(input)).rejects.toThrow(/futureProjectField/);
+  });
+  it('still rejects unrecognized fields in the environment being backed up', async () => {
+    const { input, spec, files } = fixture();
+    Object.assign(spec.environments.production, { futureField: true });
+    files.set('.hypervibe/spec.json', JSON.stringify(spec));
+    await expect(verifyManagedBackupAuthority(input)).rejects.toThrow(/futureField/);
+  });
   it('accepts only the published program and exact default-branch resource bindings', async () => {
     const { input } = fixture();
     expect(await verifyManagedBackupAuthority(input)).toMatchObject({ target: input.target, environment: { name: 'production' } });

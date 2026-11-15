@@ -249,7 +249,7 @@ describe('repo local env file', () => {
     }
   });
 
-  it.each(['railway', 'cloudrun', 'digitalocean', 'fly', 'ecs', 'azure-container-apps', 'vercel'])(
+  it.each(['railway', 'cloudrun', 'ecs', 'azure-container-apps'])(
     'prepares value-free runtime documentation in every environment on %s without adopting production values', (provider) => {
       const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-runtime-docs-'));
       initRepo(root);

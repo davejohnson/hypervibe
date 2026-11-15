@@ -11,6 +11,9 @@ import { canonicalJsonSha256 } from '../lib/canonical-json.js';
 import { workflowFilesContentHash } from '../domain/services/ci-deploy.service.js';
 import { releaseEvidenceValidationRuntime } from '../domain/services/github-ops.service.js';
 import { managedCiReleaseArtifactName, MANAGED_CI_RELEASE_EVIDENCE_FILE } from '../domain/services/managed-ci-evidence.js';
+import { observedCredentialDeployment } from './credential-operation-verification.js';
+import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
 
 type Task = Extract<GitHubAutomationSpec, { kind: 'environment-task' }>;
 type JsonRecord = Record<string, unknown>;
@@ -191,6 +194,11 @@ export async function executeManagedEnvironmentTask(params: {
     const now = new Date();
     const environment: Environment = { id: task.environment, projectId: bindings.project, name: task.environment, platformBindings: bound, createdAt: now, updatedAt: now };
     const service: Service = { id: task.service, projectId: bindings.project, name: task.service, buildConfig: desired.services[task.service], envVarSpec: {}, createdAt: now, updatedAt: now };
+    const roleChecks = [...new Map(Object.values(params.spec.secrets).flatMap(slot => slot.credential ? [slot.credential] : []).map(descriptor => [descriptor.role, descriptor])).values()]
+      .flatMap(descriptor => (descriptor.verification ?? []).flatMap(check => check.kind === 'environment-task' && check.task === params.taskId ? [{ descriptor, check }] : []));
+    const inputs = record(params.inputs);
+    for (const { check } of roleChecks) if (!z.string().uuid().safeParse(inputs[check.operationIdInput]).success) throw new Error('Credential task requires its accepted rotation UUID.');
+    const before = roleChecks.length ? observedCredentialDeployment(environment, provider, task.service, adapter.observe ? await adapter.observe(environment) : null) : undefined;
     attempted = true;
     const result = await adapter.runJob(environment, service, command, { declaredTask: {
       variableMode: 'references', sweep: false, expectedImage: imageUri, executionId: params.executionId,
@@ -199,8 +207,19 @@ export async function executeManagedEnvironmentTask(params: {
     if (result.mutationAttempted === false) attempted = false;
     if (!result.receipt.success || result.status !== 'completed' || result.exitCode !== 0 || result.cleanupWarning) throw new Error('Environment task failed or cleanup remains unverified. Do not retry an applied run without reviewing its outcome.');
     const application = task.receiptPrefix ? safeManagedTaskReceipt(result.output ?? '', task.receiptPrefix, task.receiptCountKeys) : undefined;
+    const credentialOperations: JsonRecord[] = [];
+    if (roleChecks.length) {
+      const after = observedCredentialDeployment(environment, provider, task.service, adapter.observe ? await adapter.observe(environment) : null);
+      if (!isDeepStrictEqual(before, after)) throw new Error('Task deployment identity changed.');
+      if (application?.mode === 'applied') for (const { descriptor, check } of roleChecks) {
+        const counts = record(application.counts);
+        if (Object.entries(check.requiredCounts).some(([key, minimum]) => typeof counts[key] !== 'number' || Number(counts[key]) < minimum)) continue;
+        credentialOperations.push({ version: 1, role: descriptor.role, operationId: inputs[check.operationIdInput], deploymentId: after.deploymentId,
+          completedAt: new Date().toISOString(), status: 'passed', counts: Object.fromEntries(Object.keys(check.requiredCounts).map(key => [key, counts[key]])) });
+      }
+    }
     return { version: 1, task: params.taskId, environment: task.environment, executionId: params.executionId, status: 'completed', exitCode: 0,
-      jobId: result.jobId, ...(application ? { application } : {}) };
+      jobId: result.jobId, ...(application ? { application } : {}), ...(roleChecks.length ? { credentialOperations } : {}) };
   } catch {
     throw new ManagedTaskExecutionError(attempted);
   }

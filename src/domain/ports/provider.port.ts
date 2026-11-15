@@ -1,6 +1,7 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type { Component, ComponentType } from '../entities/component.entity.js';
+import type { EnvironmentTaskOptions } from './hosting.port.js';
 
 export interface Receipt {
   success: boolean;
@@ -21,6 +22,9 @@ export interface DeploymentMutationOptions {
    * supportsDeferredSecretUpdates; forbid target discovery/adoption, resource
    * creation, unrelated configuration changes and workload restarts. */
   requireDeferredSecretUpdate?: boolean;
+  /** Reviewed credential-only update of an exact bound workload. Native
+   * configuration rollout effects must be declared in the reviewed plan. */
+  requireCredentialUpdate?: boolean;
   /** Reviewed identity-only stage: create an app namespace, not its workload. */
   deferWorkload?: boolean;
   /** Creation-only admission, distinct from ordinary deferred reconfiguration.
@@ -117,6 +121,13 @@ export interface ProviderCapabilities {
   supportsDeferredDeploy?: boolean;
   /** Selected-key writes to exact bound services without creates or workload restarts. */
   supportsDeferredSecretUpdates?: boolean;
+  /** Native activation behavior of the exact selected-key credential writer. */
+  credentialUpdateActivation?: 'deferred' | 'provider-rollout';
+  /** Readback equality and write acknowledgement are distinct evidence. */
+  credentialValueEvidence?: 'readback' | 'acknowledgement';
+  /** Platforms that consume native registry identity or build inputs have no runtime password-copy destination. */
+  registryCredentialModel?: 'native-workload-identity' | 'build-input';
+  registryCredentialGuidance?: string;
   /** Enforces creation-only admission at the final provider mutation boundary. */
   supportsCreateOnlyDeploy?: boolean;
   /** Prepare an untriggered cron workload, then activate only its verified release. */
@@ -187,7 +198,9 @@ export interface VerifyResult {
   warning?: string;
 }
 
+/** Authentication, inspection and operational access do not imply infrastructure ownership. */
 export interface IProviderAdapter {
+  readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
   readonly serviceVolumes?: import('./service-volume.port.js').IServiceVolumes;
   readonly name: string;
 
@@ -207,35 +220,11 @@ export interface IProviderAdapter {
   /** Grants exact Job invocation and creates its trigger after fresh workload/UID/image verification. */
   activateSchedule?(service: Service, environment: Environment, options: ScheduleActivationOptions): Promise<DeployResult>;
 
-  ensureProject(
-    projectName: string,
-    environment: Environment
-  ): Promise<Receipt>;
-
   /**
    * Ensure a distinct provider environment exists inside an already-bound
    * provider project. This method must never create or replace the project.
    */
   ensureEnvironment?(environment: Environment): Promise<Receipt>;
-
-  ensureComponent(
-    type: ComponentType,
-    environment: Environment
-  ): Promise<ComponentResult>;
-
-  deploy(
-    service: Service,
-    environment: Environment,
-    envVars: Record<string, string>,
-    options?: DeploymentMutationOptions
-  ): Promise<DeployResult>;
-
-  setEnvVars(
-    environment: Environment,
-    service: Service,
-    vars: Record<string, string>,
-    options?: DeploymentMutationOptions
-  ): Promise<Receipt>;
 
   /** Delete only explicitly retired environment variable names. */
   deleteEnvVars?(
@@ -248,7 +237,7 @@ export interface IProviderAdapter {
    * Disconnect a provider-native repository source so pushes cannot bypass
    * manual promotion or a Hypervibe-owned CI deployment workflow.
    */
-  disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
+  disconnectDeploySource?(params: { serviceId: string; projectId?: string; environmentId?: string }): Promise<Receipt>;
 
   getDeployStatus?(
     environment: Environment,
@@ -263,7 +252,8 @@ export interface IProviderAdapter {
   runJob?(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: EnvironmentTaskOptions
   ): Promise<JobResult>;
 
   /**
@@ -307,5 +297,13 @@ export interface IProviderAdapter {
    * Read back live state for an environment (services, config, env var
    * hashes, databases). Implemented when capabilities.supportsObserve is true.
    */
-  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
+  observe?(environment: Environment, context?: import('./observe.port.js').HostingObservationContext): Promise<import('./observe.port.js').ObservedState>;
+}
+
+/** The retained imperative lifecycle, used by Railway. New cloud lifecycle belongs to OpenTofu. */
+export interface IProviderLifecycleAdapter extends IProviderAdapter {
+  ensureProject(projectName: string, environment: Environment): Promise<Receipt>;
+  ensureComponent(type: ComponentType, environment: Environment): Promise<ComponentResult>;
+  deploy(service: Service, environment: Environment, envVars: Record<string, string>, options?: DeploymentMutationOptions): Promise<DeployResult>;
+  setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options?: DeploymentMutationOptions): Promise<Receipt>;
 }

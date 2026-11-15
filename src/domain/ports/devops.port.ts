@@ -1,5 +1,15 @@
 import type { Observation } from './provider-observation.js';
 
+/** A provider boundary proved this attempted configuration write had no effect. */
+export class RepositoryConfigurationWriteError extends Error {
+  readonly outcome = 'rejected' as const;
+
+  constructor() {
+    super('Repository variable write was rejected before any provider change; re-plan after correcting access or configuration.');
+    this.name = 'RepositoryConfigurationWriteError';
+  }
+}
+
 export interface CodeRepositoryIdentity {
   provider: string;
   nativeId: string;
@@ -10,6 +20,20 @@ export interface CodeRepositoryIdentity {
   visibility?: 'private' | 'internal' | 'public';
   webUrl: string;
   cloneUrls: string[];
+}
+
+/** Ordinary non-secret repository configuration, separate from deploy secrets. */
+export interface RepositoryVariableInventory {
+  repository: CodeRepositoryIdentity;
+  observedAt: string;
+  variables: Array<{ name: string; valueHash: string; createdAt: string; updatedAt: string }>;
+}
+
+export interface RepositoryConfigurationPort {
+  normalizeName(name: string): string;
+  observe(scope: string): Promise<Observation<RepositoryVariableInventory>>;
+  create(identity: CodeRepositoryIdentity, name: string, value: string): Promise<void>;
+  update(identity: CodeRepositoryIdentity, name: string, value: string): Promise<void>;
 }
 
 export interface CodeRepositoryFile {
@@ -70,35 +94,6 @@ export interface CodeHostPort {
 /** Identity is universal; mutation facets remain optional provider capabilities. */
 export interface CodeHostIdentityPort {
   observeRepository(scope: string): Promise<Observation<CodeRepositoryIdentity>>;
-}
-
-export interface ManagedCodeRepositoryRequest {
-  scope: string;
-  defaultBranch: string;
-  visibility: 'private' | 'internal' | 'public';
-}
-
-/** Repository create/delete is deliberately separate from identity and files. */
-export interface CodeRepositoryLifecyclePort extends CodeHostIdentityPort {
-  observeRepositoryById(nativeId: string): Promise<Observation<CodeRepositoryIdentity>>;
-  /** Proves the exact parent scope and lifecycle authority without mutating it. */
-  verifyCreateTarget(request: ManagedCodeRepositoryRequest): Promise<{
-    success: boolean;
-    error?: string;
-  }>;
-  /** Proves delete authority over the exact durable identity without mutating it. */
-  verifyDeleteTarget(identity: CodeRepositoryIdentity): Promise<{
-    success: boolean;
-    error?: string;
-  }>;
-  createRepository(request: ManagedCodeRepositoryRequest): Promise<CodeRepositoryIdentity>;
-  /** Acknowledgement is not convergence; callers must re-observe exact absence. */
-  deleteRepository(identity: CodeRepositoryIdentity): Promise<{
-    scheduled: boolean;
-    permanentRequested: boolean;
-    /** A partial acknowledgement that must be retained and retried safely. */
-    error?: string;
-  }>;
 }
 
 export type CiPhase = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'skipped' | 'unknown';

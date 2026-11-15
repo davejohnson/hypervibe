@@ -111,6 +111,8 @@ cp "$SWIFT_BIN_DIR/HypervibeCompanionUpdater" "$CONTENTS/MacOS/hypervibe-updater
 cp "$NODE_DIR/bin/node" "$RESOURCES/runtime/node"
 cp "$NODE_DIR/LICENSE" "$RESOURCES/runtime/LICENSE"
 cp -R "$SERVER_STAGE/dist" "$RESOURCES/server/dist"
+cp -R "$ROOT/skills" "$RESOURCES/server/skills"
+cp -R "$ROOT/templates" "$RESOURCES/server/templates"
 cp -R "$SERVER_STAGE/node_modules" "$RESOURCES/server/node_modules"
 cp "$SERVER_STAGE/package.json" "$SERVER_STAGE/package-lock.json" "$RESOURCES/server/"
 cp "$ROOT/LICENSE" "$RESOURCES/licenses/Hypervibe-LICENSE"
@@ -165,7 +167,8 @@ fi
 node "$ROOT/scripts/smoke-macos-mcp.mjs" \
     "$CONTENTS/MacOS/hypervibe-mcp" \
     "$ROOT" \
-    "$WORK_DIR/smoke-data"
+    "$WORK_DIR/smoke-data" \
+    "$MCP_VERSION"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 

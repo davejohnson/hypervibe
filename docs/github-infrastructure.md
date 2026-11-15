@@ -1,8 +1,13 @@
 # GitHub infrastructure for beginners
 
+To manage only ordinary repository flags on an externally managed repository,
+use [selected repository configuration variables](repository-variables.md)
+under `devops.ci.repositoryVariables`. That isolated capability does not require
+ownership of the generated infrastructure described below.
+
 Hypervibe can manage repository collaboration, checks, autofix, pull-request
 review, code audit, dependency maintenance, and security settings as desired
-state. GitHub and OpenAI connections are optional: without them you can still
+state. A GitHub connection and the `OPENAI_API_KEY` secret are optional: without them you can still
 edit/read the spec, inspect local state and history, use the desktop companion,
 and manage every independently connected provider.
 
@@ -49,61 +54,6 @@ The canonical pull-request template asks for a summary, related issue, visual
 evidence, verification, deployment impact, changed expectations, risks, and
 review checks. Projects can add detail in individual pull requests, while the
 owned template keeps the required review contract consistent.
-
-## Static sites with GitHub Pages
-
-Pages is project-level desired state. A repository that only publishes a
-static site does not need a fake application-hosting environment;
-use the reserved canonical environment `repository`:
-
-```json
-{
-  "version": 1,
-  "project": "example-site",
-  "gitRemoteUrl": "git@github.com:OWNER/REPOSITORY.git",
-  "github": {
-    "repository": "OWNER/REPOSITORY",
-    "canonicalEnvironment": "repository",
-    "pages": {
-      "sourcePath": "apps/website",
-      "branch": "main",
-      "customDomain": "example.com"
-    }
-  },
-  "environments": {}
-}
-```
-
-Hypervibe generates a reviewed workflow using GitHub's supported Pages
-artifact actions. The first apply opens the ordinary GitHub infrastructure
-pull request; it does not enable Pages or change DNS. After a person merges the
-workflow, a new plan can emit two explicit actions: Cloudflare address-record
-reconciliation and GitHub Pages configuration with `build_type: workflow`.
-Replacing existing address records is confirmation-gated. Apex domains use
-GitHub's Pages A records; subdomains use an unproxied CNAME. MX, TXT, and other
-unrelated records are outside this action's authority. Once configuration is
-verified, Hypervibe dispatches the reviewed Pages workflow and returns pending;
-it does not claim publication before the workflow runs.
-
-GitHub may take time to issue the custom-domain certificate. Apply reports a
-pending receipt instead of claiming success; rerun `hv_plan` and `hv_apply`
-later to enforce HTTPS after GitHub reports the certificate ready. Inspect the
-managed workflow through `hv_ci_status`, followed by the live site after the
-run succeeds.
-
-Connect Cloudflare with a zone-scoped API token that has Zone read and DNS edit
-for the intended zone:
-
-```text
-hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
-```
-
-Set `github.pages.enabled` to `false` to tear the site down declaratively. The
-reviewed workflow is removed first. A subsequent plan confirmation-gates Pages
-deletion and removal of only matching GitHub Pages address records. To replace
-or remove an existing custom domain, first disable Pages while retaining that
-current `customDomain`; after the teardown verifies, declare the replacement.
-Hypervibe blocks a one-step domain swap so the old DNS record is not orphaned.
 
 ## A practical starting spec
 
@@ -248,7 +198,6 @@ For the full `github` feature set, grant the fine-grained token:
 - Issues: read/write
 - Secrets: read/write
 - Workflows: read/write
-- Pages: read/write when `github.pages` is declared
 - Dependabot alerts: read/write when dependency alerts/updates are enabled
 - Code scanning alerts: read/write when code scanning is enabled
 - Secret scanning alerts: read/write when secret scanning is enabled
@@ -281,26 +230,31 @@ For least privilege, a fine-grained repository token can still be supplied as
 `apiToken`, with a separate classic `read:packages` PAT as
 `packageReadToken`. See [GitHub's PAT guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 
-## Connect OpenAI (only for AI automations)
+## Provide the OpenAI key (only for AI automations)
 
-Credential type: an OpenAI project API key. A ChatGPT subscription is not an
-API credential and API usage is billed separately. Create a project-scoped key
-at [OpenAI API keys](https://platform.openai.com/api-keys). The project needs
-access to `gpt-5.6-sol`; a restricted key must allow model reads and Responses
-API writes. Set a project budget/usage limit before enabling scheduled work.
+Autofix, pull-request review and code-audit automations read `OPENAI_API_KEY`
+from GitHub Actions. Treat it like any other API key: create a project-scoped
+key at [OpenAI API keys](https://platform.openai.com/api-keys) (a ChatGPT
+subscription is not an API credential), set a project budget, and declare it as
+a delegated secret delivered to the repository:
 
-```bash
-export OPENAI_API_KEY='sk-proj-...'
+```json
+"secrets": {
+  "OPENAI_API_KEY": { "principal": "repository owner", "githubActions": { "repository": true } }
+}
 ```
 
-```text
-hv_connections provider="openai" scope="OWNER/REPOSITORY" credentialsRef="env:OPENAI_API_KEY"
-```
+Supply the value when planning, for example
+`hv_plan secretRefs={"OPENAI_API_KEY":"env:OPENAI_API_KEY"}`. Planning blocks
+those automations until the secret is declared. The value never appears in
+specs, plans, logs, receipts, snapshots or workflow files, and the Codex job
+receives no GitHub write token.
 
-Hypervibe syncs the value only into the repository's `OPENAI_API_KEY` Actions
-secret. It never appears in specs, plans, logs, receipts, snapshots, workflow
-files, or the desktop cache. The Codex job receives no GitHub write token; a
-separate job publishes its artifact or draft pull request.
+When the same plan changes managed GitHub files, review and merge its file PR,
+then plan again to finish supplying the Actions keys. This applies to all Actions
+keys, including `OPENAI_API_KEY`: writes and removals wait for that publication.
+Accepted unchanged keys are preserved, and application runtime keys follow their
+separate hosting setup.
 
 ## Allow autofix pull requests
 

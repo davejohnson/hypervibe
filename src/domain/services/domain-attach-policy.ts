@@ -21,7 +21,7 @@ export const domainRetargetBindingSchema = z.object({
   serviceName: z.string().min(1),
   serviceId: z.string().min(1),
   environmentId: z.string().min(1),
-  zoneId: z.string().min(1),
+  zoneId: z.string().min(1).optional(),
   records: z.array(z.object({
     id: z.string().min(1), name: z.string().min(1), type: z.string().min(1), target: z.string().min(1),
   }).strict()),

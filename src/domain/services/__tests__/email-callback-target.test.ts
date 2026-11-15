@@ -85,11 +85,6 @@ describe('email callback target ownership', () => {
       .toEqual({ url: `https://worker-provider.example.net${path}` });
   });
 
-  it('preserves provider endpoints when the domain belongs to the load balancer lifecycle', () => {
-    const desired = environmentSpecSchema.parse({ ...spec(), services: { web: {}, other: {} },
-      loadBalancer: { provider: 'cloudflare', services: ['web', 'other'] } });
-    expect(resolveEmailCallbackTarget(environment(), desired, target)).toEqual({ url: `https://web-provider.example.net${path}` });
-  });
 
   it.each(['https://user:private@example.net', 'https://example.net?private=token', 'https://example.net#private',
     'https://example.net\\@other.example.net', 'javascript:alert(1)', 'not a URL'])(

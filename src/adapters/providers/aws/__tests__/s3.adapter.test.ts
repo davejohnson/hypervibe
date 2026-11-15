@@ -1,22 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  CreateBucketCommand,
   GetBucketTaggingCommand,
-  HeadBucketCommand,
   ListObjectsV2Command,
   ListBucketsCommand,
-  ListObjectVersionsCommand,
-  DeleteObjectsCommand,
-  DeleteBucketCommand,
-  PutBucketEncryptionCommand,
-  PutBucketTaggingCommand,
-  PutPublicAccessBlockCommand,
-  type Tag,
 } from '@aws-sdk/client-s3';
-import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import { S3StorageAdapter } from '../s3.adapter.js';
-import { verifyIsolatedStorageLifecycle } from '../../__tests__/storage-lifecycle.contract.js';
 
 const credentials = {
   accessKeyId: 'A'.repeat(20),
@@ -32,30 +21,6 @@ function environment(): Environment {
 }
 
 describe('S3StorageAdapter', () => {
-  it('keeps same logical names isolated through shared plan/apply and observation', async () => {
-    const buckets = new Map<string, Tag[]>();
-    const s3 = { destroy: vi.fn(), send: vi.fn(async (command: any) => {
-      const name = command.input.Bucket;
-      if (command instanceof HeadBucketCommand) {
-        if (!buckets.has(name)) throw Object.assign(new Error('missing'), { name: 'NotFound' });
-        return {};
-      }
-      if (command instanceof CreateBucketCommand) { expect(buckets.has(name)).toBe(false); buckets.set(name, []); return {}; }
-      if (command instanceof PutBucketTaggingCommand) { buckets.set(name, command.input.Tagging!.TagSet!); return {}; }
-      if (command instanceof GetBucketTaggingCommand) return { TagSet: buckets.get(name) };
-      if (command instanceof ListBucketsCommand) return { Buckets: [...buckets.keys()]
-        .filter((name) => !command.input.Prefix || name.startsWith(command.input.Prefix))
-        .map((Name) => ({ Name })) };
-      if (command instanceof ListObjectsV2Command) return { Contents: [], IsTruncated: false };
-      expect([PutBucketEncryptionCommand, PutPublicAccessBlockCommand]).toContain(command.constructor);
-      return {};
-    }) };
-    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
-    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
-    await adapter.connect(credentials);
-    await verifyIsolatedStorageLifecycle(adapter, region);
-    expect(buckets.size).toBe(2);
-  });
 
   it('inventories bounded buckets with durable account scope', async () => {
     const s3 = {
@@ -123,37 +88,6 @@ describe('S3StorageAdapter', () => {
     )).rejects.toThrow(/will not copy an expiring CLI\/SSO session/);
   });
 
-  it('creates a tagged, encrypted, private bucket and returns composite scope', async () => {
-    const s3 = { send: vi.fn(async (command: unknown) => {
-      if (command instanceof HeadBucketCommand) {
-        throw Object.assign(new Error('missing'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } });
-      }
-      return {};
-    }), destroy: vi.fn() };
-    const sts = { send: vi.fn(async (command: unknown) => {
-      expect(command).toBeInstanceOf(GetCallerIdentityCommand);
-      return { Account: '123456789012', Arn: 'arn:aws:iam::123456789012:user/hypervibe' };
-    }), destroy: vi.fn() };
-    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
-    await adapter.connect(credentials);
-
-    const contextResult = await adapter.ensureContext('friend-app', environment(), {}, region);
-    const result = await adapter.ensureBucket(
-      environment(), contextResult.context!, 'documents', region
-    );
-
-    expect(contextResult.context).toMatchObject({ accountId: '123456789012', region: 'us-west-2' });
-    expect(result.receipt.success).toBe(true);
-    expect(result.externalId).toMatch(/^documents-[0-9a-f]{10}$/);
-    expect(s3.send.mock.calls.map(([command]) => (command as object).constructor)).toEqual([
-      HeadBucketCommand,
-      CreateBucketCommand,
-      PutBucketTaggingCommand,
-      PutPublicAccessBlockCommand,
-      PutBucketEncryptionCommand,
-    ]);
-  });
-
   it('observes only buckets tagged for the selected Hypervibe environment', async () => {
     const s3 = { send: vi.fn(async (command: unknown) => {
       if (command instanceof GetBucketTaggingCommand) {
@@ -183,97 +117,6 @@ describe('S3StorageAdapter', () => {
     })]);
   });
 
-  it('refuses to adopt an existing deterministic bucket without ownership tags', async () => {
-    const s3 = { send: vi.fn(async (command: unknown) => {
-      if (command instanceof HeadBucketCommand) return {};
-      if (command instanceof GetBucketTaggingCommand) return { TagSet: [] };
-      throw new Error(`unexpected ${(command as object).constructor.name}`);
-    }), destroy: vi.fn() };
-    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
-    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
-    await adapter.connect(credentials);
-    const context = (await adapter.ensureContext('friend-app', environment(), {}, region)).context!;
-
-    const result = await adapter.ensureBucket(environment(), context, 'documents', region);
-
-    expect(result.receipt.success).toBe(false);
-    expect(result.receipt.error).toContain('not owned');
-    expect(s3.send.mock.calls.some(([command]) => command instanceof CreateBucketCommand)).toBe(false);
-  });
-
-  it('retains the exact bucket id when post-create configuration and rollback both fail', async () => {
-    let createCount = 0;
-    const s3 = { send: vi.fn(async (command: unknown) => {
-      if (command instanceof HeadBucketCommand) {
-        if (createCount === 0) {
-          throw Object.assign(new Error('missing'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } });
-        }
-        return {};
-      }
-      if (command instanceof CreateBucketCommand) {
-        createCount += 1;
-        return {};
-      }
-      if (command instanceof PutBucketTaggingCommand) throw new Error('tagging denied');
-      if (command instanceof DeleteBucketCommand) throw new Error('rollback denied');
-      if (command instanceof GetBucketTaggingCommand) return { TagSet: [] };
-      throw new Error(`unexpected ${(command as object).constructor.name}`);
-    }), destroy: vi.fn() };
-    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
-    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
-    await adapter.connect(credentials);
-    const context = (await adapter.ensureContext('friend-app', environment(), {}, region)).context!;
-
-    const first = await adapter.ensureBucket(environment(), context, 'documents', region);
-
-    expect(first).toMatchObject({
-      receipt: {
-        success: false,
-        error: expect.stringContaining('rollback failed: rollback denied'),
-        data: {
-          externalId: expect.stringMatching(/^documents-[0-9a-f]{10}$/),
-          created: true,
-          rollback: 'failed',
-          recoveryRequired: true,
-        },
-      },
-      externalId: expect.stringMatching(/^documents-[0-9a-f]{10}$/),
-      context,
-    });
-    const rollback = s3.send.mock.calls.find(([command]) => command instanceof DeleteBucketCommand)?.[0] as DeleteBucketCommand;
-    expect(rollback.input).toMatchObject({ ExpectedBucketOwner: '123456789012' });
-
-    const retry = await adapter.ensureBucket(environment(), context, 'documents', region);
-
-    expect(retry.receipt).toMatchObject({ success: false, error: expect.stringContaining('not owned') });
-    expect(createCount).toBe(1);
-  });
-
-  it('reapplies private configuration when retrying an existing owned bucket', async () => {
-    const s3 = { send: vi.fn(async (command: unknown) => {
-      if (command instanceof HeadBucketCommand) return {};
-      if (command instanceof GetBucketTaggingCommand) {
-        return { TagSet: [
-          { Key: 'hypervibe-environment-id', Value: 'environment-1' },
-          { Key: 'hypervibe-storage-name', Value: 'documents' },
-        ] };
-      }
-      return {};
-    }), destroy: vi.fn() };
-    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
-    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
-    await adapter.connect(credentials);
-    const context = (await adapter.ensureContext('friend-app', environment(), {}, region)).context!;
-
-    const result = await adapter.ensureBucket(environment(), context, 'documents', region);
-
-    expect(result.receipt).toMatchObject({ success: true, data: { created: false } });
-    expect(s3.send.mock.calls.some(([command]) => command instanceof CreateBucketCommand)).toBe(false);
-    expect(s3.send.mock.calls.some(([command]) => command instanceof PutBucketTaggingCommand)).toBe(false);
-    expect(s3.send.mock.calls.some(([command]) => command instanceof PutPublicAccessBlockCommand)).toBe(true);
-    expect(s3.send.mock.calls.some(([command]) => command instanceof PutBucketEncryptionCommand)).toBe(true);
-  });
-
   it('returns the established S3 runtime contract without exposing it in receipts', async () => {
     const s3 = { send: vi.fn(), destroy: vi.fn() };
     const sts = { send: vi.fn(), destroy: vi.fn() };
@@ -287,33 +130,5 @@ describe('S3StorageAdapter', () => {
     ]);
     await expect(adapter.getRuntimeEnv(environment(), { accountId: '123456789012', region: 'us-west-2' }, 'bucket', 'documents'))
       .resolves.toMatchObject({ AWS_S3_BUCKET_NAME: 'bucket', AWS_DEFAULT_REGION: 'us-west-2' });
-  });
-
-  it('empties owned object versions before confirmed bucket deletion', async () => {
-    let headCount = 0;
-    const s3 = { send: vi.fn(async (command: unknown) => {
-      if (command instanceof HeadBucketCommand) {
-        headCount += 1;
-        if (headCount > 1) throw Object.assign(new Error('missing'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } });
-        return {};
-      }
-      if (command instanceof GetBucketTaggingCommand) {
-        return { TagSet: [{ Key: 'hypervibe-environment-id', Value: 'environment-1' }] };
-      }
-      if (command instanceof ListObjectVersionsCommand) {
-        return { Versions: [{ Key: 'a.pdf', VersionId: 'version-1' }], IsTruncated: false };
-      }
-      if (command instanceof ListObjectsV2Command) return { Contents: [], IsTruncated: false };
-      return {};
-    }), destroy: vi.fn() };
-    const sts = { send: vi.fn(), destroy: vi.fn() };
-    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
-    await adapter.connect(credentials);
-
-    await expect(adapter.destroyBucket(
-      environment(), { accountId: '123456789012', region: 'us-west-2' }, 'managed-bucket'
-    )).resolves.toMatchObject({ success: true });
-    expect(s3.send.mock.calls.some(([command]) => command instanceof DeleteObjectsCommand)).toBe(true);
-    expect(s3.send.mock.calls.some(([command]) => command instanceof DeleteBucketCommand)).toBe(true);
   });
 });

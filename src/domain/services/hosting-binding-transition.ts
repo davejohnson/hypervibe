@@ -23,6 +23,7 @@ const RESERVED_PROVIDER_BINDINGS = new Set([
   'services',
   'serviceVolumes',
   'serviceCreateRecovery',
+  'serviceInstanceCreates',
   'previousHosting',
   'maintenance',
   'runtimeRollouts',
@@ -105,6 +106,10 @@ export function prepareHostingBindingTransition(params: {
     || !sameScope(current.providerScope, target.providerScope)
   );
   const resetActiveScope = changed || params.target.created === true;
+  if ((resetActiveScope || environmentId !== undefined && current.environmentId !== environmentId)
+    && Object.keys(current.serviceInstanceCreates ?? {}).length) {
+    return { ok: false, error: 'Retained service instance creation blocks hosting scope changes. Reconcile its exact parent and target first.' };
+  }
   if ((resetActiveScope || (environmentId !== undefined && current.environmentId !== environmentId))
     && hasRetainedServiceVolumes({ platformBindings: params.current })) {
     return { ok: false, error: 'Retained service volumes block hosting scope changes; volume migration is not implemented.' };
@@ -115,6 +120,19 @@ export function prepareHostingBindingTransition(params: {
     ...(projectId ? { projectId } : { projectId: undefined }),
     ...(environmentId ? { environmentId } : {}),
   };
+
+  // A provider switch first retains the old scope and leaves only the new
+  // provider name. Binding its first returned IDs is initialization, not a
+  // second scope replacement; any retained cleanup identity stays untouched.
+  const initializingEmptyScope = current.provider === target.provider
+    && !current.projectId && !current.environmentId && !current.providerScope
+    && Object.keys(current.services ?? {}).length === 0
+    && Object.keys(current.serviceCreateRecovery ?? {}).length === 0
+    && current.maintenance === undefined
+    && (current.runtimeRollouts === undefined
+      || Array.isArray(current.runtimeRollouts) && current.runtimeRollouts.length === 0)
+    && !hasRetainedServiceVolumes({ platformBindings: params.current });
+  if (initializingEmptyScope) return { ok: true, changed: false, patch };
 
   if (!resetActiveScope) return { ok: true, changed: false, patch };
 

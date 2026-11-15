@@ -1,6 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
+import { userInfo } from 'node:os';
 import { Client } from 'pg';
+import {
+  assertDistinctPostgresDatabaseIdentities,
+  POSTGRES_DATABASE_IDENTITY_SQL,
+  PostgresDatabaseIdentityError,
+} from './postgres-database-identity.js';
 
 export interface PostgresTableCount {
   schema: string;
@@ -35,6 +41,8 @@ export interface PostgresToolTransferInput {
   sourceUrl: string;
   targetUrl: string;
   snapshotId: string;
+  sourceEnvironment: NodeJS.ProcessEnv;
+  targetEnvironment: NodeJS.ProcessEnv;
 }
 
 export interface TransferDependencies {
@@ -57,15 +65,50 @@ export function postgresProcessEnvironment(connectionUrl: string): NodeJS.Proces
     throw new Error('PostgreSQL connection URL is missing a host or database name.');
   }
   const sslMode = parsed.searchParams.get('sslmode');
+  const environment = { ...process.env };
+  // These libpq-only settings can redirect tools without redirecting pg.Client.
+  delete environment.PGHOSTADDR;
+  delete environment.PGSERVICE;
+  delete environment.PGSERVICEFILE;
   return {
-    ...process.env,
+    ...environment,
     PGHOST: decodeURIComponent(parsed.hostname),
     PGPORT: parsed.port || '5432',
     PGDATABASE: database,
-    ...(parsed.username ? { PGUSER: decodeURIComponent(parsed.username) } : {}),
-    ...(parsed.password ? { PGPASSWORD: decodeURIComponent(parsed.password) } : {}),
+    PGUSER: parsed.username ? decodeURIComponent(parsed.username) : environment.PGUSER || userInfo().username,
+    PGPASSWORD: parsed.password ? decodeURIComponent(parsed.password) : environment.PGPASSWORD || '',
     ...(sslMode ? { PGSSLMODE: sslMode } : {}),
   };
+}
+
+function preparePostgresConnection(connectionUrl: string): { url: string; environment: NodeJS.ProcessEnv } {
+  try {
+    const parsed = new URL(connectionUrl);
+    // node-postgres accepts query overrides that our CLI environment mapping
+    // does not. Never probe one database and then restore into another.
+    const sslModes = parsed.searchParams.getAll('sslmode');
+    if ([...parsed.searchParams.keys()].some((key) => key !== 'sslmode')
+      || sslModes.length > 1
+      || sslModes.some((mode) => !['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'].includes(mode))) {
+      throw new Error('Unsupported PostgreSQL URL options.');
+    }
+    const environment = postgresProcessEnvironment(connectionUrl);
+    // pg uses decodeURI for database names, whereas libpq's database argument
+    // also recognizes connection strings. Reject names with different meanings.
+    if (decodeURI(parsed.pathname) !== decodeURIComponent(parsed.pathname)
+      || environment.PGDATABASE!.includes('=')
+      || /^postgres(?:ql)?:\/\//i.test(environment.PGDATABASE!)) throw new Error('Ambiguous database name.');
+    if (environment.PGSSLMODE && !['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'].includes(environment.PGSSLMODE)) {
+      throw new Error('Unsupported PostgreSQL SSL mode.');
+    }
+    parsed.port = environment.PGPORT!;
+    parsed.username = encodeURIComponent(environment.PGUSER!);
+    if (environment.PGPASSWORD) parsed.password = encodeURIComponent(environment.PGPASSWORD);
+    if (environment.PGSSLMODE) parsed.searchParams.set('sslmode', environment.PGSSLMODE);
+    return { url: parsed.toString(), environment };
+  } catch {
+    throw new PostgresDatabaseIdentityError('The connection URL cannot establish a consistent database identity. Use its host, port, database and login fields with only a supported sslmode option; no copy was started.');
+  }
 }
 
 export function postgresMajorVersion(versionNumber: string): number | null {
@@ -138,10 +181,10 @@ async function runPostgresTools(
   spawnProcess: typeof spawn
 ): Promise<number> {
   const dump = spawnProcess('pg_dump', postgresDumpArguments(input.snapshotId), {
-    env: postgresProcessEnvironment(input.sourceUrl),
+    env: input.sourceEnvironment,
     stdio: ['ignore', 'pipe', 'pipe'],
   }) as unknown as ChildProcessWithoutNullStreams;
-  const targetEnvironment = postgresProcessEnvironment(input.targetUrl);
+  const targetEnvironment = input.targetEnvironment;
   const restore = spawnProcess('pg_restore', [
     '--no-owner',
     '--no-acl',
@@ -178,6 +221,8 @@ export async function transferPostgresDatabase(
   targetUrl: string,
   dependencies: TransferDependencies = {}
 ): Promise<PostgresTransferResult> {
+  const sourceConnection = preparePostgresConnection(sourceUrl);
+  const targetConnection = preparePostgresConnection(targetUrl);
   const createClient = dependencies.createClient ?? ((connectionString: string): SnapshotClient => {
     const client = new Client({ connectionString });
     return {
@@ -191,11 +236,26 @@ export async function transferPostgresDatabase(
   });
   const spawnProcess = dependencies.spawn ?? spawn;
   const runTools = dependencies.runTools ?? ((input: PostgresToolTransferInput) => runPostgresTools(input, spawnProcess));
-  const source = createClient(sourceUrl);
-  const target = createClient(targetUrl);
+  let source: SnapshotClient | undefined;
+  let target: SnapshotClient | undefined;
   let snapshotOpen = false;
   try {
-    await source.connect();
+    try {
+      source = createClient(sourceConnection.url);
+      target = createClient(targetConnection.url);
+      await source.connect();
+      await target.connect();
+      const sourceIdentity = await source.query(POSTGRES_DATABASE_IDENTITY_SQL);
+      const targetIdentity = await target.query(POSTGRES_DATABASE_IDENTITY_SQL);
+      assertDistinctPostgresDatabaseIdentities(
+        sourceIdentity.rows.length === 1 ? sourceIdentity.rows[0]?.identity : undefined,
+        targetIdentity.rows.length === 1 ? targetIdentity.rows[0]?.identity : undefined,
+      );
+    } catch (error) {
+      // Connection/query diagnostics may contain credentials. An unverified
+      // identity must also stop callers from deleting this target as cleanup.
+      throw error instanceof PostgresDatabaseIdentityError ? error : new PostgresDatabaseIdentityError();
+    }
     await source.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
     snapshotOpen = true;
     const snapshot = await source.query('SELECT pg_export_snapshot() AS snapshot') as QueryResultLike<{ snapshot: string }>;
@@ -203,11 +263,11 @@ export async function transferPostgresDatabase(
     if (!snapshotId) throw new Error('PostgreSQL did not return an exported snapshot.');
     const sourceManifest = await databaseManifest(source);
 
-    const dumpBytes = await runTools({ sourceUrl, targetUrl, snapshotId });
+    const dumpBytes = await runTools({ sourceUrl: sourceConnection.url, targetUrl: targetConnection.url, snapshotId,
+      sourceEnvironment: sourceConnection.environment, targetEnvironment: targetConnection.environment });
     await source.query('COMMIT');
     snapshotOpen = false;
 
-    await target.connect();
     const targetManifest = await databaseManifest(target);
     const sourceMajor = postgresMajorVersion(sourceManifest.sourceVersion);
     const targetMajor = postgresMajorVersion(targetManifest.sourceVersion);
@@ -227,7 +287,7 @@ export async function transferPostgresDatabase(
       targetVersion: targetManifest.sourceVersion,
     };
   } finally {
-    if (snapshotOpen) await source.query('ROLLBACK').catch(() => undefined);
-    await Promise.allSettled([source.end(), target.end()]);
+    if (snapshotOpen && source) await source.query('ROLLBACK').catch(() => undefined);
+    await Promise.allSettled([source?.end(), target?.end()]);
   }
 }

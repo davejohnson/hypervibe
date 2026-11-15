@@ -1,10 +1,12 @@
 import { randomUUID } from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { componentBindingsColumnSchema } from '../column.schemas.js';
 import { getSecretStore } from '../../secrets/secret-store.js';
 import type { Component, CreateComponentInput } from '../../../domain/entities/component.entity.js';
 import { EnvironmentRepository } from './environment.repository.js';
+import type { Environment } from '../../../domain/entities/environment.entity.js';
 
 /**
  * Component bindings carry live database credentials (connection URLs,
@@ -116,6 +118,31 @@ export class ComponentRepository {
     const updated = this.findById(id);
     if (updated) new EnvironmentRepository().syncRepoBindingsForId(updated.environmentId);
     return updated;
+  }
+
+  /** Commit both halves of one reviewed local provision finalization. Compare
+   * private snapshots inside SQLite's write transaction; no network/export is
+   * performed until after commit, so an export failure remains retryable. */
+  finalizeProvisionIfUnchanged(input: {
+    component: Component; environment: Environment; externalId: string;
+    bindings: Record<string, unknown>; environmentBindings: Record<string, unknown>; specRevision: number;
+  }): Component | null {
+    const db = getDb();
+    return db.transaction(() => {
+      const component = this.findById(input.component.id);
+      const environment = new EnvironmentRepository().findById(input.environment.id);
+      const spec = db.prepare('SELECT revision FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1')
+        .get(input.environment.projectId) as { revision: number } | undefined;
+      if (!component || !environment || component.environmentId !== environment.id
+        || spec?.revision !== input.specRevision
+        || !isDeepStrictEqual(component, input.component) || !isDeepStrictEqual(environment, input.environment)) return null;
+      const now = new Date().toISOString();
+      db.prepare('UPDATE components SET bindings = ?, external_id = ?, updated_at = ? WHERE id = ?')
+        .run(serializeComponentBindings(input.bindings), input.externalId, now, component.id);
+      db.prepare('UPDATE environments SET platform_bindings = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(input.environmentBindings), now, environment.id);
+      return this.findById(component.id);
+    }).immediate();
   }
 
   delete(id: string): boolean {

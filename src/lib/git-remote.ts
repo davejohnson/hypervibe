@@ -114,7 +114,7 @@ export function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
 
 /**
  * Parse the repository path from a remote without assuming a hosting provider.
- * Preserves nested namespaces used by GitLab and other Git hosts.
+ * Preserves nested repository namespaces.
  */
 export function parseRepositoryPathFromRemote(remoteUrl?: string): string | null {
   const identity = normalizeGitRemoteIdentity(remoteUrl);
