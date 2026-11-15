@@ -3,6 +3,8 @@ import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '..
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
+import { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
+export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
@@ -21,8 +23,6 @@ import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
-import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { CloudRunAdapter } from '../adapters/providers/gcp/cloudrun.adapter.js';
 import {
   buildCloudRunConfiguration,
@@ -67,7 +67,6 @@ const DOMAIN_OPERATIONS = new Set([DOMAIN_VERIFY_OPERATION, DOMAIN_DNS_OPERATION
  * writer never runs for these environments.
  */
 export const ENGINE_SECRET_OPERATION = 'gcpSecretManagerEnsure';
-export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export const ENGINE_RELEASE_OPERATION = 'engineImageRelease';
 export const ENGINE_STORAGE_ACCESS_BLOCKER = 'Storage buckets need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=true, or run hv_connections provider="cloudrun" action="prepare" gcsAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_CACHE_CREDENTIAL_OPERATION = 'gcpCacheCredentialEnsure';
@@ -416,12 +415,6 @@ export function recordSecretVersionMetadata(gcpProjectId: string, secretId: stri
   repo.updatePlatformBindings(environment.id, { engine: { ...engine,
     secretMetadata: { ...engine.secretMetadata, [secretId]: { gcpProjectId, version, labels } } } });
   return true;
-}
-
-/** A plan stops on missing outside keys with the one command that collects them all. */
-export function missingOutsideKeysMessage(environmentName: string, keys: string[]): string {
-  return `${environmentName} needs ${keys.length === 1 ? 'a key' : `${keys.length} keys`} Hypervibe cannot create: ${keys.join(', ')}. `
-    + `Run hv_secrets action="collect" env="${environmentName}" to add ${keys.length === 1 ? 'it' : 'them all'} on one local page (hv_launch does this itself), then plan again.`;
 }
 
 /** Google Secret Manager as an environment's secret store. */
@@ -902,9 +895,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
         sourceFingerprint: mapping.state === 'present' ? mapping.sourceFingerprint : 'absent', remove: true } });
   }
 
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { blocked: [binary.error] };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { blocked: [engine.blocked] };
   const boundServices = Object.keys((context.environment.platformBindings as { services?: Record<string, unknown> }).services ?? {});
   const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
     adopt: { ...adopt, secrets: adoptSecrets },
@@ -1057,9 +1049,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   ];
   const observedGenerations = await serviceGenerations(token, context, environmentName);
   if ('blocked' in observedGenerations) return { blocked: [observedGenerations.blocked] };
-  const document: PlanRunDocument = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
+  return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
@@ -1067,19 +1057,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       domainClaims: { ...domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
         [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
       } : {}) }, cancelledDomainProofs,
-    },
-  } as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return {
-    planRunId: run.id,
-    environmentName,
-    specRevision: params.specRevision,
-    actions,
-    confirmActions: actions.filter((a) => a.type !== 'noop' && (a.requiresConfirm || a.billable || a.dataBearing)).map((a) => a.id),
-    warnings,
-  };
+    } });
 }
 
 // ---------------------------------------------------------------- Apply
@@ -1186,9 +1164,8 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.gcpProjectId !== context.gcpProjectId || reviewed.region !== context.region) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different environment, GCP project or region. Re-run hv_plan.' };
   }
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { kind: 'blocked', reason: binary.error };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const token = await context.adapter.engineAccessToken();
 
   const result = await executor.execute({
