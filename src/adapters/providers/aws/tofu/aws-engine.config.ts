@@ -17,7 +17,8 @@ export interface AwsEngineInput {
   environmentId: string;
   /** SSM path holding this environment's runtime secrets, e.g. `/hypervibe/<env-id>/`. */
   parameterPath: string;
-  database?: AwsDatabaseInput;
+  /** The environment's own database on the project's shared testing cluster. */
+  database?: AwsEnvironmentDatabaseInput;
   storage?: Array<{ name: string; bucket: string }>;
   /** Web services on Lambda (container image with the Lambda Web Adapter). */
   services?: AwsWebServiceInput[];
@@ -91,7 +92,25 @@ export interface AwsWebServiceInput {
   healthCheckPath?: string;
 }
 
-export interface AwsDatabaseInput {
+export interface AwsEnvironmentDatabaseInput {
+  /** The shared cluster's ARN (deterministic, so it can be named before the cluster exists). */
+  clusterArn: string;
+  /** This environment's database on it. */
+  name: string;
+}
+
+/** The project's testing cluster: one Aurora Serverless cluster that every testing environment has its own database on. */
+export interface AwsSharedInput {
+  accountId: string;
+  region: string;
+  /** Prefix of the shared resources, e.g. `hv-billforge-shared`. */
+  prefix: string;
+  /** Stamped as `hv-environment` on the shared resources. */
+  environmentId: string;
+  database: AwsClusterInput;
+}
+
+export interface AwsClusterInput {
   /** Exact Aurora PostgreSQL version, the newest minor AWS offers for the spec's major (read at plan time). */
   engineVersion: string;
   /** 0 pauses when idle (staging); production uses at least 0.5. */
@@ -175,7 +194,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   }
   if (onDemand) {
     runtimeStatements.push(
-      { Sid: 'WakerCount', Effect: 'Allow', Action: 'rds-data:ExecuteStatement', Resource: `arn:aws:rds:${account}:cluster:${input.prefix}-postgres` },
+      ...(input.database ? [{ Sid: 'WakerCount', Effect: 'Allow', Action: 'rds-data:ExecuteStatement', Resource: input.database.clusterArn }] : []),
       { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: `arn:aws:secretsmanager:${account}:secret:hypervibe/${input.prefix}/*` },
       { Sid: 'WakerScale', Effect: 'Allow', Action: ['ecs:UpdateService', 'ecs:DescribeServices'], Resource: `arn:aws:ecs:${account}:service/${input.prefix}/*` },
       { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
@@ -208,51 +227,6 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       for (const type of Object.keys(bucketResources)) resources[`${type}.${key}`] = mapping;
     }
     files['storage.tf.json'] = { resource: bucketResources };
-  }
-
-  // Database: Aurora Serverless v2 on a public, TLS-only endpoint (see docs/opentofu-engine-aws.md).
-  if (input.database) {
-    const version = input.database.engineVersion;
-    if (!/^\d+\.\d+$/.test(version)) throw new Error(`Aurora PostgreSQL version ${version} is invalid.`);
-    const major = version.split('.')[0];
-    const mapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true };
-    for (const address of ['aws_rds_cluster.postgres', 'aws_rds_cluster_instance.postgres', 'aws_rds_cluster_parameter_group.postgres', 'aws_db_subnet_group.postgres', 'aws_security_group.postgres']) {
-      resources[address] = mapping;
-    }
-    files['database.tf.json'] = {
-      resource: {
-        aws_security_group: { postgres: { name: `${input.prefix}-postgres`, description: 'Hypervibe: Postgres over TLS', vpc_id: '${data.aws_vpc.default.id}',
-          ingress: [{ description: 'Postgres (TLS required by the cluster)', from_port: 5432, to_port: 5432, protocol: 'tcp', cidr_blocks: ['0.0.0.0/0'], ipv6_cidr_blocks: [], prefix_list_ids: [], security_groups: [], self: false }],
-          egress: [] } },
-        aws_db_subnet_group: { postgres: { name: `${input.prefix}-postgres`, subnet_ids: '${data.aws_subnets.default.ids}' } },
-        aws_rds_cluster_parameter_group: { postgres: { name: `${input.prefix}-postgres`, family: `aurora-postgresql${major}`,
-          ...(input.database.tlsRequiredByDefault ? {} : { parameter: [{ name: 'rds.force_ssl', value: '1' }] }) } },
-        aws_rds_cluster: { postgres: {
-          cluster_identifier: `${input.prefix}-postgres`, engine: 'aurora-postgresql', engine_mode: 'provisioned', engine_version: version,
-          database_name: 'app', master_username: 'hvadmin',
-          // RDS keeps the master password in Secrets Manager; it never enters engine state.
-          manage_master_user_password: true,
-          enable_http_endpoint: true, iam_database_authentication_enabled: true,
-          db_subnet_group_name: '${aws_db_subnet_group.postgres.name}', vpc_security_group_ids: ['${aws_security_group.postgres.id}'],
-          db_cluster_parameter_group_name: '${aws_rds_cluster_parameter_group.postgres.name}',
-          storage_encrypted: true, backup_retention_period: 1, copy_tags_to_snapshot: true,
-          deletion_protection: false, skip_final_snapshot: false, final_snapshot_identifier: `${input.prefix}-postgres-final`,
-          serverlessv2_scaling_configuration: [{ min_capacity: input.database.minCapacity, max_capacity: input.database.maxCapacity,
-            ...(input.database.minCapacity === 0 ? { seconds_until_auto_pause: input.database.pauseAfterSeconds ?? 600 } : {}) }],
-          lifecycle: [{ ignore_changes: ['engine_version'] }],
-        } },
-        aws_rds_cluster_instance: { postgres: {
-          identifier: `${input.prefix}-postgres-1`, cluster_identifier: '${aws_rds_cluster.postgres.id}', instance_class: 'db.serverless',
-          engine: '${aws_rds_cluster.postgres.engine}', engine_version: '${aws_rds_cluster.postgres.engine_version}',
-          publicly_accessible: true, db_subnet_group_name: '${aws_db_subnet_group.postgres.name}',
-        } },
-      },
-      output: {
-        database_endpoint: { value: '${aws_rds_cluster.postgres.endpoint}' },
-        database_cluster_arn: { value: '${aws_rds_cluster.postgres.arn}' },
-        database_master_secret_arn: { value: '${aws_rds_cluster.postgres.master_user_secret[0].secret_arn}' },
-      },
-    };
   }
 
   // Web services: Lambda behind a function URL; requests reach the app through the Lambda Web Adapter.
@@ -304,6 +278,64 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   files['outputs.tf.json'] = { output: {
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },
   } };
+  return { files, resources };
+}
+
+/** The cluster ARN a shared prefix names. */
+export function awsSharedClusterArn(input: Pick<AwsSharedInput, 'accountId' | 'region' | 'prefix'>): string {
+  return `arn:aws:rds:${input.region}:${input.accountId}:cluster:${input.prefix}-postgres`;
+}
+
+/**
+ * The project's shared testing cluster, in its own state so each testing
+ * environment adds only a database and logins (seconds, not a new cluster).
+ * Aurora Serverless v2 on a public, TLS-only endpoint (see docs/opentofu-engine-aws.md).
+ */
+export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfiguration {
+  const files: Record<string, unknown> = checkedProvider(input);
+  const resources: Record<string, EngineResourceMapping> = {};
+  const version = input.database.engineVersion;
+  if (!/^\d+\.\d+$/.test(version)) throw new Error(`Aurora PostgreSQL version ${version} is invalid.`);
+  const major = version.split('.')[0];
+  const mapping: EngineResourceMapping = { actionId: 'shared:database', kind: 'database', name: 'postgres', dataBearing: true, billable: true };
+  for (const address of ['aws_rds_cluster.postgres', 'aws_rds_cluster_instance.postgres', 'aws_rds_cluster_parameter_group.postgres', 'aws_db_subnet_group.postgres', 'aws_security_group.postgres']) {
+    resources[address] = mapping;
+  }
+  files['database.tf.json'] = {
+    data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
+    resource: {
+      aws_security_group: { postgres: { name: `${input.prefix}-postgres`, description: 'Hypervibe: Postgres over TLS', vpc_id: '${data.aws_vpc.default.id}',
+        ingress: [{ description: 'Postgres (TLS required by the cluster)', from_port: 5432, to_port: 5432, protocol: 'tcp', cidr_blocks: ['0.0.0.0/0'], ipv6_cidr_blocks: [], prefix_list_ids: [], security_groups: [], self: false }],
+        egress: [] } },
+      aws_db_subnet_group: { postgres: { name: `${input.prefix}-postgres`, subnet_ids: '${data.aws_subnets.default.ids}' } },
+      aws_rds_cluster_parameter_group: { postgres: { name: `${input.prefix}-postgres`, family: `aurora-postgresql${major}`,
+        ...(input.database.tlsRequiredByDefault ? {} : { parameter: [{ name: 'rds.force_ssl', value: '1' }] }) } },
+      aws_rds_cluster: { postgres: {
+        // No initial database: each testing environment gets its own.
+        cluster_identifier: `${input.prefix}-postgres`, engine: 'aurora-postgresql', engine_mode: 'provisioned', engine_version: version,
+        master_username: 'hvadmin',
+        // RDS keeps the master password in Secrets Manager; it never enters engine state.
+        manage_master_user_password: true,
+        enable_http_endpoint: true, iam_database_authentication_enabled: true,
+        db_subnet_group_name: '${aws_db_subnet_group.postgres.name}', vpc_security_group_ids: ['${aws_security_group.postgres.id}'],
+        db_cluster_parameter_group_name: '${aws_rds_cluster_parameter_group.postgres.name}',
+        storage_encrypted: true, backup_retention_period: 1, copy_tags_to_snapshot: true,
+        deletion_protection: false, skip_final_snapshot: false, final_snapshot_identifier: `${input.prefix}-postgres-final`,
+        serverlessv2_scaling_configuration: [{ min_capacity: input.database.minCapacity, max_capacity: input.database.maxCapacity,
+          ...(input.database.minCapacity === 0 ? { seconds_until_auto_pause: input.database.pauseAfterSeconds ?? 600 } : {}) }],
+        lifecycle: [{ ignore_changes: ['engine_version'] }],
+      } },
+      aws_rds_cluster_instance: { postgres: {
+        identifier: `${input.prefix}-postgres-1`, cluster_identifier: '${aws_rds_cluster.postgres.id}', instance_class: 'db.serverless',
+        engine: '${aws_rds_cluster.postgres.engine}', engine_version: '${aws_rds_cluster.postgres.engine_version}',
+        publicly_accessible: true, db_subnet_group_name: '${aws_db_subnet_group.postgres.name}',
+      } },
+    },
+    output: {
+      database_endpoint: { value: '${aws_rds_cluster.postgres.endpoint}' },
+      database_cluster_arn: { value: '${aws_rds_cluster.postgres.arn}' },
+    },
+  };
   return { files, resources };
 }
 

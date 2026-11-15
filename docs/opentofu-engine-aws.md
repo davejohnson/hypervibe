@@ -92,6 +92,22 @@ not current quotes.
   Aurora kept awake (minimum 0.5 ACU, estimated about $44/mo at the time) was
   rejected as the default. This is an AWS implementation decision, not a
   cross-cloud support guarantee.
+- **Testing environments share one cluster (decided 2026-11-14).** Creating an
+  Aurora cluster and its instance takes about 10 minutes, most of a first
+  launch. So a project's testing environments share one cluster
+  (`hv-<project>-shared-postgres`, in its own OpenTofu state), as they share one
+  Postgres server on Azure. Each environment gets its own database
+  (`app_<env>`), owner login and worker-waker login. `CONNECT` is revoked from
+  `PUBLIC`, so no environment's logins can reach another's database. A new testing
+  environment adds only a database and logins, which takes seconds. Testing
+  environments must use the same Postgres major. Staging and production will
+  get their own databases. An environment created with its own cluster before
+  this change is blocked from planning until it is torn down and launched again.
+  Verified live 2026-11-15 in us-west-2: the first launch created the cluster;
+  a second testing environment launched in 3m12s with no cluster change. Its
+  waker login was refused on the other environment's database
+  (`permission denied for database`). Tearing it down dropped only its database,
+  and tearing down the last environment removed the cluster.
 - **Database network: public endpoint, TLS required (decided 2026-11-10).**
   Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
   $32/mo and would be more than the rest of a staging environment. The database
@@ -142,7 +158,11 @@ plan; every action needs its own confirmation:
 4. The environment's bindings are cleared and it is removed from the spec, so the
    next plan does not recreate it.
 
-The database keeps a final snapshot (`<prefix>-postgres-final`) unless the plan
+While other testing environments use the shared cluster, teardown drops only
+the environment's database and logins (no snapshot; the cluster's one-day
+backups can restore the whole cluster). The last testing environment's teardown
+removes the cluster too, which keeps a final snapshot
+(`hv-<project>-shared-postgres-final`) unless the plan
 uses `deleteFinalSnapshot=true`, which adds its deletion as its own confirmed
 action; for an environment already torn down, it plans just that deletion.
 Cleanup confirms the environment's roles are gone (`iam:ListRoles` on
