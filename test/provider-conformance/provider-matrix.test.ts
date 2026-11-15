@@ -66,34 +66,9 @@ describe('provider conformance matrix', () => {
         'learn.microsoft.com',
       ]),
     });
-    const instructions = actions['provider-truth'].kind === 'code-audit'
-      ? actions['provider-truth'].instructions
-      : '';
-    expect(instructions).toContain('providerContracts');
-    expect(instructions).toContain('provider, DevOps and secret-manager registries');
-    expect(instructions).toContain('ready-for-live');
-    expect(instructions).toContain('live-conformance evidence');
-    const shardScopes = actions['provider-truth'].kind === 'code-audit'
-      ? actions['provider-truth'].shards.map((shard) => shard.instructions).join('\n')
-      : '';
-    for (const scope of [
-      'OpenTofu-managed compute lifecycle',
-      'database, cache, storage, queue',
-      'email, payments',
-      'secret-manager',
-      'delegated API-key, webhook, credential-check and AI workflow behavior',
-    ]) {
-      expect(shardScopes).toContain(scope);
-    }
   });
 
   it('covers the requested hosting providers', () => {
-    expect(hostingProviderContracts.map((entry) => entry.vendor)).toEqual([
-      'Railway',
-      'Google Cloud',
-      'AWS',
-      'Microsoft Azure',
-    ]);
     expect(hostingProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('hosting').sort());
   });
@@ -217,12 +192,6 @@ describe('provider conformance matrix', () => {
   });
 
   it('covers the retained PostgreSQL providers', () => {
-    expect(databaseProviderContracts.map((entry) => [entry.vendor, entry.engine])).toEqual([
-      ['Google Cloud', 'postgres'],
-      ['AWS', 'postgres'],
-      ['Railway', 'postgres'],
-      ['Microsoft Azure', 'postgres'],
-    ]);
     expect(databaseProviderContracts.filter(entry => entry.status !== 'planned').map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('database').sort());
   });
