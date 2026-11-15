@@ -134,7 +134,7 @@ describe.each<SetupPath>(['github', 'legacy', 'canonicalized legacy'])('%s revie
       expect(action).toMatchObject({ type: 'update', verified: true });
       const result = spec.github
         ? await applyGitHubNativeSetting({ action })
-        : await applyGitHubCollaboration(params);
+        : await applyGitHubCollaboration({ ...params, action });
       expect(result.success).toBe(true);
     }
     return { plan, apply, writes };
