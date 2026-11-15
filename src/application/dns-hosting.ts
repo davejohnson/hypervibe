@@ -70,7 +70,7 @@ export async function planHostedDns(ctx: CommandContext, params: {
 }): Promise<SavedDnsPlan | { blocked: string[] } | null> {
   const spec = params.spec.environments[params.environmentName];
   const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
-  if (!spec || !environment || spec.loadBalancer || spec.domainTarget) return null;
+  if (!spec || !environment || spec.domainTarget) return null;
   const binding = parseHostingBindings(environment).domainDns;
   const domain = spec.domain ?? binding?.name;
   if (!domain || !binding?.providerDomainId) return null;

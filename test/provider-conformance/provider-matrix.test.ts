@@ -12,7 +12,6 @@ import {
   cacheProviderContracts,
   databaseProviderContracts,
   hostingProviderContracts,
-  loadBalancerProviderContracts,
   managedWorkflowGitHubCredentials,
   providerContracts,
   queueProviderContracts,
@@ -236,24 +235,16 @@ describe('provider conformance matrix', () => {
       .toEqual(providerRegistry.namesFor('cache').sort());
   });
 
-  it('tracks every production storage, queue, and load-balancer lifecycle in the evidence matrix', () => {
+  it('tracks every production storage and queue lifecycle in the evidence matrix', () => {
     expect(storageProviderContracts.map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('storage').sort());
     expect(queueProviderContracts.map((entry) => entry.provider).sort())
       .toEqual(providerRegistry.namesFor('queue').sort());
-    expect(loadBalancerProviderContracts.map((entry) => entry.provider).sort())
-      .toEqual(providerRegistry.namesFor('load-balancer').sort());
 
     for (const entry of queueProviderContracts) {
       expect(providerRegistry.getMetadata(entry.provider)?.lifecycle?.queue).toEqual({
         backend: entry.backend,
         resources: entry.resources,
-      });
-    }
-    for (const entry of loadBalancerProviderContracts) {
-      expect(providerRegistry.getMetadata(entry.provider)?.lifecycle?.loadBalancer).toEqual({
-        topology: entry.topology,
-        minimumOrigins: entry.minimumOrigins,
       });
     }
   });
@@ -449,9 +440,7 @@ describe('provider conformance matrix', () => {
             ? 'cache'
             : entry.kind === 'storage'
               ? 'storage'
-              : entry.kind === 'queue'
-                ? 'queue'
-                : 'load-balancer';
+              : 'queue';
       expect(
         providerRegistry.lifecycleMaturity(entry.provider, capability)?.status,
         `${entry.provider}/${capability}`

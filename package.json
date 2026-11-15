@@ -59,7 +59,6 @@
     "test:providers:fixtures": "npm run build && node scripts/run-provider-fixture.mjs",
     "test:providers:live": "npm run build && vitest run test/provider-conformance/provider-lifecycle.live.test.ts --testTimeout=1200000",
     "test:providers:dns-live": "npm run build && vitest run test/provider-conformance/dns-lifecycle.live.test.ts --testTimeout=5400000",
-    "test:providers:infrastructure-live": "npm run build && vitest run test/provider-conformance/provider-infrastructure.live.test.ts --testTimeout=5400000",
     "test:providers:managed-live": "npm run build && vitest run test/provider-conformance/provider-managed-workflow.live.test.ts --testTimeout=3600000",
     "docs:tools": "node scripts/generate-tools-doc.mjs",
     "release:check": "npm audit --audit-level=high && npm test && npm run typecheck && npm run build && npm run prepublish-check",
