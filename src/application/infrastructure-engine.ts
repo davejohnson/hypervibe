@@ -3,6 +3,7 @@ import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '..
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
+import { addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -308,55 +309,30 @@ export function releaseCommandFor(environmentSpec: EnvironmentSpec): string | un
 
 type Observed<T> = { state: 'present'; value: T } | { state: 'absent' } | { state: 'unknown'; reason: string };
 
-export async function secretManagerFetch(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
-}
-
 interface ObservedSecret { resourceName?: string; labels: Record<string, string>; containerLabels?: Record<string, string>; hasEnabledVersion: boolean; latestVersion?: string }
 
 export async function observeSecret(token: string, gcpProjectId: string, secretId: string): Promise<Observed<ObservedSecret>> {
-  const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}`;
-  const secret = await secretManagerFetch(token, base);
-  if (secret.status === 404) return { state: 'absent' };
-  if (!secret.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${secret.status} for ${secretId}.` };
-  const body = await secret.json() as { name?: string; labels?: Record<string, string> };
-  const resourceName = body.name ?? `projects/${gcpProjectId}/secrets/${secretId}`;
-  const version = await secretManagerFetch(token, `${base}/versions/latest`);
-  if (version.status === 404) return { state: 'present', value: { resourceName, labels: body.labels ?? {}, hasEnabledVersion: false } };
-  if (!version.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${version.status} for ${secretId} versions.` };
-  const versionBody = await version.json() as { state?: string; name?: string };
-  if (versionBody.name && !versionBody.name.startsWith(`${resourceName}/versions/`)) return { state: 'unknown', reason: `Secret Manager returned a version for a different secret than ${secretId}.` };
-  const latestVersion = versionBody.name?.split('/').pop();
-  const containerLabels = body.labels ?? {};
+  const read = await readSecretContainer(token, gcpProjectId, secretId);
+  if (read.state !== 'present') return read;
+  const { resourceName, labels: containerLabels, hasEnabledVersion, latestVersionName: latestVersion } = read.value;
+  if (!read.value.hasVersion) return { state: 'present', value: { resourceName, labels: containerLabels, hasEnabledVersion: false } };
+  // Credential metadata Hypervibe recorded for this exact version replaces the container's labels.
   const environment = containerLabels['hv-environment'] ? new EnvironmentRepository().findById(containerLabels['hv-environment']) : undefined;
   const metadata = (environment?.platformBindings as { engine?: EngineBinding } | undefined)?.engine?.secretMetadata?.[secretId];
   if (metadata && (metadata.gcpProjectId !== gcpProjectId || metadata.version !== latestVersion)) {
     return { state: 'unknown', reason: `Secret ${secretId} has an unrecognized version; its credential metadata cannot be reused. Inspect the interrupted value write before retrying.` };
   }
   return { state: 'present', value: { resourceName, labels: metadata ? { ...metadata.labels, 'managed-by': containerLabels['managed-by']!, 'hv-environment': containerLabels['hv-environment']! } : containerLabels, containerLabels,
-    hasEnabledVersion: versionBody.state === 'ENABLED',
+    hasEnabledVersion,
     ...(latestVersion && /^[1-9][0-9]*$/.test(latestVersion) ? { latestVersion } : {}) } };
 }
 
-async function listEngineSecrets(token: string, gcpProjectId: string, environmentId: string): Promise<Observed<string[]>> {
-  const filter = encodeURIComponent(`labels.managed-by=hypervibe AND labels.hv-environment=${labelValue(environmentId)}`);
-  const ids: string[] = [];
-  let pageToken = '';
-  for (let page = 0; page < 20; page++) {
-    const response = await secretManagerFetch(token,
-      `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets?filter=${filter}&pageSize=100${pageToken ? `&pageToken=${pageToken}` : ''}`);
-    if (!response.ok) return { state: 'unknown', reason: `Listing Secret Manager secrets returned HTTP ${response.status}.` };
-    const body = await response.json() as { secrets?: Array<{ name: string }>; nextPageToken?: string };
-    ids.push(...(body.secrets ?? []).map((secret) => secret.name.split('/').pop()!));
-    if (!body.nextPageToken) return { state: 'present', value: ids.sort() };
-    pageToken = encodeURIComponent(body.nextPageToken);
-  }
-  return { state: 'unknown', reason: 'Secret Manager listing exceeded its page bound.' };
+function listEngineSecrets(token: string, gcpProjectId: string, environmentId: string): Promise<Observed<string[]>> {
+  return listSecretIds(token, gcpProjectId, `labels.managed-by=hypervibe AND labels.hv-environment=${labelValue(environmentId)}`);
 }
 
 async function ensureSecret(token: string, action: PlanAction): Promise<ActionResult> {
   const { gcpProjectId, secretId, labels } = action.metadata as { gcpProjectId: string; secretId: string; labels: Record<string, string> };
-  const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets`;
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
   if (observed.state === 'present') {
@@ -371,9 +347,7 @@ async function ensureSecret(token: string, action: PlanAction): Promise<ActionRe
   const value = crypto.randomBytes(32).toString('base64url');
   let added: Response;
   try {
-    added = await secretManagerFetch(token, `${base}/${secretId}:addVersion`, {
-      method: 'POST', body: JSON.stringify({ payload: { data: Buffer.from(value).toString('base64') } }),
-    });
+    added = await addSecretVersion(token, gcpProjectId, secretId, value);
   } catch {
     return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
   }
@@ -464,9 +438,7 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   } } });
   let added: Response;
   try {
-    added = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}:addVersion`, {
-      method: 'POST', body: JSON.stringify({ payload: { data: Buffer.from(value).toString('base64') } }),
-    });
+    added = await addSecretVersion(token, gcpProjectId, secretId, value);
   } catch {
     return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
   }

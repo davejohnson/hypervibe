@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
-import { observeSecret, secretManagerFetch, writeSecretVersion } from './infrastructure-engine.js';
+import { deleteSecret } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { observeSecret, writeSecretVersion } from './infrastructure-engine.js';
 
 /**
  * Data transfer that runs inside the target cloud, next to the target data.
@@ -328,7 +329,7 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
   } finally {
     await google(context, `${base}/${id}`, { method: 'DELETE' }).catch(() => undefined);
     for (const secretId of temporarySecrets) {
-      await secretManagerFetch(await context.token(), `https://secretmanager.googleapis.com/v1/projects/${context.gcpProjectId}/secrets/${secretId}`, { method: 'DELETE' }).catch(() => undefined);
+      await deleteSecret(await context.token(), context.gcpProjectId, secretId).catch(() => undefined);
     }
   }
 }
