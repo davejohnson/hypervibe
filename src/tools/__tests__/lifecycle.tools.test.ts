@@ -1505,7 +1505,7 @@ describe('hv_inspect / hv_import', () => {
     });
     const connections = new ConnectionRepository();
     const connection = connections.create({
-      provider: 'azure-container-apps',
+      provider: 'fixture-azure-database',
       credentialsEncrypted: getSecretStore().encryptObject({
         tenantId: '11111111-1111-4111-8111-111111111111',
         subscriptionId,
