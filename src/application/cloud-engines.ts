@@ -19,6 +19,24 @@ export type EngineReleaseOutcome =
   | { blocked: string };
 
 /**
+ * One step of a cloud's guided connection. The interface shows `result` as it is;
+ * anything other than connected, invalid or failed asks the person something and
+ * is called again with their answer in `input`.
+ */
+export interface EngineConnectStep {
+  status: 'waiting' | 'needs_choice' | 'needs_approval' | 'connected' | 'invalid' | 'failed';
+  result: Record<string, unknown>;
+  /** For the agent: what to show and how to call again. */
+  hint?: string;
+  /** For the agent: the one thing to ask the person. */
+  ask?: string;
+  /** Commands that follow a finished connection. */
+  next?: string[];
+  /** Why the step is invalid or failed. */
+  message?: string;
+}
+
+/**
  * One cloud's implementation of the managed OpenTofu lifecycle. Generic code
  * selects an engine here and calls it; it does not branch on a cloud's name.
  * A capability a cloud lacks is an absent optional method, never a silent no-op.
@@ -27,6 +45,16 @@ export interface CloudEngine {
   id: 'gcp' | 'aws' | 'azure';
   /** `hosting.provider` value this engine serves. */
   hostingProvider: string;
+  /**
+   * What hv_migrate can move into this cloud: 'full' copies runtime settings and
+   * data; 'settings' copies runtime settings only. Absent: not built yet.
+   */
+  migration?: 'full' | 'settings';
+  /**
+   * Guided one-time access setup: sign in, preview the exact access Hypervibe will
+   * create, and create it once approved. `input` carries the person's answers.
+   */
+  connect?(params: { project: Project; spec?: ProjectSpec; input: Record<string, unknown> }): Promise<EngineConnectStep>;
   plan(ctx: CommandContext, params: EnginePlanParams): Promise<EnginePlanOutcome>;
   /** Removes a whole environment as one reviewed plan. */
   planTeardown?(ctx: CommandContext, params: EnginePlanParams & { deleteFinalSnapshot?: boolean }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
@@ -40,7 +68,7 @@ export interface CloudEngine {
 // Engine modules load on first use: they import shared code from each other's
 // neighbours, and most commands touch one cloud.
 const gcp: CloudEngine = {
-  id: 'gcp', hostingProvider: 'cloudrun',
+  id: 'gcp', hostingProvider: 'cloudrun', migration: 'full',
   plan: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpInfrastructureEngine(ctx, params),
   apply: async (ctx, params) => (await import('./infrastructure-engine.js')).applyGcpInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine.js')).releaseGcpEngineServices(ctx, params),
@@ -49,12 +77,13 @@ const gcp: CloudEngine = {
 };
 
 const aws: CloudEngine = {
-  id: 'aws', hostingProvider: 'aws',
+  id: 'aws', hostingProvider: 'aws', migration: 'settings',
   plan: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsTeardown(ctx, params),
   apply: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).applyAwsInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine-aws-release.js')).releaseAwsEngineServices(ctx, params),
   secretStore: async (ctx, project, _spec, environmentName) => (await import('./infrastructure-engine-aws.js')).awsSecretStore(ctx, project, environmentName),
+  connect: async (params) => (await import('./aws-connect.js')).connectAwsStep(params),
   ownsPlan: (document) => Boolean(document.engine?.aws),
 };
 
@@ -65,6 +94,7 @@ const azure: CloudEngine = {
   apply: async (ctx, params) => (await import('./infrastructure-engine-azure.js')).applyAzureInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine-azure-release.js')).releaseAzureEngineServices(ctx, params),
   secretStore: async (ctx, project, _spec, environmentName) => (await import('./infrastructure-engine-azure.js')).azureSecretStore(ctx, project, environmentName),
+  connect: async (params) => (await import('./azure-connect.js')).connectAzureStep(params),
   ownsPlan: (document) => Boolean(document.engine?.azure),
 };
 
@@ -85,4 +115,9 @@ export function cloudEngineFor(spec: ProjectSpec, environmentName: string): Clou
  */
 export function cloudEngineForPlan(document: { environmentName: string; engine?: Record<string, unknown> }, spec: ProjectSpec): CloudEngine {
   return [azure, aws].find((engine) => engine.ownsPlan(document)) ?? cloudEngineFor(spec, document.environmentName) ?? gcp;
+}
+
+/** The engine whose guided connection serves a connection provider name, if it has one. */
+export function cloudEngineForConnection(provider: string): CloudEngine | undefined {
+  return cloudEngines.find((engine) => engine.connect && engine.hostingProvider === provider);
 }

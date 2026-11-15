@@ -1,3 +1,5 @@
+import { cloudEngineFor } from './cloud-engines.js';
+import { engineSecretStore } from './engine-secrets.js';
 import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import { createCommandRegistry } from './commands.js';
 import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.service.js';
@@ -14,8 +16,6 @@ import { migrationDatabaseBindingConflict } from './migration-database-binding.j
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
-import { putParameter } from '../adapters/providers/aws/aws-engine.client.js';
-import { isAwsEngineEnvironment, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import {
   ENGINE_DATABASE_URL_KEY,
   engineBucketName,
@@ -159,17 +159,19 @@ Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[] } | 
 }
 
 /**
- * Migration into an AWS engine environment. Runtime settings are copied into
- * Parameter Store after the user sees their names; the services read them on
- * the next infrastructure apply. Copying data to AWS is not built yet.
+ * Migration into an engine that copies runtime settings only. The settings go
+ * into the cloud's secret store after the user sees their names; the services
+ * read them on the next infrastructure apply.
  */
-async function migrateToAws(ctx: CommandContext, params: {
+async function migrateSettingsOnly(ctx: CommandContext, params: {
   project: Project; from: string; to: string; importSecrets?: boolean; copyData?: boolean; cutover?: boolean;
   spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment;
 }): Promise<MigrateResult> {
-  const context = await resolveAwsEngineContext(ctx, params.project, params.to);
-  if ('blocked' in context) return { status: 'blocked', message: context.blocked };
-  const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const store = await engineSecretStore(ctx, params.project, params.spec, params.to);
+  if ('blocked' in store) return { status: 'blocked', message: store.blocked };
+  const target = ctx.repos.environments.findByProjectAndName(params.project.id, params.to);
+  if (!target) return { status: 'blocked', message: `Environment ${params.to} has no local record yet. Run hv_plan scope="infrastructure" first.` };
+  const environment = () => ctx.repos.environments.findById(target.id) ?? target;
   const engine = () => (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
   if (!engine().importedSecrets) {
     const settings = await sourceSettings(ctx, params);
@@ -178,22 +180,18 @@ async function migrateToAws(ctx: CommandContext, params: {
     if (!params.importSecrets) {
       return {
         status: 'needs_secret_import', keys, ...(leftOut.length ? { leftOut } : {}),
-        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into AWS Parameter Store for ${params.to}. Values are copied directly and never shown.`
+        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into ${store.name} for ${params.to}. Values are copied directly and never shown.`
           + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
       };
     }
-    const access = { region: context.connection.region, credentials: context.credentials };
     for (const key of keys) {
-      try {
-        await putParameter(access, `${context.parameterPath}${key}`, values[key]!);
-      } catch (error) {
-        return { status: 'blocked', message: `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}); nothing was recorded as imported. Run the migration again.` };
-      }
+      const failure = await store.write(key, values[key]!);
+      if (failure) return { status: 'blocked', message: `${failure} Nothing was recorded as imported. Run the migration again.` };
     }
-    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine(), kind: 'opentofu', importedSecrets: keys } });
+    ctx.repos.environments.updatePlatformBindings(target.id, { engine: { ...engine(), kind: 'opentofu', importedSecrets: keys } });
   }
   const imported = engine().importedSecrets ?? [];
-  return { status: 'blocked', message: `${imported.length} runtime setting(s) are in AWS Parameter Store for ${params.to}. Run hv_plan scope="infrastructure" and hv_apply so the services read them, then hv_deploy. Copying data to AWS is not available yet.` };
+  return { status: 'blocked', message: `${imported.length} runtime setting(s) are in ${store.name} for ${params.to}. Run hv_plan scope="infrastructure" and hv_apply so the services read them, then hv_deploy. Copying data to this cloud is not available yet.` };
 }
 
 export async function migrateEnvironment(ctx: CommandContext, params: {
@@ -255,7 +253,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     if (sourcePlanApproval && !params.cutover) return { status: 'blocked', message: 'A source-environment plan can be confirmed only during the reviewed cutover.' };
   }
   let spec = specResult.spec;
-  if (isAwsEngineEnvironment(spec, params.to)) return migrateToAws(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
+  if (cloudEngineFor(spec, params.to)?.migration === 'settings') return migrateSettingsOnly(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
