@@ -1,7 +1,9 @@
-import { specWithoutEnvironment } from './engine-shared.js';
 import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
+import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
-import { AZURE_SCOPES, azureRest } from './azure-ops.js';
+import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
+import { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
+export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { azureEngineAuthentication, azureEngineBackend } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 import {
@@ -9,9 +11,6 @@ import {
   buildAzureSharedConfiguration, type AzureEngineInput, type AzureSharedInput,
 } from '../adapters/providers/azure/tofu/azure-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { RunRepository } from '../adapters/db/repositories/run.repository.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
-import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -25,12 +24,12 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
   AzureTokens, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
   type AzureKeyVaultSecretStore, type SqlRunner,
-} from './azure-ops.js';
-import { azureDeployAppName } from './azure-setup.js';
+} from '../adapters/providers/azure/azure-ops.client.js';
+import { azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
 import type { EngineSecretStore } from './engine-secrets.js';
 import { engineOutsideKeys } from './engine-secrets.js';
-import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, missingOutsideKeysMessage, type InfrastructurePlanResult } from './infrastructure-engine.js';
+import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
 import { localRepositoryFor } from './local-repository.js';
 
 /**
@@ -46,8 +45,6 @@ export const AZURE_IMAGE_BUILD_OPERATION = 'azureImageBuild';
 export const AZURE_STORAGE_EMPTY_OPERATION = 'azureStorageEmpty';
 export const AZURE_DATABASE_DROP_OPERATION = 'azureDatabaseDrop';
 export const AZURE_TEARDOWN_CLEANUP_OPERATION = 'azureTeardownCleanup';
-/** The one image repository in the registry; tags are commit SHAs. */
-export const AZURE_IMAGE_REPOSITORY = 'app';
 
 export type AzureProfile = 'production' | 'testing';
 
@@ -162,7 +159,7 @@ export function azureEngineLayout(project: Pick<Project, 'id' | 'name'>, environ
       registryId: `${group}/providers/Microsoft.ContainerRegistry/registries/${names.registry}`, registryLoginServer: `${names.registry}.azurecr.io`,
       serverName: names.server, databaseHost: `${names.server}.postgres.database.azure.com`,
     },
-    vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: `https://${vaultName}.vault.azure.net/` },
+    vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: azureVaultUri(vaultName) },
   };
 }
 
@@ -266,26 +263,12 @@ export function azureEnvironmentSecretKeys(spec: ProjectSpec, environmentName: s
 
 const importedOf = (environment: Environment) => (environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets;
 
-function engineFor(): Promise<OpenTofuEngine | { blocked: string }> {
-  return ensureEngineBinary().then((binary) => binary.ok
-    // Azure deletes can take over 20 minutes (a Container Apps environment drains before its workspace goes).
-    ? new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), timeoutMs: 60 * 60 * 1000 })
-    : { blocked: binary.error });
-}
+// Azure deletes can take over 20 minutes (a Container Apps environment drains before its workspace goes).
+const engineFor = () => openTofuEngine({ timeoutMs: 60 * 60 * 1000 });
 
 function recordPlan(project: Project, context: AzureEngineContext, params: { environmentName: string; specRevision: number }, actions: PlanAction[], warnings: string[], engine: Record<string, unknown>): InfrastructurePlanResult {
-  const document = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName: params.environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
-    engine: { state: context.state, azure: { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, prefix: context.prefix }, ...engine },
-  } as unknown as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return {
-    planRunId: run.id, environmentName: params.environmentName, specRevision: params.specRevision, actions, warnings,
-    confirmActions: actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
-  };
+  return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName: params.environmentName, specRevision: params.specRevision, actions, warnings,
+    engine: { state: context.state, azure: { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, prefix: context.prefix }, ...engine } });
 }
 
 const withDependencies = (actions: PlanAction[], dependencies: string[]) => dependencies.length
@@ -303,12 +286,12 @@ async function leftoverRoleAssignments(context: AzureEngineContext, input: Azure
   if (!creating.length) return { adopt: {} };
   const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
   const tokens = context.tokens;
-  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
+  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
   if (!identity) return { unknown: 'Hypervibe could not read the runtime identity from Azure; try again.' };
   if (identity.status === 404) return { adopt: {} };
   const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
   if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read the runtime identity from Azure (HTTP ${identity.status}).` };
-  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
+  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
   if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the runtime identity's roles in Azure (HTTP ${listed?.status ?? 'none'}).` };
   const existing = ((listed.body.value ?? []) as Array<{ id?: string; properties?: { scope?: string; roleDefinitionId?: string } }>);
   const configuration = buildAzureEnvironmentConfiguration(input);
@@ -352,24 +335,17 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   // Outside keys must already have a value; Hypervibe never invents them.
   const store = azureEnvironmentSecretStore(context);
   const keys = azureEnvironmentSecretKeys(spec, environmentName, importedOf(context.environment));
-  const missing: string[] = [];
-  for (const key of keys.outside) {
-    const observed = await store.observe(key);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    if (observed === 'absent') missing.push(key);
-  }
-  if (missing.length) return { blocked: [missingOutsideKeysMessage(environmentName, missing)], missingOutsideKeys: missing };
-  const secretActions: PlanAction[] = [];
-  for (const key of keys.generated) {
-    const observed = await store.observe(key);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    const name = azureVaultSecretName(environmentName, key);
-    secretActions.push({
-      id: `secret:${key}`, type: observed === 'present' ? 'noop' : 'create', verified: true, resource: { kind: 'secret', name: key, provider: 'azure' },
-      reason: observed === 'present' ? `Secret ${key} is stored in Key Vault.` : `Hypervibe will generate ${key} and store it in Key Vault (${context.vault.name}/${name}).`,
+  const secrets = await planEngineSecrets({
+    environmentName, generated: keys.generated, outside: keys.outside,
+    observe: (key) => store.observe(key),
+    action: (key, stored) => ({
+      id: `secret:${key}`, type: stored ? 'noop' : 'create', verified: true, resource: { kind: 'secret', name: key, provider: 'azure' },
+      reason: stored ? `Secret ${key} is stored in Key Vault.` : `Hypervibe will generate ${key} and store it in Key Vault (${context.vault.name}/${azureVaultSecretName(environmentName, key)}).`,
       metadata: { operation: AZURE_SECRET_OPERATION, subscriptionId: context.connection.subscriptionId, key },
-    });
-  }
+    }),
+  });
+  if ('blocked' in secrets) return secrets;
+  const secretActions = secrets.actions;
 
   const engine = await engineFor();
   if ('blocked' in engine) return { blocked: [engine.blocked] };

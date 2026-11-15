@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { chooseAzureLocation } from '../azure-connect.js';
+import { chooseAzureLocation } from '../../../../application/azure-connect.js';
 import {
   AZURE_APP_ROLES, AZURE_RESOURCE_PROVIDERS, AZURE_ROLES, appRoleAssignmentCondition, applyAzureSetup, deployRoleGrants, githubSubjects, planAzureSetup,
   roleAssignmentName, type AzureSetupPlan,
-} from '../azure-setup.js';
-import type { AzureSignInSession } from '../azure-sign-in.js';
+} from '../azure-setup.client.js';
+import type { AzureSignInSession } from '../azure-entra.client.js';
 
 const SUB = '11111111-2222-3333-4444-555555555555';
 const TENANT = '99999999-8888-7777-6666-555555555555';

@@ -186,30 +186,13 @@
     "src/domain/spec/spec.store.ts -> src/application/results"
   ],
   "cloud-sdk-outside-adapters": [
-    "src/application/aws-setup.ts -> @aws-sdk/client-iam",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-codebuild",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-ecr",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-ecs",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-lambda",
-    "src/application/infrastructure-engine-aws-release.ts -> @aws-sdk/client-s3",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-cloudwatch-logs",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-ecs",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-iam",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-rds",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-rds-data",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-s3",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-secrets-manager",
-    "src/application/infrastructure-engine-aws.ts -> @aws-sdk/client-ssm",
     "src/application/infrastructure-engine-database.ts -> @google-cloud/cloud-sql-connector",
-    "src/application/migrate.ts -> @aws-sdk/client-ssm",
     "src/domain/services/cloud-prepare.execute.ts -> google-auth-library",
     "src/domain/services/object-storage-transfer.service.ts -> @aws-sdk/client-s3"
   ],
   "interface-imports-provider": [
     "src/tools/connections.tools.ts -> src/application/aws-connect",
-    "src/tools/connections.tools.ts -> src/application/azure-connect",
-    "src/tools/core.tools.ts -> src/application/infrastructure-engine-aws",
-    "src/tools/core.tools.ts -> src/application/infrastructure-engine-azure"
+    "src/tools/connections.tools.ts -> src/application/azure-connect"
   ],
   "railway-dependency": [
     "src/application/hosted/providers.ts -> src/adapters/providers/railway/railway.adapter",
@@ -221,10 +204,14 @@
     "src/domain/services/import.service.ts -> src/adapters/providers/railway/railway.adapter"
   ],
   "engine-name-branch": [
-    "src/application/engine-secrets.ts x2",
-    "src/application/infrastructure-engine.ts x5",
-    "src/application/migrate.ts x1",
-    "src/tools/core.tools.ts x2"
+    "src/application/migrate.ts x1"
+  ],
+  "cloud-api-outside-adapters": [
+    "src/application/infrastructure-engine-database.ts -> googleapis.com",
+    "src/domain/services/cloud-prepare.execute.ts -> googleapis.com",
+    "src/domain/services/connection-guidance.ts -> login.microsoftonline.com",
+    "src/domain/services/connection-guidance.ts -> signin.aws.amazon.com",
+    "src/domain/services/gcp-preparation-adoption.ts -> googleapis.com"
   ],
   "duplicated-exported-function": [
     "azureResourceGroupId: src/adapters/providers/azure/azure-environment-scope.ts, src/adapters/providers/azure/tofu/azure-engine.backend.ts"

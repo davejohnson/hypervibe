@@ -4,7 +4,7 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import crypto from 'crypto';
 import { describe, expect, it } from 'vitest';
 import { LOAD_SECRETS_SOURCE } from '../../adapters/providers/aws/runtime/load-secrets.js';
-import { awsReleaseDockerfile, lambdaErrorType, LAMBDA_WEB_ADAPTER_IMAGE, RDS_CA_BUNDLE_URL } from '../infrastructure-engine-aws-release.js';
+import { awsReleaseDockerfile, lambdaErrorType, LAMBDA_WEB_ADAPTER_IMAGE, RDS_CA_BUNDLE_URL } from '../../adapters/providers/aws/aws-release.client.js';
 
 describe('AWS release image', () => {
   it('adds the web adapter and secrets loader, and pulls generated bases from ECR Public', () => {

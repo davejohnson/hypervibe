@@ -7,7 +7,7 @@ import { saveConnection, verifyConnection } from '../domain/services/connection-
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { signInToAzure, type AzureSignInSession } from './azure-sign-in.js';
 import { escapeHtml } from './local-paste-page.js';
-import { applyAzureSetup, listAzureSubscriptions, planAzureSetup, type AzureSetupChange, type AzureSetupPlan, type AzureSubscription } from './azure-setup.js';
+import { applyAzureSetup, listAzureSubscriptions, planAzureSetup, type AzureSetupChange, type AzureSetupPlan, type AzureSubscription } from '../adapters/providers/azure/azure-setup.client.js';
 
 /** Closest Azure region to the app's other environments; East US 2 otherwise (broad service availability, lowest US prices). */
 export function chooseAzureLocation(spec?: ProjectSpec): string {

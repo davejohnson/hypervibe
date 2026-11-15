@@ -7,7 +7,7 @@ import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import * as awsBackend from '../../adapters/providers/aws/tofu/aws-engine.backend.js';
-import * as setup from '../aws-setup.js';
+import * as setup from '../../adapters/providers/aws/aws-setup.client.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { createCommandContext } from '../context.js';
 import { planInfrastructureEngine } from '../infrastructure-engine.js';
