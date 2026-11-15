@@ -194,3 +194,6 @@ export async function ensureDatabaseLogin(access: AwsAccess, params: {
     ? `Created the app's database login and stored ${params.databaseUrlKey} in Parameter Store.`
     : 'Created the worker waker\'s read-only database login.' };
 }
+
+/** The regional S3 endpoint an app's S3 client is pointed at. */
+export const s3Endpoint = (region: string): string => `https://s3.${region}.amazonaws.com`;

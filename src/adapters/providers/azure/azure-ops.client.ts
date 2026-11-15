@@ -241,3 +241,6 @@ export async function taggedResources(tokens: AzureTokens, subscriptionId: strin
   }
   return found;
 }
+
+/** A Key Vault's address from its name. */
+export const azureVaultUri = (vaultName: string): string => `https://${vaultName}.vault.azure.net/`;

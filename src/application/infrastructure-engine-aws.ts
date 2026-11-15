@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import {
   deleteFinalSnapshot, describeDatabaseCluster, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
-  putParameter, removeLeftovers, tlsRequiredByDefault, type AwsAccess,
+  putParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess,
 } from '../adapters/providers/aws/aws-engine.client.js';
 import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
@@ -147,7 +147,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     if (buckets.length > 1) throw new Error(`Service ${service} can receive only one bucket's variables.`);
     const storage: Record<string, string> = buckets[0] ? {
       OBJECT_STORAGE_PROVIDER: 's3', OBJECT_STORAGE_BUCKET: bucketName(buckets[0]), AWS_S3_BUCKET_NAME: bucketName(buckets[0]),
-      AWS_ENDPOINT_URL: `https://s3.${context.connection.region}.amazonaws.com`, AWS_DEFAULT_REGION: context.connection.region, AWS_S3_URL_STYLE: 'virtual',
+      AWS_ENDPOINT_URL: s3Endpoint(context.connection.region), AWS_DEFAULT_REGION: context.connection.region, AWS_S3_URL_STYLE: 'virtual',
     } : {};
     for (const key of Object.keys(storage)) if (key in environmentSpec.envVars) throw new Error(`Environment variable ${key} conflicts with storage ${buckets[0]}.`);
     return { ...environmentSpec.envVars, ...storage };

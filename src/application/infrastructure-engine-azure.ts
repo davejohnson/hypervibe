@@ -1,7 +1,7 @@
 import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
-import { AZURE_SCOPES, azureRest } from '../adapters/providers/azure/azure-ops.client.js';
+import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
 import { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
@@ -159,7 +159,7 @@ export function azureEngineLayout(project: Pick<Project, 'id' | 'name'>, environ
       registryId: `${group}/providers/Microsoft.ContainerRegistry/registries/${names.registry}`, registryLoginServer: `${names.registry}.azurecr.io`,
       serverName: names.server, databaseHost: `${names.server}.postgres.database.azure.com`,
     },
-    vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: `https://${vaultName}.vault.azure.net/` },
+    vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: azureVaultUri(vaultName) },
   };
 }
 
@@ -286,12 +286,12 @@ async function leftoverRoleAssignments(context: AzureEngineContext, input: Azure
   if (!creating.length) return { adopt: {} };
   const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
   const tokens = context.tokens;
-  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
+  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
   if (!identity) return { unknown: 'Hypervibe could not read the runtime identity from Azure; try again.' };
   if (identity.status === 404) return { adopt: {} };
   const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
   if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read the runtime identity from Azure (HTTP ${identity.status}).` };
-  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
+  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
   if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the runtime identity's roles in Azure (HTTP ${listed?.status ?? 'none'}).` };
   const existing = ((listed.body.value ?? []) as Array<{ id?: string; properties?: { scope?: string; roleDefinitionId?: string } }>);
   const configuration = buildAzureEnvironmentConfiguration(input);
