@@ -46,3 +46,8 @@ export function createStorageHmacKey(token: string, gcpProjectId: string, servic
 export function readBucket(token: string, bucket: string): Promise<Response> {
   return fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
 }
+
+/** Reads a project by id; its `name` carries the project number. */
+export function readGcpProject(token: string, gcpProjectId: string): Promise<Response> {
+  return fetchWithRetry(`https://cloudresourcemanager.googleapis.com/v3/projects/${gcpProjectId}`, { headers: { Authorization: `Bearer ${token}` } });
+}
