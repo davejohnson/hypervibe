@@ -1,15 +1,11 @@
 import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
-import { scramVerifier, specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
-import { RDSClient, DeleteDBClusterSnapshotCommand, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
-import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
-import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DeleteParametersCommand, GetParameterCommand, GetParametersByPathCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
-import { DeleteTaskDefinitionsCommand, DeregisterTaskDefinitionCommand, ECSClient, ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
-import { CloudWatchLogsClient, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { IAMClient, ListRolesCommand } from '@aws-sdk/client-iam';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
+import {
+  deleteFinalSnapshot, describeDatabaseCluster, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
+  putParameter, removeLeftovers, tlsRequiredByDefault, type AwsAccess,
+} from '../adapters/providers/aws/aws-engine.client.js';
 import { awsAccessCurrent } from './aws-setup.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { LAMBDA_RESERVED_ENV, type AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
@@ -18,7 +14,7 @@ import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Project } from '../domain/entities/project.entity.js';
-import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
+import { ConvergeExecutor, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { engineSegmentOf, type EngineAuthentication, type EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -38,9 +34,6 @@ export const AWS_DATABASE_LOGIN_OPERATION = 'awsDatabaseLoginEnsure';
 export const AWS_BUCKET_EMPTY_OPERATION = 'awsBucketEmpty';
 export const AWS_TEARDOWN_CLEANUP_OPERATION = 'awsTeardownCleanup';
 export const AWS_SNAPSHOT_DELETE_OPERATION = 'awsSnapshotDelete';
-const APP_DATABASE = 'app';
-const APP_LOGIN = 'app_owner';
-const WAKER_LOGIN = 'hv_waker';
 
 export type AwsProfile = 'production' | 'testing';
 
@@ -81,6 +74,8 @@ export function isAwsEngineEnvironment(spec: ProjectSpec, environmentName: strin
 export function awsBinding(environment: Environment): AwsEngineBinding {
   return ((environment.platformBindings as { aws?: AwsEngineBinding }).aws) ?? {};
 }
+
+const awsAccess = (context: Pick<AwsEngineContext, 'connection' | 'credentials'>): AwsAccess => ({ region: context.connection.region, credentials: context.credentials });
 
 export async function resolveAwsEngineContext(ctx: CommandContext, project: Project, environmentName: string): Promise<AwsEngineContext | { blocked: string }> {
   const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl ?? undefined) ?? project.name;
@@ -126,31 +121,6 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
     if (storage.provider !== 's3') problems.push(`Storage ${name}: the AWS engine manages buckets only with provider "s3".`);
   }
   return problems;
-}
-
-async function newestAuroraVersion(context: AwsEngineContext, major: number): Promise<string | undefined> {
-  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-  let marker: string | undefined;
-  const versions: string[] = [];
-  do {
-    const page = await rds.send(new DescribeDBEngineVersionsCommand({ Engine: 'aurora-postgresql', Marker: marker }));
-    versions.push(...(page.DBEngineVersions ?? []).map((entry) => entry.EngineVersion ?? '').filter((version) => version.startsWith(`${major}.`)));
-    marker = page.Marker;
-  } while (marker);
-  return versions.sort((a, b) => Number(a.split('.')[1]) - Number(b.split('.')[1])).pop();
-}
-
-/** Whether Aurora PostgreSQL of this major already requires TLS by default; undefined when it cannot be read. */
-async function tlsRequiredByDefault(context: AwsEngineContext, major: string): Promise<boolean | undefined> {
-  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-  let marker: string | undefined;
-  do {
-    const page = await rds.send(new DescribeEngineDefaultClusterParametersCommand({ DBParameterGroupFamily: `aurora-postgresql${major}`, Marker: marker }));
-    const forceSsl = page.EngineDefaults?.Parameters?.find((parameter) => parameter.ParameterName === 'rds.force_ssl');
-    if (forceSsl) return forceSsl.ParameterValue === '1';
-    marker = page.EngineDefaults?.Marker;
-  } while (marker);
-  return undefined;
 }
 
 /** The AWS name of a workload: its Lambda function, ECS service and task family. */
@@ -208,26 +178,19 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
 export async function awsSecretStore(ctx: CommandContext, project: Project, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
   const context = await resolveAwsEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return context;
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  const access = awsAccess(context);
   return {
     name: 'AWS Parameter Store',
-    observe: async (key) => parameterExists(ssm, `${context.parameterPath}${key}`),
+    observe: async (key) => parameterExists(access, `${context.parameterPath}${key}`),
     write: async (key, value) => {
       try {
-        await ssm.send(new PutParameterCommand({ Name: `${context.parameterPath}${key}`, Type: 'SecureString', Value: value, Overwrite: true }));
+        await putParameter(access, `${context.parameterPath}${key}`, value);
         return undefined;
       } catch (error) {
         return `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}).`;
       }
     },
   };
-}
-
-async function parameterExists(ssm: SSMClient, name: string): Promise<'present' | 'absent' | { unknown: string }> {
-  try { await ssm.send(new GetParameterCommand({ Name: name })); return 'present'; } catch (error) {
-    if (error instanceof ParameterNotFound) return 'absent';
-    return { unknown: `Parameter Store could not be read (${error instanceof Error ? error.name : 'error'}).` };
-  }
 }
 
 /** The engine configuration for an environment as it stands: what plans compare against and teardown destroys. */
@@ -237,10 +200,10 @@ async function awsEngineConfigurationFor(context: AwsEngineContext, spec: Projec
   let tlsDefault: boolean | undefined;
   if (environmentSpec.database) {
     const major = (environmentSpec.database as { version?: number }).version ?? 17;
-    engineVersion = await newestAuroraVersion(context, major).catch(() => undefined);
+    engineVersion = await newestAuroraVersion(awsAccess(context), major).catch(() => undefined);
     if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
     // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
-    tlsDefault = await tlsRequiredByDefault(context, engineVersion.split('.')[0]!).catch(() => undefined);
+    tlsDefault = await tlsRequiredByDefault(awsAccess(context), engineVersion.split('.')[0]!).catch(() => undefined);
   }
   const binding = awsBinding(context.environment);
   const databaseWired = Boolean(environmentSpec.database && binding.databaseLoginAt);
@@ -334,85 +297,6 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   return record(actions, warnings, { planId });
 }
 
-async function deleteFinalSnapshot(context: AwsEngineContext, identifier: string): Promise<ActionResult> {
-  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-  try {
-    await rds.send(new DeleteDBClusterSnapshotCommand({ DBClusterSnapshotIdentifier: identifier }));
-  } catch (error) {
-    if (!(error instanceof Error && error.name === 'DBClusterSnapshotNotFoundFault')) throw error;
-    return { success: true, message: `Snapshot ${identifier} no longer exists.` };
-  }
-  return { success: true, message: `Deleted the final database snapshot ${identifier}.` };
-}
-
-async function emptyBucket(context: AwsEngineContext, bucket: string): Promise<ActionResult> {
-  const s3 = new S3Client({ region: context.connection.region, credentials: context.credentials });
-  let deleted = 0;
-  for (;;) {
-    let listed;
-    try {
-      listed = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket, MaxKeys: 1000 }));
-    } catch (error) {
-      if (error instanceof Error && error.name === 'NoSuchBucket') return { success: true, message: `${bucket} no longer exists.` };
-      throw error;
-    }
-    const objects = [...(listed.Versions ?? []), ...(listed.DeleteMarkers ?? [])].map((entry) => ({ Key: entry.Key!, ...(entry.VersionId ? { VersionId: entry.VersionId } : {}) }));
-    if (!objects.length) return { success: true, message: `Deleted ${deleted} file version(s) from ${bucket}.` };
-    const result = await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects, Quiet: true } }));
-    if (result.Errors?.length) return { success: false, message: `${result.Errors.length} file(s) in ${bucket} could not be deleted (${result.Errors[0]!.Code ?? 'error'}).` };
-    deleted += objects.length;
-  }
-}
-
-async function removeLeftovers(context: AwsEngineContext, metadata: { parameterPath: string; families: string[]; logGroups: string[]; prefix: string }): Promise<ActionResult> {
-  const { region } = context.connection;
-  const credentials = context.credentials;
-  const ssm = new SSMClient({ region, credentials });
-  const names: string[] = [];
-  let token: string | undefined;
-  do {
-    const page = await ssm.send(new GetParametersByPathCommand({ Path: metadata.parameterPath, Recursive: true, WithDecryption: false, NextToken: token }));
-    names.push(...(page.Parameters ?? []).map((parameter) => parameter.Name!));
-    token = page.NextToken;
-  } while (token);
-  for (let index = 0; index < names.length; index += 10) await ssm.send(new DeleteParametersCommand({ Names: names.slice(index, index + 10) }));
-  const ecs = new ECSClient({ region, credentials });
-  let revisions = 0;
-  for (const family of metadata.families) {
-    for (const status of ['ACTIVE', 'INACTIVE'] as const) {
-      const arns: string[] = [];
-      let next: string | undefined;
-      do {
-        const page = await ecs.send(new ListTaskDefinitionsCommand({ familyPrefix: family, status, nextToken: next }));
-        // familyPrefix also matches longer family names; keep only this exact family.
-        arns.push(...(page.taskDefinitionArns ?? []).filter((arn) => arn.split('/').pop()!.replace(/:\d+$/, '') === family));
-        next = page.nextToken;
-      } while (next);
-      if (status === 'ACTIVE') for (const arn of arns) await ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: arn }));
-      const deletable = arns;
-      for (let index = 0; index < deletable.length; index += 10) await ecs.send(new DeleteTaskDefinitionsCommand({ taskDefinitions: deletable.slice(index, index + 10) }));
-      revisions += status === 'ACTIVE' ? arns.length : 0;
-    }
-  }
-  const logs = new CloudWatchLogsClient({ region, credentials });
-  for (const logGroupName of metadata.logGroups) {
-    try { await logs.send(new DeleteLogGroupCommand({ logGroupName })); } catch (error) {
-      if (!(error instanceof Error && error.name === 'ResourceNotFoundException')) throw error;
-    }
-  }
-  // OpenTofu reported the roles deleted; confirm it, since a leftover role keeps the environment's access alive.
-  const iam = new IAMClient({ region: 'us-east-1', credentials });
-  const remaining: string[] = [];
-  let marker: string | undefined;
-  do {
-    const page = await iam.send(new ListRolesCommand({ PathPrefix: '/hypervibe/app/', Marker: marker }));
-    remaining.push(...(page.Roles ?? []).map((role) => role.RoleName!).filter((name) => name.startsWith(`${metadata.prefix}-`)));
-    marker = page.IsTruncated ? page.Marker : undefined;
-  } while (marker);
-  if (remaining.length) return { success: false, message: `These roles of the environment still exist: ${remaining.join(', ')}. Run the teardown plan again.` };
-  return { success: true, message: `Deleted ${names.length} setting(s) from Parameter Store, ${revisions} released task revision(s) and the build logs, and confirmed the environment's roles are gone.` };
-}
-
 export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; specRevision: number; environmentName: string;
 }): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
@@ -422,20 +306,20 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveAwsEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
-  const access = await awsAccessCurrent(context.credentials, context.connection.accountId);
-  if (access === 'outdated') {
+  const setup = await awsAccessCurrent(context.credentials, context.connection.accountId);
+  if (setup === 'outdated') {
     return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
   }
-  if (typeof access === 'object') return { blocked: [access.unknown] };
+  if (typeof setup === 'object') return { blocked: [setup.unknown] };
 
   // Hypervibe-owned generated secrets, observed in Parameter Store (present, absent or unknown).
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  const access = awsAccess(context);
   const generated = engineSecretKeys(spec, environmentName);
   // Outside keys (declared in the spec or copied by a migration) must have a value; Hypervibe never invents them.
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
   const secrets = await planEngineSecrets({
     environmentName, generated, outside: imported,
-    observe: (key) => parameterExists(ssm, `${context.parameterPath}${key}`),
+    observe: (key) => parameterExists(access, `${context.parameterPath}${key}`),
     action: (key, stored) => {
       const name = `${context.parameterPath}${key}`;
       return {
@@ -495,56 +379,6 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     engine: { planId, state: context.state, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
 }
 
-async function ensureParameter(ssm: SSMClient, action: PlanAction): Promise<ActionResult> {
-  const name = (action.metadata as { name: string }).name;
-  const existing = await parameterExists(ssm, name);
-  if (existing === 'present') return { success: true, message: `${name} already exists.` };
-  if (typeof existing === 'object') return { success: false, status: 'blocked', message: existing.unknown };
-  await ssm.send(new PutParameterCommand({ Name: name, Type: 'SecureString', Value: crypto.randomBytes(32).toString('base64url'), Overwrite: false,
-    Tags: [{ Key: 'managed-by', Value: 'hypervibe' }] }));
-  return { success: true, message: `Stored a generated value in ${name}.` };
-}
-
-async function ensureDatabaseLogin(context: AwsEngineContext, action: PlanAction, clusterArn: string, masterSecretArn: string, endpoint: string): Promise<ActionResult> {
-  const metadata = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean };
-  const data = new RDSDataClient({ region: context.connection.region, credentials: context.credentials });
-  const sql = async (statement: string) => data.send(new ExecuteStatementCommand({ resourceArn: clusterArn, secretArn: masterSecretArn, database: APP_DATABASE, sql: statement }));
-  // A paused Aurora cluster wakes on the first statement; give it time.
-  for (let attempt = 0; ; attempt++) {
-    try { await sql('SELECT 1'); break; } catch (error) {
-      if (attempt >= 8 || !/DatabaseResumingException|resum/i.test(error instanceof Error ? `${error.name} ${error.message}` : '')) throw error;
-      await new Promise((done) => setTimeout(done, 10_000));
-    }
-  }
-  if (metadata.appLogin !== false) await ensureAppLogin(context, sql, metadata.parameter, endpoint);
-  // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy.
-  if (metadata.wakerSecrets.length) {
-    const wakerPassword = crypto.randomBytes(24).toString('base64url');
-    const waker = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${WAKER_LOGIN}'`);
-    await sql(`${waker.records?.length ? 'ALTER' : 'CREATE'} ROLE ${WAKER_LOGIN} LOGIN PASSWORD '${scramVerifier(wakerPassword)}'`);
-    await sql(`GRANT pg_read_all_data TO ${WAKER_LOGIN}`);
-    const secrets = new SecretsManagerClient({ region: context.connection.region, credentials: context.credentials });
-    for (const secretId of metadata.wakerSecrets) {
-      await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: WAKER_LOGIN, password: wakerPassword }) }));
-    }
-  }
-  return { success: true, message: metadata.appLogin !== false
-    ? `Created the app's database login and stored ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
-    : 'Created the worker waker\'s read-only database login.' };
-}
-
-async function ensureAppLogin(context: AwsEngineContext, sql: (statement: string) => Promise<{ records?: unknown[] }>, parameter: string, endpoint: string): Promise<void> {
-  const password = crypto.randomBytes(24).toString('base64url');
-  const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${APP_LOGIN}'`);
-  await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${APP_LOGIN} LOGIN PASSWORD '${scramVerifier(password)}'`);
-  await sql(`GRANT ${APP_LOGIN} TO CURRENT_USER`);
-  await sql(`ALTER DATABASE ${APP_DATABASE} OWNER TO ${APP_LOGIN}`);
-  await sql(`ALTER SCHEMA public OWNER TO ${APP_LOGIN}`);
-  const url = `postgresql://${APP_LOGIN}:${password}@${endpoint}:5432/${APP_DATABASE}?sslmode=require`;
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
-  await ssm.send(new PutParameterCommand({ Name: parameter, Type: 'SecureString', Value: url, Overwrite: true }));
-}
-
 export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: {
   project: Project; spec: ProjectSpec; specRevision: number; planId: string; confirmActions: string[];
 }): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
@@ -564,16 +398,16 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   }
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  const access = awsAccess(context);
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
     handler: async (action) => {
       const metadata = action.metadata as { operation?: string; accountId?: string } | undefined;
       if (metadata?.accountId !== context.connection.accountId) return { success: false, status: 'blocked', message: 'AWS target changed; re-run hv_plan.' };
       try {
-        if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureParameter(ssm, action);
+        if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureGeneratedParameter(access, (action.metadata as { name: string }).name);
         if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {
-          const deleted = await deleteFinalSnapshot(context, (action.metadata as { identifier: string }).identifier);
+          const deleted = await deleteFinalSnapshot(access, (action.metadata as { identifier: string }).identifier);
           if (deleted.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const { finalSnapshot: _snapshot, ...remaining } = awsBinding(current);
@@ -581,9 +415,9 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           }
           return deleted;
         }
-        if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(context, (action.metadata as { bucket: string }).bucket);
+        if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(access, (action.metadata as { bucket: string }).bucket);
         if (metadata.operation === AWS_TEARDOWN_CLEANUP_OPERATION) {
-          const removed = await removeLeftovers(context, { prefix: context.prefix, ...(action.metadata as { parameterPath: string; families: string[]; logGroups: string[] }) });
+          const removed = await removeLeftovers(access, { prefix: context.prefix, ...(action.metadata as { parameterPath: string; families: string[]; logGroups: string[] }) });
           if (removed.success) {
             // Nothing of this environment remains on AWS; forget its bindings so a later plan starts fresh.
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
@@ -599,11 +433,11 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
         if (metadata.operation === AWS_DATABASE_LOGIN_OPERATION) {
           // The cluster OpenTofu just created, read from RDS: its ARN, endpoint and RDS-managed master secret.
           const identifier = (action.metadata as { clusterIdentifier: string }).clusterIdentifier;
-          const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-          const cluster = (await rds.send(new DescribeDBClustersCommand({ DBClusterIdentifier: identifier }))).DBClusters?.[0];
-          const clusterArn = cluster?.DBClusterArn; const secretArn = cluster?.MasterUserSecret?.SecretArn; const endpoint = cluster?.Endpoint;
+          const { clusterArn, secretArn, endpoint } = await describeDatabaseCluster(access, identifier);
           if (!clusterArn || !secretArn || !endpoint) return { success: false, status: 'blocked', message: `Database ${identifier} is not ready yet; re-run hv_plan.` };
-          const created = await ensureDatabaseLogin(context, action, clusterArn, secretArn, endpoint);
+          const login = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean };
+          const created = await ensureDatabaseLogin(access, { parameter: login.parameter, wakerSecrets: login.wakerSecrets, ...(login.appLogin !== undefined ? { appLogin: login.appLogin } : {}),
+            clusterArn, masterSecretArn: secretArn, endpoint, databaseUrlKey: ENGINE_DATABASE_URL_KEY });
           if (created.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const previous = awsBinding(current);
