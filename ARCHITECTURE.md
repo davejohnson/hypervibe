@@ -346,6 +346,21 @@ start/restart the user's client. See [installation](docs/agent-installation.md).
 The code layout alone does not prove a complete cloud journey. Verify the managed
 engine through the installed interfaces and the intended running application.
 
+## Enforced Boundaries
+
+`src/__tests__/architecture-boundaries.test.ts` runs in ordinary CI and fails on a
+new violation of these rules. Existing violations are listed in its baseline file,
+which may only shrink:
+
+- `src/domain` does not import adapters or application code.
+- Cloud SDKs are imported only under `src/adapters`.
+- Tools and interfaces do not import provider adapters or per-cloud modules.
+- Nothing new depends on the Railway adapter.
+- Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`
+  branches; the behavior belongs in the engine.
+- An exported function is not defined in two files. Shared engine helpers live in
+  `src/application/engine-shared.ts`.
+
 ## New Provider Checklist
 
 Prove one integrated path first: clean installation, authorized connection,

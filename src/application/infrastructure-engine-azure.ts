@@ -1,4 +1,5 @@
 import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
+import { specWithoutEnvironment } from './engine-shared.js';
 import crypto from 'crypto';
 import { AZURE_SCOPES, azureRest } from './azure-ops.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
@@ -504,17 +505,6 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, teardown: true, ...shared });
-}
-
-/** A spec patch removing an environment, including from the secrets that target it (a secret targeting only it goes too). */
-export function specWithoutEnvironment(spec: ProjectSpec, environmentName: string): Record<string, unknown> {
-  const secrets = Object.fromEntries(Object.entries(spec.secrets)
-    .filter(([, secret]) => (secret.environments as string[] | undefined)?.includes(environmentName))
-    .map(([key, secret]) => {
-      const remaining = (secret.environments as string[]).filter((name) => name !== environmentName);
-      return [key, remaining.length ? { environments: remaining } : null];
-    }));
-  return { environments: { [environmentName]: null }, ...(Object.keys(secrets).length ? { secrets } : {}) };
 }
 
 export interface AzureApplyDependencies {

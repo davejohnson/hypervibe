@@ -71,7 +71,7 @@ class NodeSha256 {
 
 describe('AWS teardown spec cleanup', () => {
   it('removes the environment and its secrets, keeping secrets other environments use', async () => {
-    const { specWithoutEnvironment } = await import('../infrastructure-engine-aws.js');
+    const { specWithoutEnvironment } = await import('../engine-shared.js');
     const spec = { secrets: { ONLY: { ownership: 'hypervibe', environments: ['demo'] }, SHARED: { ownership: 'hypervibe', environments: ['demo', 'prod'] }, OTHER: { environments: ['prod'] } } } as never;
     expect(specWithoutEnvironment(spec, 'demo')).toEqual({ environments: { demo: null }, secrets: { ONLY: null, SHARED: { environments: ['prod'] } } });
   });
