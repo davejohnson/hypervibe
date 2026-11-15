@@ -59,3 +59,21 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
       : releaseTask(target, name, resource, image, kind === 'worker'),
   });
 }
+
+/**
+ * Builds one reviewed commit of the local repository for an environment (used by
+ * the infrastructure apply for the first image), returning the digest-pinned image.
+ */
+export async function buildAwsCommitImage(target: AwsReleaseTarget, spec: ProjectSpec, environmentName: string, directory: string, commitSha: string)
+  : Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
+  const workloads = selectReleaseWorkloads(spec.environments[environmentName]!, undefined);
+  const startCommand = 'blocked' in workloads ? undefined : workloads.startCommand;
+  const source = await packageLocalCommit(directory, {
+    format: 'zip', dockerfileName: AWS_DOCKERFILE, addFiles: { [LOADER_IN_SOURCE]: LOAD_SECRETS_SOURCE }, commitSha,
+    dockerfileFor: (repositoryDockerfile) => awsReleaseDockerfile({
+      ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(spec.runtime ? { runtime: spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
+    }),
+  });
+  if ('blocked' in source) return { error: source.blocked };
+  return buildImage(target, source);
+}
