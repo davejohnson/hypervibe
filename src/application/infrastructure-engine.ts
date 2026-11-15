@@ -2,8 +2,15 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
-import { applyAwsInfrastructureEngine, isAwsEngineEnvironment, planAwsInfrastructureEngine } from './infrastructure-engine-aws.js';
-import { applyAzureInfrastructureEngine, isAzureEngineEnvironment, planAzureInfrastructureEngine } from './infrastructure-engine-azure.js';
+import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
+import { addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import {
+  cloudRunGet, googleErrorMessage, latestWakerExecution, readCloudRunOperation, releaseImage, releaseJobImage, startCloudRunJob, workloadContainers, type WorkloadKind,
+} from '../adapters/providers/gcp/gcp-cloud-run.client.js';
+import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
+export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
+import { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
+export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
@@ -22,8 +29,6 @@ import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
-import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { CloudRunAdapter } from '../adapters/providers/gcp/cloudrun.adapter.js';
 import {
   buildCloudRunConfiguration,
@@ -31,7 +36,8 @@ import {
   gcpEngineBackend,
   type GcpCloudRunEngineInput,
 } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
-import type { EngineAuthentication, EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
+import type { EngineAuthentication, EngineReleaseResult, EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
+export type { EngineReleaseResult } from '../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -68,7 +74,6 @@ const DOMAIN_OPERATIONS = new Set([DOMAIN_VERIFY_OPERATION, DOMAIN_DNS_OPERATION
  * writer never runs for these environments.
  */
 export const ENGINE_SECRET_OPERATION = 'gcpSecretManagerEnsure';
-export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export const ENGINE_RELEASE_OPERATION = 'engineImageRelease';
 export const ENGINE_STORAGE_ACCESS_BLOCKER = 'Storage buckets need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=true, or run hv_connections provider="cloudrun" action="prepare" gcsAccess="lifecycle" (preview, then confirm).';
 export const ENGINE_CACHE_CREDENTIAL_OPERATION = 'gcpCacheCredentialEnsure';
@@ -309,55 +314,30 @@ export function releaseCommandFor(environmentSpec: EnvironmentSpec): string | un
 
 type Observed<T> = { state: 'present'; value: T } | { state: 'absent' } | { state: 'unknown'; reason: string };
 
-export async function secretManagerFetch(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(url, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
-}
-
 interface ObservedSecret { resourceName?: string; labels: Record<string, string>; containerLabels?: Record<string, string>; hasEnabledVersion: boolean; latestVersion?: string }
 
 export async function observeSecret(token: string, gcpProjectId: string, secretId: string): Promise<Observed<ObservedSecret>> {
-  const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}`;
-  const secret = await secretManagerFetch(token, base);
-  if (secret.status === 404) return { state: 'absent' };
-  if (!secret.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${secret.status} for ${secretId}.` };
-  const body = await secret.json() as { name?: string; labels?: Record<string, string> };
-  const resourceName = body.name ?? `projects/${gcpProjectId}/secrets/${secretId}`;
-  const version = await secretManagerFetch(token, `${base}/versions/latest`);
-  if (version.status === 404) return { state: 'present', value: { resourceName, labels: body.labels ?? {}, hasEnabledVersion: false } };
-  if (!version.ok) return { state: 'unknown', reason: `Secret Manager returned HTTP ${version.status} for ${secretId} versions.` };
-  const versionBody = await version.json() as { state?: string; name?: string };
-  if (versionBody.name && !versionBody.name.startsWith(`${resourceName}/versions/`)) return { state: 'unknown', reason: `Secret Manager returned a version for a different secret than ${secretId}.` };
-  const latestVersion = versionBody.name?.split('/').pop();
-  const containerLabels = body.labels ?? {};
+  const read = await readSecretContainer(token, gcpProjectId, secretId);
+  if (read.state !== 'present') return read;
+  const { resourceName, labels: containerLabels, hasEnabledVersion, latestVersionName: latestVersion } = read.value;
+  if (!read.value.hasVersion) return { state: 'present', value: { resourceName, labels: containerLabels, hasEnabledVersion: false } };
+  // Credential metadata Hypervibe recorded for this exact version replaces the container's labels.
   const environment = containerLabels['hv-environment'] ? new EnvironmentRepository().findById(containerLabels['hv-environment']) : undefined;
   const metadata = (environment?.platformBindings as { engine?: EngineBinding } | undefined)?.engine?.secretMetadata?.[secretId];
   if (metadata && (metadata.gcpProjectId !== gcpProjectId || metadata.version !== latestVersion)) {
     return { state: 'unknown', reason: `Secret ${secretId} has an unrecognized version; its credential metadata cannot be reused. Inspect the interrupted value write before retrying.` };
   }
   return { state: 'present', value: { resourceName, labels: metadata ? { ...metadata.labels, 'managed-by': containerLabels['managed-by']!, 'hv-environment': containerLabels['hv-environment']! } : containerLabels, containerLabels,
-    hasEnabledVersion: versionBody.state === 'ENABLED',
+    hasEnabledVersion,
     ...(latestVersion && /^[1-9][0-9]*$/.test(latestVersion) ? { latestVersion } : {}) } };
 }
 
-async function listEngineSecrets(token: string, gcpProjectId: string, environmentId: string): Promise<Observed<string[]>> {
-  const filter = encodeURIComponent(`labels.managed-by=hypervibe AND labels.hv-environment=${labelValue(environmentId)}`);
-  const ids: string[] = [];
-  let pageToken = '';
-  for (let page = 0; page < 20; page++) {
-    const response = await secretManagerFetch(token,
-      `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets?filter=${filter}&pageSize=100${pageToken ? `&pageToken=${pageToken}` : ''}`);
-    if (!response.ok) return { state: 'unknown', reason: `Listing Secret Manager secrets returned HTTP ${response.status}.` };
-    const body = await response.json() as { secrets?: Array<{ name: string }>; nextPageToken?: string };
-    ids.push(...(body.secrets ?? []).map((secret) => secret.name.split('/').pop()!));
-    if (!body.nextPageToken) return { state: 'present', value: ids.sort() };
-    pageToken = encodeURIComponent(body.nextPageToken);
-  }
-  return { state: 'unknown', reason: 'Secret Manager listing exceeded its page bound.' };
+function listEngineSecrets(token: string, gcpProjectId: string, environmentId: string): Promise<Observed<string[]>> {
+  return listSecretIds(token, gcpProjectId, `labels.managed-by=hypervibe AND labels.hv-environment=${labelValue(environmentId)}`);
 }
 
 async function ensureSecret(token: string, action: PlanAction): Promise<ActionResult> {
   const { gcpProjectId, secretId, labels } = action.metadata as { gcpProjectId: string; secretId: string; labels: Record<string, string> };
-  const base = `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets`;
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
   if (observed.state === 'present') {
@@ -372,9 +352,7 @@ async function ensureSecret(token: string, action: PlanAction): Promise<ActionRe
   const value = crypto.randomBytes(32).toString('base64url');
   let added: Response;
   try {
-    added = await secretManagerFetch(token, `${base}/${secretId}:addVersion`, {
-      method: 'POST', body: JSON.stringify({ payload: { data: Buffer.from(value).toString('base64') } }),
-    });
+    added = await addSecretVersion(token, gcpProjectId, secretId, value);
   } catch {
     return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
   }
@@ -388,26 +366,6 @@ async function ensureSecret(token: string, action: PlanAction): Promise<ActionRe
 
 // ---------------------------------------------------------------- Database login (Hypervibe-owned)
 
-export async function sqlAdmin(token: string, gcpProjectId: string, path: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(`https://sqladmin.googleapis.com/v1/projects/${gcpProjectId}/${path}`, {
-    ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-  });
-}
-
-export async function waitForSqlOperation(token: string, gcpProjectId: string, operation: { name?: string; status?: string; error?: unknown }): Promise<'done' | 'failed' | 'unknown'> {
-  if (operation.status === 'DONE') return operation.error ? 'failed' : 'done';
-  if (!operation.name) return 'unknown';
-  const deadline = Date.now() + 5 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const response = await sqlAdmin(token, gcpProjectId, `operations/${operation.name}`);
-    if (!response.ok) continue;
-    const body = await response.json() as { status?: string; error?: unknown };
-    if (body.status === 'DONE') return body.error ? 'failed' : 'done';
-  }
-  return 'unknown';
-}
-
 /** Records only non-secret operational metadata; the engine owns container metadata. */
 export function recordSecretVersionMetadata(gcpProjectId: string, secretId: string, version: string, labels: Record<string, string>): boolean {
   const repo = new EnvironmentRepository();
@@ -417,12 +375,6 @@ export function recordSecretVersionMetadata(gcpProjectId: string, secretId: stri
   repo.updatePlatformBindings(environment.id, { engine: { ...engine,
     secretMetadata: { ...engine.secretMetadata, [secretId]: { gcpProjectId, version, labels } } } });
   return true;
-}
-
-/** A plan stops on missing outside keys with the one command that collects them all. */
-export function missingOutsideKeysMessage(environmentName: string, keys: string[]): string {
-  return `${environmentName} needs ${keys.length === 1 ? 'a key' : `${keys.length} keys`} Hypervibe cannot create: ${keys.join(', ')}. `
-    + `Run hv_secrets action="collect" env="${environmentName}" to add ${keys.length === 1 ? 'it' : 'them all'} on one local page (hv_launch does this itself), then plan again.`;
 }
 
 /** Google Secret Manager as an environment's secret store. */
@@ -471,9 +423,7 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   } } });
   let added: Response;
   try {
-    added = await secretManagerFetch(token, `https://secretmanager.googleapis.com/v1/projects/${gcpProjectId}/secrets/${secretId}:addVersion`, {
-      method: 'POST', body: JSON.stringify({ payload: { data: Buffer.from(value).toString('base64') } }),
-    });
+    added = await addSecretVersion(token, gcpProjectId, secretId, value);
   } catch {
     return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
   }
@@ -492,14 +442,13 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
 /** Publishes REDIS_URL from the instance's private address and Google-generated AUTH string. */
 async function ensureCacheCredential(token: string, action: PlanAction): Promise<ActionResult> {
   const { gcpProjectId, region, instanceName, secretId, labels } = action.metadata as { gcpProjectId: string; region: string; instanceName: string; secretId: string; labels: Record<string, string> };
-  const base = `https://redis.googleapis.com/v1/projects/${gcpProjectId}/locations/${region}/instances/${instanceName}`;
-  const instanceResponse = await fetchWithRetry(base, { headers: { Authorization: `Bearer ${token}` } });
+  const instanceResponse = await readRedisInstance(token, gcpProjectId, region, instanceName);
   if (instanceResponse.status === 404) return { success: false, status: 'blocked', message: `Redis instance ${instanceName} does not exist yet.` };
   if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Memorystore returned HTTP ${instanceResponse.status} for ${instanceName}.` };
   const instance = await instanceResponse.json() as { state?: string; host?: string; port?: number; labels?: Record<string, string> };
   if (instance.state !== 'READY' || !instance.host) return { success: false, status: 'pending', message: `Redis instance ${instanceName} is not ready yet.` };
   if (instance.labels?.['managed-by'] !== 'hypervibe') return { success: false, status: 'blocked', message: `Redis instance ${instanceName} is not managed by Hypervibe.` };
-  const authResponse = await fetchWithRetry(`${base}/authString`, { headers: { Authorization: `Bearer ${token}` } });
+  const authResponse = await readRedisAuthString(token, gcpProjectId, region, instanceName);
   if (!authResponse.ok) return { success: false, status: 'blocked', message: `Reading the Redis AUTH string returned HTTP ${authResponse.status}.` };
   const authString = (await authResponse.json() as { authString?: string }).authString;
   if (!authString) return { success: false, status: 'pending', message: `Redis instance ${instanceName} has no AUTH string yet.` };
@@ -521,9 +470,7 @@ async function ensureStorageS3Key(token: string, action: PlanAction): Promise<Ac
   }
   let created: Response;
   try {
-    created = await fetch(`https://storage.googleapis.com/storage/v1/projects/${gcpProjectId}/hmacKeys?serviceAccountEmail=${encodeURIComponent(runtimeServiceAccountEmail)}`, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}` },
-    });
+    created = await createStorageHmacKey(token, gcpProjectId, runtimeServiceAccountEmail);
   } catch {
     return { success: false, status: 'pending', message: `Creating the S3 access key for ${storageName} has an unknown outcome. Run the same command again.` };
   }
@@ -663,7 +610,7 @@ async function findOwnLeftovers(
   for (const name of storageNames) {
     if (!creating.has(`storage:${name}`)) continue;
     const bucket = engineBucketName(context.gcpProjectId, environmentName, name);
-    const response = await fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await readBucket(token, bucket);
     if (response.status === 404) continue;
     if (!response.ok) return { blocked: `Bucket ${bucket} could not be checked (HTTP ${response.status}); it may belong to someone else.` };
     const labels = (await response.json() as { labels?: Record<string, string> }).labels ?? {};
@@ -690,11 +637,20 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   specRevision: number;
   environmentName: string;
 }): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
+  const engine = cloudEngineFor(params.spec, params.environmentName);
+  if (!engine) return { blocked: [`Environment ${params.environmentName} is not managed by the OpenTofu engine. Its hosting provider is not Google Cloud, AWS or Azure.`] };
+  return engine.plan(ctx, params);
+}
+
+/** Google Cloud's plan: Cloud Run, Cloud SQL, storage, queues, Redis and custom domains. */
+export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
+  project: Project;
+  spec: ProjectSpec;
+  specRevision: number;
+  environmentName: string;
+}): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
-  if (!isEngineManaged(environmentSpec)) return { blocked: [`Environment ${environmentName} is not managed by the OpenTofu engine. Use Cloud Run or select hosting.engine="opentofu" for AWS.`] };
-  if (isAwsEngineEnvironment(spec, environmentName)) return planAwsInfrastructureEngine(ctx, params);
-  if (isAzureEngineEnvironment(spec, environmentName)) return planAzureInfrastructureEngine(ctx, params);
   const problems = engineEnvironmentProblems(spec, environmentName);
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
@@ -894,9 +850,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
         sourceFingerprint: mapping.state === 'present' ? mapping.sourceFingerprint : 'absent', remove: true } });
   }
 
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { blocked: [binary.error] };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { blocked: [engine.blocked] };
   const boundServices = Object.keys((context.environment.platformBindings as { services?: Record<string, unknown> }).services ?? {});
   const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
     adopt: { ...adopt, secrets: adoptSecrets },
@@ -1049,9 +1004,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   ];
   const observedGenerations = await serviceGenerations(token, context, environmentName);
   if ('blocked' in observedGenerations) return { blocked: [observedGenerations.blocked] };
-  const document: PlanRunDocument = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
+  return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
@@ -1059,19 +1012,7 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
       domainClaims: { ...domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
         [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
       } : {}) }, cancelledDomainProofs,
-    },
-  } as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return {
-    planRunId: run.id,
-    environmentName,
-    specRevision: params.specRevision,
-    actions,
-    confirmActions: actions.filter((a) => a.type !== 'noop' && (a.requiresConfirm || a.billable || a.dataBearing)).map((a) => a.id),
-    warnings,
-  };
+    } });
 }
 
 // ---------------------------------------------------------------- Apply
@@ -1098,7 +1039,6 @@ export async function verifyGcpDnsSource(ctx: CommandContext, project: Project, 
   return { ready: true };
 }
 
-export type WorkloadKind = 'services' | 'jobs' | 'workerPools';
 
 /** Bound Cloud Run workloads: services record serviceId, scheduled jobs jobName, workers workerPoolName. */
 function boundWorkloads(environment: Environment): Array<{ name: string; kind: WorkloadKind; resource: string }> {
@@ -1110,21 +1050,6 @@ function boundWorkloads(environment: Environment): Array<{ name: string; kind: W
     else if (binding.workerPoolName) workloads.push({ name, kind: 'workerPools', resource: binding.workerPoolName });
   }
   return workloads;
-}
-
-/** The single container of a service, or of a job's task template. */
-function workloadContainers(kind: WorkloadKind, value: Record<string, any>): Array<Record<string, any>> {
-  const containers = kind === 'jobs' ? value.template?.template?.containers : value.template?.containers;
-  return Array.isArray(containers) ? containers : [];
-}
-
-async function cloudRunGet(token: string, gcpProjectId: string, region: string, name: string, kind: WorkloadKind = 'services'): Promise<Observed<Record<string, any>>> {
-  const response = await fetchWithRetry(`https://run.googleapis.com/v2/projects/${gcpProjectId}/locations/${region}/${kind}/${name}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (response.status === 404) return { state: 'absent' };
-  if (!response.ok) return { state: 'unknown', reason: `Cloud Run returned HTTP ${response.status} for ${name}.` };
-  return { state: 'present', value: await response.json() as Record<string, any> };
 }
 
 /**
@@ -1150,12 +1075,22 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   planId: string;
   confirmActions: string[];
 }): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
+  const loaded = new ConvergeExecutor().loadPlan(params.planId);
+  if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
+  return cloudEngineForPlan(loaded.document as PlanRunDocument & { engine?: Record<string, unknown> }, params.spec).apply(ctx, params);
+}
+
+/** Applies a reviewed Google Cloud plan. */
+export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: {
+  project: Project;
+  spec: ProjectSpec;
+  specRevision: number;
+  planId: string;
+  confirmActions: string[];
+}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  // AWS plans carry their target; a teardown's snapshot cleanup runs after the environment left the spec.
-  if ((loaded.document as { engine?: { azure?: unknown } }).engine?.azure) return applyAzureInfrastructureEngine(ctx, params);
-  if ((loaded.document as { engine?: { aws?: unknown } }).engine?.aws || isAwsEngineEnvironment(params.spec, (loaded.document as PlanRunDocument).environmentName)) return applyAwsInfrastructureEngine(ctx, params);
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
@@ -1168,9 +1103,8 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.gcpProjectId !== context.gcpProjectId || reviewed.region !== context.region) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different environment, GCP project or region. Re-run hv_plan.' };
   }
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { kind: 'blocked', reason: binary.error };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const token = await context.adapter.engineAccessToken();
 
   const result = await executor.execute({
@@ -1397,16 +1331,6 @@ async function recordServiceBindings(
 
 // ---------------------------------------------------------------- Release (image only)
 
-export interface EngineReleaseResult {
-  service: string;
-  status: 'released' | 'failed' | 'unknown';
-  imageUri?: string;
-  url?: string;
-  health?: { status: number; path: string };
-  message: string;
-  buildLogsUrl?: string;
-}
-
 /**
  * Releases application code to engine-managed services. Builds an immutable
  * image and changes only the running image, guarded by the service etag so a
@@ -1423,17 +1347,23 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
   /** Local repository root; when present, the exact HEAD commit is built without any git credentials. */
   sourceDirectory?: string;
 }): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
+  const engine = cloudEngineFor(params.spec, params.environmentName);
+  if (!engine) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
+  return engine.release(ctx, params) as Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }>;
+}
+
+/** Releases code to Cloud Run services, worker pools and jobs. */
+export async function releaseGcpEngineServices(ctx: CommandContext, params: {
+  project: Project;
+  spec: ProjectSpec;
+  environmentName: string;
+  specRevision: number;
+  services?: string[];
+  revision?: string;
+  sourceDirectory?: string;
+}): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
   const { spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
-  if (!isEngineManaged(environmentSpec)) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
-  if (isAwsEngineEnvironment(spec, environmentName)) {
-    const { releaseAwsEngineServices } = await import('./infrastructure-engine-aws-release.js');
-    return releaseAwsEngineServices(ctx, params);
-  }
-  if (isAzureEngineEnvironment(spec, environmentName)) {
-    const { releaseAzureEngineServices } = await import('./infrastructure-engine-azure-release.js');
-    return releaseAzureEngineServices(ctx, params);
-  }
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);
@@ -1588,10 +1518,9 @@ async function runReleaseCommand(
   const token = await context.adapter.engineAccessToken();
   const updated = await releaseJobImage(token, context, job, build.imageUri);
   if (updated.status !== 'released') return updated;
-  const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/jobs/${job}:run`;
   let started: Response;
   try {
-    started = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' });
+    started = await startCloudRunJob(token, context, job);
   } catch {
     return { status: 'unknown', message: 'Starting the release command had an unknown outcome. Check hv_logs before retrying.' };
   }
@@ -1600,7 +1529,7 @@ async function runReleaseCommand(
   const deadline = Date.now() + 30 * 60 * 1000;
   while (!operation.done && operation.name && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5000));
-    const polled = await fetchWithRetry(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${await context.adapter.engineAccessToken()}` } });
+    const polled = await readCloudRunOperation(await context.adapter.engineAccessToken(), operation.name);
     if (polled.ok) operation = await polled.json() as typeof operation;
   }
   if (!operation.done) return { status: 'unknown', message: 'The release command is still running. Check hv_logs, then run hv_deploy again.' };
@@ -1644,94 +1573,6 @@ async function releaseOne(
   return result;
 }
 
-/** Google's error message (never request content), bounded for display. */
-async function googleErrorMessage(response: Response): Promise<string> {
-  try {
-    const body = await response.json() as { error?: { message?: string } };
-    return (body.error?.message ?? 'no details').slice(0, 300);
-  } catch {
-    return 'no details';
-  }
-}
-
-/** Image-only, etag-guarded update of a scheduled job's task template; the next scheduled run uses it. */
-async function releaseJobImage(token: string, context: EngineContext, resource: string, imageUri: string): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
-  const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/jobs/${resource}`;
-  const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'jobs');
-  if (observed.state !== 'present') return { status: 'failed', message: observed.state === 'absent' ? `Job ${resource} does not exist.` : observed.reason };
-  const containers = workloadContainers('jobs', observed.value).map((container) => ({ ...container }));
-  if (containers.length !== 1) return { status: 'failed', message: `Job ${resource} must have exactly one container for an image release.` };
-  containers[0]!.image = imageUri;
-  // Jobs have no update mask: send the observed job back unchanged except for the image.
-  // The etag still makes a concurrent change fail this release instead of being overwritten.
-  const job = observed.value;
-  const body = { ...job, template: { ...job.template, template: { ...job.template?.template, containers } } };
-  const patch = await fetchWithRetry(url, {
-    method: 'PATCH',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (patch.status === 409 || patch.status === 412) return { status: 'failed', message: `Job ${resource} changed while releasing. Nothing was overwritten; retry hv_deploy.` };
-  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the job image release (HTTP ${patch.status}): ${await googleErrorMessage(patch)}` };
-  let operation = await patch.json() as { name?: string; done?: boolean; error?: { message?: string } };
-  for (let attempt = 0; attempt < 100 && !operation.done && operation.name; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const polled = await fetchWithRetry(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (polled.ok) operation = await polled.json() as typeof operation;
-  }
-  if (!operation.done) return { status: 'unknown', message: `The job release for ${resource} did not finish in time.` };
-  if (operation.error) return { status: 'failed', message: `Cloud Run could not update job ${resource}: ${operation.error.message ?? 'unknown error'}` };
-  const after = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'jobs');
-  if (after.state !== 'present' || workloadContainers('jobs', after.value)[0]?.image !== imageUri) {
-    return { status: 'unknown', message: `Job ${resource} did not report the new image.` };
-  }
-  return { status: 'released', message: `Released ${imageUri.split('@')[0]} to scheduled job ${resource}; its next run uses it.` };
-}
-
-async function releaseImage(token: string, context: EngineContext, resource: string, imageUri: string, kind: WorkloadKind = 'services'): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
-  if (kind === 'jobs') return releaseJobImage(token, context, resource, imageUri);
-  // Services and worker pools share the template shape and the masked image PATCH.
-  const url = `https://run.googleapis.com/v2/projects/${context.gcpProjectId}/locations/${context.region}/${kind}/${resource}`;
-  const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource, kind);
-  if (observed.state !== 'present') {
-    return { status: 'failed', message: observed.state === 'absent' ? `Service ${resource} does not exist. Re-run hv_plan scope="infrastructure".` : observed.reason };
-  }
-  const current = observed.value;
-  const containers = Array.isArray(current.template?.containers) ? current.template.containers.map((c: Record<string, unknown>) => ({ ...c })) : [];
-  if (containers.length !== 1) return { status: 'failed', message: `Service ${resource} must have exactly one container for an image release.` };
-  containers[0].image = imageUri;
-  // Only the image changes; every other field is sent back exactly as observed.
-  const patch = await fetchWithRetry(`${url}?updateMask=template.containers`, {
-    method: 'PATCH',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ etag: current.etag, template: { containers } }),
-  });
-  if (patch.status === 409 || patch.status === 412) {
-    return { status: 'failed', message: `Service ${resource} changed while releasing (concurrent update). Nothing was overwritten; retry hv_deploy.` };
-  }
-  if (!patch.ok) return { status: 'failed', message: `Cloud Run rejected the image release (HTTP ${patch.status}): ${await googleErrorMessage(patch)}` };
-  const operation = await patch.json() as { name?: string; done?: boolean; error?: { message?: string } };
-  const deadline = Date.now() + 10 * 60 * 1000;
-  let done = operation.done === true;
-  let error = operation.error;
-  while (!done && operation.name && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const polled = await fetchWithRetry(`https://run.googleapis.com/v2/${operation.name}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!polled.ok) continue;
-    const body = await polled.json() as { done?: boolean; error?: { message?: string } };
-    done = body.done === true;
-    error = body.error;
-  }
-  if (!done) return { status: 'unknown', message: `The release of ${resource} did not finish in time. Check hv_status before retrying.` };
-  if (error) return { status: 'failed', message: `Cloud Run could not roll out the new image: ${error.message ?? 'unknown error'}` };
-  const after = await cloudRunGet(token, context.gcpProjectId, context.region, resource, kind);
-  if (after.state !== 'present') return { status: 'unknown', message: 'The release finished but the service could not be observed.' };
-  const running = after.value.template?.containers?.[0]?.image;
-  const ready = after.value.terminalCondition?.state === 'CONDITION_SUCCEEDED' && after.value.latestReadyRevision === after.value.latestCreatedRevision;
-  if (running !== imageUri || !ready) return { status: 'unknown', message: 'The service did not report the new image as ready.' };
-  return { status: 'released', message: `Released ${imageUri.split('@')[0]} to ${resource}.`, ...(typeof after.value.uri === 'string' ? { url: after.value.uri } : {}) };
-}
-
 // ---------------------------------------------------------------- Status
 
 export interface EngineWorkerStatus {
@@ -1763,9 +1604,7 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
       const pool = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'workerPools');
       if (pool.state === 'present') status.instances = Number(pool.value.scaling?.manualInstanceCount ?? 0);
       if (service.onDemand) {
-        const response = await fetchWithRetry(`https://workflowexecutions.googleapis.com/v1/projects/${context.gcpProjectId}/locations/${context.region}/workflows/${resource}-waker/executions?pageSize=1&view=FULL`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const response = await latestWakerExecution(token, context, resource);
         const latest = response.ok ? ((await response.json()) as { executions?: Array<{ state?: string; startTime?: string; result?: string }> }).executions?.[0] : undefined;
         if (latest) {
           let parsed: { pendingWork?: number | string; readError?: string } = {};

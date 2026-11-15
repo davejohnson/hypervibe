@@ -32,7 +32,7 @@ describe('database defaults at committed and local spec boundaries', () => {
   });
 
   it.each([
-    ['railway', 'railway'], ['cloudrun', 'cloudsql'], ['ecs', 'rds'], ['azure-container-apps', 'azure-postgres'],
+    ['railway', 'railway'], ['cloudrun', 'cloudsql'], ['aws', 'rds'], ['azure', 'azure-postgres'],
   ])('interprets the same %s database declaration in every parser', (host, expected) => {
     const raw = JSON.stringify(document(host));
     root = mkdtempSync(join(tmpdir(), 'hv-database-default-'));
@@ -72,7 +72,7 @@ describe('database defaults at committed and local spec boundaries', () => {
   });
 
   it.each([
-    ['unknown-host', undefined], ['railway', null], ['cloudrun', ''], ['ecs', 1],
+    ['unknown-host', undefined], ['railway', null], ['cloudrun', ''], ['aws', 1],
   ])('rejects unresolved or invalid %s database provider %s', (host, provider) => {
     const input = document(host as string, { provider });
     expect(projectSpecSchema.safeParse(input).success).toBe(false);

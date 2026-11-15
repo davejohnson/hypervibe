@@ -19,8 +19,6 @@ const databases = [
 const hosts = [
   { provider: 'railway', immutableRollback: true },
   { provider: 'cloudrun', immutableRollback: false },
-  { provider: 'ecs', immutableRollback: true },
-  { provider: 'azure-container-apps', immutableRollback: true },
 ] as const;
 
 describe('named provider recovery contract coverage', () => {

@@ -1,3 +1,4 @@
+import type { EngineConnectStep } from './cloud-engines.js';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -7,7 +8,7 @@ import { saveConnection, verifyConnection } from '../domain/services/connection-
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { signInToAws, type AwsSignInSession } from './aws-sign-in.js';
 import { escapeHtml } from './local-paste-page.js';
-import { ACCOUNT_DEPLOY_ROLE, applyAwsSetup, awsAccessCurrent, planAwsSetup, retireProjectRoles, type AwsSetupChange, type AwsSetupPlan } from './aws-setup.js';
+import { ACCOUNT_DEPLOY_ROLE, applyAwsSetup, awsAccessCurrent, planAwsSetup, retireProjectRoles, type AwsSetupChange, type AwsSetupPlan } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 
 /** Closest AWS region to the app's other environments; us-east-1 otherwise (newest services launch there first). */
@@ -145,4 +146,20 @@ async function finishSetup(project: Project, session: AwsSignInSession, plan: Aw
   if (plan.retiringRoles.length) await retireProjectRoles(session, plan);
   return { status: 'connected', accountId: plan.accountId, region: plan.region, roleArn: applied.roleArn,
     message: `Hypervibe can now deploy ${project.name} to AWS account ${plan.accountId} (${plan.region}). The sign-in is no longer used.` };
+}
+
+/** AWS's guided connection as one engine step; `input.awsAccountId` approves the previewed account. */
+export async function connectAwsStep(params: { project: Project; spec?: ProjectSpec; input: Record<string, unknown> }): Promise<EngineConnectStep> {
+  const accountId = typeof params.input.awsAccountId === 'string' ? params.input.awsAccountId : undefined;
+  const result = await connectAws({ project: params.project, ...(params.spec ? { spec: params.spec } : {}), ...(accountId ? { approveAccountId: accountId } : {}) });
+  if (result.status === 'needs_approval') {
+    return { status: 'needs_approval', result,
+      hint: 'Show the user the account, region and each change in one short list, then ask them to approve. On approval call again with awsAccountId set to this accountId.',
+      ask: `Ask the user to approve setting up Hypervibe in AWS account ${result.accountId}.` };
+  }
+  if (result.status === 'waiting') {
+    return { status: 'waiting', result, hint: 'Tell the user an AWS sign-in page is open in their browser (give the link). Call action="connect" again after they sign in.',
+      ask: 'Ask the user to sign in to AWS in the browser tab that opened, then continue.' };
+  }
+  return result.status === 'connected' ? { status: 'connected', result, next: ['hv_launch', 'hv_plan'] } : { status: 'failed', result, message: result.message };
 }

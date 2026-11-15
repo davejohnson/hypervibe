@@ -1,17 +1,11 @@
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 
-/** Cloud Run always uses OpenTofu; AWS and Azure keep their explicit engine selection. */
-export function isEngineManaged(environment: EnvironmentSpec | undefined): boolean {
-  return environment?.hosting.provider === 'cloudrun'
-    || ((environment?.hosting.provider === 'aws' || environment?.hosting.provider === 'azure') && environment.hosting.engine === 'opentofu');
-}
+/** Hosting providers the managed OpenTofu engine builds. Everything else is Railway, which the engine never touches. */
+export const ENGINE_HOSTING_PROVIDERS: readonly string[] = ['cloudrun', 'aws', 'azure'];
 
-/** Reject an explicit engine on providers for which that engine has no implementation. */
-export function engineSelectionProblem(environment: EnvironmentSpec): string | undefined {
-  if (environment.hosting.engine !== undefined && !isEngineManaged(environment)) {
-    return `hosting.engine="${environment.hosting.engine}" is not supported with hosting.provider="${environment.hosting.provider}". OpenTofu currently manages Cloud Run and explicitly selected AWS and Azure environments.`;
-  }
-  return undefined;
+/** The engine is not a choice: Google Cloud, AWS and Azure always use it; Railway never does. */
+export function isEngineManaged(environment: EnvironmentSpec | undefined): boolean {
+  return environment !== undefined && ENGINE_HOSTING_PROVIDERS.includes(environment.hosting.provider);
 }
 
 const present = (value: unknown): boolean => value !== undefined && value !== null

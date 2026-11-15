@@ -1,7 +1,7 @@
 # GCP engine implementation notes
 
 Google Cloud uses OpenTofu as its only infrastructure engine. Cloud Run selects
-it automatically; `hosting.engine` is not a user choice. Default planning routes
+it automatically; there is no engine setting. Default planning routes
 to the engine and unsupported work blocks without a legacy fallback.
 
 This page records engine ownership, implementation decisions and dated evidence.

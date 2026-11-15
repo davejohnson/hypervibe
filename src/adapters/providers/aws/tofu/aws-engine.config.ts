@@ -105,21 +105,51 @@ export interface AwsDatabaseInput {
 
 export const awsKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 
-export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguration {
+function checkedProvider(input: Pick<AwsEngineInput, 'accountId' | 'region' | 'prefix' | 'environmentId'>): Record<string, unknown> {
   if (!/^\d{12}$/.test(input.accountId)) throw new Error('AWS account id is invalid.');
   if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(input.region)) throw new Error('AWS region is invalid.');
   if (!/^[a-z][a-z0-9-]{2,30}$/.test(input.prefix)) throw new Error('AWS name prefix is invalid.');
   const tags = { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() };
-  const resources: Record<string, EngineResourceMapping> = {};
-  const files: Record<string, unknown> = {
-    'provider.tf.json': { provider: { aws: [{ region: input.region, allowed_account_ids: [input.accountId], default_tags: [{ tags }] }] } },
-  };
+  return { 'provider.tf.json': { provider: { aws: [{ region: input.region, allowed_account_ids: [input.accountId], default_tags: [{ tags }] }] } } };
+}
 
-  // Image registry and the app's runtime role (capped by the setup boundary).
+/** The registry an environment's images are pushed to: deterministic, so plans can name an image before it is built. */
+export function awsRegistryUrl(input: Pick<AwsEngineInput, 'accountId' | 'region' | 'prefix'>): string {
+  return `${input.accountId}.dkr.ecr.${input.region}.amazonaws.com/${input.prefix}`;
+}
+
+/**
+ * The environment's image registry and CodeBuild project, in their own state:
+ * they are applied first, so the first image is built inside the same reviewed
+ * apply and the workloads are created from it (one plan round).
+ */
+export function buildAwsBuildConfiguration(input: AwsEngineInput): EngineConfiguration {
+  const files: Record<string, unknown> = checkedProvider(input);
+  const resources: Record<string, EngineResourceMapping> = {};
   const registry = { actionId: 'registry:images', kind: 'service' as const, name: 'images' };
-  const runtime = { actionId: 'identity:runtime', kind: 'service' as const, name: 'runtime' };
   resources['aws_ecr_repository.images'] = registry;
   resources['aws_ecr_lifecycle_policy.images'] = registry;
+  files['registry.tf.json'] = { resource: {
+    aws_ecr_repository: { images: { name: input.prefix, image_tag_mutability: 'IMMUTABLE', force_delete: true, image_scanning_configuration: [{ scan_on_push: true }] } },
+    aws_ecr_lifecycle_policy: { images: { repository: '${aws_ecr_repository.images.name}', policy: JSON.stringify({
+      rules: [{ rulePriority: 1, description: 'Keep the last 10 images', selection: { tagStatus: 'any', countType: 'imageCountMoreThan', countNumber: 10 }, action: { type: 'expire' } }],
+    }) } },
+  } };
+  addBuilds(input, files, resources);
+  files['outputs.tf.json'] = { output: {
+    registry_url: { value: '${aws_ecr_repository.images.repository_url}' },
+    build_project: { value: '${aws_codebuild_project.images.name}' },
+    build_source_bucket: { value: '${aws_s3_bucket.build_source.id}' },
+  } };
+  return { files, resources };
+}
+
+export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguration {
+  const resources: Record<string, EngineResourceMapping> = {};
+  const files: Record<string, unknown> = checkedProvider(input);
+
+  // The app's runtime role (capped by the setup boundary).
+  const runtime = { actionId: 'identity:runtime', kind: 'service' as const, name: 'runtime' };
   resources['aws_iam_role.runtime'] = runtime;
   resources['aws_iam_role_policy.runtime'] = runtime;
   const buckets = input.storage ?? [];
@@ -156,10 +186,6 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     // The default VPC: databases and tasks use its public subnets (no NAT gateway).
     data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
     resource: {
-      aws_ecr_repository: { images: { name: input.prefix, image_tag_mutability: 'IMMUTABLE', force_delete: true, image_scanning_configuration: [{ scan_on_push: true }] } },
-      aws_ecr_lifecycle_policy: { images: { repository: '${aws_ecr_repository.images.name}', policy: JSON.stringify({
-        rules: [{ rulePriority: 1, description: 'Keep the last 10 images', selection: { tagStatus: 'any', countType: 'imageCountMoreThan', countNumber: 10 }, action: { type: 'expire' } }],
-      }) } },
       aws_iam_role: { runtime: {
         name: `${input.prefix}-runtime`, path: '/hypervibe/app/',
         permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
@@ -229,42 +255,6 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     };
   }
 
-  // Image builds: CodeBuild reads a source archive Hypervibe uploads and pushes to the registry.
-  const builds: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'builds' };
-  for (const address of ['aws_s3_bucket.build_source', 'aws_s3_bucket_public_access_block.build_source', 'aws_s3_bucket_lifecycle_configuration.build_source',
-    'aws_iam_role.build', 'aws_iam_role_policy.build', 'aws_codebuild_project.images']) resources[address] = builds;
-  files['builds.tf.json'] = { resource: {
-    aws_s3_bucket: { build_source: { bucket: `${input.prefix}-build-${input.accountId}`, force_destroy: true } },
-    aws_s3_bucket_public_access_block: { build_source: { bucket: '${aws_s3_bucket.build_source.id}', block_public_acls: true, block_public_policy: true, ignore_public_acls: true, restrict_public_buckets: true } },
-    aws_s3_bucket_lifecycle_configuration: { build_source: { bucket: '${aws_s3_bucket.build_source.id}', rule: [{ id: 'expire-sources', status: 'Enabled', filter: [{}], expiration: [{ days: 7 }] }] } },
-    aws_iam_role: { build: {
-      name: `${input.prefix}-build`, path: '/hypervibe/app/', permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
-      assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { Service: 'codebuild.amazonaws.com' } }] }),
-    } },
-    aws_iam_role_policy: { build: { name: 'build', role: '${aws_iam_role.build.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: [
-      { Sid: 'Logs', Effect: 'Allow', Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'], Resource: '*' },
-      { Sid: 'Source', Effect: 'Allow', Action: ['s3:GetObject', 's3:GetObjectVersion'], Resource: `arn:aws:s3:::${input.prefix}-build-${input.accountId}/*` },
-      { Sid: 'Login', Effect: 'Allow', Action: 'ecr:GetAuthorizationToken', Resource: '*' },
-      { Sid: 'Push', Effect: 'Allow', Resource: `arn:aws:ecr:${input.region}:${input.accountId}:repository/${input.prefix}`, Action: [
-        'ecr:BatchCheckLayerAvailability', 'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'] },
-    ] }) } },
-    aws_codebuild_project: { images: {
-      name: `${input.prefix}-images`, service_role: '${aws_iam_role.build.arn}', build_timeout: 30,
-      artifacts: [{ type: 'NO_ARTIFACTS' }],
-      environment: [{ compute_type: 'BUILD_GENERAL1_SMALL', image: 'aws/codebuild/amazonlinux-x86_64-standard:5.0', type: 'LINUX_CONTAINER', privileged_mode: true,
-        environment_variable: [{ name: 'REGISTRY', value: '${aws_ecr_repository.images.repository_url}' }] }],
-      // Hypervibe uploads source.zip with its generated Dockerfile and starts builds with an IMAGE_TAG override.
-      source: [{ type: 'S3', location: `${input.prefix}-build-${input.accountId}/source.zip`, buildspec: JSON.stringify({
-        version: '0.2',
-        phases: {
-          pre_build: { commands: ['aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY%%/*}"'] },
-          build: { commands: ['docker build --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
-        },
-      }).replace(/\$\{/g, () => '$${') }],
-      logs_config: [{ cloudwatch_logs: [{ status: 'ENABLED', group_name: `/hypervibe/${input.prefix}/builds` }] }],
-    } },
-  } };
-
   // Web services: Lambda behind a function URL; requests reach the app through the Lambda Web Adapter.
   const services = input.services ?? [];
   if (services.length) {
@@ -312,10 +302,45 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   addTasks(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
-    registry_url: { value: '${aws_ecr_repository.images.repository_url}' },
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },
-    build_project: { value: '${aws_codebuild_project.images.name}' },
-    build_source_bucket: { value: '${aws_s3_bucket.build_source.id}' },
   } };
   return { files, resources };
+}
+
+function addBuilds(input: AwsEngineInput, files: Record<string, unknown>, resources: Record<string, EngineResourceMapping>): void {
+  // Image builds: CodeBuild reads a source archive Hypervibe uploads and pushes to the registry.
+  const builds: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'builds' };
+  for (const address of ['aws_s3_bucket.build_source', 'aws_s3_bucket_public_access_block.build_source', 'aws_s3_bucket_lifecycle_configuration.build_source',
+    'aws_iam_role.build', 'aws_iam_role_policy.build', 'aws_codebuild_project.images']) resources[address] = builds;
+  files['builds.tf.json'] = { resource: {
+    aws_s3_bucket: { build_source: { bucket: `${input.prefix}-build-${input.accountId}`, force_destroy: true } },
+    aws_s3_bucket_public_access_block: { build_source: { bucket: '${aws_s3_bucket.build_source.id}', block_public_acls: true, block_public_policy: true, ignore_public_acls: true, restrict_public_buckets: true } },
+    aws_s3_bucket_lifecycle_configuration: { build_source: { bucket: '${aws_s3_bucket.build_source.id}', rule: [{ id: 'expire-sources', status: 'Enabled', filter: [{}], expiration: [{ days: 7 }] }] } },
+    aws_iam_role: { build: {
+      name: `${input.prefix}-build`, path: '/hypervibe/app/', permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
+      assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { Service: 'codebuild.amazonaws.com' } }] }),
+    } },
+    aws_iam_role_policy: { build: { name: 'build', role: '${aws_iam_role.build.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: [
+      { Sid: 'Logs', Effect: 'Allow', Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'], Resource: '*' },
+      { Sid: 'Source', Effect: 'Allow', Action: ['s3:GetObject', 's3:GetObjectVersion'], Resource: `arn:aws:s3:::${input.prefix}-build-${input.accountId}/*` },
+      { Sid: 'Login', Effect: 'Allow', Action: 'ecr:GetAuthorizationToken', Resource: '*' },
+      { Sid: 'Push', Effect: 'Allow', Resource: `arn:aws:ecr:${input.region}:${input.accountId}:repository/${input.prefix}`, Action: [
+        'ecr:BatchCheckLayerAvailability', 'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'] },
+    ] }) } },
+    aws_codebuild_project: { images: {
+      name: `${input.prefix}-images`, service_role: '${aws_iam_role.build.arn}', build_timeout: 30,
+      artifacts: [{ type: 'NO_ARTIFACTS' }],
+      environment: [{ compute_type: 'BUILD_GENERAL1_SMALL', image: 'aws/codebuild/amazonlinux-x86_64-standard:5.0', type: 'LINUX_CONTAINER', privileged_mode: true,
+        environment_variable: [{ name: 'REGISTRY', value: '${aws_ecr_repository.images.repository_url}' }] }],
+      // Hypervibe uploads source.zip with its generated Dockerfile and starts builds with an IMAGE_TAG override.
+      source: [{ type: 'S3', location: `${input.prefix}-build-${input.accountId}/source.zip`, buildspec: JSON.stringify({
+        version: '0.2',
+        phases: {
+          pre_build: { commands: ['aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY%%/*}"'] },
+          build: { commands: ['docker build --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
+        },
+      }).replace(/\$\{/g, () => '$${') }],
+      logs_config: [{ cloudwatch_logs: [{ status: 'ENABLED', group_name: `/hypervibe/${input.prefix}/builds` }] }],
+    } },
+  } };
 }

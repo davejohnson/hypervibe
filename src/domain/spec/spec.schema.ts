@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
-import { withDefaultDatabaseProvider } from './database-defaults.js';
+import { withDefaultDatabaseProvider, withoutEngineFlag } from './database-defaults.js';
 import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
 export { dnsSpecSchema, dnsSecurityPolicySchema } from './dns.schema.js';
 export type { DnsSpec, DnsSecurityPolicy } from './dns.schema.js';
@@ -1552,14 +1552,12 @@ export const environmentWebhookSchema = z.object({
   signingSecretEnvVar: environmentVariableNameSchema.optional(),
 }).strict();
 
-export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z.object({
+export const environmentSpecSchema = z.preprocess((environment) => withDefaultDatabaseProvider(withoutEngineFlag(environment)), z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
-    /** Compatibility field for saved specs; Cloud Run always uses OpenTofu. */
-    engine: z.literal('opentofu').optional().describe('Optional compatibility field. Cloud Run always uses OpenTofu; other hosting providers cannot select it.'),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

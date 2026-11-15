@@ -3,18 +3,14 @@ import { describe, expect, it } from 'vitest';
 import '../../src/application/providers.js';
 import { RailwayAdapter } from '../../src/adapters/providers/railway/railway.adapter.js';
 import { CloudRunAdapter } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
-import { EcsExpressAdapter } from '../../src/adapters/providers/aws/ecs-express.adapter.js';
-import { AzureContainerAppsAdapter } from '../../src/adapters/providers/azure/azure-container-apps.adapter.js';
 import type { IHostingAdapter } from '../../src/domain/ports/hosting.port.js';
 import { registryCredentialLifecycle } from '../../src/domain/ports/registry-credential.port.js';
 
 const reviewed: Array<[string, Pick<IHostingAdapter, 'capabilities'> & Partial<Pick<IHostingAdapter, 'observe' | 'setEnvVars'>>, boolean]> = [
   ['railway', new RailwayAdapter(), true],
   ['cloudrun', new CloudRunAdapter(), false],
-  ['ecs', new EcsExpressAdapter(), false],
-  ['azure-container-apps', new AzureContainerAppsAdapter(), false],
 ];
-const registryPasswordCopies = new Set(['railway', 'cloudrun', 'ecs', 'azure-container-apps']);
+const registryPasswordCopies = new Set(['railway', 'cloudrun']);
 
 describe('named-provider secret-only contract coverage', () => {
   it('covers every hosting provider', () => {

@@ -1,3 +1,4 @@
+import { accessLatestSecretVersion } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import crypto from 'crypto';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -7,8 +8,9 @@ import { Connector, GoogleAuth, IpAddressTypes } from '@google-cloud/cloud-sql-c
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
+import { sqlAdmin, waitForSqlOperation } from '../adapters/providers/gcp/gcp-data.client.js';
 import {
-  observeSecret, recordSecretVersionMetadata, sqlAdmin, waitForSqlOperation, writeSecretVersion,
+  observeSecret, recordSecretVersionMetadata, writeSecretVersion,
 } from './infrastructure-engine.js';
 
 /**
@@ -241,9 +243,7 @@ export async function grantWorkerWakeRead(token: string, serviceAccount: Record<
   if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Cloud SQL returned HTTP ${instanceResponse.status} for ${meta.instanceName}.` };
   const instance = await instanceResponse.json() as { state?: string; connectionName?: string };
   if (instance.state !== 'RUNNABLE' || !instance.connectionName) return { success: false, status: 'pending', message: `Database instance ${meta.instanceName} is not ready yet.` };
-  const secretResponse = await fetch(`https://secretmanager.googleapis.com/v1/projects/${meta.gcpProjectId}/secrets/${meta.secretId}/versions/latest:access`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const secretResponse = await accessLatestSecretVersion(token, meta.gcpProjectId, meta.secretId);
   if (!secretResponse.ok) return { success: false, status: 'blocked', message: `Reading the database connection (${meta.secretId}) returned HTTP ${secretResponse.status}.` };
   const url = Buffer.from((await secretResponse.json() as { payload?: { data?: string } }).payload?.data ?? '', 'base64').toString('utf8');
   const parsed = /^postgresql:\/\/([a-z_]+):([^@]+)@/.exec(url);

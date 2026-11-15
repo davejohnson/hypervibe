@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import os from 'os';
-import { azureProjectVaultName } from '../adapters/providers/azure/tofu/azure-engine.config.js';
-import { ARM_SCOPE, GRAPH_SCOPE, azureTokenFor, type AzureSignInSession } from './azure-sign-in.js';
+import { azureProjectVaultName } from './tofu/azure-engine.config.js';
+import { ARM_SCOPE, GRAPH_SCOPE, azureTokenFor, type AzureSignInSession } from './azure-entra.client.js';
 
 /**
  * One-time Azure setup, mirroring AWS: the person signs in once (an Owner of

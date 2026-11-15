@@ -14,7 +14,6 @@ import { railwayHttpFixture, projectId as nativeProjectId, stagingId as nativeEn
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/s3.adapter.js';
-import '../../../adapters/providers/azure/azure-container-apps.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
@@ -2057,16 +2056,6 @@ describe('PlanService.plan', () => {
     const result = await new PlanService().plan(project, 'staging');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
-  });
-
-  it('accepts an existing primary cloud connection for its storage adapter', () => {
-    const connection = new ConnectionRepository().create({
-      provider: 'ecs',
-      credentialsEncrypted: 'encrypted-for-preflight-only',
-    });
-    new ConnectionRepository().updateStatus(connection.id, 'verified');
-
-    expect(new PlanService().providerPreflight(['s3'])).toEqual([]);
   });
 
   it('requires a Cloudflare connection that matches the requested domain scope', () => {

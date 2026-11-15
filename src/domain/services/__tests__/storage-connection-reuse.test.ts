@@ -15,24 +15,6 @@ describe('compatible cloud connection reuse', () => {
     SqliteAdapter.getInstance(path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-storage-connection-')), 'test.db')).migrate();
   });
 
-  it('builds the S3 adapter from an existing verified ECS connection', async () => {
-    const connectionRepo = new ConnectionRepository();
-    const connection = connectionRepo.create({
-      provider: 'ecs',
-      credentialsEncrypted: getSecretStore().encryptObject({
-        accessKeyId: 'A'.repeat(20),
-        secretAccessKey: 's'.repeat(40),
-      }),
-    });
-    connectionRepo.updateStatus(connection.id, 'verified');
-    const project = new ProjectRepository().create({ name: 'storage-auth-reuse' });
-
-    await expect(adapterFactory.getStorageOperations('s3', project)).resolves.toMatchObject({
-      success: true,
-      adapter: { name: 's3' },
-    });
-  });
-
   it('builds the GCS adapter from an existing verified Cloud Run connection', async () => {
     const serviceAccount = {
       type: 'service_account',
@@ -78,26 +60,6 @@ describe('compatible cloud connection reuse', () => {
 
     await expect(adapterFactory.getCacheAdapter('memorystore', project)).resolves.toMatchObject({
       success: false,
-    });
-  });
-
-  it('builds the Azure Blob adapter from an existing verified Container Apps connection', async () => {
-    const connectionRepo = new ConnectionRepository();
-    const connection = connectionRepo.create({
-      provider: 'azure-container-apps',
-      credentialsEncrypted: getSecretStore().encryptObject({
-        tenantId: '11111111-1111-4111-8111-111111111111',
-        subscriptionId: '22222222-2222-4222-8222-222222222222',
-        clientId: '33333333-3333-4333-8333-333333333333',
-        clientSecret: 'secret-value',
-      }),
-    });
-    connectionRepo.updateStatus(connection.id, 'verified');
-    const project = new ProjectRepository().create({ name: 'storage-auth-reuse-azure' });
-
-    await expect(adapterFactory.getStorageOperations('azureblob', project)).resolves.toMatchObject({
-      success: true,
-      adapter: { name: 'azureblob' },
     });
   });
 });

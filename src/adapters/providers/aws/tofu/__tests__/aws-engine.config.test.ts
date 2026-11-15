@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildAwsConfiguration, schedulerCron } from '../aws-engine.config.js';
+import { awsRegistryUrl, buildAwsBuildConfiguration, buildAwsConfiguration, schedulerCron } from '../aws-engine.config.js';
 
 const base = { accountId: '111122223333', region: 'us-west-2', prefix: 'hv-app-aws', environmentId: 'ENV1', parameterPath: '/hypervibe/env1/' };
 
@@ -22,6 +22,19 @@ describe('AWS engine configuration', () => {
     expect(role.aws_iam_role.runtime.permissions_boundary).toBe('arn:aws:iam::111122223333:policy/hypervibe/hypervibe-app-boundary');
     expect(role.aws_iam_role_policy.runtime.policy).toContain('parameter/hypervibe/env1/*');
     expect(config.resources['aws_s3_bucket.documents']).toMatchObject({ dataBearing: true });
+  });
+});
+
+describe('AWS image builds', () => {
+  it('keep the registry and build project in their own state, so the first image is built before the services', () => {
+    const build = buildAwsBuildConfiguration(base);
+    const environment = buildAwsConfiguration(base);
+    for (const address of ['aws_ecr_repository.images', 'aws_codebuild_project.images', 'aws_iam_role.build']) {
+      expect(build.resources[address]).toBeDefined();
+      expect(environment.resources[address]).toBeUndefined();
+    }
+    expect(JSON.stringify(environment.files)).not.toContain('aws_ecr_repository');
+    expect(awsRegistryUrl(base)).toBe('111122223333.dkr.ecr.us-west-2.amazonaws.com/hv-app-aws');
   });
 });
 
