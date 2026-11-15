@@ -1,0 +1,130 @@
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+
+/**
+ * Layering rules from ARCHITECTURE.md (Provider Boundary, Interface Boundary),
+ * enforced as a ratchet. Existing violations are listed in
+ * architecture-boundaries.baseline.json; a new one fails, and a fixed one must be
+ * removed from the baseline so the list only shrinks.
+ *
+ * Regenerate after removing violations:
+ *   UPDATE_ARCHITECTURE_BASELINE=1 npx vitest run src/__tests__/architecture-boundaries.test.ts
+ */
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const sourceRoot = path.join(root, 'src');
+const baselinePath = path.join(sourceRoot, '__tests__', 'architecture-boundaries.baseline.json');
+
+function sourceFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name === '__tests__' || entry.name === 'test') return [];
+    const filename = path.join(directory, entry.name);
+    if (entry.isDirectory()) return sourceFiles(filename);
+    return entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.d.ts') ? [filename] : [];
+  });
+}
+
+interface Import { file: string; target: string; external: boolean }
+
+function importsOf(filename: string): Import[] {
+  const file = path.relative(root, filename).split(path.sep).join('/');
+  const text = readFileSync(filename, 'utf8');
+  const found: Import[] = [];
+  for (const match of text.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*|^\s*import\s+)['"]([^'"\n]+)['"]/gm)) {
+    const specifier = match[1]!;
+    if (specifier.startsWith('.')) {
+      const resolved = path.resolve(path.dirname(filename), specifier).replace(/\.js$/, '');
+      found.push({ file, target: path.relative(root, resolved).split(path.sep).join('/'), external: false });
+    } else {
+      found.push({ file, target: specifier, external: true });
+    }
+  }
+  return found;
+}
+
+const CLOUD_SDK = /^(@aws-sdk\/|@azure\/|@google-cloud\/|google-auth-library$)/;
+const PER_CLOUD_APPLICATION = /^src\/application\/(infrastructure-engine-(aws|azure)(-release)?|(aws|azure)-[a-z-]+|migration-transfer-gcp|gcp-[a-z-]+)$/;
+const ENGINE_BRANCH = /\b(isAwsEngineEnvironment|isAzureEngineEnvironment)\s*\(/g;
+
+interface Rule { name: string; why: string; violates: (entry: Import) => boolean }
+
+const rules: Rule[] = [
+  {
+    name: 'domain-imports-outward',
+    why: 'src/domain holds intent and policy. It must not import adapters or application code; depend on a port instead.',
+    violates: ({ file, target, external }) => !external && file.startsWith('src/domain/')
+      && (target.startsWith('src/adapters/') || target.startsWith('src/application/')),
+  },
+  {
+    name: 'cloud-sdk-outside-adapters',
+    why: 'Cloud SDK calls belong in src/adapters. Application and domain code route through a registered capability.',
+    violates: ({ file, target, external }) => external && CLOUD_SDK.test(target) && !file.startsWith('src/adapters/'),
+  },
+  {
+    name: 'interface-imports-provider',
+    why: 'Tools and interfaces are thin adapters over src/application. They must not import a provider adapter or a per-cloud module.',
+    violates: ({ file, target, external }) => !external && (file.startsWith('src/tools/') || file.startsWith('src/interfaces/'))
+      && (target.startsWith('src/adapters/providers/') || PER_CLOUD_APPLICATION.test(target)),
+  },
+  {
+    name: 'railway-dependency',
+    why: 'Railway is frozen. Nothing outside its own folder may take a new dependency on it.',
+    violates: ({ file, target, external }) => !external && target.startsWith('src/adapters/providers/railway/')
+      && !file.startsWith('src/adapters/providers/railway/'),
+  },
+];
+
+function observe(): Record<string, string[]> {
+  const files = sourceFiles(sourceRoot);
+  const imports = files.flatMap(importsOf);
+  const result: Record<string, string[]> = {};
+  for (const rule of rules) {
+    result[rule.name] = [...new Set(imports.filter(rule.violates).map((entry) => `${entry.file} -> ${entry.target}`))].sort();
+  }
+  // Provider-name dispatch: each call site outside the engine's own module is a
+  // branch the engine registry should replace.
+  const branches: string[] = [];
+  for (const filename of files) {
+    const file = path.relative(root, filename).split(path.sep).join('/');
+    if (/^src\/application\/infrastructure-engine-(aws|azure)\.ts$/.test(file)) continue;
+    const count = [...readFileSync(filename, 'utf8').matchAll(ENGINE_BRANCH)].length;
+    if (count > 0) branches.push(`${file} x${count}`);
+  }
+  result['engine-name-branch'] = branches.sort();
+  // The same exported function defined in several files is a copied helper.
+  const definitions = new Map<string, string[]>();
+  for (const filename of files) {
+    const file = path.relative(root, filename).split(path.sep).join('/');
+    for (const match of readFileSync(filename, 'utf8').matchAll(/^export (?:async )?function ([A-Za-z0-9_]+)\s*[(<]/gm)) {
+      definitions.set(match[1]!, [...(definitions.get(match[1]!) ?? []), file]);
+    }
+  }
+  result['duplicated-exported-function'] = [...definitions]
+    .filter(([, where]) => new Set(where).size > 1)
+    .map(([name, where]) => `${name}: ${[...new Set(where)].sort().join(', ')}`).sort();
+  return result;
+}
+
+describe('architecture boundaries', () => {
+  const observed = observe();
+  if (process.env.UPDATE_ARCHITECTURE_BASELINE === '1') {
+    writeFileSync(baselinePath, `${JSON.stringify(observed, null, 2)}\n`);
+  }
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as Record<string, string[]>;
+  const why: Record<string, string> = {
+    ...Object.fromEntries(rules.map((rule) => [rule.name, rule.why])),
+    'engine-name-branch': 'Generic code must route by engine capability, not by isAwsEngineEnvironment/isAzureEngineEnvironment. Add the behavior to the engine instead of a new branch.',
+    'duplicated-exported-function': 'An exported function with this name already exists in another file. Reuse or move the existing one instead of copying it.',
+  };
+
+  it.each(Object.keys(observed))('%s has no new violations', (rule) => {
+    const added = observed[rule]!.filter((entry) => !(baseline[rule] ?? []).includes(entry));
+    expect(added, `${why[rule]}\nNew violations`).toEqual([]);
+  });
+
+  it.each(Object.keys(observed))('%s baseline lists only current violations', (rule) => {
+    const fixed = (baseline[rule] ?? []).filter((entry) => !observed[rule]!.includes(entry));
+    expect(fixed, 'These are fixed. Remove them from architecture-boundaries.baseline.json (see the header of this test)').toEqual([]);
+  });
+});
