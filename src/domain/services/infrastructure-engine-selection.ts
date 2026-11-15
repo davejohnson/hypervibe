@@ -14,16 +14,18 @@ export function engineSelectionProblem(environment: EnvironmentSpec): string | u
   return undefined;
 }
 
-/** Unsupported desired state must block GCP planning instead of falling back to another engine. */
-export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
-  const environment = spec.environments[environmentName];
-  if (!environment) return [`Spec has no environment "${environmentName}".`];
-  // AWS and Azure validate their provider capabilities in their own engine planners.
-  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return [];
+const present = (value: unknown): boolean => value !== undefined && value !== null
+  && !(typeof value === 'object' && Object.keys(value as object).length === 0);
+
+/**
+ * Capabilities no OpenTofu engine builds yet. Every cloud refuses them the same way,
+ * so declared intent is never silently dropped from a plan. A cloud adds only its own
+ * differences in its own planner.
+ */
+export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   const problems: string[] = [];
-  if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   const unsupported: Array<[string, unknown]> = [
-    ['domainTarget', environment.domainTarget], ['domainRecreateRevision', environment.domainRecreateRevision],
+    ['domainRecreateRevision', environment.domainRecreateRevision],
     ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
     ['email', environment.email?.enabled ? environment.email : undefined],
@@ -31,11 +33,34 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     ['deploy.promoteFrom', environment.deploy?.promoteFrom], ['deploy.promotionTests', environment.deploy?.promotionTests],
   ];
   for (const [field, value] of unsupported) {
-    if (value !== undefined && value !== null && !(typeof value === 'object' && Object.keys(value as object).length === 0)) {
-      problems.push(`${field} is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.`);
-    }
+    if (present(value)) problems.push(`${field} is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.`);
   }
   if (environment.migrations?.mode === 'tool') problems.push('migrations.mode="tool" is not yet supported by the OpenTofu engine; use "releaseCommand".');
+  for (const field of ['seedCommand', 'resilience', 'credentialAliases', 'freshInitialization'] as const) {
+    if (environment.database?.[field] !== undefined) {
+      problems.push(field === 'seedCommand'
+        ? 'database.seedCommand is not yet supported by the OpenTofu engine: remove it from the spec and have the app seed an empty database when it starts (for example in its migrations).'
+        : `database.${field} is not yet supported by the OpenTofu engine.`);
+    }
+  }
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
+    if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
+  }
+  return problems;
+}
+
+/** Unsupported desired state must block planning instead of falling back to another engine. */
+export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
+  const environment = spec.environments[environmentName];
+  if (!environment) return [`Spec has no environment "${environmentName}".`];
+  // AWS and Azure add their own provider capabilities in their engine planners.
+  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return commonEngineProblems(environment);
+  const problems: string[] = [];
+  if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
+  problems.push(...commonEngineProblems(environment));
+  // Cloud Run cannot switch traffic to another environment yet; AWS and Azure can.
+  if (present(environment.domainTarget)) problems.push('domainTarget is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.');
   if (environment.migrations?.mode === 'releaseCommand' && !environment.migrations.command?.trim()) problems.push('migrations.mode="releaseCommand" needs a command.');
   if (environment.domain) {
     if (environment.domainProxy) problems.push('domainProxy must be off: Google issues the certificate and needs DNS-only records.');
@@ -55,13 +80,6 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   if (database) {
     if (database.engine !== 'postgres') problems.push('The OpenTofu engine manages Cloud SQL only with engine "postgres".');
     if (database.provider !== 'cloudsql') problems.push('The OpenTofu engine manages databases only with provider "cloudsql".');
-    for (const field of ['seedCommand', 'resilience', 'credentialAliases', 'freshInitialization'] as const) {
-      if (database[field] !== undefined) {
-        problems.push(field === 'seedCommand'
-          ? 'database.seedCommand is not yet supported by the OpenTofu engine: remove it from the spec and have the app seed an empty database when it starts (for example in its migrations).'
-          : `database.${field} is not yet supported by the OpenTofu engine.`);
-      }
-    }
   }
   for (const [name, service] of Object.entries(environment.services)) {
     if (service.workloadKind === 'cron' && (!service.cronSchedule || !service.startCommand)) {
@@ -74,8 +92,6 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
     if (service.onDemand && !environment.database) {
       problems.push(`Service ${name}: an on-demand worker counts pending work in the app database, so the environment needs a database.`);
     }
-    if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
-    if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
   }
   return problems;
 }
