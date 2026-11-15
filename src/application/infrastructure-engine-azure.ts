@@ -1,3 +1,4 @@
+import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
 import crypto from 'crypto';
 import { AZURE_SCOPES, azureRest } from './azure-ops.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
@@ -96,7 +97,7 @@ export function azureTestingEnvironments(spec: ProjectSpec): string[] {
 /** Desired state the Azure engine cannot build yet; listed problems block planning instead of being ignored. */
 export function azureEngineProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName]!;
-  const problems: string[] = [];
+  const problems: string[] = commonEngineProblems(environment);
   if (azureProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (its own server and registry, web always on), which the Azure engine does not build yet. Testing environments are supported.`);
   }
