@@ -1,4 +1,4 @@
-import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
+import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
@@ -46,12 +46,8 @@ export const AZURE_STORAGE_EMPTY_OPERATION = 'azureStorageEmpty';
 export const AZURE_DATABASE_DROP_OPERATION = 'azureDatabaseDrop';
 export const AZURE_TEARDOWN_CLEANUP_OPERATION = 'azureTeardownCleanup';
 
-export type AzureProfile = 'production' | 'testing';
-
-/** production and staging share one shape; everything else is a cheap testing environment. */
-export function azureProfileFor(environmentName: string): AzureProfile {
-  return /prod|stag/i.test(environmentName) ? 'production' : 'testing';
-}
+export type AzureProfile = EnvironmentProfile;
+export const azureProfileFor = environmentProfile;
 
 export function isAzureEngineEnvironment(spec: ProjectSpec, environmentName: string): boolean {
   const environment = spec.environments[environmentName];

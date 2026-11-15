@@ -3,6 +3,7 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
 import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
+import { databaseRemovalBlocker, gcpDatabaseShape } from '../gcp-database-shape.js';
 
 // Contract (docs/development/support-matrix.md): settings an app needs to run for real
 // on Google Cloud reach the engine configuration; a cloud that cannot build one says so.
@@ -15,6 +16,7 @@ function specFor(provider: 'cloudrun' | 'aws' | 'azure') {
       worker: { workloadKind: 'worker', startCommand: 'python scripts/worker.py' },
       plain: {},
     },
+    database: { provider: provider === 'cloudrun' ? 'cloudsql' : provider === 'aws' ? 'rds' : 'azure-postgres', size: 'medium', deletionProtection: true },
     storage: { media: { provider: storageProvider, type: 'bucket', region: 'us-west1', injectInto: ['web', 'worker'], versioning: true, browserUploads: true },
       scratch: { provider: storageProvider, type: 'bucket', region: 'us-west1', injectInto: [] } },
   } } });
@@ -73,10 +75,47 @@ describe('production settings on Google Cloud', () => {
     for (const [provider, cloud] of [['aws', 'AWS'], ['azure', 'Azure']] as const) {
       expect(engineEnvironmentProblems(specFor(provider), 'staging')).toEqual([
         `Service web: alwaysOn is not yet supported on ${cloud}.`,
+        `database.size is not yet supported on ${cloud}.`,
+        `database.deletionProtection is not yet supported on ${cloud}.`,
         `Storage media: versioning is not yet supported on ${cloud}.`,
         `Storage media: browserUploads is not yet supported on ${cloud}.`,
       ]);
     }
+  });
+
+  it('gives production and staging a dedicated, protected database and everything else the cheapest one', () => {
+    const database = { provider: 'cloudsql', engine: 'postgres' } as const;
+    expect(gcpDatabaseShape('production', database)).toMatchObject({ tier: 'db-custom-1-3840', deletionProtection: true, retainedBackups: 14, transactionLogDays: 7 });
+    expect(gcpDatabaseShape('staging', database).tier).toBe('db-custom-1-3840');
+    expect(gcpDatabaseShape('preview-42', database)).toMatchObject({ tier: 'db-f1-micro', deletionProtection: false, retainedBackups: 7 });
+    expect(gcpDatabaseShape('preview-42', { ...database, size: 'large', deletionProtection: true })).toMatchObject({ tier: 'db-custom-4-15360', deletionProtection: true });
+    expect(gcpDatabaseShape('production', { ...database, deletionProtection: false }).deletionProtection).toBe(false);
+  });
+
+  it('states size, monthly cost, backups and protection in one plan sentence', () => {
+    expect(gcpDatabaseShape('production', { provider: 'cloudsql', engine: 'postgres' }).summary).toBe(
+      'Database: 1 vCPU, 3.75 GB, about US$50 a month plus storage. 14 daily backups and 7 days of point-in-time recovery. Deletion protection is on.');
+  });
+
+  it('protects the instance in the engine and on Google, and keeps the declared backups', () => {
+    const shape = gcpDatabaseShape('production', { provider: 'cloudsql', engine: 'postgres' });
+    const sql = (buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-west1', services: [], database: {
+      instanceName: 'hv-production-db-a1', databaseName: 'app', wireServices: false, tier: shape.tier,
+      deletionProtection: shape.deletionProtection, retainedBackups: shape.retainedBackups, transactionLogDays: shape.transactionLogDays,
+    } }).files['cloudsql.tf.json'] as any).resource.google_sql_database_instance.db;
+    expect(sql.deletion_protection).toBe(true);
+    expect(sql.settings[0]).toMatchObject({ tier: 'db-custom-1-3840', deletion_protection_enabled: true });
+    expect(sql.settings[0].backup_configuration).toEqual([{ enabled: true, point_in_time_recovery_enabled: true,
+      transaction_log_retention_days: 7, backup_retention_settings: [{ retained_backups: 14, retention_unit: 'COUNT' }] }]);
+  });
+
+  it('plans the deletion of a database only when Google confirms it is unprotected or gone', async () => {
+    const answer = (status: number, body: unknown = {}) => async () => new Response(JSON.stringify(body), { status });
+    expect(await databaseRemovalBlocker('db-a1', answer(200, { settings: { deletionProtectionEnabled: true } }))).toMatch(/deletion protection on.*"deletionProtection": false/);
+    expect(await databaseRemovalBlocker('db-a1', answer(200, { settings: { deletionProtectionEnabled: false } }))).toBeUndefined();
+    expect(await databaseRemovalBlocker('db-a1', answer(404))).toBeUndefined();
+    // An unreadable instance is unknown, never permission to delete.
+    expect(await databaseRemovalBlocker('db-a1', answer(503))).toBe('Cloud SQL returned HTTP 503 while checking deletion protection on db-a1.');
   });
 
   it('rejects alwaysOn on anything but a web service', () => {
