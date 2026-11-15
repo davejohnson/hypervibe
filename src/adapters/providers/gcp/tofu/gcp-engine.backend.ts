@@ -206,6 +206,11 @@ export interface GcpCloudSqlInput {
   instanceName: string;
   databaseName: string;
   tier?: string;
+  /** Refuse deletion, both in the engine and on Google's side, until turned off in a reviewed change. */
+  deletionProtection?: boolean;
+  /** Daily backups to keep and days of transaction log for point-in-time recovery. */
+  retainedBackups?: number;
+  transactionLogDays?: number;
   /** PostgreSQL major version (default 16). */
   majorVersion?: number;
   /**
@@ -559,9 +564,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       project: input.projectId,
       region: input.region,
       database_version: `POSTGRES_${input.database.majorVersion ?? 16}`,
-      // Hypervibe's confirmation gate governs deletion (data-bearing, explicit confirmation).
-      deletion_protection: false,
+      // Hypervibe's confirmation gate always governs deletion. A protected database also refuses
+      // deletion here and in the Google console until protection is turned off in its own change.
+      deletion_protection: input.database.deletionProtection === true,
       settings: [{
+        deletion_protection_enabled: input.database.deletionProtection === true,
         // Shared-core tiers require the Enterprise edition.
         edition: 'ENTERPRISE',
         tier: input.database.tier ?? 'db-f1-micro',
@@ -572,7 +579,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
           data_api_access: 'ALLOW_DATA_API',
           database_flags: [{ name: 'cloudsql.iam_authentication', value: 'on' }],
         } : {}),
-        backup_configuration: [{ enabled: true, point_in_time_recovery_enabled: true }],
+        backup_configuration: [{
+          enabled: true, point_in_time_recovery_enabled: true,
+          ...(input.database.transactionLogDays ? { transaction_log_retention_days: input.database.transactionLogDays } : {}),
+          ...(input.database.retainedBackups ? { backup_retention_settings: [{ retained_backups: input.database.retainedBackups, retention_unit: 'COUNT' }] } : {}),
+        }],
         user_labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
       }],
     } };

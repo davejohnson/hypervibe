@@ -276,6 +276,16 @@ export const databaseSpecSchema = z.object({
   passwordGeneration: z.number().int().positive().optional(),
   /** OpenTofu-managed databases: PostgreSQL major version (default 16). Never lower than a migration source. */
   version: z.number().int().min(13).max(18).optional(),
+  /**
+   * Dedicated capacity: small (1 vCPU), medium (2) or large (4). Omitted, production
+   * and staging get small and other environments the cheapest shared instance.
+   */
+  size: z.enum(['small', 'medium', 'large']).optional(),
+  /**
+   * Refuse to delete the database until this is turned off in its own reviewed
+   * change. On by default for production and staging.
+   */
+  deletionProtection: z.boolean().optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
