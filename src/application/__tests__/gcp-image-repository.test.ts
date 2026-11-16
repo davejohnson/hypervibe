@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../gcp-image-repository.js';
+import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../../adapters/providers/gcp/gcp-image-repository.js';
 
 const name = 'projects/demo-project/locations/us-west1/repositories/hypervibe';
 const reply = (status: number, body?: unknown) => (async () => new Response(body === undefined ? null : JSON.stringify(body), { status })) as unknown as typeof fetch;

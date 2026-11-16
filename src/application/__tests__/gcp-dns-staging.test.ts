@@ -13,6 +13,8 @@ import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.j
 import { OpenTofuEngine } from '../../adapters/engine/opentofu/engine.js';
 import * as install from '../../adapters/engine/opentofu/install.js';
 import { ConvergeExecutor } from '../../domain/plan/converge.executor.js';
+vi.mock('../../adapters/providers/gcp/gcp-image-repository.js', async (original) => ({ ...await original<typeof import('../../adapters/providers/gcp/gcp-image-repository.js')>(),
+  observeImageRepository: async () => ({ state: 'present' as const }) }));
 
 let directory: string;
 beforeEach(() => {

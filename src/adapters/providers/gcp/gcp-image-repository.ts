@@ -1,5 +1,5 @@
-import type { EngineConfiguration, EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
-import { artifactRegistryRepositoryName, buildArtifactRegistryConfiguration } from '../adapters/providers/gcp/tofu/gcp-project.backend.js';
+import type { EngineConfiguration, EngineStateIdentity } from '../../../domain/ports/infrastructure-engine.port.js';
+import { artifactRegistryRepositoryName, buildArtifactRegistryConfiguration } from './tofu/gcp-project.backend.js';
 
 /**
  * A release pushes its image to the repository in the environment's own region.

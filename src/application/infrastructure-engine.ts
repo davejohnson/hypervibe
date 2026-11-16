@@ -17,7 +17,7 @@ import { registerEngineWebServiceResolver } from '../domain/services/domain-targ
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
-import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from './gcp-image-repository.js';
+import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
