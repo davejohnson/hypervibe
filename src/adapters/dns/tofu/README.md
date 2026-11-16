@@ -35,13 +35,8 @@ unsupported control must produce a blocker there.
 
 ## Existing DNS consumers
 
-The shared application bridge stages GitHub Pages and SendGrid DNS from records
-frozen by their ordinary read-only planning. Pages first attaches its hostname,
-then DNS is planned, then certificate readiness can continue. This follows
-[GitHub's hostname-claim ordering](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site#about-custom-domain-configuration).
-Cleanup removes and verifies owned DNS while the exact repository still claims
-the hostname. Only a saved, verified DNS removal receipt authorizes detaching
-Pages. An absent or unknown Pages site cannot authorize record deletion.
+The shared application bridge stages SendGrid DNS from records frozen by its
+ordinary read-only planning.
 
 SendGrid domain authentication must be bound and freshly observed before its
 complete automated-security record set can be frozen. The engine also supports
@@ -49,7 +44,7 @@ the inbound MX record. The exact authorization ID and returned targets are
 checked again before apply. Legacy or incomplete SendGrid DNS layouts stop.
 Cloudflare Email Routing's automatic DNS activation remains blocked until its
 exact DNS resources have an engine capability; destinations and routing rules
-retain their existing separate workflow. Historical Pages/email DNS actions
+retain their existing separate workflow. Historical email DNS actions
 cannot perform direct provider record writes.
 
 ## Verified evidence
