@@ -68,6 +68,9 @@ function fixture() {
       if (url.endsWith(':getIamPolicy')) return Response.json({ etag: 'test-etag', bindings: [{ role: 'roles/iam.serviceAccountUser', members: [`serviceAccount:${deploy}`] }, { role: 'roles/iam.serviceAccountTokenCreator', members: [`serviceAccount:${deploy}`] }] });
       return Response.json({ name: `projects/${gcpProjectId}/serviceAccounts/${email}`, projectId: gcpProjectId, email, uniqueId: email === runtime ? '123456789012345678902' : '123456789012345678901', disabled: false });
     }
+    // Both resources hold content, so adoption depends on release evidence, not on being empty.
+    if (url.includes(`storage.googleapis.com/storage/v1/b/${bucket}/o?`)) return Response.json({ items: [{ name: 'source.tgz' }] });
+    if (url.includes('artifactregistry.googleapis.com/v1/') && url.includes('/packages?')) return Response.json({ packages: [{ name: `${repository}/packages/web` }] });
     if (url.includes(`storage.googleapis.com/storage/v1/b/${bucket}`)) {
       if (condition === 'missing') return new Response('{}', { status: 404 });
       if (condition === 'unknown') return new Response('{}', { status: 403 });
