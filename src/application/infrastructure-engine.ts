@@ -26,7 +26,7 @@ import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/qu
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
-import { buildTokenKey, engineOutsideKeys, isBuildTokenKey, type EngineSecretStore } from './engine-secrets.js';
+import { buildTokenKey, engineOutsideKeys, isBuildTokenKey, optionalOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
 import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
@@ -753,8 +753,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     } else outsideContainersMissing = true;
     if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) {
       // required: false means the app runs without it: no value never blocks, and services simply do not receive it.
-      const declared = spec.secrets?.[key];
-      if (!(declared && 'required' in declared && declared.required === false)) missingKeys.push(key);
+      if (!optionalOutsideKeys(spec, environmentName).includes(key)) missingKeys.push(key);
       continue;
     }
     secretVersions[key] = observed.value.latestVersion;

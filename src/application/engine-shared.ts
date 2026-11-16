@@ -45,14 +45,17 @@ export async function planEngineSecrets(params: {
   environmentName: string;
   generated: string[];
   outside: string[];
+  /** Outside keys the spec declares required: false. Without a value they never block; they are returned in unset so workloads leave them out. */
+  optional?: string[];
   observe: (key: string) => Promise<'present' | 'absent' | { unknown: string }>;
   action: (key: string, stored: boolean) => PlanAction;
-}): Promise<{ actions: PlanAction[] } | { blocked: string[]; missingOutsideKeys?: string[] }> {
+}): Promise<{ actions: PlanAction[]; unset?: string[] } | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const missing: string[] = [];
+  const unset: string[] = [];
   for (const key of params.outside) {
     const observed = await params.observe(key);
     if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    if (observed === 'absent') missing.push(key);
+    if (observed === 'absent') (params.optional?.includes(key) ? unset : missing).push(key);
   }
   if (missing.length) return { blocked: [missingOutsideKeysMessage(params.environmentName, missing)], missingOutsideKeys: missing };
   const actions: PlanAction[] = [];
@@ -61,7 +64,7 @@ export async function planEngineSecrets(params: {
     if (typeof observed === 'object') return { blocked: [observed.unknown] };
     actions.push(params.action(key, observed === 'present'));
   }
-  return { actions };
+  return { actions, ...(unset.length ? { unset } : {}) };
 }
 
 /**
