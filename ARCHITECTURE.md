@@ -91,7 +91,7 @@ have ordinary CI configuration checks with their actual pinned providers; their
 installed live lifecycle remains unverified. See the
 [DNS evidence record](docs/development/provider-evidence.md#existing-zone-dns-evidence)
 for the precise coverage. Historical direct DNS adapter methods are not invoked
-by managed domain, Pages or email record workflows; writes use saved engine plans.
+by managed domain or email record workflows; writes use saved engine plans.
 
 ## Engine Runtime And Installation
 

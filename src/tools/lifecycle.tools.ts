@@ -24,7 +24,7 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
       project: z.string().optional().describe('Hypervibe project name or id. Requires provider. Required with env; without env it may help choose the project-scoped provider connection.'),
       env: z.string().optional().describe('Exact environment name. Live environment inspection requires provider, project, and env; this command does not default to staging.'),
       scope: z.string().trim().min(1).optional().describe('Provider connection/account/repository/domain scope, such as owner/repo or example.com.'),
-      resource: z.string().trim().min(1).optional().describe('Provider-owned resource class returned by the provider listing, such as project, ref, pages, zone, or dns.'),
+      resource: z.string().trim().min(1).optional().describe('Provider-owned resource class returned by the provider listing, such as project, ref, zone, or dns.'),
       id: z.string().trim().min(1).optional().describe('Exact durable provider resource id.'),
       name: z.string().trim().min(1).optional().describe('Exact provider resource name when an id is not known.'),
       region: z.string().trim().min(1).optional().describe('Explicit provider region only for inspection modes whose discovery contract accepts region (including hosting environment forensics).'),
