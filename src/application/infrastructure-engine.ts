@@ -4,7 +4,7 @@ import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.j
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
-import { addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
   cloudRunGet, googleErrorMessage, latestWakerExecution, readCloudRunOperation, releaseImage, releaseJobImage, startCloudRunJob, workloadContainers, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -26,7 +26,7 @@ import { buildQueueEnvVars, pubsubQueueResourceIds } from '../domain/services/qu
 
 const execFileAsync = promisify(execFile);
 import type { CommandContext } from './context.js';
-import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
+import { buildTokenKey, engineOutsideKeys, isBuildTokenKey, type EngineSecretStore } from './engine-secrets.js';
 import { resourceName } from '../domain/services/resource-names.js';
 import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
@@ -257,7 +257,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   secretVersions?: Record<string, string>;
 }): GcpCloudRunEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
-  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.importedSecrets ?? []), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
+  // A package token is for image builds only; running services never receive it.
+  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.importedSecrets ?? []).filter((key) => !isBuildTokenKey(key)), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
     ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
   const secretEnv = Object.fromEntries(secretKeys
     .filter((key) => context.secretVersions?.[key])
@@ -401,6 +402,12 @@ export async function gcpSecretStore(ctx: CommandContext, project: Project, spec
   return {
     name: 'Google Secret Manager', observe,
     write: async (key, value) => (await writeSecretVersion(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key), labels, value))?.message,
+    read: async (key) => {
+      const response = await accessLatestSecretVersion(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key));
+      if (!response.ok) return { error: `Secret Manager returned HTTP ${response.status}.` };
+      const data = (await response.json() as { payload?: { data?: string } }).payload?.data;
+      return data ? { value: Buffer.from(data, 'base64').toString('utf8') } : { error: 'The secret has no value.' };
+    },
   };
 }
 
@@ -1533,8 +1540,19 @@ async function buildServiceImage(
       ...(spec.runtime ? { runtime: spec.runtime as ProjectRuntime } : {}),
     },
   };
+  let packageTokenVersion: string | undefined;
+  const tokenKey = buildTokenKey(spec, environmentName);
+  if (tokenKey && source.archive) {
+    const secretId = engineSecretId(environmentName, tokenKey);
+    const observed = await observeSecret(await context.adapter.engineAccessToken(), context.gcpProjectId, secretId);
+    if (observed.state === 'unknown') return { success: false, error: observed.reason };
+    if (observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.latestVersion) {
+      packageTokenVersion = `projects/${context.gcpProjectId}/secrets/${secretId}/versions/${observed.value.latestVersion}`;
+    }
+  }
   const build = source.archive
-    ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId) })
+    ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId),
+      ...(packageTokenVersion ? { packageTokenVersion } : {}) })
     : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { success: false, error: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };

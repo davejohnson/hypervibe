@@ -8,6 +8,7 @@ import type { CommandContext } from './context.js';
 import { contextRows } from './local-connect-page.js';
 import { serveMultiPastePage, type PasteField } from './local-paste-page.js';
 import { checkKnownSecret, keyHintHtml, KNOWN_SECRETS } from './local-secret-page.js';
+import { serveRevealPage } from './local-reveal-page.js';
 import { requestingAgent } from './requesting-agent.js';
 
 /**
@@ -21,6 +22,12 @@ export interface EngineSecretStore {
   observe(key: string): Promise<'present' | 'absent' | { unknown: string }>;
   /** Saves a value; returns a displayable error on failure. */
   write(key: string, value: string): Promise<string | undefined>;
+  /**
+   * Reads one value for the owner's local page (revealGeneratedSecret) and for
+   * nothing else. Callers must never log it or put it in a command result.
+   * Absent on clouds where this is not implemented yet.
+   */
+  read?(key: string): Promise<{ value: string } | { error: string }>;
 }
 
 export async function engineSecretStore(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
@@ -38,6 +45,14 @@ export function engineOutsideKeys(spec: ProjectSpec, environmentName: string, im
     .filter(([, secret]) => secret.ownership !== 'hypervibe' && secret.environments.includes(environmentName))
     .map(([key]) => key);
   return [...new Set([...declared, ...importedSecrets])].sort();
+}
+
+/** Outside keys that authenticate private package installs. They are mounted into image builds and never given to running services. */
+export const BUILD_TOKEN_KEYS = ['NODE_AUTH_TOKEN', 'NPM_TOKEN'] as const;
+export const isBuildTokenKey = (key: string): boolean => (BUILD_TOKEN_KEYS as readonly string[]).includes(key);
+/** The package token this environment declares, if any. */
+export function buildTokenKey(spec: ProjectSpec, environmentName: string): string | undefined {
+  return engineOutsideKeys(spec, environmentName).find(isBuildTokenKey);
 }
 
 /** The outside keys with no value yet; unknown stops everything rather than guessing absence. */
@@ -152,4 +167,46 @@ export async function collectOutsideKeys(ctx: CommandContext, params: {
       message: collected.message ?? `Open the page and add ${keys.join(', ')}; then run the same command again.` };
   }
   return { status: 'collected', keys };
+}
+
+export type RevealResult =
+  | { status: 'viewed'; key: string; message: string }
+  | { status: 'waiting'; key: string; url?: string; message: string }
+  | { status: 'blocked'; message: string };
+
+/**
+ * Lets the owner copy one secret Hypervibe generated for their app, on a local
+ * page. This is the single place a stored value leaves the store: it goes to a
+ * browser on this computer after a click, and the result reports only that it
+ * was viewed. Keys an outside service issued are not shown; their issuer is
+ * the place to read them.
+ */
+export async function revealGeneratedSecret(ctx: CommandContext, params: {
+  project: Project; spec: ProjectSpec; environmentName: string; key: string;
+  waitMs?: number; openBrowser?: (url: string) => void; store?: EngineSecretStore;
+}): Promise<RevealResult> {
+  const declared = params.spec.secrets?.[params.key];
+  if (!declared || declared.ownership !== 'hypervibe' || !declared.environments.includes(params.environmentName)) {
+    return { status: 'blocked', message: `${params.key} is not a secret Hypervibe generated for ${params.environmentName}. Only generated secrets can be copied this way; a key from an outside service is read from that service.` };
+  }
+  const store = params.store ?? await engineSecretStore(ctx, params.project, params.spec, params.environmentName);
+  if ('blocked' in store) return { status: 'blocked', message: store.blocked };
+  if (!store.read) return { status: 'blocked', message: `Copying a generated secret is not available for ${store.name} yet.` };
+  const present = await store.observe(params.key);
+  if (present !== 'present') {
+    return { status: 'blocked', message: typeof present === 'object' ? present.unknown : `${params.key} has no value yet. Run hv_plan and hv_apply for ${params.environmentName} first.` };
+  }
+  const agent = requestingAgent();
+  const page = await serveRevealPage({
+    key: `reveal:${params.project.id}:${params.environmentName}:${params.key}`,
+    ...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}), ...(params.openBrowser ? { openBrowser: params.openBrowser } : {}),
+    read: () => store.read!(params.key),
+    spec: {
+      tabTitle: `${params.key} for ${params.environmentName}`, name: params.key,
+      leadHtml: `Hypervibe generated this key for ${params.project.name}. Copy it to give another app or tool access. ${agent} asked for this page and cannot see the value.`,
+      rows: contextRows({ agent, project: params.project.name, environment: params.environmentName }),
+      agent, readFrom: `Read from ${store.name} for ${params.environmentName}`,
+    },
+  });
+  return { status: page.status, key: params.key, ...(page.url ? { url: page.url } : {}), message: page.message };
 }

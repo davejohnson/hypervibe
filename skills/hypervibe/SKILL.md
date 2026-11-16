@@ -72,6 +72,12 @@ such keys in the spec's `secrets` (ownership not `hypervibe`); never ask for
 their values in chat. `hv_secrets action="collect" env=<env>` opens the same page
 for any missing key, on GCP or AWS. Call `hv_launch` again after `pending`.
 
+When the user needs a secret Hypervibe generated (for example to give another
+app access), use `hv_secrets action="reveal" env=<env> key=<KEY>`. It opens a
+local page where they copy it; the value is never returned to you, so do not
+ask them to paste it into chat or send them to the cloud console. Google Cloud
+only for now.
+
 This describes implemented GCP commands, not a verified complete journey on every
 cloud. Full launch, migration and recovery need evidence for the actual installed
 release and requested scope. Never infer support from a command name or a successful

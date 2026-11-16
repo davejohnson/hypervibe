@@ -18,7 +18,8 @@ describe('Cloud Run domain source contract', () => {
     const requests: Array<{ url: string; body?: unknown }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input); requests.push({ url, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
-      if (url.endsWith('/webResource')) return json({ items: [] });
+      // Google answers {} with no items field when the identity has verified nothing yet.
+      if (url.endsWith('/webResource')) return json({});
       if (url.endsWith('/token')) return json({ token: 'google-site-verification=fixture-proof', method: 'DNS_TXT' });
       if (url.includes('/domainmappings/')) return json({}, 404);
       throw Error('Unexpected request');

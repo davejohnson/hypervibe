@@ -57,6 +57,8 @@ changing customer-facing pages, emails, prompts or errors.
   plans or verified connections; redact supplied values from every output and
   diagnostic. Treat engine plans and state as potentially secret-bearing.
   Control-plane access does not authorize copying credentials into runtime.
+  The one exception is the owner copying a generated secret on a local page
+  ([connections](docs/development/connections.md#managed-runtime-secrets)).
   Preserve repository/environment scope and supported workload identities.
 - MCP and CLI are thin adapters over `src/application`, with shared commands,
   validation, redaction and results. Keep both reachable unless architecture
