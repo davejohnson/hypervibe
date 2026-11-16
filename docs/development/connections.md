@@ -132,6 +132,16 @@ Declarative `principal` attribution does not grant provider roles or establish a
 authenticated ACL. Repository review and actual provider authorization remain
 separate boundaries.
 
+One exception to DG-083 is deliberate: the owner may copy a secret Hypervibe
+generated for their own app, for example to give another app access to it.
+`hv_secrets action="reveal"` opens a page on this computer (127.0.0.1) and the
+value reaches the browser only after a click on that page. It is never in the
+page's HTML, the command result, a log or chat, and an agent that asked for the
+page cannot read it. Only secrets declared with `ownership: "hypervibe"` for
+that environment qualify; a key an outside service issued is read from that
+service. Do not widen this to other secrets, to command output or to injecting
+values into commands an agent runs.
+
 Keep inventory read-only and distinguish value acceptance, deployment activation,
 old-instance retirement, credential authentication and application operation.
 The [credential lifecycle](../credential-lifecycle.md) and
