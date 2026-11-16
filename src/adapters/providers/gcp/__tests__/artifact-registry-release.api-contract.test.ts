@@ -100,7 +100,7 @@ describe('Artifact Registry release prerequisite', () => {
     expect(calls[0]).toBe(`GET https://artifactregistry.googleapis.com/v1/${repositoryName}`);
     expect(calls.filter((call) => call.includes('artifactregistry.googleapis.com'))).toHaveLength(1);
   });
-  it('gives the build a private package token only as a mounted build secret, never in the request', async () => {
+  it.each(['archive', 'git'] as const)('gives a %s build a private package token only as a mounted build secret, never in the request', async (source) => {
     const subject = await adapter();
     const version = 'projects/gcp-project/secrets/hv-staging-node-auth-token/versions/3';
     let submitted: Record<string, unknown> = {};
@@ -113,8 +113,9 @@ describe('Artifact Registry release prerequisite', () => {
       }
       return Response.json(location.includes('artifactregistry') ? { name: repositoryName, format: 'DOCKER' } : {});
     }));
-    const result = await subject.buildReleaseImageFromArchive(service, environment,
-      { archive: Buffer.from('archive'), commitSha, bucket: 'gcp-project-build-source', packageTokenVersion: version });
+    const result = source === 'archive'
+      ? await subject.buildReleaseImageFromArchive(service, environment, { archive: Buffer.from('archive'), commitSha, bucket: 'gcp-project-build-source', packageTokenVersion: version })
+      : await subject.buildReleaseImage(service, environment, { repoUrl: 'https://github.com/example/app.git', revision: commitSha, packageTokenVersion: version });
     expect(result.success, result.error).toBe(true);
     expect(submitted.availableSecrets).toEqual({ secretManager: [{ versionName: version, env: 'NPM_TOKEN' }] });
     const step = (submitted.steps as Array<{ secretEnv?: string[]; args: string[] }>)[0]!;

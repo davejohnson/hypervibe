@@ -539,12 +539,12 @@ export class CloudRunAdapter implements
   async buildReleaseImage(
     service: Service,
     environment: Environment,
-    source: { repoUrl: string; revision: string }
+    source: { repoUrl: string; revision: string; packageTokenVersion?: string }
   ): Promise<CloudBuildResult> {
     return this.buildImageForService(service, environment, {
       HYPERVIBE_SOURCE_REPO_URL: source.repoUrl,
       HYPERVIBE_SOURCE_REVISION: source.revision,
-    });
+    }, source.packageTokenVersion);
   }
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
@@ -2355,7 +2355,8 @@ export class CloudRunAdapter implements
   private async buildImageForService(
     service: Service,
     environment: Environment,
-    envVars: Record<string, string>
+    envVars: Record<string, string>,
+    packageTokenVersion?: string
   ): Promise<CloudBuildResult> {
     if (!this.credentials) {
       return { success: false, error: 'Not connected. Call connect() first.' };
@@ -2393,6 +2394,7 @@ export class CloudRunAdapter implements
         sourceRepoUrl,
         revision,
         imageUri,
+        ...(packageTokenVersion ? { packageTokenVersion } : {}),
       });
 
       return {

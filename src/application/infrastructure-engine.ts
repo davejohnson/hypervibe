@@ -1542,7 +1542,7 @@ async function buildServiceImage(
   };
   let packageTokenVersion: string | undefined;
   const tokenKey = buildTokenKey(spec, environmentName);
-  if (tokenKey && source.archive) {
+  if (tokenKey) {
     const secretId = engineSecretId(environmentName, tokenKey);
     const observed = await observeSecret(await context.adapter.engineAccessToken(), context.gcpProjectId, secretId);
     if (observed.state === 'unknown') return { success: false, error: observed.reason };
@@ -1553,7 +1553,7 @@ async function buildServiceImage(
   const build = source.archive
     ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId),
       ...(packageTokenVersion ? { packageTokenVersion } : {}) })
-    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision });
+    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision, ...(packageTokenVersion ? { packageTokenVersion } : {}) });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { success: false, error: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   }
