@@ -2,14 +2,14 @@ import http from 'http';
 import { describe, expect, it } from 'vitest';
 import { connectCloudflareInBrowser } from '../local-connect-page.js';
 
-function request(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<{ status: number; body: string }> {
+function request(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<{ status: number; body: string; policy: string }> {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const req = http.request({ hostname: '127.0.0.1', port: target.port, path: target.pathname, method: options.method ?? 'GET',
       headers: { host: target.host, ...(options.headers ?? {}) } }, (res) => {
       let body = '';
       res.on('data', (chunk) => { body += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body, policy: String(res.headers['content-security-policy'] ?? '') }));
     });
     req.on('error', reject);
     if (options.body) req.write(options.body);
@@ -38,6 +38,9 @@ describe('local Cloudflare connect page', () => {
     expect(pageResponse.status).toBe(200);
     expect(pageResponse.body).toContain('dash.cloudflare.com/profile/api-tokens');
     expect(pageResponse.body).toContain('example.com');
+    // The tab icon is inlined, so the page's policy has to allow it.
+    expect(pageResponse.body).toContain('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,');
+    expect(pageResponse.policy).toContain('img-src data:');
 
     expect((await request(opened, { headers: { host: `evil.test:${url.port}` } })).status).toBe(421);
     expect((await request(`${url.origin}/connect/wrong`)).status).toBe(404);
