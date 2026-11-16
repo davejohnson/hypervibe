@@ -96,9 +96,19 @@ export async function reviewGcpPreparationAdoption(params: {
       if (owner[0] !== contributionId) omitResource(result.configuration, address);
       return;
     }
-    if (!provenance) throw new Error('An existing build resource has no exact prior Hypervibe release evidence. A matching name alone cannot authorize adoption.');
+    if (!provenance) throw new Error('An existing build resource holds content but has no exact prior Hypervibe release evidence. A matching name alone cannot authorize adoption.');
     (result.configuration.imports ??= {})[address] = nativeId;
     result.allowImportAddresses.push(address);
+  };
+  // A preparation that never reached a release leaves these resources empty. Adopting an
+  // empty resource with verified Hypervibe identity puts nothing of anyone's at risk; one
+  // holding content still needs release evidence. Only a confirmed empty listing counts.
+  const empty = async (url: string, key: string): Promise<boolean> => {
+    const listing = await read(token, url);
+    if (!listing) throw new Error('Existing build-resource contents could not be listed; no setup changes are authorized.');
+    const items = listing[key];
+    if (items !== undefined && !Array.isArray(items)) throw new Error('Existing build-resource evidence is malformed; no setup changes are authorized.');
+    return !items?.length && listing.nextPageToken === undefined;
   };
   // Earlier preparations made no build bucket, and its contents expire anyway. With no
   // recorded release there is nothing to recover, so setup may create it.
@@ -110,7 +120,8 @@ export async function reviewGcpPreparationAdoption(params: {
       || record(bucket.labels)?.['managed-by'] !== 'hypervibe' || record(iam?.uniformBucketLevelAccess)?.enabled !== true || iam?.publicAccessPrevention !== 'enforced') {
       throw new Error('The existing source bucket has a different identity, ownership label or private access configuration.');
     }
-    admit('google_storage_bucket.build_source', bucketName, { project: target.gcpProjectId, name: bucketName }, hasRelease());
+    admit('google_storage_bucket.build_source', bucketName, { project: target.gcpProjectId, name: bucketName },
+      hasRelease() || await empty(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucketName)}/o?maxResults=1&versions=true`, 'items'));
   }
   if (repository) {
     if (repository.name !== repositoryName || repository.format !== 'DOCKER' || repository.mode !== 'STANDARD_REPOSITORY'
@@ -120,7 +131,8 @@ export async function reviewGcpPreparationAdoption(params: {
     }
     assertPrivatePolicy(await read(token, `https://artifactregistry.googleapis.com/v1/${repositoryName}:getIamPolicy`));
     assertPrivatePolicy(await read(token, `https://cloudresourcemanager.googleapis.com/v1/projects/${target.gcpProjectId}:getIamPolicy`, 'POST'));
-    admit(artifactRegistryEngineAddress(region), repositoryName, { project: target.gcpProjectId, location: region, repository_id: 'hypervibe' }, hasRelease(region));
+    admit(artifactRegistryEngineAddress(region), repositoryName, { project: target.gcpProjectId, location: region, repository_id: 'hypervibe' },
+      hasRelease(region) || await empty(`https://artifactregistry.googleapis.com/v1/${repositoryName}/packages?pageSize=1`, 'packages'));
   }
   return result;
 }
