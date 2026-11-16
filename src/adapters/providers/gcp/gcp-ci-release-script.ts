@@ -6,7 +6,7 @@
  * not in Hypervibe.
  */
 export const RELEASE_SCRIPT = String.raw`
-const [resource, image, healthPath, kind = 'services'] = process.argv.slice(2);
+const [resource, image, healthPath, kind = 'services', startCommand = '-'] = process.argv.slice(2);
 const token = process.env.GCP_TOKEN;
 const base = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT + '/locations/' + process.env.GCP_REGION + '/' + kind + '/' + resource;
 const call = async (url, init = {}) => fetch(url, { ...init, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
@@ -15,7 +15,13 @@ const current = await (await call(base)).json();
 const containers = ((isJob ? current.template?.template?.containers : current.template?.containers) ?? []).map((c) => ({ ...c }));
 if (containers.length !== 1) throw new Error('Workload must have exactly one container.');
 containers[0].image = image;
-// Only the image changes; the etag makes a concurrent infrastructure change fail this release instead of being overwritten.
+// Services and workers get their start command with the image ('-' keeps what is there, '' means the image's own).
+if (!isJob && startCommand !== '-') {
+  delete containers[0].command; delete containers[0].args;
+  const command = Buffer.from(startCommand, 'base64').toString('utf8').trim();
+  if (command) { containers[0].command = ['/bin/sh']; containers[0].args = ['-lc', command]; }
+}
+// Only the image and its start command change; the etag makes a concurrent infrastructure change fail this release instead of being overwritten.
 // Jobs take the whole resource back; services accept a mask limited to the containers.
 const body = isJob ? { ...current, template: { ...current.template, template: { ...current.template.template, containers } } } : { etag: current.etag, template: { containers } };
 const patch = await call(isJob ? base : base + '?updateMask=template.containers', { method: 'PATCH', body: JSON.stringify(body) });
