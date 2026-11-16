@@ -823,7 +823,8 @@ export class CloudRunAdapter implements
       limit: request.limit,
       errorsOnly: request.errorsOnly,
     });
-    const deploymentId = serviceBinding.serviceId;
+    const workerPool = (serviceBinding as { workerPoolName?: unknown }).workerPoolName;
+    const deploymentId = serviceBinding.serviceId ?? (typeof workerPool === 'string' ? workerPool : undefined);
     const status = deploymentId
       ? await this.getDeployStatus(request.environment, deploymentId)
       : undefined;
@@ -1816,9 +1817,9 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    // Resource types and labels: https://docs.cloud.google.com/run/docs/logging
+    // Resource types and labels: https://docs.cloud.google.com/logging/docs/api/v2/resource-list
     const resourceFilter = params.targetKind === 'workerPool'
-      ? `resource.type="cloud_run_workerpool" AND resource.labels.workerpool_name="${this.escapeLoggingValue(params.targetName)}"`
+      ? `resource.type="cloud_run_worker_pool" AND resource.labels.worker_pool_name="${this.escapeLoggingValue(params.targetName)}"`
       : params.targetKind === 'job'
       ? `resource.type="cloud_run_job" AND resource.labels.job_name="${this.escapeLoggingValue(params.targetName)}"`
       : `resource.type="cloud_run_revision" AND resource.labels.service_name="${this.escapeLoggingValue(params.targetName)}"`;
