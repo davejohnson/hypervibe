@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { serveMultiPastePage } from '../local-paste-page.js';
+import { serveMultiPastePage, unfinishedPage } from '../local-paste-page.js';
 import { looksSecret } from '../secret-rotation.js';
 
 describe('secret rotation', () => {
@@ -37,5 +37,18 @@ describe('secret rotation', () => {
     expect((await post({ generate: 'JWT_SECRET' })).status).toBe(200);
     await expect(pending).resolves.toMatchObject({ status: 'connected', saved: ['OTHER_KEY', 'API_KEY', 'JWT_SECRET'] });
     expect(saved).toEqual([['OTHER_KEY', 'other'], ['API_KEY', 'good'], ['JWT_SECRET', 'generated']]);
+  });
+});
+
+describe('a page the person did not finish in time', () => {
+  it('keeps its address while the server goes on serving it', () => {
+    expect(unfinishedPage({ url: 'http://127.0.0.1:1/connect/x', staysOpen: true, open: 'A page is open.' }))
+      .toEqual({ url: 'http://127.0.0.1:1/connect/x', message: 'A page is open.' });
+  });
+
+  it('gives no address once a CLI command returns, because its page ends with it', () => {
+    const result = unfinishedPage({ url: 'http://127.0.0.1:1/connect/x', staysOpen: false, open: 'A page is open.' });
+    expect(result).not.toHaveProperty('url');
+    expect(result.message).toMatch(/has now closed.*Run the same command again/);
   });
 });
