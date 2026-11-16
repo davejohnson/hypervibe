@@ -86,7 +86,8 @@ export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure
 export const ENGINE_WORKER_WAKE_GRANT_OPERATION = 'gcpWorkerWakeGrant';
 export const ENGINE_WORKER_ACCESS_BLOCKER = 'On-demand workers need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["workers"], or run hv_connections provider="cloudrun" action="prepare" workerAccess="lifecycle" (preview, then confirm).';
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
-export const ENGINE_DATABASE_URL_KEY = 'DATABASE_URL';
+import { ENGINE_DATABASE_URL_KEY, engineSecretId } from '../domain/services/engine-secret-id.js';
+export { ENGINE_DATABASE_URL_KEY, engineSecretId };
 const ENGINE_DATABASE_NAME = 'app';
 /** Google's public sample container, pinned by digest; serves until the first release. */
 export const ENGINE_HOLDING_IMAGE = 'us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7';
@@ -115,12 +116,6 @@ export function engineSecretKeys(spec: ProjectSpec, environmentName: string): st
     .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(environmentName))
     .map(([key]) => key)
     .sort();
-}
-
-export function engineSecretId(environmentName: string, key: string): string {
-  const id = `hv-${environmentName}-${key}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
-  if (id.length > 255) throw new Error(`Secret id for ${key} is too long.`);
-  return id;
 }
 
 function labelValue(value: string): string {
