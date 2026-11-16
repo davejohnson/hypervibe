@@ -6,6 +6,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { TemporaryDatabaseAccess } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { isExternallyUsableDatabaseUrl, resolveExternalDatabaseUrl } from './database-ops.service.js';
+import { ENGINE_DATABASE_URL_KEY, engineSecretId } from './engine-secret-id.js';
 
 const componentRepo = new ComponentRepository();
 const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
@@ -376,12 +377,38 @@ export async function acquireDatabaseComponentAccess(
   };
 }
 
+/**
+ * The Google engine's database has no component row: its identity is the
+ * environment's engine binding, and its login stays in Secret Manager.
+ */
+export function engineDatabaseComponent(environment: Environment): Component | undefined {
+  const bindings = environment.platformBindings as {
+    provider?: unknown; projectId?: unknown; region?: unknown; engine?: { database?: { instanceName?: unknown } };
+  };
+  const instanceName = bindings.engine?.database?.instanceName;
+  if (bindings.provider !== 'cloudrun' || typeof instanceName !== 'string' || !instanceName
+    || typeof bindings.projectId !== 'string' || typeof bindings.region !== 'string') return undefined;
+  return {
+    id: `engine:${environment.id}:postgres`,
+    environmentId: environment.id,
+    type: 'postgres',
+    externalId: instanceName,
+    bindings: {
+      provider: 'cloudsql',
+      providerScope: { projectId: bindings.projectId, region: bindings.region },
+      connectionSecretId: engineSecretId(environment.name, ENGINE_DATABASE_URL_KEY),
+    },
+    createdAt: environment.createdAt,
+    updatedAt: environment.updatedAt,
+  };
+}
+
 export async function acquireManagedDatabaseAccess(
   project: Project,
   environment: Environment,
   serviceName?: string
 ): Promise<DatabaseAccessAcquireResult> {
-  const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+  const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres') ?? engineDatabaseComponent(environment);
   const bindings = component?.bindings as Record<string, unknown> | undefined;
   const provider = typeof bindings?.provider === 'string'
     ? bindings.provider

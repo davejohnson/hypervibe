@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Component } from '../../entities/component.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { IProviderAdapter, TemporaryDatabaseAccess } from '../../ports/provider.port.js';
-import { DatabaseAccessLeaseCoordinator } from '../database-access.service.js';
+import { DatabaseAccessLeaseCoordinator, engineDatabaseComponent } from '../database-access.service.js';
 
 const environment = {
   id: 'env-1',
@@ -149,5 +149,25 @@ describe('DatabaseAccessLeaseCoordinator', () => {
     expect(coordinator.activeLeaseCount()).toBe(0);
     await expect(lease.release()).resolves.toMatchObject({ status: 'completed' });
     expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('engineDatabaseComponent', () => {
+  const engineEnvironment = (platformBindings: Record<string, unknown>) => ({ ...environment, name: 'gcp-staging', platformBindings }) as Environment;
+
+  it('describes the Google engine database, which has no component row', () => {
+    const found = engineDatabaseComponent(engineEnvironment({
+      provider: 'cloudrun', projectId: 'gcp-project', region: 'us-west1', engine: { database: { instanceName: 'hv-gcp-staging-db-1' } },
+    }));
+    expect(found).toMatchObject({
+      type: 'postgres', externalId: 'hv-gcp-staging-db-1', environmentId: 'env-1',
+      bindings: { provider: 'cloudsql', providerScope: { projectId: 'gcp-project', region: 'us-west1' }, connectionSecretId: 'hv-gcp-staging-database-url' },
+    });
+  });
+
+  it('finds nothing when the engine has no database or its scope is incomplete', () => {
+    expect(engineDatabaseComponent(engineEnvironment({ provider: 'cloudrun', projectId: 'gcp-project', region: 'us-west1', engine: {} }))).toBeUndefined();
+    expect(engineDatabaseComponent(engineEnvironment({ provider: 'cloudrun', region: 'us-west1', engine: { database: { instanceName: 'db' } } }))).toBeUndefined();
+    expect(engineDatabaseComponent(engineEnvironment({ provider: 'railway', projectId: 'p', region: 'r', engine: { database: { instanceName: 'db' } } }))).toBeUndefined();
   });
 });
