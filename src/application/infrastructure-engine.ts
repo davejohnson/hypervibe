@@ -17,6 +17,7 @@ import { registerEngineWebServiceResolver } from '../domain/services/domain-targ
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
@@ -932,6 +933,21 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
 
+  // Releases push to the repository in this environment's region; project setup made only one.
+  const repository = await observeImageRepository(token, context.gcpProjectId, context.region);
+  if (repository.state === 'unknown') return { blocked: [repository.reason] };
+  let imageRepository: { planId: string; state: EngineStateIdentity } | undefined;
+  let imageRepositoryActions: PlanAction[] = [];
+  if (repository.state === 'absent') {
+    imageRepository = { planId: crypto.randomUUID(), state: imageRepositoryState(project.id, context.region) };
+    const repositoryPlanned = await engine.plan({ backend: gcpEngineBackend, configuration: imageRepositoryConfiguration(context.gcpProjectId, context.region),
+      auth: context.auth, state: imageRepository.state, planId: imageRepository.planId });
+    if (!repositoryPlanned.ok) return { blocked: [redactEngineOutput(repositoryPlanned.error, context.auth.redact)] };
+    if (repositoryPlanned.blockers.length) return { blocked: repositoryPlanned.blockers };
+    imageRepositoryActions = repositoryPlanned.actions.filter((action) => action.type !== 'noop');
+    if (!imageRepositoryActions.length) imageRepository = undefined;
+  }
+
   const domainPrerequisites = domainActions.before.filter((a) => a.type !== 'noop').map((a) => a.id);
   const serviceActions = planned.actions.map((action) => {
     if (action.type !== 'create' && action.type !== 'update' && action.type !== 'replace') return action;
@@ -1003,7 +1019,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // The complete engine segment creates containers before operational value writes.
-  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  const actions = [...imageRepositoryActions, ...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
@@ -1021,6 +1037,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
+      ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
       domainClaims: { ...domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
         [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
@@ -1105,6 +1122,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
+    imageRepository?: { planId: string; state: EngineStateIdentity };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {
@@ -1181,6 +1199,14 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
     },
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
+      if (reviewed.imageRepository && segment.id === `opentofu:${reviewed.imageRepository.planId}`) {
+        if (JSON.stringify(reviewed.imageRepository.state) !== JSON.stringify(imageRepositoryState(params.project.id, context.region))) {
+          return { outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])), diagnostics: ['The reviewed image repository targets a different region. Re-run hv_plan.'] };
+        }
+        const outcome = await engine.apply({ backend: gcpEngineBackend, auth: context.auth, state: reviewed.imageRepository.state,
+          planId: reviewed.imageRepository.planId, segment: { ...segment, addresses }, approvedAddresses: addresses });
+        return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
+      }
       const current = await serviceGenerations(token, context, environmentName);
       if ('blocked' in current || JSON.stringify(current.generations) !== JSON.stringify(reviewed.observedGenerations ?? {})) {
         return {

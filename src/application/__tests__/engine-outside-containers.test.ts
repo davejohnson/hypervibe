@@ -12,6 +12,8 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { OpenTofuEngine } from '../../adapters/engine/opentofu/engine.js';
 import * as install from '../../adapters/engine/opentofu/install.js';
 import type { EngineConfiguration } from '../../domain/ports/infrastructure-engine.port.js';
+vi.mock('../../adapters/providers/gcp/gcp-image-repository.js', async (original) => ({ ...await original<typeof import('../../adapters/providers/gcp/gcp-image-repository.js')>(),
+  observeImageRepository: async () => ({ state: 'present' as const }) }));
 
 let directory: string;
 beforeEach(() => {
