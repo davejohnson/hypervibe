@@ -100,7 +100,9 @@ export async function reviewGcpPreparationAdoption(params: {
     (result.configuration.imports ??= {})[address] = nativeId;
     result.allowImportAddresses.push(address);
   };
-  if (!bucket) throw new Error('The previously prepared build source bucket is missing. Restore or explicitly review its recovery before changing shared setup.');
+  // Earlier preparations made no build bucket, and its contents expire anyway. With no
+  // recorded release there is nothing to recover, so setup may create it.
+  if (!bucket && hasRelease()) throw new Error('The build source bucket used by the recorded release is missing. Review its recovery before changing shared setup.');
   if (!repository && hasRelease(region)) throw new Error('The image repository used by the recorded release is missing. Restore its images before changing shared setup.');
   if (bucket) {
     const iam = record(bucket.iamConfiguration);
