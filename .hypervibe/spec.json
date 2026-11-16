@@ -79,7 +79,7 @@
           },
           {
             "id": "hosting-edge",
-            "instructions": "Audit current registered DNS, domain and edge capabilities and implemented repository Pages routing. Derive the inventory from current provider registrations and shared workflows. Cover durable identity, routing, maintenance, certificates and domains, DNS ownership, teardown, mocked contracts, recent live evidence, and public support claims. Leave compute hosting and code-host collaboration to their assigned shards."
+            "instructions": "Audit current registered DNS, domain and edge capabilities. Derive the inventory from current provider registrations and shared workflows. Cover durable identity, routing, maintenance, certificates and domains, DNS ownership, teardown, mocked contracts, recent live evidence, and public support claims. Leave compute hosting and code-host collaboration to their assigned shards."
           },
           {
             "id": "data-services",
@@ -87,7 +87,7 @@
           },
           {
             "id": "integrations",
-            "instructions": "Audit current registered email, payments, source-control and CI, app-store, and secret-manager capabilities and public claims. Derive the integration inventory from the provider, DevOps and secret-manager registries. Include current delegated API-key, webhook, credential-check and AI workflow behavior without treating those paths as dedicated provider connectors. Cover credential boundaries, provider behavior, lifecycle safety, mocked contracts, and recent live evidence. Leave repository Pages routing to the edge shard."
+            "instructions": "Audit current registered email, payments, source-control and CI, app-store, and secret-manager capabilities and public claims. Derive the integration inventory from the provider, DevOps and secret-manager registries. Include current delegated API-key, webhook, credential-check and AI workflow behavior without treating those paths as dedicated provider connectors. Cover credential boundaries, provider behavior, lifecycle safety, mocked contracts, and recent live evidence."
           }
         ],
         "documentationDomains": [
@@ -120,15 +120,15 @@
           ],
           "manual": true
         },
+        "runtime": {
+          "kind": "node"
+        },
         "changeScope": "all",
         "commands": [
           "npm run typecheck",
           "npm test"
         ],
-        "failureArtifacts": [],
-        "runtime": {
-          "kind": "node"
-        }
+        "failureArtifacts": []
       }
     },
     "externalWorkflows": {},
