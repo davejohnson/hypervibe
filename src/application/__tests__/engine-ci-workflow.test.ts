@@ -32,6 +32,26 @@ describe('keyless release workflow', () => {
     expect(build.run).toContain('DOCKER_BUILDKIT=1 docker build --secret id=npm_token,env=NPM_TOKEN');
   });
 
+  it('runs the migration job on the new image, and waits for it, before any service is released', () => {
+    const withMigrations = YAML.parse(renderReleaseWorkflow({
+      environmentName: 'staging', branch: 'main', gcpProjectId: 'demo-project', region: 'us-central1', provider: 'projects/123/locations/global/workloadIdentityPools/hypervibe-github/providers/github',
+      releaseIdentity: 'hypervibe-release@demo-project.iam.gserviceaccount.com', releaseCommand: { job: 'release-command-abc', service: 'web' },
+      services: [
+        { name: 'web', resource: 'web-abc', image: 'us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web' },
+        { name: 'worker', resource: 'worker-abc', kind: 'workerPools', image: 'us-central1-docker.pkg.dev/demo-project/hypervibe/staging-worker' },
+      ],
+    }));
+    const names = withMigrations.jobs.release.steps.map((step: { name?: string }) => step.name).filter(Boolean);
+    expect(names).toEqual(['Build web', 'Build worker', 'Run release command', 'Release web', 'Release worker']);
+    const migrate = withMigrations.jobs.release.steps.find((step: { name?: string }) => step.name === 'Run release command');
+    expect(migrate.env.HYPERVIBE_RUN_JOB).toBe('1');
+    expect(migrate.run).toContain('node release.mjs release-command-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} "" jobs');
+    // A failed or unfinished run throws, which stops the workflow before the release steps.
+    expect(migrate.run).toContain("base + ':run'");
+    expect(migrate.run).toContain('No service was switched');
+    expect(parsed.jobs.release.steps.some((step: { name?: string }) => step.name === 'Run release command')).toBe(false);
+  });
+
   it('releases on push with one release at a time and an etag-guarded image-only change', () => {
     expect(parsed.on.push.branches).toEqual(['main']);
     expect(parsed.concurrency).toEqual({ group: 'hypervibe-release-staging', 'cancel-in-progress': false });

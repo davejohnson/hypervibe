@@ -28,6 +28,7 @@ import {
   type InfrastructurePlanResult,
   isEngineManaged,
   planInfrastructureEngine,
+  releaseCommandFor,
   releaseEngineServices,
   resolveEngineContext,
   engineGcpAdapter,
@@ -526,10 +527,15 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
     });
   const branch = environmentSpec.deploy?.branch ?? 'main';
   const packageTokenSecret = buildTokenKey(params.spec, params.environmentName);
+  // Same choice as the engine: the release command runs on the web service's image, or the first non-job service.
+  const migrationService = services.find((service) => environmentSpec.services[service.name]?.workloadKind === 'web') ?? services.find((service) => service.kind !== 'jobs');
+  const releaseCommand = releaseCommandFor(environmentSpec) && binding.engine?.releaseJob && migrationService
+    ? { job: binding.engine.releaseJob, service: migrationService.name } : undefined;
   const content = renderReleaseWorkflow({
     environmentName: params.environmentName, branch, gcpProjectId: context.gcpProjectId, region: context.region,
     provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,
     ...(packageTokenSecret ? { packageTokenSecret } : {}),
+    ...(releaseCommand ? { releaseCommand } : {}),
   });
   return { ...writeReleaseWorkflow(params.sourceDirectory, params.environmentName, content), branch };
 }
