@@ -215,8 +215,9 @@ export async function servePastePage(params: {
     new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 30 * 60 * 1000)).unref()),
   ]);
   return waited ?? {
-    status: 'waiting', provider: params.provider, scope: params.scope, url: entry.url,
-    message: `A ${params.spec.tabTitle.replace(/^Connect /, '')} page is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.`,
+    status: 'waiting', provider: params.provider, scope: params.scope,
+    ...unfinishedPage({ url: entry.url, staysOpen: servingMcpClient() || params.waitMs !== undefined,
+      open: `A ${params.spec.tabTitle.replace(/^Connect /, '')} page is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.` }),
   };
 }
 
@@ -297,6 +298,17 @@ ${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*
 <script nonce="${state.scriptNonce}">${MULTI_SCRIPT}</script>`;
   return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere, scriptNonce: state.scriptNonce, expiresMinutes: 60 })
     .replace('</style>', '.fields{list-style:none;padding:0;margin:0}.field{border-top:1px solid var(--frame);padding:.9rem 0}.field.saved{opacity:.8}.fieldname{margin:0 0 .4rem}.fieldname code{font-family:var(--mono);color:#fff}.ok{color:var(--signal-300);font-size:.8rem}button.secondary{border-color:var(--frame);color:var(--cloud-100)}#keys{display:block;margin:0}.inputrow{display:flex;gap:.5rem;margin:.6rem 0 .25rem;flex-wrap:wrap}.saveall{border-top:1px solid var(--frame);padding-top:.9rem;margin:0}</style>');
+}
+
+/**
+ * What to report when the person did not finish the page in time. An MCP server
+ * keeps serving the page, so its address is still good. A single CLI command
+ * ends when it returns and its page ends with it, so the address is left out
+ * rather than pointing at nothing.
+ */
+export function unfinishedPage(params: { url: string; staysOpen: boolean; open: string }): { url?: string; message: string } {
+  return params.staysOpen ? { url: params.url, message: params.open }
+    : { message: 'The page in your browser was not finished and has now closed. Run the same command again to reopen it.' };
 }
 
 /**
@@ -393,7 +405,8 @@ export async function serveMultiPastePage(params: {
     new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 60 * 60 * 1000)).unref()),
   ]);
   return waited ?? {
-    status: 'waiting', provider: params.provider, scope: params.scope, url: entry.url,
-    message: `A page for the new values is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.`,
+    status: 'waiting', provider: params.provider, scope: params.scope,
+    ...unfinishedPage({ url: entry.url, staysOpen: servingMcpClient() || params.waitMs !== undefined,
+      open: `A page for the new values is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.` }),
   };
 }
