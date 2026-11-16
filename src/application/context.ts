@@ -168,9 +168,9 @@ export function createCommandContext(): CommandContext {
     return project;
   };
 
-  const workspaceMatchesProject = (project: Project, startDir: string): boolean => {
+  const repoSpecProjectName = (startDir: string): string | undefined => {
     try {
-      if (readRepoSpecFile(startDir)?.spec.project === project.name) return true;
+      return readRepoSpecFile(startDir)?.spec.project;
     } catch (error) {
       throw new HvError(
         'VALIDATION',
@@ -178,8 +178,25 @@ export function createCommandContext(): CommandContext {
         { hint: 'Repair the existing .hypervibe/spec.json file before retrying. Hypervibe will not treat unreadable desired state as an uninitialized repository.' }
       );
     }
+  };
+
+  const workspaceMatchesProject = (project: Project, startDir: string): boolean => {
+    if (repoSpecProjectName(startDir) === project.name) return true;
     const remoteUrl = detectGitRemoteUrl(startDir);
-    return Boolean(remoteUrl && repos.projects.findByGitRemoteUrl(remoteUrl)?.id === project.id);
+    return Boolean(remoteUrl && repos.projects.findAllByGitRemoteUrl(remoteUrl).some(({ id }) => id === project.id));
+  };
+
+  /**
+   * Projects recorded for the repository at startDir. When several share its
+   * remote, only the one named by the repository's own spec is selected; a
+   * recorded order is never a reason to choose between them.
+   */
+  const projectsForRemote = (remoteUrl: string, startDir: string): { selected: Project | null; ambiguous: Project[] } => {
+    const candidates = repos.projects.findAllByGitRemoteUrl(remoteUrl);
+    if (candidates.length <= 1) return { selected: candidates[0] ?? null, ambiguous: [] };
+    const named = repoSpecProjectName(startDir);
+    const selected = candidates.find(({ name }) => name === named) ?? null;
+    return { selected, ambiguous: selected ? [] : candidates };
   };
 
   const resolve = (opts?: { project?: string; readOnly?: boolean }): Project | null => {
@@ -192,11 +209,12 @@ export function createCommandContext(): CommandContext {
         const remoteUrl = detectGitRemoteUrl(startDir);
         if (remoteUrl) {
           repositoryIdentityFound = true;
-          const remoteProject = repos.projects.findByGitRemoteUrl(remoteUrl);
+          const { selected: remoteProject, ambiguous } = projectsForRemote(remoteUrl, startDir);
           if (remoteProject) {
             resolved.set(remoteProject.id, { project: remoteProject, startDir });
             continue;
           }
+          if (ambiguous.length > 0) return null;
         }
         const repoBacked = resolveRepoBackedProject(undefined, startDir, readOnly);
         if (repoBacked) {
@@ -278,6 +296,13 @@ export function createCommandContext(): CommandContext {
 
       const startDir = workspaceDirectories()[0];
       const remoteUrl = startDir ? detectGitRemoteUrl(startDir) : null;
+      const sharing = remoteUrl && startDir ? projectsForRemote(remoteUrl, startDir).ambiguous : [];
+      if (sharing.length > 0) {
+        throw new HvError('AMBIGUOUS_PROJECT', `${sharing.length} Hypervibe projects are recorded for this repository.`, {
+          hint: `Pass project explicitly: ${sharing.map(({ name }) => name).join(', ')}.`,
+          details: { projects: sharing.map((p) => ({ id: p.id, name: p.name })) },
+        });
+      }
       if (remoteUrl) {
         throw new HvError('NOT_FOUND', `No Hypervibe project is initialized for git remote "${remoteUrl}".`, {
           hint: 'Call hv_spec from this repository. A fresh-repository read returns the initialization contract, then hv_spec with spec input creates the project.',
