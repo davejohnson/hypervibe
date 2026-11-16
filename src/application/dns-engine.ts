@@ -250,15 +250,20 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
         const preserved = old.intent.authority.kind === 'managed' ? old.intent.authority.preserveValues : [];
         records.push({ ...record, authority: { kind: 'managed', nativeId, preserveValues: sorted([...preserved, ...extra]) } });
       } else {
+        // Cloudflare's native identity is zone/record; the record ID alone, as its dashboard and API show it, selects the same record.
+        const selects = (id: string, nativeId: string) => nativeId === id || (identity.provider === 'cloudflare' && nativeId === `${identity.zoneId}/${id}`);
         const adoption = effective.dns.adoptRecords?.find(entry => normalized(entry.name) === normalized(record.name) && entry.type === record.type
-          && present.some(observed => observed.nativeId === entry.id));
-        const exact = adoption && present.find(entry => entry.nativeId === adoption.id);
+          && present.some(observed => selects(entry.id, observed.nativeId)));
+        const exact = adoption && present.find(entry => selects(adoption.id, entry.nativeId));
         if (exact && adoption) {
           if (JSON.stringify(sorted(exact.values)) !== JSON.stringify(normalizedValues(record.type, adoption.values))) return blocked('The DNS record changed after its adoption values were selected. Refresh the explicit adoption intent.');
           if (identity.provider === 'cloudflare' && present.filter(entry => entry.nativeId !== exact.nativeId).some(entry => entry.values.some(value => record.values.includes(value)))) return blocked('Several DNS records match the adoption target. Select each exact native record instead of guessing.');
           const desiredValues = desired.filter(entry => dnsRecordAddress(identity, { ...entry, authority: { kind: 'absent' } }) === recordAddress).flatMap(entry => entry.values);
+          // A name holds one CNAME, so taking over the reviewed record replaces its target; other types keep every existing value.
           records.push({ ...record, authority: { kind: 'adopt', nativeId: exact.nativeId, existingValues: exact.values,
-            preserveValues: exact.values.filter(value => !desiredValues.includes(value)) } });
+            preserveValues: record.type === 'CNAME' ? [] : exact.values.filter(value => !desiredValues.includes(value)) } });
+        } else if (present.length && record.type === 'CNAME') {
+          return blocked(`${record.name} already has a CNAME that this DNS state does not own (record ${present[0]!.nativeId}), so a new one cannot be created. To point it at this environment instead, add that record's ID and its current target to dns.adoptRecords and review the plan.`);
         } else if (present.length && (identity.provider !== 'cloudflare' || present.some(entry => entry.values.some(value => record.values.includes(value))))) {
           return blocked(`Existing ${record.type} records for ${record.name} are not owned by this DNS state. Add exact native IDs and current values to dns.adoptRecords and review the import plan.`);
         } else records.push({ ...record, authority: { kind: 'absent' } });

@@ -47,6 +47,14 @@ export function engineOutsideKeys(spec: ProjectSpec, environmentName: string, im
   return [...new Set([...declared, ...importedSecrets])].sort();
 }
 
+/** Outside keys the spec declares required: false: the app runs without them, so a missing value never blocks. */
+export function optionalOutsideKeys(spec: ProjectSpec, environmentName: string): string[] {
+  return engineOutsideKeys(spec, environmentName).filter((key) => {
+    const declared = spec.secrets?.[key];
+    return Boolean(declared && 'required' in declared && declared.required === false);
+  });
+}
+
 /** Outside keys that authenticate private package installs. They are mounted into image builds and never given to running services. */
 export const BUILD_TOKEN_KEYS = ['NODE_AUTH_TOKEN', 'NPM_TOKEN'] as const;
 export const isBuildTokenKey = (key: string): boolean => (BUILD_TOKEN_KEYS as readonly string[]).includes(key);
@@ -129,8 +137,9 @@ export async function collectOutsideKeys(ctx: CommandContext, params: {
   // Settings issued with a key (a reCAPTCHA site key) go on the same page, right after it.
   const local = localKeyValues(params.sourceDirectory, params.environmentName, keys);
   const companionOf = (key: string) => Object.entries(KNOWN_SECRETS).find(([, known]) => known.companions?.some((companion) => companion.key === key));
+  const optional = (key: string) => { const declared = params.spec.secrets?.[key]; return Boolean(declared && 'required' in declared && declared.required === false); };
   const fields: PasteField[] = keys.map((key) => {
-    const fromFile = local[key] ? { fromFile: local[key]!.file } : {};
+    const fromFile = { ...(local[key] ? { fromFile: local[key]!.file } : {}), ...(optional(key) ? { optional: true } : {}) };
     const parent = companionOf(key);
     if (parent) return { id: key, ...fromFile, noteHtml: parent[1].companions!.find((companion) => companion.key === key)!.hintHtml };
     const known = KNOWN_SECRETS[key];
