@@ -75,6 +75,8 @@ export interface ReleaseWorkflowInput {
     startCommand?: string }>;
   /** Name of the repository's Actions secret holding a private-package token; mounted into builds as npm_token. */
   packageTokenSecret?: string;
+  /** The migration job and the service whose image it runs; executed after every build and before any release. */
+  releaseCommand?: { job: string; service: string };
 }
 
 /** A GitHub Actions workflow with no stored cloud credentials; a package token is referenced only by its repository secret name. */
@@ -129,13 +131,32 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
       ] : [`          ${secret ? 'DOCKER_BUILDKIT=1 ' : ''}docker build${secret} -t ${service.image}:$GITHUB_SHA .`]),
       `          docker push ${service.image}:$GITHUB_SHA`,
       `          echo "digest=$(gcloud artifacts docker images describe ${service.image}:$GITHUB_SHA --format='value(image_summary.digest)')" >> "$GITHUB_OUTPUT"`,
+    );
+  }
+  const script = ["          cat > release.mjs <<'HYPERVIBE_RELEASE'", ...RELEASE_SCRIPT.split('\n').map((line) => `          ${line}`), '          HYPERVIBE_RELEASE'];
+  const stepId = (name: string) => name.replace(/[^A-Za-z0-9_]/g, '_');
+  if (input.releaseCommand) {
+    const source = input.services.find((service) => service.name === input.releaseCommand!.service);
+    if (!source) throw new Error('The release command needs the image of a released service.');
+    // Every image is built first, so a failed migration leaves all services on the previous release.
+    lines.push(
+      '      - name: Run release command',
+      '        env:',
+      '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
+      "          HYPERVIBE_RUN_JOB: '1'",
+      '        run: |',
+      ...script,
+      `          node release.mjs ${input.releaseCommand.job} ${source.image}@\${{ steps.build_${stepId(source.name)}.outputs.digest }} "" jobs`,
+    );
+  }
+  for (const service of input.services) {
+    const id = stepId(service.name);
+    lines.push(
       `      - name: Release ${service.name}`,
       '        env:',
       '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
       '        run: |',
-      "          cat > release.mjs <<'HYPERVIBE_RELEASE'",
-      ...RELEASE_SCRIPT.split('\n').map((line) => `          ${line}`),
-      '          HYPERVIBE_RELEASE',
+      ...script,
       `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
     );
   }
