@@ -21,6 +21,17 @@ describe('keyless release workflow', () => {
     expect(auth.with.workload_identity_provider).toContain('workloadIdentityPools/hypervibe-github');
   });
 
+  it('mounts a declared package token into each build from the repository secret of the same name', () => {
+    const withToken = YAML.parse(renderReleaseWorkflow({
+      environmentName: 'staging', branch: 'main', gcpProjectId: 'demo-project', region: 'us-central1', provider: 'projects/123/locations/global/workloadIdentityPools/hypervibe-github/providers/github',
+      releaseIdentity: 'hypervibe-release@demo-project.iam.gserviceaccount.com', packageTokenSecret: 'NODE_AUTH_TOKEN',
+      services: [{ name: 'web', resource: 'web-abc', image: 'us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web' }],
+    }));
+    const build = withToken.jobs.release.steps.find((step: { name?: string }) => step.name === 'Build web');
+    expect(build.env).toEqual({ NPM_TOKEN: '${{ secrets.NODE_AUTH_TOKEN }}' });
+    expect(build.run).toContain('DOCKER_BUILDKIT=1 docker build --secret id=npm_token,env=NPM_TOKEN');
+  });
+
   it('releases on push with one release at a time and an etag-guarded image-only change', () => {
     expect(parsed.on.push.branches).toEqual(['main']);
     expect(parsed.concurrency).toEqual({ group: 'hypervibe-release-staging', 'cancel-in-progress': false });
