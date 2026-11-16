@@ -215,8 +215,9 @@ export async function servePastePage(params: {
     new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 30 * 60 * 1000)).unref()),
   ]);
   return waited ?? {
-    status: 'waiting', provider: params.provider, scope: params.scope, url: entry.url,
-    message: `A ${params.spec.tabTitle.replace(/^Connect /, '')} page is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.`,
+    status: 'waiting', provider: params.provider, scope: params.scope,
+    ...unfinishedPage({ url: entry.url, staysOpen: servingMcpClient() || params.waitMs !== undefined,
+      open: `A ${params.spec.tabTitle.replace(/^Connect /, '')} page is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.` }),
   };
 }
 
@@ -233,6 +234,8 @@ export interface PasteField {
   noteHtml?: string;
   /** A local file that already has this value (".env.staging"); the page offers to use it without showing it. */
   fromFile?: string;
+  /** The app runs without this value, so the page offers "Skip for now". */
+  optional?: boolean;
 }
 
 export interface MultiPastePageSpec {
@@ -255,7 +258,8 @@ const MULTI_SCRIPT = `(function(){var f=document.getElementById('keys');if(!f)re
 f.querySelectorAll('button').forEach(function(x){x.disabled=true});
 fetch(f.action,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded','x-hv-fetch':'1'},body:new URLSearchParams(d).toString()}).then(function(r){return r.json()}).then(function(r){
 if(r.finished){location.reload();return}
-Object.keys(r.saved||{}).forEach(function(id){var li=f.querySelector('[data-field="'+id+'"]');if(!li||li.classList.contains('saved'))return;li.classList.add('saved');var en=li.querySelector('.entry');if(en)en.remove();var er=li.querySelector('.error');if(er)er.hidden=true;var s=document.createElement('span');s.className='ok';s.textContent=' \u2713 '+r.saved[id];li.querySelector('.fieldname').appendChild(s)});
+Object.keys(r.saved||{}).forEach(function(id){var li=f.querySelector('[data-field="'+id+'"]');if(!li||li.classList.contains('saved'))return;li.classList.add('saved');var en=li.querySelector('.entry');if(en)en.remove();var er=li.querySelector('.error');if(er)er.hidden=true;var s=document.createElement('span');s.className='ok';s.textContent=' \u2713 '+r.saved[id];li.querySelector('.fieldname').appendChild(s);var dl=document.getElementById('donefields');if(dl){dl.appendChild(li);dl.parentNode.hidden=false;document.getElementById('donecount').textContent=dl.children.length}});
+var ul=f.querySelector('.uselocal');if(ul&&f.querySelectorAll('[data-field]:not(.saved) [name="fromfile"]').length<2)ul.remove();
 f.querySelectorAll('[data-field]').forEach(function(li){var er=li.querySelector('.error'),m=(r.errors||{})[li.getAttribute('data-field')];if(er&&!li.classList.contains('saved')){er.hidden=!m;er.textContent=m||''}});
 var left=f.querySelectorAll('[data-field]:not(.saved)').length,all=f.querySelector('.saveall');if(all&&left<2)all.remove();
 }).catch(function(){var er=f.querySelector('[data-field]:not(.saved) .error');if(er){er.hidden=false;er.textContent='Could not reach Hypervibe. Ask your agent to reopen this page.'}}).finally(function(){f.querySelectorAll('button').forEach(function(x){x.disabled=false})})})})();`;
@@ -266,8 +270,8 @@ function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; 
   const items = spec.fields.map((field) => {
     const saved = state.saved[field.id];
     const id = escapeHtml(field.id);
-    const head = `<p class="fieldname"><code>${id}</code>${saved ? ` <span class="ok">✓ ${escapeHtml(saved)}</span>` : ''}</p>`;
-    if (saved) return `<li class="field saved">${head}${field.noteHtml ? `<p class="muted small">${field.noteHtml}</p>` : ''}</li>`;
+    const head = `<p class="fieldname"><code>${id}</code>${field.optional && !saved ? ' <span class="muted small">optional</span>' : ''}${saved ? ` <span class="ok">✓ ${escapeHtml(saved)}</span>` : ''}</p>`;
+    if (saved) return `<li class="field saved" data-field="${id}">${head}${field.noteHtml ? `<p class="muted small">${field.noteHtml}</p>` : ''}</li>`;
     const link = field.link ? `<p><a class="button" href="${escapeHtml(field.link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(field.link.label)} ↗</a></p>
 <p class="muted">${field.link.hintHtml}</p>${field.link.copy ? `<p class="copyrow"><span class="muted">${escapeHtml(field.link.copy.label)}</span> <code class="copy">${escapeHtml(field.link.copy.value)}</code> <button type="button" class="icon-button" data-copy="${escapeHtml(field.link.copy.value)}" aria-label="Copy" title="Copy">${COPY_ICON}</button></p>` : ''}`
       : `<p class="muted">Paste the new value from wherever it was issued${field.allowGenerate ? ', or generate one if it is a secret only your app uses' : ''}.</p>`;
@@ -278,10 +282,15 @@ function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; 
 <div class="inputrow">
   <label class="sr" for="v-${id}">${id}</label>
   <input id="v-${id}" type="password" name="value:${id}" placeholder="Paste the new ${id}" spellcheck="false" autocapitalize="off">
-  <button type="submit" name="save" value="${id}">Save</button>${field.allowGenerate ? `<button type="submit" name="generate" value="${id}" class="secondary">Generate</button>` : ''}
+  <button type="submit" name="save" value="${id}">Save</button>${field.allowGenerate ? `<button type="submit" name="generate" value="${id}" class="secondary">Generate</button>` : ''}${field.optional ? `<button type="submit" name="skip" value="${id}" class="secondary">Skip for now</button>` : ''}
 </div></div>
 <p class="error" role="alert"${state.errors[field.id] ? '' : ' hidden'}>${escapeHtml(state.errors[field.id] ?? '')}</p></li>`;
-  }).join('\n');
+  });
+  // Finished keys are tucked away so what is left to do is all that shows.
+  const done = spec.fields.length - remaining;
+  const openItems = items.filter((_, index) => !state.saved[spec.fields[index]!.id]).join('\n');
+  const doneItems = items.filter((_, index) => state.saved[spec.fields[index]!.id]).join('\n');
+  const local = spec.fields.filter((field) => field.fromFile && !state.saved[field.id]).length;
   const body = state.finished
     ? `<section class="done"><div class="tick" aria-hidden="true">✓</div><h1>${escapeHtml(spec.doneTitle)}</h1><p>${escapeHtml(state.finished)}</p>
 <p class="muted">You can close this tab; ${escapeHtml(spec.agent)} continues from here.</p></section>`
@@ -291,12 +300,25 @@ function renderMultiPastePage(spec: MultiPastePageSpec, state: { nonce: string; 
 ${rows}
 <p class="muted small">Save each key as you go, or fill them in and save all at once.</p>
 <form id="keys" method="post" action="/connect/${state.nonce}" autocomplete="off"><input type="hidden" name="nonce" value="${state.nonce}">
-<ol class="fields">${items}</ol>
-${remaining > 1 ? `<p class="saveall"><button type="submit" name="save" value="*">Save all</button>${spec.fields.filter((field) => field.fromFile && !state.saved[field.id]).length > 1 ? ' <button type="submit" name="fromfile" value="*" class="secondary">Use every value found in .env files</button>' : ''}</p>` : ''}
+${local > 1 ? `<p class="uselocal"><button type="submit" name="fromfile" value="*">Use the ${local} values found in your .env files</button> <span class="muted small">Values are never shown.</span></p>` : ''}
+<ol class="fields">${openItems}</ol>
+${remaining > 1 ? '<p class="saveall"><button type="submit" name="save" value="*">Save all</button></p>' : ''}
+<details class="donelist"${done ? '' : ' hidden'}><summary><span class="ok">✓</span> <span id="donecount">${done}</span> of ${spec.fields.length} done</summary><ol class="fields" id="donefields">${doneItems}</ol></details>
 </form>
 <script nonce="${state.scriptNonce}">${MULTI_SCRIPT}</script>`;
   return pageShell({ tabTitle: spec.tabTitle, body, agent: spec.agent, storedWhere: spec.storedWhere, scriptNonce: state.scriptNonce, expiresMinutes: 60 })
-    .replace('</style>', '.fields{list-style:none;padding:0;margin:0}.field{border-top:1px solid var(--frame);padding:.9rem 0}.field.saved{opacity:.8}.fieldname{margin:0 0 .4rem}.fieldname code{font-family:var(--mono);color:#fff}.ok{color:var(--signal-300);font-size:.8rem}button.secondary{border-color:var(--frame);color:var(--cloud-100)}#keys{display:block;margin:0}.inputrow{display:flex;gap:.5rem;margin:.6rem 0 .25rem;flex-wrap:wrap}.saveall{border-top:1px solid var(--frame);padding-top:.9rem;margin:0}</style>');
+    .replace('</style>', '.fields{list-style:none;padding:0;margin:0}.field{border-top:1px solid var(--frame);padding:.9rem 0}.field.saved{opacity:.8}.uselocal{margin:1rem 0}.donelist{margin-top:1.2rem}.donelist summary{cursor:pointer}.fieldname{margin:0 0 .4rem}.fieldname code{font-family:var(--mono);color:#fff}.ok{color:var(--signal-300);font-size:.8rem}button.secondary{border-color:var(--frame);color:var(--cloud-100)}#keys{display:block;margin:0}.inputrow{display:flex;gap:.5rem;margin:.6rem 0 .25rem;flex-wrap:wrap}.saveall{border-top:1px solid var(--frame);padding-top:.9rem;margin:0}</style>');
+}
+
+/**
+ * What to report when the person did not finish the page in time. An MCP server
+ * keeps serving the page, so its address is still good. A single CLI command
+ * ends when it returns and its page ends with it, so the address is left out
+ * rather than pointing at nothing.
+ */
+export function unfinishedPage(params: { url: string; staysOpen: boolean; open: string }): { url?: string; message: string } {
+  return params.staysOpen ? { url: params.url, message: params.open }
+    : { message: 'The page in your browser was not finished and has now closed. Run the same command again to reopen it.' };
 }
 
 /**
@@ -312,12 +334,13 @@ export async function serveMultiPastePage(params: {
   accept: (field: string, value: string | { generate: true } | { fromFile: true }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
   waitMs?: number;
   openBrowser?: (url: string) => void;
-}): Promise<LocalPasteResult & { saved?: string[] }> {
+}): Promise<LocalPasteResult & { saved?: string[]; skipped?: string[] }> {
   let entry = active.get(params.key);
   if (entry?.settled?.status === 'connected') return entry.settled;
   if (!entry) {
     const nonce = crypto.randomBytes(24).toString('base64url');
     const saved: Record<string, string> = {};
+    const skipped = new Set<string>();
     const errors: Record<string, string> = {};
     let resolve!: (result: LocalPasteResult) => void;
     const result = new Promise<LocalPasteResult>((done) => { resolve = done; });
@@ -350,12 +373,20 @@ export async function serveMultiPastePage(params: {
         const generateId = form.get('generate');
         const fromFileId = form.get('fromfile');
         const saveId = form.get('save');
-        const targets = generateId
+        const skipId = form.get('skip');
+        if (skipId) {
+          const target = open.find((candidate) => candidate.id === skipId && candidate.optional);
+          if (!target) { reply(400); return; }
+          delete errors[target.id];
+          saved[target.id] = 'skipped for now';
+          skipped.add(target.id);
+        }
+        const targets = skipId ? [] : generateId
           ? open.filter((candidate) => candidate.id === generateId && candidate.allowGenerate)
           : fromFileId
             ? open.filter((candidate) => candidate.fromFile && (fromFileId === '*' || candidate.id === fromFileId))
             : saveId === '*' ? open.filter((candidate) => form.get(`value:${candidate.id}`)?.trim()) : open.filter((candidate) => candidate.id === saveId);
-        if (!targets.length) {
+        if (!targets.length && !skipId) {
           const first = saveId === '*' ? open[0] : undefined;
           if (first) errors[first.id] = 'Paste at least one value, then save.';
           reply(400); return;
@@ -370,8 +401,10 @@ export async function serveMultiPastePage(params: {
           saved[target.id] = outcome.message;
         }
         if (params.spec.fields.every((candidate) => saved[candidate.id])) {
-          const message = `All ${params.spec.fields.length} values are saved.`;
-          const settled: LocalPasteResult & { saved?: string[] } = { status: 'connected', provider: params.provider, scope: params.scope, message, saved: Object.keys(saved) };
+          const kept = Object.keys(saved).filter((id) => !skipped.has(id));
+          const message = skipped.size ? `${kept.length} saved, ${skipped.size} skipped for now.` : `All ${params.spec.fields.length} values are saved.`;
+          const settled: LocalPasteResult & { saved?: string[]; skipped?: string[] } = { status: 'connected', provider: params.provider, scope: params.scope, message, saved: kept,
+            ...(skipped.size ? { skipped: [...skipped] } : {}) };
           entry!.settled = settled;
           reply(200, message);
           resolve(settled);
@@ -393,7 +426,8 @@ export async function serveMultiPastePage(params: {
     new Promise<undefined>((done) => setTimeout(() => done(undefined), params.waitMs ?? (servingMcpClient() ? 4 * 60 * 1000 : 60 * 60 * 1000)).unref()),
   ]);
   return waited ?? {
-    status: 'waiting', provider: params.provider, scope: params.scope, url: entry.url,
-    message: `A page for the new values is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.`,
+    status: 'waiting', provider: params.provider, scope: params.scope,
+    ...unfinishedPage({ url: entry.url, staysOpen: servingMcpClient() || params.waitMs !== undefined,
+      open: `A page for the new values is open in your browser (${entry.url}). Finish there, then ${params.spec.agent} continues.` }),
   };
 }

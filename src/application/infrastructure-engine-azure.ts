@@ -28,7 +28,7 @@ import {
 import { azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
 import type { EngineSecretStore } from './engine-secrets.js';
-import { engineOutsideKeys } from './engine-secrets.js';
+import { engineOutsideKeys, optionalOutsideKeys } from './engine-secrets.js';
 import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
 import { localRepositoryFor } from './local-repository.js';
 
@@ -332,7 +332,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const store = azureEnvironmentSecretStore(context);
   const keys = azureEnvironmentSecretKeys(spec, environmentName, importedOf(context.environment));
   const secrets = await planEngineSecrets({
-    environmentName, generated: keys.generated, outside: keys.outside,
+    environmentName, generated: keys.generated, outside: keys.outside, optional: optionalOutsideKeys(spec, environmentName),
     observe: (key) => store.observe(key),
     action: (key, stored) => ({
       id: `secret:${key}`, type: stored ? 'noop' : 'create', verified: true, resource: { kind: 'secret', name: key, provider: 'azure' },
@@ -379,7 +379,8 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   }] : [];
 
   // 4. Everything else, in the environment's own state.
-  let input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all, ...(image ? { image } : {}) });
+  // An optional key without a value is left out, so no workload references a Key Vault secret that does not exist.
+  let input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all.filter((key) => !secrets.unset?.includes(key)), ...(image ? { image } : {}) });
   let planId = crypto.randomUUID();
   let planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
