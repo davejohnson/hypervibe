@@ -40,6 +40,38 @@ describe('secret rotation', () => {
   });
 });
 
+describe('keys page with values found locally and optional keys', () => {
+  it('offers every local value from the top, tucks saved keys away, and lets an optional key be skipped', async () => {
+    let url = '';
+    const accepted: string[] = [];
+    const pending = serveMultiPastePage({
+      key: 'test-bulk-skip', provider: 'secret', scope: 'staging', waitMs: 10_000, openBrowser: (opened) => { url = opened; },
+      accept: async (field) => { accepted.push(field); return { ok: true, message: 'saved from .env' }; },
+      spec: { tabTitle: 'Keys', eyebrow: 'Add keys', titleHtml: 'Add keys', leadHtml: 'Lead', rows: [], agent: 'Claude Code', storedWhere: 'Saved', doneTitle: 'Done',
+        fields: [{ id: 'A_KEY', fromFile: '.env' }, { id: 'B_KEY', fromFile: '.env' }, { id: 'STRIPE_KEY', optional: true }] },
+    });
+    while (!url) await new Promise((resolve) => setTimeout(resolve, 5));
+    const nonce = url.split('/').pop()!;
+    const post = (fields: Record<string, string>) => fetch(url, { method: 'POST', headers: { origin: new URL(url).origin, 'content-type': 'application/x-www-form-urlencoded', 'x-hv-fetch': '1' },
+      body: new URLSearchParams({ nonce, ...fields }).toString() });
+    const page = await (await fetch(url)).text();
+    // The one-click button comes before the list of keys, not after it.
+    expect(page.indexOf('name="fromfile" value="*"')).toBeGreaterThan(0);
+    expect(page.indexOf('name="fromfile" value="*"')).toBeLessThan(page.indexOf('<ol class="fields">'));
+    expect(page).toContain('name="skip" value="STRIPE_KEY"');
+    expect(page).not.toContain('name="skip" value="A_KEY"');
+    expect((await post({ skip: 'A_KEY' })).status).toBe(400);
+    expect(await (await post({ fromfile: '*' })).json()).toMatchObject({ saved: { A_KEY: 'saved from .env', B_KEY: 'saved from .env' } });
+    const after = await (await fetch(url)).text();
+    expect(after).toContain('>2</span> of 3 done');
+    expect(after).toMatch(/<details class="donelist">[\s\S]*A_KEY[\s\S]*B_KEY[\s\S]*<\/details>/);
+    expect((await post({ skip: 'STRIPE_KEY' })).status).toBe(200);
+    // A skipped key is never sent to the store and is not reported as saved.
+    await expect(pending).resolves.toMatchObject({ status: 'connected', saved: ['A_KEY', 'B_KEY'], skipped: ['STRIPE_KEY'] });
+    expect(accepted).toEqual(['A_KEY', 'B_KEY']);
+  });
+});
+
 describe('a page the person did not finish in time', () => {
   it('keeps its address while the server goes on serving it', () => {
     expect(unfinishedPage({ url: 'http://127.0.0.1:1/connect/x', staysOpen: true, open: 'A page is open.' }))
