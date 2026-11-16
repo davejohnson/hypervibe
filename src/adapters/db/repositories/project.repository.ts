@@ -48,10 +48,16 @@ export class ProjectRepository {
     return rows.map((row) => this.mapRow(row));
   }
 
-  findByGitRemoteUrl(url: string): Project | null {
+  /** Every project recorded for this repository. Several can share one remote. */
+  findAllByGitRemoteUrl(url: string): Project[] {
     const normalized = normalizeGitUrl(url);
-    const all = this.findAll();
-    return all.find((p) => p.gitRemoteUrl && normalizeGitUrl(p.gitRemoteUrl) === normalized) ?? null;
+    return this.findAll().filter((p) => p.gitRemoteUrl && normalizeGitUrl(p.gitRemoteUrl) === normalized);
+  }
+
+  /** The only project for this repository, or null when none or several match. */
+  findByGitRemoteUrl(url: string): Project | null {
+    const matches = this.findAllByGitRemoteUrl(url);
+    return matches.length === 1 ? matches[0]! : null;
   }
 
   update(id: string, updates: Partial<CreateProjectInput>): Project | null {
