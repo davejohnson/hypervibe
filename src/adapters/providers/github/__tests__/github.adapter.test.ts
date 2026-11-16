@@ -163,17 +163,17 @@ describe('GitHub Actions release evidence', () => {
       .mockResolvedValueOnce(response(undefined, 204));
     const adapter = connectedAdapter();
 
-    await adapter.listWorkflowRuns('dave', 'app', '.github/workflows/hypervibe pages.yml');
-    await adapter.triggerWorkflow('dave', 'app', '.github/workflows/hypervibe pages.yml', 'main');
+    await adapter.listWorkflowRuns('dave', 'app', '.github/workflows/hypervibe deploy.yml');
+    await adapter.triggerWorkflow('dave', 'app', '.github/workflows/hypervibe deploy.yml', 'main');
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'https://api.github.com/repos/dave/app/actions/workflows/hypervibe%20pages.yml/runs',
+      'https://api.github.com/repos/dave/app/actions/workflows/hypervibe%20deploy.yml/runs',
       expect.objectContaining({ method: 'GET' })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://api.github.com/repos/dave/app/actions/workflows/hypervibe%20pages.yml/dispatches',
+      'https://api.github.com/repos/dave/app/actions/workflows/hypervibe%20deploy.yml/dispatches',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({ ref: 'main', inputs: {} }),
