@@ -143,7 +143,8 @@ export async function collectProjectDeploymentHealth(params: {
 
     const services = [] as ProjectDeploymentHealth['environments'][number]['services'];
     for (const service of desiredServiceNames) {
-      const serviceId = bindings.services?.[service]?.serviceId;
+      const binding = bindings.services?.[service] as { serviceId?: string; workerPoolName?: string } | undefined;
+      const serviceId = binding?.serviceId ?? binding?.workerPoolName;
       if (!serviceId) {
         services.push({
           service,
