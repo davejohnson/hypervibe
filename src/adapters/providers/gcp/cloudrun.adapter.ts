@@ -503,7 +503,8 @@ export class CloudRunAdapter implements
   async buildReleaseImageFromArchive(
     service: Service,
     environment: Environment,
-    source: { archive: Buffer; commitSha: string; bucket: string }
+    /** packageTokenVersion: full Secret Manager version name of a private-package token, mounted only during the build. */
+    source: { archive: Buffer; commitSha: string; bucket: string; packageTokenVersion?: string }
   ): Promise<CloudBuildResult> {
     if (!this.credentials) return { success: false, error: 'Not connected. Call connect() first.' };
     try {
@@ -526,6 +527,7 @@ export class CloudRunAdapter implements
       const build = await this.submitCloudBuild({
         token, service, sourceRepoUrl: '', revision: source.commitSha, imageUri,
         storageSource: { bucket: source.bucket, object },
+        ...(source.packageTokenVersion ? { packageTokenVersion: source.packageTokenVersion } : {}),
       });
       return { success: true, imageUri: build.imageUri, buildId: build.id, logsUrl: build.logsUrl, resolvedCommitSha: source.commitSha };
     } catch (error) {
@@ -2428,6 +2430,7 @@ export class CloudRunAdapter implements
     imageUri: string;
     /** Build from an uploaded archive instead of cloning a git URL. */
     storageSource?: { bucket: string; object: string };
+    packageTokenVersion?: string;
   }): Promise<{
     id?: string;
     logsUrl?: string;
@@ -2457,8 +2460,11 @@ export class CloudRunAdapter implements
         steps: [{
           name: 'gcr.io/cloud-builders/docker',
           entrypoint: 'bash',
-          args: ['-lc', this.cloudBuildScript(params.service, params.imageUri)],
+          args: ['-lc', this.cloudBuildScript(params.service, params.imageUri, Boolean(params.packageTokenVersion))],
+          ...(params.packageTokenVersion ? { secretEnv: ['NPM_TOKEN'] } : {}),
         }],
+        // The token stays in Secret Manager; the build reads it and Docker mounts it for the install step only.
+        ...(params.packageTokenVersion ? { availableSecrets: { secretManager: [{ versionName: params.packageTokenVersion, env: 'NPM_TOKEN' }] } } : {}),
         images: [params.imageUri],
         timeout: '1200s',
         // A user-specified build identity requires an explicit logging mode.
@@ -2468,10 +2474,14 @@ export class CloudRunAdapter implements
       }),
     });
 
-    let response = await submit();
+    const deployIdentity = this.serviceAccountCreds?.client_email;
+    // Only the deployment identity is known to be able to read the token; the project default is not.
+    let response = await submit(params.packageTokenVersion ? deployIdentity : undefined);
+    if (response.status === 403 && params.packageTokenVersion) {
+      throw new Error(`Cloud Build submission failed: ${response.status} ${await response.text()}`);
+    }
     if (response.status === 403) {
       const text = await response.text();
-      const deployIdentity = this.serviceAccountCreds?.client_email;
       // Newer projects build as the Compute Engine default account (Editor).
       // Never act as it; build as the deployment identity instead.
       if (!/act as service account/i.test(text) || !deployIdentity) {
@@ -2578,7 +2588,7 @@ export class CloudRunAdapter implements
     throw new Error(`Cloud Build did not finish before timeout${logsUrl ? ` (${logsUrl})` : ''}`);
   }
 
-  private cloudBuildScript(service: Service, imageUri: string): string {
+  private cloudBuildScript(service: Service, imageUri: string, packageToken = false): string {
     const dockerfilePath = service.buildConfig.dockerfilePath?.trim() || 'Dockerfile';
     const runtime = service.buildConfig.runtime;
     let generatedDockerfile = '';
@@ -2600,15 +2610,16 @@ export class CloudRunAdapter implements
         ? '[ -f requirements.txt ] || [ -f pyproject.toml ]'
         : 'false';
 
+    const secret = packageToken ? ' --secret id=npm_token,env=NPM_TOKEN' : '';
     return [
       'set -euo pipefail',
       // Generated Dockerfiles mount the optional package token as a build secret.
       'export DOCKER_BUILDKIT=1',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
-      `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
+      `  docker build --pull${secret} -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,
       writeGeneratedDockerfile,
-      `  docker build --pull -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
+      `  docker build --pull${secret} -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
       'else',
       '  echo "No repository Dockerfile or manifest for an explicit project runtime was found. Run hv_spec to review runtime evidence; custom languages require a Dockerfile." >&2',
       '  exit 1',
