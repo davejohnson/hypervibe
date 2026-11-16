@@ -27,7 +27,7 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
-import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
+import { engineOutsideKeys, optionalOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
 
 /**
  * The OpenTofu lifecycle for AWS environments: spec → configuration, Hypervibe-owned
@@ -390,7 +390,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // Outside keys (declared in the spec or copied by a migration) must have a value; Hypervibe never invents them.
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
   const secrets = await planEngineSecrets({
-    environmentName, generated, outside: imported,
+    environmentName, generated, outside: imported, optional: optionalOutsideKeys(spec, environmentName),
     observe: (key) => parameterExists(access, `${context.parameterPath}${key}`),
     action: (key, stored) => {
       const name = `${context.parameterPath}${key}`;
@@ -409,7 +409,8 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const workloads = Object.keys(environmentSpec.services).length;
   const commit = !awsBinding(context.environment).imageUri && workloads ? localCommit(project) : undefined;
   const firstImage = commit ? `${awsRegistryUrl({ accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix })}:${commit.commitSha}` : undefined;
-  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported], firstImage);
+  // An optional key without a value is left out, so no workload references a parameter that does not exist.
+  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported.filter((key) => !secrets.unset?.includes(key))], firstImage);
   const { binding, input, configuration } = built;
   if (environmentSpec.database && binding.databaseLoginAt && !binding.sharedDatabase) {
     return { blocked: [`${environmentName} was created with its own database cluster, before testing environments shared one. Tear it down (hv_plan scope="teardown") and launch it again to move it onto the shared cluster.`] };

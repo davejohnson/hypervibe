@@ -37,6 +37,21 @@ describe('shared engine secret planning', () => {
     expect(await plan({ JWT_SECRET: 'present' })).toEqual({ blocked: [expect.stringContaining('STRIPE_KEY')], missingOutsideKeys: ['STRIPE_KEY'] });
   });
 
+  it('plans without a value for an outside key declared optional, and reports it so workloads leave it out', async () => {
+    const result = await planEngineSecrets({
+      environmentName: 'testing', generated: ['JWT_SECRET'], outside: ['STRIPE_KEY', 'SENTRY_DSN'], optional: ['STRIPE_KEY'],
+      observe: async (key) => (({ JWT_SECRET: 'present', SENTRY_DSN: 'present' } as Record<string, 'present'>)[key] ?? 'absent'), action,
+    });
+    expect(result).toEqual({ actions: [action('JWT_SECRET', true)], unset: ['STRIPE_KEY'] });
+  });
+
+  it('still stops on a required key when an optional one is also missing', async () => {
+    const result = await planEngineSecrets({
+      environmentName: 'testing', generated: [], outside: ['STRIPE_KEY', 'SENTRY_DSN'], optional: ['STRIPE_KEY'], observe: async () => 'absent', action,
+    });
+    expect(result).toEqual({ blocked: [expect.stringContaining('SENTRY_DSN')], missingOutsideKeys: ['SENTRY_DSN'] });
+  });
+
   it.each(['STRIPE_KEY', 'SESSION_SECRET'])('blocks instead of creating when %s cannot be read', async (key) => {
     const result = await plan({ STRIPE_KEY: 'present', JWT_SECRET: 'present', [key]: { unknown: 'The secret store could not be read.' } });
     expect(result).toEqual({ blocked: ['The secret store could not be read.'] });
