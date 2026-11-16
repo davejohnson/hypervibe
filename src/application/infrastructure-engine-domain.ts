@@ -23,9 +23,10 @@ export type DomainMappingObservation = { state: 'absent' } | { state: 'unknown';
 const normalized = (value: string) => value.toLowerCase().replace(/\.$/, '');
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
+// Google omits `items` from a successful response when the identity owns no verified sites.
 const ownedList = z.object({ items: z.array(z.object({ id: z.string().min(1),
   site: z.object({ type: z.string(), identifier: z.string().min(1) }), owners: z.array(z.string()).min(1),
-})).max(10000) });
+})).max(10000).default([]) });
 
 /** A permission error is unknown. Only a complete successful owned-site list proves nonownership. */
 async function observeOwnership(context: DomainContext, verificationDomain: string): Promise<Ownership> {
