@@ -1,18 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { awsRegistryUrl, buildAwsBuildConfiguration, buildAwsConfiguration, schedulerCron } from '../aws-engine.config.js';
+import { awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsConfiguration, buildAwsSharedConfiguration, schedulerCron } from '../aws-engine.config.js';
 
 const base = { accountId: '111122223333', region: 'us-west-2', prefix: 'hv-app-aws', environmentId: 'ENV1', parameterPath: '/hypervibe/env1/' };
 
 describe('AWS engine configuration', () => {
   it('keeps the database TLS-only, its password out of state, and its deletion confirmable', () => {
-    const config = buildAwsConfiguration({ ...base, database: { engineVersion: '18.6', minCapacity: 0, maxCapacity: 2 } });
+    const config = buildAwsSharedConfiguration({ accountId: base.accountId, region: base.region, prefix: 'hv-app-shared', environmentId: 'shared-testing',
+      database: { engineVersion: '18.6', minCapacity: 0, maxCapacity: 2 } });
     const database = config.files['database.tf.json'] as { resource: Record<string, Record<string, Record<string, unknown>>> };
     const cluster = database.resource.aws_rds_cluster!.postgres!;
     expect(cluster.manage_master_user_password).toBe(true);
     expect(cluster).not.toHaveProperty('master_password');
     expect(database.resource.aws_rds_cluster_parameter_group!.postgres!.parameter).toEqual([{ name: 'rds.force_ssl', value: '1' }]);
     expect(cluster.serverlessv2_scaling_configuration).toEqual([{ min_capacity: 0, max_capacity: 2, seconds_until_auto_pause: 600 }]);
-    expect(config.resources['aws_rds_cluster.postgres']).toMatchObject({ dataBearing: true, billable: true });
+    expect(config.resources['aws_rds_cluster.postgres']).toMatchObject({ actionId: 'shared:database', dataBearing: true, billable: true });
+    // Each testing environment creates its own database on it.
+    expect(cluster).not.toHaveProperty('database_name');
+    expect(awsSharedClusterArn({ ...base, prefix: 'hv-app-shared' })).toBe('arn:aws:rds:us-west-2:111122223333:cluster:hv-app-shared-postgres');
   });
 
   it('caps the runtime role with the setup boundary and scopes secrets to the environment', () => {
@@ -46,6 +50,10 @@ describe('AWS web services', () => {
     const variables = fn.environment[0]!.variables;
     expect(variables).not.toHaveProperty('AWS_DEFAULT_REGION');
     expect(variables).toMatchObject({ AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1', NODE_OPTIONS: '--require /opt/hypervibe/load-secrets.cjs', AWS_LWA_INVOKE_MODE: 'response_stream' });
+    // The URL and both public permissions write one function policy; Lambda rejects concurrent writes with 409.
+    const permissions = (config.files['services.tf.json'] as { resource: { aws_lambda_permission: Record<string, { depends_on?: string[] }> } }).resource.aws_lambda_permission;
+    expect(permissions.web_url!.depends_on).toEqual(['aws_lambda_function_url.web']);
+    expect(permissions.web_invoke!.depends_on).toEqual(['aws_lambda_permission.web_url']);
   });
 });
 
@@ -58,7 +66,7 @@ describe('AWS tasks', () => {
   });
 
   it('starts on-demand workers at zero, counts only after app activity so the database can pause, wakes on time, and fails open', () => {
-    const config = buildAwsConfiguration({ ...base, database: { engineVersion: '18.6', minCapacity: 0, maxCapacity: 2 },
+    const config = buildAwsConfiguration({ ...base, database: { clusterArn: 'arn:aws:rds:us-west-2:111122223333:cluster:hv-app-shared-postgres', name: 'app_demo' },
       services: [{ logicalName: 'web', resourceName: 'hv-app-web', initialImageUri: 'x', public: true }],
       workers: [{ logicalName: 'worker', resourceName: 'hv-app-worker', initialImageUri: 'x', pendingWorkQuery: 'SELECT 1', nextWorkAtQuery: 'SELECT min(run_at) FROM jobs;' }],
       jobs: [{ logicalName: 'tick', resourceName: 'hv-app-tick', initialImageUri: 'x', schedule: '0 * * * *' }], secretKeys: ['JWT_SECRET'] });
@@ -68,6 +76,12 @@ describe('AWS tasks', () => {
     expect(tasks.aws_ecs_task_definition!.worker).toMatchObject({ track_latest: true });
     const definition = JSON.parse(String(tasks.aws_sfn_state_machine!.worker_waker!.definition).replaceAll('$${', '${'));
     expect(definition.QueryLanguage).toBe('JSONata');
+    // The environment holds no cluster; its waker counts in its own database on the shared one, and may query only that cluster.
+    expect(config.files['database.tf.json']).toBeUndefined();
+    expect(JSON.stringify(definition)).toContain('"Database":"app_demo"');
+    expect(JSON.stringify(definition)).toContain('cluster:hv-app-shared-postgres');
+    const policy = JSON.parse((config.files['base.tf.json'] as { resource: { aws_iam_role_policy: { runtime: { policy: string } } } }).resource.aws_iam_role_policy.runtime.policy);
+    expect(policy.Statement.find((statement: { Sid: string }) => statement.Sid === 'WakerCount').Resource).toBe('arn:aws:rds:us-west-2:111122223333:cluster:hv-app-shared-postgres');
     expect(definition.States.Route.Default).toBe('Running');
     expect(definition.States.Route.Choices[0]).toMatchObject({ Next: 'Count' });
     expect(definition.States.IsRunning).toMatchObject({ Choices: [{ Next: 'Count' }], Default: 'Requests' });

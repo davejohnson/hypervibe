@@ -36,7 +36,7 @@ export interface ProviderCapabilityMaturity {
 export interface ProviderInspectionRequest {
   /** Provider connection/account/repository/domain scope. */
   scope?: string;
-  /** Provider-owned resource class, such as project, ref, pages, zone, or dns. */
+  /** Provider-owned resource class, such as project, ref, zone, or dns. */
   resource?: string;
   /** Durable provider id when one is known. */
   id?: string;

@@ -815,7 +815,7 @@ providerRegistry.register({
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     maturity: {
       lifecycle: {
-        database: { status: 'planned', reason: 'Resource lifecycle is moving to OpenTofu; this adapter provides connections and existing-resource operations only.' },
+        database: { status: 'planned', reason: 'The OpenTofu engine manages this resource lifecycle; this adapter provides connections and existing-resource operations only.' },
       },
     },
   },

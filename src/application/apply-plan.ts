@@ -702,6 +702,7 @@ async function executeRepositoryPlanApply(
           project: projectForApply,
           spec: params.spec,
           environmentName: params.envName,
+          action,
         });
       case 'github.setting.sync':
         return applyGitHubNativeSetting({ action });
@@ -1548,7 +1549,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           `Reviewed repository is ${action.resource.name}; collaboration currently targets ${expectedRepository ?? 'no repository'}.`
         );
       }
-      return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });
+      return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName, action });
     }
     if (capability === 'github.infrastructure.sync') {
       if (planScope === 'backup-program-publication') {

@@ -685,6 +685,20 @@ export class CloudRunAdapter implements
         || binding.jobName === deploymentId
         || binding.schedulerJobName === deploymentId
       ));
+      // Background workers run as worker pools: no URL, readiness from the pool's own condition.
+      const workerPool = Object.values(bindings.services ?? {}).some((binding) => (binding as { workerPoolName?: unknown }).workerPoolName === deploymentId);
+      if (workerPool) {
+        const { projectId, region } = this.credentials;
+        const response = await fetch(`https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/workerPools/${encodeURIComponent(deploymentId)}`,
+          { headers: { Authorization: `Bearer ${token}` } });
+        if (response.status === 404) return { status: 'unknown', reason: `Cloud Run worker pool ${deploymentId} is absent in region ${region}.` };
+        if (!response.ok) return { status: 'unknown', reason: `Cloud Run worker pool observation failed: ${response.status}` };
+        const pool = await response.json() as { terminalCondition?: { state?: string; message?: string } };
+        const state = pool.terminalCondition?.state;
+        if (state === 'CONDITION_SUCCEEDED') return { status: 'deployed' };
+        if (state === 'CONDITION_FAILED') return { status: 'failed', reason: pool.terminalCondition?.message ?? `Worker pool ${deploymentId} failed to start.` };
+        return { status: 'deploying' };
+      }
       const resourceType = targetBinding?.resourceType;
       const workloadKind = targetBinding?.workloadKind;
       const scheduledTarget = resourceType === 'scheduledJob' || workloadKind === 'cron';
@@ -809,7 +823,8 @@ export class CloudRunAdapter implements
       limit: request.limit,
       errorsOnly: request.errorsOnly,
     });
-    const deploymentId = serviceBinding.serviceId;
+    const workerPool = (serviceBinding as { workerPoolName?: unknown }).workerPoolName;
+    const deploymentId = serviceBinding.serviceId ?? (typeof workerPool === 'string' ? workerPool : undefined);
     const status = deploymentId
       ? await this.getDeployStatus(request.environment, deploymentId)
       : undefined;
@@ -844,12 +859,16 @@ export class CloudRunAdapter implements
     const token = await this.getAccessToken();
     const bindings = parseHostingBindings(environment);
     const serviceBinding = bindings.services?.[serviceName];
-    const targetName = serviceBinding?.jobName ?? serviceBinding?.serviceId ?? serviceName;
+    // Logs live in the environment's own region, which may differ from the connection default.
+    if (bindings.environmentId) this.configureTarget({ region: bindings.environmentId });
+    const workerPool = (serviceBinding as { workerPoolName?: unknown } | undefined)?.workerPoolName;
+    const workerPoolName = typeof workerPool === 'string' ? workerPool : undefined;
+    const targetName = workerPoolName ?? serviceBinding?.jobName ?? serviceBinding?.serviceId ?? serviceName;
     const isJob = serviceBinding?.resourceType === 'scheduledJob' || Boolean(serviceBinding?.jobName);
     const logs = await this.queryCloudLogging({
       token,
       targetName,
-      targetKind: isJob ? 'job' : 'service',
+      targetKind: workerPoolName ? 'workerPool' : isJob ? 'job' : 'service',
       limit: options?.limit ?? 100,
       since: options?.since,
       errorsOnly: options?.errorsOnly,
@@ -1788,7 +1807,7 @@ export class CloudRunAdapter implements
   private async queryCloudLogging(params: {
     token: string;
     targetName: string;
-    targetKind: 'service' | 'job';
+    targetKind: 'service' | 'job' | 'workerPool';
     limit: number;
     since?: Date;
     errorsOnly?: boolean;
@@ -1798,7 +1817,10 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const resourceFilter = params.targetKind === 'job'
+    // Resource types and labels: https://docs.cloud.google.com/logging/docs/api/v2/resource-list
+    const resourceFilter = params.targetKind === 'workerPool'
+      ? `resource.type="cloud_run_worker_pool" AND resource.labels.worker_pool_name="${this.escapeLoggingValue(params.targetName)}"`
+      : params.targetKind === 'job'
       ? `resource.type="cloud_run_job" AND resource.labels.job_name="${this.escapeLoggingValue(params.targetName)}"`
       : `resource.type="cloud_run_revision" AND resource.labels.service_name="${this.escapeLoggingValue(params.targetName)}"`;
     const filterParts = [
@@ -3085,7 +3107,7 @@ export class CloudRunAdapter implements
   /** Only selected, reviewed credential updates remain outside the infrastructure engine. */
   async setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options: DeploymentMutationOptions = {}): Promise<Receipt> {
     if (options.requireCredentialUpdate) return this.setCredentialEnvVars(environment, service, vars);
-    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is moving to OpenTofu.' };
+    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is managed by the OpenTofu engine.' };
   }
 
   private async setCredentialEnvVars(environment: Environment, service: Service, vars: Record<string, string>): Promise<Receipt> {
@@ -3200,7 +3222,7 @@ providerRegistry.register({
       lifecycle: {
         hosting: {
           status: 'planned',
-          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+          reason: 'The OpenTofu engine manages infrastructure. Authentication and operational tools remain available.',
         },
       },
     },

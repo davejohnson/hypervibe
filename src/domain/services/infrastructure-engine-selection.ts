@@ -8,6 +8,13 @@ export function isEngineManaged(environment: EnvironmentSpec | undefined): boole
   return environment !== undefined && ENGINE_HOSTING_PROVIDERS.includes(environment.hosting.provider);
 }
 
+export type EnvironmentProfile = 'production' | 'testing';
+
+/** production and staging share one shape; everything else is a cheap testing environment. */
+export function environmentProfile(environmentName: string): EnvironmentProfile {
+  return /prod|stag/i.test(environmentName) ? 'production' : 'testing';
+}
+
 const present = (value: unknown): boolean => value !== undefined && value !== null
   && !(typeof value === 'object' && Object.keys(value as object).length === 0);
 
@@ -40,6 +47,23 @@ export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   for (const [name, service] of Object.entries(environment.services)) {
     if (service.volume) problems.push(`Service ${name}: filesystem volumes are not yet managed by the OpenTofu engine.`);
     if (service.releaseCommand) problems.push(`Service ${name}: release commands are not yet supported by the OpenTofu engine.`);
+  }
+  if (environment.hosting.provider !== 'cloudrun') problems.push(...googleOnlyProblems(environment));
+  return problems;
+}
+
+/** Settings only the Google Cloud engine builds so far; the other clouds refuse them instead of dropping them. */
+function googleOnlyProblems(environment: EnvironmentSpec): string[] {
+  const cloud = environment.hosting.provider === 'aws' ? 'AWS' : 'Azure';
+  const problems: string[] = [];
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (service.alwaysOn) problems.push(`Service ${name}: alwaysOn is not yet supported on ${cloud}.`);
+  }
+  if (environment.database?.size) problems.push(`database.size is not yet supported on ${cloud}.`);
+  if (environment.database?.deletionProtection !== undefined) problems.push(`database.deletionProtection is not yet supported on ${cloud}.`);
+  for (const [name, storage] of Object.entries(environment.storage ?? {})) {
+    if (storage.versioning) problems.push(`Storage ${name}: versioning is not yet supported on ${cloud}.`);
+    if (storage.browserUploads) problems.push(`Storage ${name}: browserUploads is not yet supported on ${cloud}.`);
   }
   return problems;
 }

@@ -30,6 +30,27 @@ describe('proposed migration target', () => {
   });
 });
 
+// Contract: a migration must not silently drop how the app's schema is migrated.
+// The engine runs migrations as a release step, so a source that ran them through
+// the migration tool keeps its command in that form.
+describe('proposed migration target keeps schema migrations', () => {
+  const propose = (migrations: unknown) => proposeTargetEnvironment({
+    hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web', startCommand: 'sh scripts/start.sh' } },
+    database: { provider: 'railway', engine: 'postgres' }, envVars: {}, email: { enabled: false }, migrations,
+  } as unknown as EnvironmentSpec, {}) as unknown as Record<string, any>;
+
+  it('carries a tool-mode migration command over as a release command', () => {
+    expect(propose({ mode: 'tool', command: 'alembic upgrade head' }).migrations).toEqual({ mode: 'releaseCommand', command: 'alembic upgrade head' });
+  });
+
+  it('keeps a release command as it is and invents nothing when there is no command', () => {
+    expect(propose({ mode: 'releaseCommand', command: 'npm run migrate', runInDeploy: true }).migrations).toEqual({ mode: 'releaseCommand', command: 'npm run migrate', runInDeploy: true });
+    expect(propose({ mode: 'tool' }).migrations).toBeUndefined();
+    expect(propose({ mode: 'none' }).migrations).toBeUndefined();
+    expect(propose(undefined).migrations).toBeUndefined();
+  });
+});
+
 describe('migrated settings', () => {
   it('never copies a setting that points at the source database or cache, whatever its name', () => {
     expect(pointsAtSourceData('postgresql://user:pw@roundhouse.proxy.rlwy.net:5432/railway')).toBe(true);

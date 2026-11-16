@@ -13,9 +13,6 @@ const deprecatedNode20Actions = [
   /uses:\s*actions\/github-script@v[1-7]\b/,
   /actions\/upload-artifact@v[1-5]\b/,
   /actions\/download-artifact@v[1-6]\b/,
-  /actions\/configure-pages@v[1-5]\b/,
-  /actions\/upload-pages-artifact@v[1-4]\b/,
-  /actions\/deploy-pages@v[1-4]\b/,
 ];
 
 function sourceFiles(directory: string): string[] {

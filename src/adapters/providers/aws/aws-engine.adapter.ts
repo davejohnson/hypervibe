@@ -64,7 +64,7 @@ providerRegistry.register({
     setupHelpUrl: 'https://console.aws.amazon.com/',
     maturity: {
       lifecycle: {
-        hosting: { status: 'planned', reason: 'The OpenTofu AWS engine is being built; setup creates Hypervibe\'s access only.' },
+        hosting: { status: 'planned', reason: 'The OpenTofu engine manages AWS infrastructure; this connection provides Hypervibe\'s access only.' },
       },
     },
   },

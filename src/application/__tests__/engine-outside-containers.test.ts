@@ -12,6 +12,8 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { OpenTofuEngine } from '../../adapters/engine/opentofu/engine.js';
 import * as install from '../../adapters/engine/opentofu/install.js';
 import type { EngineConfiguration } from '../../domain/ports/infrastructure-engine.port.js';
+vi.mock('../../adapters/providers/gcp/gcp-image-repository.js', async (original) => ({ ...await original<typeof import('../../adapters/providers/gcp/gcp-image-repository.js')>(),
+  observeImageRepository: async () => ({ state: 'present' as const }) }));
 
 let directory: string;
 beforeEach(() => {
@@ -83,6 +85,15 @@ describe('outside keys under the engine container boundary', () => {
     expect(await planInfrastructureEngine(f.ctx, params)).not.toHaveProperty('blocked');
     expect(JSON.stringify(f.configurations.at(-1)!.files['cloudrun.tf.json'])).toContain('"version":"7"');
     expect(f.fetch.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+  });
+
+  it('plans without a value for a key declared required: false, and leaves it out of the services', async () => {
+    const f = fixture();
+    const spec = projectSpecSchema.parse({ ...f.spec, secrets: { API_KEY: { ...f.spec.secrets!.API_KEY, required: false } } });
+    f.setState('empty');
+    const planned = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' });
+    expect(planned).not.toHaveProperty('blocked');
+    expect(JSON.stringify(f.configurations.at(-1)!.files['cloudrun.tf.json'])).not.toContain('secret_key_ref');
   });
 
   it('preserves the migration container round before its private value transfer', async () => {

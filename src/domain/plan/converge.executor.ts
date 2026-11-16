@@ -42,6 +42,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   billable: z.boolean().optional(),
   requiresConfirm: z.boolean().optional(),
   dependsOn: z.array(z.string().min(1)).optional(),
+  background: z.boolean().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 }).passthrough().superRefine((action, ctx) => {
   const billableDataResource = ['database', 'cache', 'storage', 'volume'].includes(action.resource.kind);
@@ -296,7 +297,7 @@ export const planRunDocumentSchema = z.object({
   if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
-    'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild',
+    'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild', 'awsDatabaseDrop',
     'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
@@ -955,40 +956,17 @@ export class ConvergeExecutor {
     }
 
     const completed = new Set<string>();
-    const segmentResults = new Map<string, EngineSegmentResult>();
+    const segmentResults = new Map<string, Promise<EngineSegmentResult>>();
+    // Background actions still running; dependents and the end of apply wait for them.
+    const inFlight = new Map<string, Promise<void>>();
+    const backgroundSegments = new Set<string>();
     let failed = false;
     let pending = false;
     let blocked = false;
     let firstError: string | undefined;
+    const awaitInFlight = async (ids: string[]) => { await Promise.all(ids.flatMap((id) => inFlight.get(id) ?? [])); };
 
-    for (const action of ordered) {
-      // Members of an already-executed engine plan report their real outcome,
-      // even after an earlier failure: the engine may have changed them.
-      const executedSegment = engineSegmentOf(action);
-      const alreadyExecuted = executedSegment !== undefined && segmentResults.has(executedSegment.id);
-      if (!alreadyExecuted && (failed || pending || blocked)) {
-        const state = failed ? 'failure' : pending ? 'pending result' : 'blocked result';
-        receipts.push({ actionId: action.id, status: 'aborted', message: `Skipped after earlier ${state}` });
-        continue;
-      }
-      if (action.type === 'noop') {
-        receipts.push({ actionId: action.id, status: 'skipped_noop' });
-        completed.add(action.id);
-        continue;
-      }
-      // A dependency that was skipped (not completed) blocks dependents.
-      const unmetDep = alreadyExecuted ? undefined : (action.dependsOn ?? []).find(
-        (dep) => ordered.some((a) => a.id === dep) && !completed.has(dep)
-      );
-      if (unmetDep) {
-        receipts.push({
-          actionId: action.id,
-          status: 'aborted',
-          message: `Dependency "${unmetDep}" did not complete`,
-        });
-        continue;
-      }
-
+    const execute = async (action: PlanAction): Promise<void> => {
       const recordReceipt = (status: ActionReceiptStatus, message?: string, error?: string, data?: Record<string, unknown>) => {
         receipts.push({ actionId: action.id, status, message, error, data });
         this.runRepo.addReceipt(applyRun.id, {
@@ -1016,18 +994,17 @@ export class ConvergeExecutor {
           if (!segmentResult) {
             const members = ordered.filter((candidate) => engineSegmentOf(candidate)?.id === segment.id);
             const memberIds = new Set(members.map((member) => member.id));
-            const externalDep = members.flatMap((member) => member.dependsOn ?? [])
-              .find((dep) => !memberIds.has(dep) && ordered.some((a) => a.id === dep) && !completed.has(dep));
-            if (!params.segmentHandler) {
-              segmentResult = { outcomes: {}, diagnostics: ['This apply path cannot execute infrastructure-engine plans. Re-run hv_plan.'] };
-            } else if (externalDep) {
-              segmentResult = { outcomes: {}, diagnostics: [`Engine plan prerequisite "${externalDep}" has not completed.`] };
-            } else {
-              segmentResult = await params.segmentHandler(segment, members, { applyRunId: applyRun.id });
-            }
+            const external = members.flatMap((member) => member.dependsOn ?? []).filter((dep) => !memberIds.has(dep));
+            segmentResult = (async (): Promise<EngineSegmentResult> => {
+              await awaitInFlight(external);
+              const externalDep = external.find((dep) => ordered.some((a) => a.id === dep) && !completed.has(dep));
+              if (!params.segmentHandler) return { outcomes: {}, diagnostics: ['This apply path cannot execute infrastructure-engine plans. Re-run hv_plan.'] };
+              if (externalDep) return { outcomes: {}, diagnostics: [`Engine plan prerequisite "${externalDep}" has not completed.`] };
+              return params.segmentHandler(segment, members, { applyRunId: applyRun.id });
+            })();
             segmentResults.set(segment.id, segmentResult);
           }
-          result = engineSegmentActionResult(action, segment, segmentResult);
+          result = engineSegmentActionResult(action, segment, await segmentResult);
         } else {
           result = await params.handler(action, { applyRunId: applyRun.id });
         }
@@ -1042,15 +1019,52 @@ export class ConvergeExecutor {
           recordReceipt('succeeded', result.message, undefined, result.data);
         } else {
           failed = true;
-          firstError = result.error ?? result.message;
+          firstError ??= result.error ?? result.message;
           recordReceipt('failed', result.message, result.error, result.data);
         }
       } catch (error) {
         failed = true;
-        firstError = error instanceof Error ? error.message : String(error);
-        recordReceipt('failed', undefined, firstError);
+        firstError ??= error instanceof Error ? error.message : String(error);
+        recordReceipt('failed', undefined, error instanceof Error ? error.message : String(error));
       }
+    };
+
+    for (const action of ordered) {
+      // Members of an already-executed engine plan report their real outcome,
+      // even after an earlier failure: the engine may have changed them.
+      const executedSegment = engineSegmentOf(action);
+      const alreadyExecuted = executedSegment !== undefined && segmentResults.has(executedSegment.id);
+      if (!alreadyExecuted) await awaitInFlight(action.dependsOn ?? []);
+      if (!alreadyExecuted && (failed || pending || blocked)) {
+        const state = failed ? 'failure' : pending ? 'pending result' : 'blocked result';
+        receipts.push({ actionId: action.id, status: 'aborted', message: `Skipped after earlier ${state}` });
+        continue;
+      }
+      if (action.type === 'noop') {
+        receipts.push({ actionId: action.id, status: 'skipped_noop' });
+        completed.add(action.id);
+        continue;
+      }
+      // A dependency that was skipped (not completed) blocks dependents.
+      const unmetDep = alreadyExecuted ? undefined : (action.dependsOn ?? []).find(
+        (dep) => ordered.some((a) => a.id === dep) && !completed.has(dep)
+      );
+      if (unmetDep) {
+        receipts.push({
+          actionId: action.id,
+          status: 'aborted',
+          message: `Dependency "${unmetDep}" did not complete`,
+        });
+        continue;
+      }
+
+      // The other members of a background engine plan share its run, so they wait in the background too.
+      const background = action.background === true || (executedSegment !== undefined && backgroundSegments.has(executedSegment.id));
+      if (background && executedSegment) backgroundSegments.add(executedSegment.id);
+      if (background) inFlight.set(action.id, execute(action));
+      else await execute(action);
     }
+    await Promise.all(inFlight.values());
 
     const runStatus = failed ? 'failed' : blocked ? 'blocked' : pending ? 'pending' : 'succeeded';
     this.runRepo.updateStatus(applyRun.id, runStatus, firstError);

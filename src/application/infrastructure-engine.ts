@@ -1,5 +1,6 @@
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
@@ -16,6 +17,7 @@ import { registerEngineWebServiceResolver } from '../domain/services/domain-targ
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
@@ -84,7 +86,8 @@ export const ENGINE_DATABASE_CREDENTIAL_OPERATION = 'gcpDatabaseCredentialEnsure
 export const ENGINE_WORKER_WAKE_GRANT_OPERATION = 'gcpWorkerWakeGrant';
 export const ENGINE_WORKER_ACCESS_BLOCKER = 'On-demand workers need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["workers"], or run hv_connections provider="cloudrun" action="prepare" workerAccess="lifecycle" (preview, then confirm).';
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
-export const ENGINE_DATABASE_URL_KEY = 'DATABASE_URL';
+import { ENGINE_DATABASE_URL_KEY, engineSecretId } from '../domain/services/engine-secret-id.js';
+export { ENGINE_DATABASE_URL_KEY, engineSecretId };
 const ENGINE_DATABASE_NAME = 'app';
 /** Google's public sample container, pinned by digest; serves until the first release. */
 export const ENGINE_HOLDING_IMAGE = 'us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7';
@@ -113,12 +116,6 @@ export function engineSecretKeys(spec: ProjectSpec, environmentName: string): st
     .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(environmentName))
     .map(([key]) => key)
     .sort();
-}
-
-export function engineSecretId(environmentName: string, key: string): string {
-  const id = `hv-${environmentName}-${key}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
-  if (id.length > 255) throw new Error(`Secret id for ${key} is too long.`);
-  return id;
 }
 
 function labelValue(value: string): string {
@@ -287,6 +284,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
+        ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -700,6 +698,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ?? lastAttemptedDatabaseInstance(context.environment.id)
     ?? `hv-${environmentName}-db-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const databaseSecretId = engineSecretId(environmentName, ENGINE_DATABASE_URL_KEY);
+  const databaseShape = databaseSpec ? gcpDatabaseShape(environmentName, databaseSpec) : undefined;
+  if (!databaseSpec && engineBinding.database) {
+    const name = engineBinding.database.instanceName;
+    const blocker = await databaseRemovalBlocker(name, () => sqlAdmin(token, context.gcpProjectId, `instances/${name}`));
+    if (blocker) return { blocked: [blocker] };
+  }
   let databaseCredential: DatabaseCredentialObservation = { ready: false, generation: 0 };
   if (databaseSpec) {
     const observed = await observeDatabaseCredential(token, context.gcpProjectId, databaseSecretId, instanceName, labels['hv-environment']);
@@ -740,7 +744,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
         return { blocked: [`Secret Manager already has ${secretId}, but its ownership does not match this environment.`] };
       }
     } else outsideContainersMissing = true;
-    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) { missingKeys.push(key); continue; }
+    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) {
+      // required: false means the app runs without it: no value never blocks, and services simply do not receive it.
+      const declared = spec.secrets?.[key];
+      if (!(declared && 'required' in declared && declared.required === false)) missingKeys.push(key);
+      continue;
+    }
     secretVersions[key] = observed.value.latestVersion;
   }
   if (missingKeys.length && !outsideContainersMissing) {
@@ -866,7 +875,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       secretVersions,
     }),
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
-    ...(databaseSpec ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady,
+    ...(databaseSpec && databaseShape ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady,
+      tier: databaseShape.tier, deletionProtection: databaseShape.deletionProtection,
+      retainedBackups: databaseShape.retainedBackups, transactionLogDays: databaseShape.transactionLogDays,
       ...(databaseSpec.version ? { majorVersion: databaseSpec.version } : {}) } } : {}),
     ...(!databaseSpec && engineBinding.database ? { retiredDatabase: true } : {}),
     ...(cacheSpec ? { cache: {
@@ -887,6 +898,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
       ...(storage.access === 's3' ? { s3: { wired: s3Ready.includes(name) } } : {}),
+      ...(storage.versioning ? { versioning: true } : {}),
+      ...(storage.browserUploads ? { browserUploads: true } : {}),
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
@@ -919,6 +932,21 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
+
+  // Releases push to the repository in this environment's region; project setup made only one.
+  const repository = await observeImageRepository(token, context.gcpProjectId, context.region);
+  if (repository.state === 'unknown') return { blocked: [repository.reason] };
+  let imageRepository: { planId: string; state: EngineStateIdentity } | undefined;
+  let imageRepositoryActions: PlanAction[] = [];
+  if (repository.state === 'absent') {
+    imageRepository = { planId: crypto.randomUUID(), state: imageRepositoryState(project.id, context.region) };
+    const repositoryPlanned = await engine.plan({ backend: gcpEngineBackend, configuration: imageRepositoryConfiguration(context.gcpProjectId, context.region),
+      auth: context.auth, state: imageRepository.state, planId: imageRepository.planId });
+    if (!repositoryPlanned.ok) return { blocked: [redactEngineOutput(repositoryPlanned.error, context.auth.redact)] };
+    if (repositoryPlanned.blockers.length) return { blocked: repositoryPlanned.blockers };
+    imageRepositoryActions = repositoryPlanned.actions.filter((action) => action.type !== 'noop');
+    if (!imageRepositoryActions.length) imageRepository = undefined;
+  }
 
   const domainPrerequisites = domainActions.before.filter((a) => a.type !== 'noop').map((a) => a.id);
   const serviceActions = planned.actions.map((action) => {
@@ -991,11 +1019,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // The complete engine segment creates containers before operational value writes.
-  const actions = [...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  const actions = [...imageRepositoryActions, ...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const warnings = [
     'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
+    ...(databaseShape && databaseAction && databaseAction.type !== 'noop' ? [databaseShape.summary] : []),
     ...(cacheSpec && !cacheReady && anyService
       ? ['Services are connected to Redis in the next infrastructure plan, once Hypervibe has published its URL.'] : []),
     ...(databaseSpec && !databaseCredentialReady && anyService
@@ -1008,6 +1037,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
+      ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
       domainClaims: { ...domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
         [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
@@ -1092,6 +1122,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
+    imageRepository?: { planId: string; state: EngineStateIdentity };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {
@@ -1168,6 +1199,14 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
     },
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
+      if (reviewed.imageRepository && segment.id === `opentofu:${reviewed.imageRepository.planId}`) {
+        if (JSON.stringify(reviewed.imageRepository.state) !== JSON.stringify(imageRepositoryState(params.project.id, context.region))) {
+          return { outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])), diagnostics: ['The reviewed image repository targets a different region. Re-run hv_plan.'] };
+        }
+        const outcome = await engine.apply({ backend: gcpEngineBackend, auth: context.auth, state: reviewed.imageRepository.state,
+          planId: reviewed.imageRepository.planId, segment: { ...segment, addresses }, approvedAddresses: addresses });
+        return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
+      }
       const current = await serviceGenerations(token, context, environmentName);
       if ('blocked' in current || JSON.stringify(current.generations) !== JSON.stringify(reviewed.observedGenerations ?? {})) {
         return {
@@ -1553,7 +1592,9 @@ async function releaseOne(
   const serviceSpec = spec.environments[environmentName]!.services[name]!;
   const build = await buildServiceImage(context, project, spec, environmentName, name, source, builtImages);
   if (!build.success) return { service: name, status: 'failed', message: build.error, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}) };
-  const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri, kind);
+  // Scheduled jobs keep their command in infrastructure; services and workers get theirs with the image.
+  const released = await releaseImage(await context.adapter.engineAccessToken(), context, resource, build.imageUri, kind,
+    kind === 'jobs' ? undefined : { startCommand: serviceSpec.startCommand });
   const result: EngineReleaseResult = { service: name, imageUri: build.imageUri, ...(build.logsUrl ? { buildLogsUrl: build.logsUrl } : {}), ...released };
   if (released.status === 'released' && released.url && serviceSpec.workloadKind !== 'worker') {
     const path = serviceSpec.healthCheckPath ?? '/';

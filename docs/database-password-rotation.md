@@ -121,7 +121,7 @@ replacement deployments, plus complete active deployment coverage. One consumer'
 receipt cannot discharge another's requirement. Missing snapshots, partial scope
 and insufficient retirement evidence stay unknown or pending; deployment success
 alone cannot finish rotation. Traffic-only coverage currently limits Cloud Run
-services and ECS Express. See [runtime provider evidence](runtime-credential-providers.md#database-consumer-activation-evidence)
+services. See [runtime provider evidence](runtime-credential-providers.md#database-consumer-activation-evidence)
 for native activation and retirement boundaries. Application business operations
 still require their own verification.
 

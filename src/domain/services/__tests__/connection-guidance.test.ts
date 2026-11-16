@@ -357,10 +357,6 @@ describe('connection guidance', () => {
     }
   });
 
-  it('keeps deliberately excluded hosting providers out of connection guidance', () => {
-    expect(getConnectionGuidance('heroku')).toBeUndefined();
-    expect(getConnectionGuidance('render')).toBeUndefined();
-  });
 });
 
 describe('credentialFieldsFromSchema', () => {

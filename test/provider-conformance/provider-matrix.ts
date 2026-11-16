@@ -217,7 +217,7 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     credentials: awsHostingCredentials,
     fixtureHostingProvider: 'aws',
     implementationNote:
-      'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+      'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'database',
@@ -239,7 +239,7 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     credentials: azureCredentials,
     fixtureHostingProvider: 'azure',
     implementationNote:
-      'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+      'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
 ];
 
@@ -264,7 +264,7 @@ export const storageProviderContracts: StorageProviderContract[] = [
     service: 'Amazon S3',
     status: 'planned',
     credentials: awsHostingCredentials,
-    implementationNote: 'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+    implementationNote: 'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'storage',
@@ -274,7 +274,7 @@ export const storageProviderContracts: StorageProviderContract[] = [
     status: 'planned',
     credentials: gcpHostingCredentials,
     connectionAlias: 'cloudrun',
-    implementationNote: 'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+    implementationNote: 'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'storage',
@@ -283,7 +283,7 @@ export const storageProviderContracts: StorageProviderContract[] = [
     service: 'Blob Storage',
     status: 'planned',
     credentials: azureHostingCredentials,
-    implementationNote: 'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+    implementationNote: 'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'storage',

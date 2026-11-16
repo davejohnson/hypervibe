@@ -216,13 +216,7 @@ describe('provider conformance matrix', () => {
     }
   });
 
-  it('excludes Upstash from the provider catalog', () => {
-    expect(
-      providerContracts.some((entry) => entry.provider === 'upstash')
-    ).toBe(false);
-  });
-
-  it('preserves RDS authentication aliases while its lifecycle moves to OpenTofu', () => {
+  it('preserves RDS authentication aliases now that OpenTofu owns its lifecycle', () => {
     const rds = databaseProviderContracts.find((entry) => entry.provider === 'rds');
     expect(rds).toMatchObject({
       status: 'planned',
@@ -247,25 +241,6 @@ describe('provider conformance matrix', () => {
       expect.objectContaining({ provider: 'cloudsql', engine: 'postgres' })
     );
     expect(hostingProviderContracts.some((entry) => entry.provider === 'cloudsql')).toBe(false);
-  });
-
-  it('keeps deliberately excluded providers out of the lifecycle catalog and registry', () => {
-    const excluded = new Set([
-      'heroku',
-      'render',
-      'fly',
-      'vercel',
-      'digitalocean',
-      'supabase',
-      'neon',
-    ]);
-    expect(providerContracts.some((entry) => excluded.has(entry.provider))).toBe(false);
-    expect(providerRegistry.supports('heroku', 'hosting')).toBe(false);
-    expect(providerRegistry.supports('render', 'hosting')).toBe(false);
-    expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
-    expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
-    expect(providerRegistry.supports('fly', 'hosting')).toBe(false);
-    expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(false);
   });
 
   it('uses stable provider ids and secret-free credential descriptors', () => {

@@ -316,9 +316,6 @@ interchangeable or disabling stronger protection to match a label.
 | Hosting provider and backing store | Native evidence and limits | Hypervibe daily-policy coverage |
 | --- | --- | --- |
 | Railway volume | [Native schedules](https://docs.railway.com/volumes/backups) include daily backups retained six days. Wiping the volume also removes its backups; this is not an independent off-provider copy. | Daily schedule observation and additive configuration for the exact bound volume. |
-| ECS Express / regional EFS | [AWS Backup](https://docs.aws.amazon.com/efs/latest/ug/awsbackup.html) offers daily automatic backups with a default 35-day window. API-created regional EFS does not enable these automatically; Hypervibe creates that class through the API. | Unsupported by this adapter capability. |
-| Cloud Run / BASIC_HDD Filestore | [Standard backups](https://docs.cloud.google.com/filestore/docs/backups) support this tier; native enhanced scheduling excludes Basic. Google documents [scheduler/function automation](https://docs.cloud.google.com/filestore/docs/schedule-backups-cloud-scheduler). | Unsupported by this adapter capability; no automatic tier upgrade or scheduler creation. |
-| Azure Container Apps / SMB Azure Files | [Azure Backup](https://learn.microsoft.com/en-us/azure/backup/quick-backup-azure-files-vault-tier-portal) supports daily schedules. Snapshot tier stays with the source; vaulted backup copies data to a vault. [Region/protocol limits](https://learn.microsoft.com/en-us/azure/backup/azure-file-share-support-matrix) apply. | Unsupported by this adapter capability. |
 
 ### Object storage
 

@@ -27,7 +27,8 @@ describe('Cloud Run engine configuration', () => {
     const service = (configuration.files['cloudrun.tf.json'] as any).resource.google_cloud_run_v2_service.web;
     const env = service.template[0].containers[0].env;
     expect(env).toContainEqual({ name: 'API_KEY', value_source: [{ secret_key_ref: [{ secret: 'web-api-key', version: '3' }] }] });
-    expect(service.lifecycle[0].ignore_changes).toEqual(['template[0].containers[0].image', 'client', 'client_version']);
+    // The release owns the image and the command that starts it; nothing else.
+    expect(service.lifecycle[0].ignore_changes).toEqual(['template[0].containers[0].image', 'template[0].containers[0].command', 'template[0].containers[0].args', 'client', 'client_version']);
     expect(configuration.resources).toHaveProperty('google_cloud_run_v2_service_iam_member.web_public');
   });
 

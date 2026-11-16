@@ -51,7 +51,6 @@ implementation, not the absence of a native provider feature.
 | --- | --- | --- |
 | Railway | Project + environment + service; additive variable upsert with `skipDeploys: true`; verify exact values after acknowledgment. [Variables and rotation](https://docs.railway.com/integrations/api/manage-variables#rotate-secrets), pinned GraphQL schema `VariableCollectionUpsertInput`. | Ready for live validation; real serialized transport and lifecycle tests. |
 | Cloud Run | Environment variables belong to a service revision; configuration changes create revisions. [Environment variables](https://docs.cloud.google.com/run/docs/configuring/services/environment-variables). | Unsupported; current writer updates workload revisions. |
-| ECS Express | Service ARN in account/region/cluster; updates create a revision and rolling deployment. [UpdateExpressGatewayService](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateExpressGatewayService.html). | Unsupported; current writer delegates to deploy. |
 | Azure Container Apps | App secrets can change without a revision, but environment references belong to revisions. [Manage secrets](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets). | Unsupported; current writer delegates to deploy rather than a proven secret-only operation. |
 
 Tests must pin this named roster against the hosting registry and the adapter

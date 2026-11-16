@@ -73,7 +73,16 @@ export async function releaseJobImage(token: string, target: CloudRunTarget, res
   return { status: 'released', message: `Released ${imageUri.split('@')[0]} to scheduled job ${resource}; its next run uses it.` };
 }
 
-export async function releaseImage(token: string, target: CloudRunTarget, resource: string, imageUri: string, kind: WorkloadKind = 'services'): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
+/** The container command for a declared start command; undefined means the image's own. */
+export function startCommandFields(startCommand: string | undefined): { command?: string[]; args?: string[] } {
+  return startCommand?.trim() ? { command: ['/bin/sh'], args: ['-lc', startCommand.trim()] } : {};
+}
+
+export async function releaseImage(
+  token: string, target: CloudRunTarget, resource: string, imageUri: string, kind: WorkloadKind = 'services',
+  /** Services and workers: the declared start command travels with the image (absent: the image's own). */
+  start?: { startCommand: string | undefined },
+): Promise<Pick<EngineReleaseResult, 'status' | 'message' | 'url'>> {
   if (kind === 'jobs') return releaseJobImage(token, target, resource, imageUri);
   // Services and worker pools share the template shape and the masked image PATCH.
   const url = `${API}/projects/${target.gcpProjectId}/locations/${target.region}/${kind}/${resource}`;
@@ -85,7 +94,12 @@ export async function releaseImage(token: string, target: CloudRunTarget, resour
   const containers = Array.isArray(current.template?.containers) ? current.template.containers.map((c: Record<string, unknown>) => ({ ...c })) : [];
   if (containers.length !== 1) return { status: 'failed', message: `Service ${resource} must have exactly one container for an image release.` };
   containers[0].image = imageUri;
-  // Only the image changes; every other field is sent back exactly as observed.
+  if (start) {
+    delete containers[0].command;
+    delete containers[0].args;
+    Object.assign(containers[0], startCommandFields(start.startCommand));
+  }
+  // Only the image and its start command change; every other field is sent back exactly as observed.
   const patch = await fetchWithRetry(`${url}?updateMask=template.containers`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
