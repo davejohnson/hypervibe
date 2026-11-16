@@ -733,6 +733,48 @@ it('rejects a runtime service account from a different GCP project', async () =>
     expect(body.filter).toContain('severity>=WARNING');
   });
 
+  it('reads logs from the environment region and from worker pools', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project', region: 'us-central1',
+      credentials: JSON.stringify({ type: 'service_account', project_id: 'gcp-project', private_key_id: 'key-id', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com', client_id: 'client-id',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth', token_uri: 'https://oauth2.googleapis.com/token' }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    const fetchMock = vi.fn(async (_input: string | URL, _init?: RequestInit) => Response.json({ entries: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const now = new Date();
+    const environment = { id: 'env-1', projectId: 'project-1', name: 'staging', createdAt: now, updatedAt: now,
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-west1',
+        services: { web: { serviceId: 'web-abc' }, worker: { workerPoolName: 'worker-abc' } } } };
+
+    await adapter.getLogs(environment as unknown as Parameters<typeof adapter.getLogs>[0], 'web');
+    await adapter.getLogs(environment as unknown as Parameters<typeof adapter.getLogs>[0], 'worker');
+
+    const filters = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).filter as string);
+    expect(filters[0]).toContain('resource.labels.location="us-west1"');
+    expect(filters[0]).toContain('resource.labels.service_name="web-abc"');
+    expect(filters[1]).toContain('resource.labels.location="us-west1"');
+    expect(filters[1]).toContain('resource.type="cloud_run_workerpool"');
+    expect(filters[1]).toContain('resource.labels.workerpool_name="worker-abc"');
+
+    const urls: string[] = [];
+    let condition: Record<string, unknown> | undefined = { state: 'CONDITION_SUCCEEDED' };
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      urls.push(String(input));
+      return condition ? Response.json({ terminalCondition: condition }) : new Response('', { status: 404 });
+    }));
+    const status = (id: string) => adapter.getDeployStatus(environment as unknown as Parameters<typeof adapter.getDeployStatus>[0], id);
+    expect(await status('worker-abc')).toEqual({ status: 'deployed' });
+    expect(urls[0]).toBe('https://run.googleapis.com/v2/projects/gcp-project/locations/us-west1/workerPools/worker-abc');
+    condition = { state: 'CONDITION_FAILED', message: 'container exited' };
+    expect(await status('worker-abc')).toEqual({ status: 'failed', reason: 'container exited' });
+    condition = undefined;
+    expect(await status('worker-abc')).toMatchObject({ status: 'unknown', reason: expect.stringContaining('absent in region us-west1') });
+  });
+
   it('explains the required IAM roles when Cloud Logging rejects log view access', async () => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({
