@@ -40,6 +40,14 @@ export function engineOutsideKeys(spec: ProjectSpec, environmentName: string, im
   return [...new Set([...declared, ...importedSecrets])].sort();
 }
 
+/** Outside keys that authenticate private package installs. They are mounted into image builds and never given to running services. */
+export const BUILD_TOKEN_KEYS = ['NODE_AUTH_TOKEN', 'NPM_TOKEN'] as const;
+export const isBuildTokenKey = (key: string): boolean => (BUILD_TOKEN_KEYS as readonly string[]).includes(key);
+/** The package token this environment declares, if any. */
+export function buildTokenKey(spec: ProjectSpec, environmentName: string): string | undefined {
+  return engineOutsideKeys(spec, environmentName).find(isBuildTokenKey);
+}
+
 /** The outside keys with no value yet; unknown stops everything rather than guessing absence. */
 export async function missingOutsideKeys(store: EngineSecretStore, keys: string[]): Promise<{ missing: string[] } | { blocked: string }> {
   const missing: string[] = [];

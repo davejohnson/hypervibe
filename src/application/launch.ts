@@ -1,6 +1,6 @@
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
-import { collectOutsideKeys } from './engine-secrets.js';
+import { buildTokenKey, collectOutsideKeys } from './engine-secrets.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
@@ -525,9 +525,11 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
       try { return { ...target, generatedDockerfile: generatedContainerDockerfile(runtime, environmentSpec.services[target.name]?.startCommand) }; } catch { return target; }
     });
   const branch = environmentSpec.deploy?.branch ?? 'main';
+  const packageTokenSecret = buildTokenKey(params.spec, params.environmentName);
   const content = renderReleaseWorkflow({
     environmentName: params.environmentName, branch, gcpProjectId: context.gcpProjectId, region: context.region,
     provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,
+    ...(packageTokenSecret ? { packageTokenSecret } : {}),
   });
   return { ...writeReleaseWorkflow(params.sourceDirectory, params.environmentName, content), branch };
 }

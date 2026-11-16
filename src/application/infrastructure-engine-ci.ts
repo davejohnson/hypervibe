@@ -73,9 +73,11 @@ export interface ReleaseWorkflowInput {
   services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
     /** Services and workers: the declared start command, applied with each release. */
     startCommand?: string }>;
+  /** Name of the repository's Actions secret holding a private-package token; mounted into builds as npm_token. */
+  packageTokenSecret?: string;
 }
 
-/** A GitHub Actions workflow with no stored credentials; every value is non-secret. */
+/** A GitHub Actions workflow with no stored cloud credentials; a package token is referenced only by its repository secret name. */
 export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
   const lines: string[] = [
@@ -109,19 +111,22 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     '      - uses: google-github-actions/setup-gcloud@v3',
     `      - run: gcloud auth configure-docker ${input.region}-docker.pkg.dev --quiet`,
   ];
+  if (input.packageTokenSecret && !/^[A-Z][A-Z0-9_]*$/.test(input.packageTokenSecret)) throw new Error('Package token secret name is not supported in a workflow.');
+  const secret = input.packageTokenSecret ? ' --secret id=npm_token,env=NPM_TOKEN' : '';
   for (const service of input.services) {
     const id = service.name.replace(/[^A-Za-z0-9_]/g, '_');
     const generated = service.generatedDockerfile ? `.hypervibe-${id}.Dockerfile` : undefined;
     lines.push(
       `      - name: Build ${service.name}`,
       `        id: build_${id}`,
+      ...(input.packageTokenSecret ? ['        env:', `          NPM_TOKEN: \${{ secrets.${input.packageTokenSecret} }}`] : []),
       '        run: |',
       // A repository Dockerfile wins; otherwise the service's generated one (with its own start command).
       ...(generated ? [
         `          DOCKERFILE=Dockerfile`,
         `          if [ ! -f Dockerfile ]; then DOCKERFILE=${generated}; printf '%s' '${Buffer.from(service.generatedDockerfile!, 'utf8').toString('base64')}' | base64 --decode > "$DOCKERFILE"; fi`,
-        `          DOCKER_BUILDKIT=1 docker build -f "$DOCKERFILE" -t ${service.image}:$GITHUB_SHA .`,
-      ] : [`          docker build -t ${service.image}:$GITHUB_SHA .`]),
+        `          DOCKER_BUILDKIT=1 docker build${secret} -f "$DOCKERFILE" -t ${service.image}:$GITHUB_SHA .`,
+      ] : [`          ${secret ? 'DOCKER_BUILDKIT=1 ' : ''}docker build${secret} -t ${service.image}:$GITHUB_SHA .`]),
       `          docker push ${service.image}:$GITHUB_SHA`,
       `          echo "digest=$(gcloud artifacts docker images describe ${service.image}:$GITHUB_SHA --format='value(image_summary.digest)')" >> "$GITHUB_OUTPUT"`,
       `      - name: Release ${service.name}`,
