@@ -106,8 +106,11 @@ decision in the pull request. Git history preserves earlier policy.
 Match verification to the affected behavior. Documentation changes need content
 and link review; runtime changes need focused behavioral checks and required CI.
 For bugs, follow the [evidence method](docs/development/workflow.md#dg-135), including
-a failing boundary regression before the fix. Preserve required independent reviews
-without inventing new gates or repeating settled checks.
+a failing boundary regression before the fix. When a bug is fixed in one provider,
+check whether GCP, AWS and Azure share it: fix the others in the same change or
+file an issue, and say in the pull request what was checked and how (read or run).
+Preserve required independent reviews without inventing new gates or repeating
+settled checks.
 
 Before recommending chat closure, commit and push task changes, include them in a
 PR, and verify every task worktree is clean. Preserve unrelated edits; report any
