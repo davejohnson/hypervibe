@@ -103,6 +103,41 @@ describe('repo-collaboration.service', () => {
     expect(result.warnings[0]).toContain('collaborator invitations are manual');
   });
 
+  it('refuses to apply settings that changed after the plan was reviewed', async () => {
+    seedGitHubConnection();
+    const { project, spec } = seedProjectAndSpec();
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'davejohnson', scopes: ['repo'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'getBranchProtection').mockResolvedValue(null);
+    const writeFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false });
+    const writeLabel = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateLabel').mockResolvedValue({ created: true, updated: false });
+    const protect = vi.spyOn(GitHubAdapter.prototype, 'updateBranchProtection').mockResolvedValue();
+    const reviewed = (await planGitHubCollaboration({ project, spec, environmentName: 'production' })).action!;
+
+    // Each edit changes a GitHub write the reviewed plan did not describe.
+    const edits: Array<(collaboration: NonNullable<ProjectSpec['collaboration']>) => void> = [
+      (collaboration) => { collaboration.pullRequests.enforceAdmins = !collaboration.pullRequests.enforceAdmins; },
+      (collaboration) => { collaboration.pullRequests.requireReview = true; collaboration.pullRequests.requiredReviewers = 3; },
+      (collaboration) => { collaboration.pullRequests.targetBranch = 'release'; },
+      (collaboration) => { collaboration.issues.labels = [{ name: 'agent-ready', color: 'ff0000', description: 'changed' }]; },
+    ];
+    for (const edit of edits) {
+      const edited = structuredClone(spec);
+      edit(edited.collaboration!);
+      const result = await applyGitHubCollaboration({ project, spec: edited, environmentName: 'production', action: reviewed });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('hv_plan');
+    }
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(writeLabel).not.toHaveBeenCalled();
+    expect(protect).not.toHaveBeenCalled();
+
+    const unchanged = await applyGitHubCollaboration({ project, spec, environmentName: 'production', action: reviewed });
+    expect(unchanged.success).toBe(true);
+    expect(protect).toHaveBeenCalledTimes(1);
+  });
+
   it('applies collaboration setup without inviting collaborators', async () => {
     seedGitHubConnection();
     const { project, spec } = seedProjectAndSpec();
@@ -111,8 +146,11 @@ describe('repo-collaboration.service', () => {
     const writeFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false });
     const writeLabel = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateLabel').mockResolvedValue({ created: true, updated: false });
     const protect = vi.spyOn(GitHubAdapter.prototype, 'updateBranchProtection').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'getBranchProtection').mockResolvedValue(null);
+    const action = (await planGitHubCollaboration({ project, spec, environmentName: 'production' })).action!;
 
-    const result = await applyGitHubCollaboration({ project, spec, environmentName: 'production' });
+    const result = await applyGitHubCollaboration({ project, spec, environmentName: 'production', action });
 
     expect(result.success).toBe(true);
     expect(writeFile).toHaveBeenCalledWith(

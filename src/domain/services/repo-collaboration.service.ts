@@ -118,6 +118,37 @@ function desiredFiles(collaboration: CollaborationSpec): Array<{ path: string; c
   return files.map((file) => ({ ...file, hash: sha256(file.content) }));
 }
 
+function desiredBranchProtection(collaboration: CollaborationSpec) {
+  const desired = collaboration.pullRequests;
+  return {
+    requireReviews: desired.requireReview,
+    requiredReviewers: desired.requiredReviewers,
+    dismissStaleReviews: desired.dismissStaleReviews,
+    requireCodeOwnerReviews: desired.requireCodeOwnerReviews,
+    requireStatusChecks: desired.requireStatusChecks,
+    statusChecks: desired.statusChecks,
+    strictStatusChecks: desired.strictStatusChecks,
+    enforceAdmins: desired.enforceAdmins,
+    preserveStatusChecks: !desired.requireStatusChecks,
+    allowForcePushes: false,
+    allowDeletions: false,
+  };
+}
+
+/**
+ * Fingerprint of every GitHub write apply can make. The plan records it and
+ * apply recomputes it, so settings edited after review are refused.
+ */
+function reviewedSettingsHash(repo: string, collaboration: CollaborationSpec): string {
+  return sha256(JSON.stringify({
+    repository: repo,
+    files: desiredFiles(collaboration).map((file) => [file.path, file.hash]),
+    labels: desiredLabels(collaboration).map((label) => [label.name, label.color, label.description]),
+    targetBranch: collaboration.pullRequests.targetBranch,
+    branchProtection: collaboration.pullRequests.requirePr ? desiredBranchProtection(collaboration) : null,
+  }));
+}
+
 export function resolveCollaborationRepository(project: Project, spec: ProjectSpec): string | undefined {
   return spec.collaboration?.repository ?? parseGitHubRepoFromRemote(project.gitRemoteUrl) ?? undefined;
 }
@@ -291,6 +322,7 @@ export async function planGitHubCollaboration(params: {
     issueTemplatePath: ISSUE_TEMPLATE_PATH,
     pullRequestTemplatePath: GITHUB_PULL_REQUEST_TEMPLATE,
     targetBranch: collaboration.pullRequests.targetBranch,
+    reviewedSettingsHash: reviewedSettingsHash(repo, collaboration),
     collaborators: collaboration.collaborators.map((entry) => ({ username: entry.username, permission: entry.permission })),
   };
   if ('error' in adapterResult) {
@@ -380,6 +412,8 @@ export async function applyGitHubCollaboration(params: {
   project: Project;
   spec: ProjectSpec;
   environmentName: string;
+  /** The reviewed plan action. Apply makes only the writes it describes. */
+  action: PlanAction;
 }): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
   const collaboration = params.spec.collaboration;
   if (!collaboration || !shouldPlanGitHubCollaboration(params.spec, params.environmentName)) {
@@ -392,6 +426,16 @@ export async function applyGitHubCollaboration(params: {
   const parts = repoParts(repo);
   if (!parts) {
     return { success: false, message: 'GitHub repository is invalid', error: `Could not parse ${repo}.` };
+  }
+  if (
+    params.action.resource.name !== repo
+    || params.action.metadata?.reviewedSettingsHash !== reviewedSettingsHash(repo, collaboration)
+  ) {
+    return {
+      success: false,
+      message: 'GitHub settings changed after this plan was reviewed',
+      error: 'The reviewed plan no longer matches the GitHub settings in your project. Re-run hv_plan and review the new plan.',
+    };
   }
   const adapterResult = getGitHubAdapter(repo);
   if ('error' in adapterResult) {
@@ -438,19 +482,7 @@ export async function applyGitHubCollaboration(params: {
 
   let branchProtectionSynced = false;
   if (collaboration.pullRequests.requirePr) {
-    await adapter.updateBranchProtection(parts.owner, parts.repoName, collaboration.pullRequests.targetBranch, {
-      requireReviews: collaboration.pullRequests.requireReview,
-      requiredReviewers: collaboration.pullRequests.requiredReviewers,
-      dismissStaleReviews: collaboration.pullRequests.dismissStaleReviews,
-      requireCodeOwnerReviews: collaboration.pullRequests.requireCodeOwnerReviews,
-      requireStatusChecks: collaboration.pullRequests.requireStatusChecks,
-      statusChecks: collaboration.pullRequests.statusChecks,
-      strictStatusChecks: collaboration.pullRequests.strictStatusChecks,
-      enforceAdmins: collaboration.pullRequests.enforceAdmins,
-      preserveStatusChecks: !collaboration.pullRequests.requireStatusChecks,
-      allowForcePushes: false,
-      allowDeletions: false,
-    });
+    await adapter.updateBranchProtection(parts.owner, parts.repoName, collaboration.pullRequests.targetBranch, desiredBranchProtection(collaboration));
     branchProtectionSynced = true;
   }
 
