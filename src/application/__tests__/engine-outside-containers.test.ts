@@ -93,6 +93,11 @@ describe('outside keys under the engine container boundary', () => {
     f.setState('ready');
     const planned = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' });
     if ('blocked' in planned) throw new Error(planned.blocked.join('; '));
+  it('plans without a value for a key declared required: false, and leaves it out of the services', async () => {
+    const f = fixture();
+    const spec = projectSpecSchema.parse({ ...f.spec, secrets: { API_KEY: { ...f.spec.secrets!.API_KEY, required: false } } });
+    f.setState('empty');
+    const planned = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' });
     expect(planned).not.toHaveProperty('blocked');
     expect(JSON.stringify(f.configurations.at(-1)!.files['cloudrun.tf.json'])).not.toContain('secret_key_ref');
   });
