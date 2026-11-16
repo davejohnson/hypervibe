@@ -1,5 +1,6 @@
 import { execFile } from 'child_process';
 import crypto from 'crypto';
+import { LOCAL_PAGE_ICON_LINK } from '../utils/local-page-icon.js';
 import http from 'http';
 import type { AddressInfo } from 'net';
 import { servingMcpClient } from './requesting-agent.js';
@@ -55,6 +56,7 @@ export function pageShell(params: { tabTitle: string; body: string; agent: strin
   const agent = escapeHtml(params.agent);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="same-origin">
+${LOCAL_PAGE_ICON_LINK}
 <title>${escapeHtml(params.tabTitle)} · Hypervibe</title>
 <style>
 /* Matches the hosted Hypervibe app: ink background, signal green, terminal wordmark. */
@@ -176,7 +178,7 @@ export async function servePastePage(params: {
       const scriptNonce = crypto.randomBytes(16).toString('base64');
       const html = (body: string, status = 200) => response.writeHead(status, {
         'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; form-action 'self'; base-uri 'none'`,
+        'Content-Security-Policy': `default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; form-action 'self'; base-uri 'none'`,
         // same-origin, not no-referrer: under no-referrer browsers send "Origin: null" on this page's own form post.
         'Referrer-Policy': 'same-origin',
       }).end(body);
@@ -327,7 +329,7 @@ export async function serveMultiPastePage(params: {
       const scriptNonce = crypto.randomBytes(16).toString('base64');
       const html = (status = 200, finished?: string) => response.writeHead(status, {
         'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'`,
+        'Content-Security-Policy': `default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${scriptNonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'`,
         'Referrer-Policy': 'same-origin',
       }).end(renderMultiPastePage(params.spec, { nonce, scriptNonce, saved, errors, ...(finished ? { finished } : {}) }));
       if (request.method === 'GET') { html(200, entry?.settled?.message); return; }
