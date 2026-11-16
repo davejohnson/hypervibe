@@ -4,7 +4,7 @@ import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.j
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
-import { addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
   cloudRunGet, googleErrorMessage, latestWakerExecution, readCloudRunOperation, releaseImage, releaseJobImage, startCloudRunJob, workloadContainers, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -402,6 +402,12 @@ export async function gcpSecretStore(ctx: CommandContext, project: Project, spec
   return {
     name: 'Google Secret Manager', observe,
     write: async (key, value) => (await writeSecretVersion(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key), labels, value))?.message,
+    read: async (key) => {
+      const response = await accessLatestSecretVersion(await context.adapter.engineAccessToken(), context.gcpProjectId, engineSecretId(environmentName, key));
+      if (!response.ok) return { error: `Secret Manager returned HTTP ${response.status}.` };
+      const data = (await response.json() as { payload?: { data?: string } }).payload?.data;
+      return data ? { value: Buffer.from(data, 'base64').toString('utf8') } : { error: 'The secret has no value.' };
+    },
   };
 }
 
