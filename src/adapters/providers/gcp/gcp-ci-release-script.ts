@@ -1,7 +1,7 @@
 /**
  * The program a generated GitHub Actions release runs on Google Cloud: switch one
  * Cloud Run workload to a new image under its etag, wait for the rollout, and
- * check health. It mirrors releaseImage in gcp-cloud-run.client.ts and must keep
+ * check health; for a release command, also run the job and wait for it. It mirrors releaseImage in gcp-cloud-run.client.ts and must keep
  * the same guarantees; it is plain JavaScript because it runs in the workflow,
  * not in Hypervibe.
  */
@@ -33,6 +33,17 @@ if (!operation.done || operation.error) throw new Error('Rollout failed: ' + (op
 const after = await (await call(base)).json();
 const running = isJob ? after.template?.template?.containers?.[0]?.image : after.template?.containers?.[0]?.image;
 if (running !== image || (!isJob && after.latestReadyRevision !== after.latestCreatedRevision)) throw new Error('The new image is not active.');
+// A release command (migrations) runs now on the new image and must succeed before any service is switched.
+if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
+  const started = await call(base + ':run', { method: 'POST', body: '{}' });
+  if (!started.ok) throw new Error('The release command could not start (HTTP ' + started.status + '): ' + ((await started.json().catch(() => ({}))).error?.message ?? 'no details') + '. No service was switched.');
+  let run = await started.json();
+  for (let i = 0; i < 360 && !run.done; i++) { await new Promise((r) => setTimeout(r, 5000)); const polled = await call('https://run.googleapis.com/v2/' + run.name); if (polled.ok) run = await polled.json(); }
+  if (!run.done) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
+  if (run.error || (run.response?.failedCount ?? 0) > 0) throw new Error('The release command failed: ' + (run.error?.message ?? 'see the job logs in Cloud Run') + '. No service was switched.');
+  console.log('Release command finished on ' + image);
+  process.exit(0);
+}
 if (!isJob && healthPath) {
   const response = await fetch(new URL(healthPath, after.uri));
   if (response.status >= 500) throw new Error(healthPath + ' returned HTTP ' + response.status);
