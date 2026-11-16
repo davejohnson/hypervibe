@@ -757,8 +757,8 @@ it('rejects a runtime service account from a different GCP project', async () =>
     expect(filters[0]).toContain('resource.labels.location="us-west1"');
     expect(filters[0]).toContain('resource.labels.service_name="web-abc"');
     expect(filters[1]).toContain('resource.labels.location="us-west1"');
-    expect(filters[1]).toContain('resource.type="cloud_run_workerpool"');
-    expect(filters[1]).toContain('resource.labels.workerpool_name="worker-abc"');
+    expect(filters[1]).toContain('resource.type="cloud_run_worker_pool"');
+    expect(filters[1]).toContain('resource.labels.worker_pool_name="worker-abc"');
 
     const urls: string[] = [];
     let condition: Record<string, unknown> | undefined = { state: 'CONDITION_SUCCEEDED' };
