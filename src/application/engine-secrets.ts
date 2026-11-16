@@ -47,6 +47,14 @@ export function engineOutsideKeys(spec: ProjectSpec, environmentName: string, im
   return [...new Set([...declared, ...importedSecrets])].sort();
 }
 
+/** Outside keys the spec declares required: false: the app runs without them, so a missing value never blocks. */
+export function optionalOutsideKeys(spec: ProjectSpec, environmentName: string): string[] {
+  return engineOutsideKeys(spec, environmentName).filter((key) => {
+    const declared = spec.secrets?.[key];
+    return Boolean(declared && 'required' in declared && declared.required === false);
+  });
+}
+
 /** Outside keys that authenticate private package installs. They are mounted into image builds and never given to running services. */
 export const BUILD_TOKEN_KEYS = ['NODE_AUTH_TOKEN', 'NPM_TOKEN'] as const;
 export const isBuildTokenKey = (key: string): boolean => (BUILD_TOKEN_KEYS as readonly string[]).includes(key);
