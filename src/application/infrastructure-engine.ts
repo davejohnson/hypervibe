@@ -744,7 +744,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
         return { blocked: [`Secret Manager already has ${secretId}, but its ownership does not match this environment.`] };
       }
     } else outsideContainersMissing = true;
-    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) { missingKeys.push(key); continue; }
+    if (observed.state !== 'present' || !observed.value.hasEnabledVersion || !observed.value.latestVersion) {
+      // required: false means the app runs without it: no value never blocks, and services simply do not receive it.
+      const declared = spec.secrets?.[key];
+      if (!(declared && 'required' in declared && declared.required === false)) missingKeys.push(key);
+      continue;
+    }
     secretVersions[key] = observed.value.latestVersion;
   }
   if (missingKeys.length && !outsideContainersMissing) {

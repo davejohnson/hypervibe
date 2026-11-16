@@ -1,5 +1,6 @@
 import { execFile } from 'child_process';
 import crypto from 'crypto';
+import { LOCAL_PAGE_ICON_LINK } from '../../../utils/local-page-icon.js';
 import http from 'http';
 import type { AddressInfo } from 'net';
 
@@ -47,7 +48,7 @@ function openInBrowser(url: string): void {
   execFile(command, [url], () => { /* the URL is also returned for manual opening */ });
 }
 
-const PAGE = (title: string, body: string) => `<!doctype html><meta charset="utf-8"><title>${title}</title>
+const PAGE = (title: string, body: string) => `<!doctype html><meta charset="utf-8">${LOCAL_PAGE_ICON_LINK}<title>${title}</title>
 <body style="font-family:system-ui;max-width:32rem;margin:4rem auto;line-height:1.5"><h1>${title}</h1><p>${body}</p></body>`;
 
 export interface BrowserSignInOptions {
