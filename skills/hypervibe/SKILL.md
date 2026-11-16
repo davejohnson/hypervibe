@@ -84,6 +84,25 @@ release and requested scope. Never infer support from a command name or a succes
 infrastructure step. `hv_launch` supports GCP, AWS testing environments and Azure
 testing environments; follow the cloud-specific stop points below.
 
+Before the first spec for an app, and before moving one to Google Cloud, AWS
+or Azure, read its code for habits that only work on a single always-on
+machine. These clouds give the app no lasting disk, stop it when idle and may
+run several copies. Tell the user in plain language what would break and the
+change needed, before deploying:
+
+- Files saved to a local folder (uploads, media, generated reports) are lost on
+  restart. Store them in a bucket declared in the spec.
+- A SQLite or other file database is lost the same way. Use the managed
+  database.
+- Work started in the web process (background threads, in-process schedulers,
+  timers) stops when the app goes idle. Move it to a separate worker that
+  takes jobs from the database, or to a scheduled job.
+- File locks and in-memory sessions or caches do not hold across copies. Use
+  the database for locks and sessions.
+
+These are changes to the app's code, so make them only with the user's
+agreement. Do not present the deployment as complete while one remains.
+
 Keep running costs low by default. A background worker that polls a database
 queue should be on demand: set `onDemand.pendingWorkQuery` to one read-only
 `SELECT count(*)` of queued plus in-progress work, read from the app's own
