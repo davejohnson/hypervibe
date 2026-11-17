@@ -187,6 +187,12 @@ its `CFBundleShortVersionString`; pass `COMPANION_VERSION=X.Y.Z` to set it and
 currently leaves `COMPANION_VERSION` unset so the app, DMG, tag, and bundled MCP
 share one release number, while each process still reports its own identity.
 
+The disk image window shows the app, an arrow and an outlined Applications
+drop target, so the install step is clear even when Finder on macOS 26 shows
+the Applications shortcut without an icon. `scripts/build-macos-dmg.sh` asks
+Finder to save that layout, so the build needs a signed-in desktop session and,
+the first time, permission for the terminal to control Finder.
+
 The artifact is written to `build/macos/`. The build takes the exact active
 Node.js release selected by the repository's `.node-version` contract, downloads
 the matching archive and published SHA-256 digest from nodejs.org, and installs
