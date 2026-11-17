@@ -70,7 +70,7 @@ export interface ReleaseWorkflowInput {
   provider: string;
   releaseIdentity: string;
   /** generatedDockerfile is used only when the repository has no Dockerfile of its own; it carries that service's start command. */
-  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
+  services: Array<{ name: string; resource: string; healthPath?: string; strictHealth?: boolean; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
     /** Services and workers: the declared start command, applied with each release. */
     startCommand?: string }>;
   /** Name of the repository's Actions secret holding a private-package token; mounted into builds as npm_token. */
@@ -154,6 +154,7 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     lines.push(
       `      - name: Release ${service.name}`,
       '        env:',
+      ...(service.strictHealth ? ["          HYPERVIBE_HEALTH_STRICT: '1'"] : []),
       '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
       '        run: |',
       ...script,

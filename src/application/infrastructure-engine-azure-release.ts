@@ -1,3 +1,4 @@
+import { strictHealthCheck } from '../domain/services/release-health.js';
 import {
   APPS_API, AZURE_DOCKERFILE, azureReleaseDockerfile, buildWithAcrTasks, releaseAzureApp, releaseAzureJob,
 } from '../adapters/providers/azure/azure-release.client.js';
@@ -101,6 +102,6 @@ export async function releaseAzureEngineServices(ctx: CommandContext, params: {
     },
     releaseWorkload: ({ name, kind, resource, image }) => kind === 'cron'
       ? releaseAzureJob(context.tokens, { id: resource, name, image })
-      : releaseAzureApp(context.tokens, { id: resource, name, image, web: kind === 'web', ...(environmentSpec.services[name]!.healthCheckPath ? { healthCheckPath: environmentSpec.services[name]!.healthCheckPath } : {}) }),
+      : releaseAzureApp(context.tokens, { id: resource, name, image, web: kind === 'web', strictHealth: strictHealthCheck(environmentSpec.services[name]!), ...(environmentSpec.services[name]!.healthCheckPath ? { healthCheckPath: environmentSpec.services[name]!.healthCheckPath } : {}) }),
   });
 }

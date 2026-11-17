@@ -21,6 +21,21 @@ describe('keyless release workflow', () => {
     expect(auth.with.workload_identity_provider).toContain('workloadIdentityPools/hypervibe-github');
   });
 
+  // #557: only a service whose health path was declared gets the strict rule in its release step.
+  it('marks the release step strict only when the service asks for it', () => {
+    const steps = YAML.parse(renderReleaseWorkflow({
+      environmentName: 'staging', branch: 'main', gcpProjectId: 'demo-project', region: 'us-central1', provider: 'projects/123/locations/global/workloadIdentityPools/hypervibe-github/providers/github',
+      releaseIdentity: 'hypervibe-release@demo-project.iam.gserviceaccount.com',
+      services: [
+        { name: 'web', resource: 'web-abc', healthPath: '/health', strictHealth: true, image: 'us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web' },
+        { name: 'api', resource: 'api-abc', healthPath: '/', image: 'us-central1-docker.pkg.dev/demo-project/hypervibe/staging-api' },
+      ],
+    })).jobs.release.steps;
+    const env = (name: string) => steps.find((step: { name?: string }) => step.name === name).env;
+    expect(env('Release web').HYPERVIBE_HEALTH_STRICT).toBe('1');
+    expect(env('Release api')).not.toHaveProperty('HYPERVIBE_HEALTH_STRICT');
+  });
+
   it('mounts a declared package token into each build from the repository secret of the same name', () => {
     const withToken = YAML.parse(renderReleaseWorkflow({
       environmentName: 'staging', branch: 'main', gcpProjectId: 'demo-project', region: 'us-central1', provider: 'projects/123/locations/global/workloadIdentityPools/hypervibe-github/providers/github',
