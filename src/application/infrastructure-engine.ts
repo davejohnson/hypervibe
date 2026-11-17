@@ -417,10 +417,37 @@ export async function gcpSecretStore(ctx: CommandContext, project: Project, spec
   };
 }
 
+/**
+ * Whether the latest stored version of an owned secret already holds this exact value.
+ * Used to settle a write whose response was lost without ever adding a second version.
+ * The value is compared in memory only.
+ */
+async function storedVersionHolding(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<{ state: 'stored'; version: string } | { state: 'different'; version?: string } | { state: 'unknown' }> {
+  try {
+    const container = await readSecretContainer(token, gcpProjectId, secretId);
+    if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== labels['hv-environment']) return { state: 'unknown' };
+    const version = container.value.latestVersionName;
+    if (!container.value.hasVersion || !version) return { state: 'different' };
+    const response = await accessLatestSecretVersion(token, gcpProjectId, secretId);
+    if (!response.ok) return { state: 'unknown' };
+    const data = (await response.json() as { payload?: { data?: string } }).payload?.data;
+    if (data === undefined) return { state: 'unknown' };
+    return Buffer.from(data, 'base64').toString('utf8') === value ? { state: 'stored', version } : { state: 'different', version };
+  } catch {
+    return { state: 'unknown' };
+  }
+}
+
 /** Writes a version only after the approved engine has created the owned container. */
 export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
   const observed = await observeSecret(token, gcpProjectId, secretId);
-  if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
+  if (observed.state === 'unknown') {
+    // An earlier write may have been stored without Hypervibe hearing back. If the stored value is
+    // the one being written now, record that version instead of adding another.
+    const held = await storedVersionHolding(token, gcpProjectId, secretId, labels, value);
+    if (held.state === 'stored' && recordSecretVersionMetadata(gcpProjectId, secretId, held.version, labels)) return undefined;
+    return { success: false, status: 'blocked', message: observed.reason };
+  }
   if (observed.state === 'absent') return { success: false, status: 'blocked', message: `Secret container ${secretId} is absent. Run hv_plan and apply its OpenTofu container action first.` };
   if (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labels['hv-environment']) {
     return { success: false, status: 'blocked', message: `Secret ${secretId} is not owned by this Hypervibe environment.` };
@@ -436,7 +463,13 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   try {
     added = await addSecretVersion(token, gcpProjectId, secretId, value);
   } catch {
-    return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
+    // The response was lost. Read what is stored to settle it now.
+    const held = await storedVersionHolding(token, gcpProjectId, secretId, labels, value);
+    if (held.state === 'stored' && held.version !== observed.value.latestVersion && recordSecretVersionMetadata(gcpProjectId, secretId, held.version, labels)) return undefined;
+    if (held.state === 'different' && held.version === observed.value.latestVersion) {
+      return { success: false, status: 'pending', message: `The value for ${secretId} was not stored (the connection dropped first). It is safe to save it again.` };
+    }
+    return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Save the same value again: Hypervibe checks what is stored first and does not add a duplicate.` };
   }
   if (!added.ok) return { success: false, message: `Writing ${secretId} failed (HTTP ${added.status}).`, error: `HTTP ${added.status}` };
   const result = await added.json() as { name?: string };

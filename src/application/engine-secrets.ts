@@ -170,7 +170,7 @@ export async function collectOutsideKeys(ctx: CommandContext, params: {
       const rejected = known ? await checkKnownSecret(known, secret) : undefined;
       if (rejected) return { ok: false, error: fromFile ? `The value in ${fromFile.file} was rejected: ${rejected}` : rejected };
       const failure = await store.write(key, secret);
-      if (failure) return { ok: false, error: `Hypervibe could not save it to ${store.name}. Try again.` };
+      if (failure) return { ok: false, error: `Hypervibe could not save it to ${store.name}. Paste the same value again; a value that is already stored is not saved twice.` };
       const how = fromFile ? `saved from ${fromFile.file}` : 'saved';
       return { ok: true, message: known?.check ? `${how}, ${known.service} accepted it` : how };
     },

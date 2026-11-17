@@ -212,7 +212,7 @@ export async function rotateSecrets(ctx: CommandContext, params: {
         const rejected = known ? await checkKnownSecret(known, value) : undefined;
         if (rejected) return { ok: false, error: rejected };
         const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, key), { ...labels, 'hv-imported': 'true' }, value);
-        if (failure) return { ok: false, error: 'Hypervibe could not save it to Google Secret Manager. Try again.' };
+        if (failure) return { ok: false, error: failure.status === 'pending' ? 'The save may not have gone through. Paste the same value again: Hypervibe checks what is stored first and never saves it twice.' : 'Hypervibe could not save it to Google Secret Manager. Try again.' };
         return { ok: true, message: known?.check ? `saved, ${known.service} accepted it` : 'saved' };
       },
       spec: {
