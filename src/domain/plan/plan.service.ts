@@ -1672,7 +1672,7 @@ export class PlanService {
       hostingProvider: environmentSpec.hosting.provider, observed, suppliedValues: values });
     const actions = planned.actions.map(action => ({ ...action,
       metadata: { ...action.metadata, deferDeployment: true, targetFingerprint: evidence.targetFingerprint } }));
-    warnings.push('This plan updates only the selected secrets. Services keep running with their current configuration until the managed CI deployment completes.');
+    warnings.push('This plan updates only the selected secrets. Services keep running with their current configuration until the managed CI deployment completes. To activate without new commits, dispatch the current release SHA with hv_ci_trigger inputs.commit_sha; hv_rollback does not restart.');
     const document: PlanRunDocument = { kind: 'hv_plan', scope: 'secrets', environmentName, specRevision: specResult.revision,
       observedFingerprint: evidence.fingerprint, actions, warnings,
       overrides: { delegatedSecretKeys: keys, delegatedSecretVarsEncrypted: getSecretStore().encryptObject(values) } };

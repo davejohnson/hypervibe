@@ -27,8 +27,9 @@ the corresponding result.
 
 - For a new app, provider access, local cloud login, or application secrets, read
   [onboarding and connections](references/onboarding-and-connections.md).
-- For deployment, promotion, domains, CI, operational diagnosis, import,
-  destruction, backups, or recovery, read
+- For deployment, promotion, changing a setting without releasing new code,
+  domains, CI, operational diagnosis, import, destruction, backups, or recovery,
+  read
   [deployment and recovery](references/deployment-and-recovery.md).
 - For hosted reporting, shared provider access, or a secret supplied by another
   person, read [hosted access and handoffs](references/hosted-access-and-handoffs.md).
