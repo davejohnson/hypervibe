@@ -1,3 +1,4 @@
+import { PINNED_ACTIONS } from '../domain/services/pinned-actions.js';
 import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
 import { assertHealthCheckPath } from '../domain/spec/health-check-path.js';
@@ -119,12 +120,12 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     '    steps:',
     '      - uses: actions/checkout@v7',
     '      - id: auth',
-    '        uses: google-github-actions/auth@v3',
+    `        uses: ${PINNED_ACTIONS.googleAuth}`,
     '        with:',
     `          workload_identity_provider: ${input.provider}`,
     `          service_account: ${input.releaseIdentity}`,
     '          token_format: access_token',
-    '      - uses: google-github-actions/setup-gcloud@v3',
+    `      - uses: ${PINNED_ACTIONS.setupGcloud}`,
     `      - run: gcloud auth configure-docker ${input.region}-docker.pkg.dev --quiet`,
   ];
   if (input.packageTokenSecret && !/^[A-Z][A-Z0-9_]*$/.test(input.packageTokenSecret)) throw new Error('Package token secret name is not supported in a workflow.');
