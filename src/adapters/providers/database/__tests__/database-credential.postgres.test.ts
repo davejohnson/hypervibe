@@ -170,7 +170,7 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
     } as unknown as IDatabaseAdapter;
     const lifecycle = createPostgresCredentialLifecycle(() => adapter);
     const target = await lifecycle.inspect(environment, component, { environment: environment.name, component: component.id, username: 'native_rotate_user', database: 'native_rotation' });
-    const replacement = "new ' @ native password";
+    const replacement = 'new-native_password.1~'; // SQL rotation sends a SCRAM verifier, so the password must be one it can encode (#484)
     // Updating configuration alone does not alter pg_authid authentication.
     component.bindings.password = replacement;
     expect(await lifecycle.probe(environment, component, target, replacement)).toMatchObject({ state: 'rejected' });

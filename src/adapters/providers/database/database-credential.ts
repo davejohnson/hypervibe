@@ -157,8 +157,10 @@ export function createPostgresCredentialLifecycle(adapterFor: () => IDatabaseOpe
           if (result) return result;
           attempted = false;
         }
-        if (!replacement || replacement.includes('\0')) return { state: 'blocked' };
-        const sqlPassword = native.passwordEncoding === 'scram-sha-256' ? postgresScramVerifier(replacement) : replacement;
+        // The server may log statements and bound values, so SQL never carries the password itself: only a
+        // one-way SCRAM verifier. A password that cannot be encoded that way is refused, not sent as text.
+        if (!replacement || !/^[A-Za-z0-9._~-]+$/.test(replacement)) return { state: 'blocked' };
+        const sqlPassword = postgresScramVerifier(replacement);
         await connection(environment, component, async url => {
           const client = clientFor(url);
           try {
