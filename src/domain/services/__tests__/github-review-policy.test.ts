@@ -107,6 +107,8 @@ describe.each<SetupPath>(['github', 'legacy', 'canonicalized legacy'])('%s revie
       if (url.pathname === '/user') return response({ login: 'owner', id: 1 });
       if (url.pathname === root) return response({ full_name: repository, private: false, default_branch: 'main' });
       if (url.pathname === `${root}/labels`) return response([]);
+      // A repository with no rulesets answers this read with an empty list.
+      if (url.pathname === `${root}/rules/branches/main`) return response([]);
       if (url.pathname === `${root}/branches/main/protection`) {
         return observed ? response(observed) : response({ message: 'Branch not protected' }, 404);
       }

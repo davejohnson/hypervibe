@@ -24,7 +24,10 @@ afterEach(() => {
 
 describe('GitHub provider inspection', () => {
   it('reports missing branch protection as absent instead of present with null data', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ message: 'Branch not protected' }, 404));
+    // No classic protection and no rulesets: GitHub answers 404 and an empty rule list.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => String(input).includes('/rules/branches/')
+      ? response([])
+      : response({ message: 'Branch not protected' }, 404));
     const inspection = providerRegistry.get('github')!.inspection!;
 
     await expect(inspection.inspect(connectedAdapter(), {

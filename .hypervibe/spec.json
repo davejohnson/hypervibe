@@ -29,7 +29,7 @@
         "statusChecks": [
           "Hypervibe / acceptance"
         ],
-        "strictStatusChecks": true,
+        "strictStatusChecks": false,
         "enforceAdmins": false
       },
       "collaborators": []

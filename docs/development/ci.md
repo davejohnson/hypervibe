@@ -96,6 +96,19 @@ The managed iOS runtime owns build-number selection from a complete paginated Ap
 
 Keep generated iOS `run` scripts within GitHub's 21,000-character limit. Embed the managed runtime as step-local data, not a growing shell literal; execute the emitted materializer and enforce the limit in the ordinary workflow regressions.
 
+## Branch rules in rulesets
+
+GitHub enforces classic branch protection and rulesets together, so Hypervibe
+reads both and reports their combined effect. When a ruleset already holds a rule,
+apply changes it there instead of adding classic protection beside it. Only
+repository rulesets that cover the target branch alone are edited. A ruleset
+that spans other branches or belongs to an organization is left untouched: if it
+is stricter than the project settings, apply stops before writing and names it.
+Rules and rulesets are never deleted. Repositories with no rulesets keep using
+classic protection. Ruleset writes are covered by reconstructed responses in
+ordinary tests; only the read path and a no-change plan were run against a real
+repository.
+
 ## Execution authority and rollback
 
 Observe the effective privileged CI configuration, including imports, and the
