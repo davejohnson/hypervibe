@@ -14,19 +14,21 @@ import { parseHostingBindings } from '../../domain/ports/hosting.port.js';
 import { executePlanApply } from '../apply-plan.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
+import { DOMAIN_RETARGET_OPERATION } from '../../domain/services/domain-attach-policy.js';
 import '../providers.js';
 
 const dns = vi.hoisted(() => ({ prepare: vi.fn(), execute: vi.fn(), reconcile: vi.fn(), owned: vi.fn(() => false) }));
 const absence = vi.hoisted(() => vi.fn());
 vi.mock('../dns-absence.js', () => ({ verifyDnsTrafficAbsent: absence }));
-vi.mock('../dns-engine.js', () => ({ prepareDnsEnginePlan: dns.prepare, executeDnsEngineSegment: dns.execute,
+vi.mock('../dns-engine.js', async importOriginal => ({ ...await importOriginal<typeof import('../dns-engine.js')>(),
+  prepareDnsEnginePlan: dns.prepare, executeDnsEngineSegment: dns.execute,
   executeDnsOwnershipReconciliation: dns.reconcile, hasOwnedDnsRecords: dns.owned }));
 let directory: string;
 beforeEach(() => {
   SqliteAdapter.resetInstance();
   directory = mkdtempSync(path.join(tmpdir(), 'hypervibe-dns-hosting-'));
   SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
-  dns.prepare.mockReset(); dns.execute.mockReset(); dns.reconcile.mockReset(); dns.owned.mockReturnValue(false);
+  dns.prepare.mockReset(); dns.execute.mockReset(); dns.reconcile.mockReset(); dns.owned.mockReset(); dns.owned.mockReturnValue(false);
   absence.mockReset(); absence.mockResolvedValue({ ready: true, zoneFingerprint: 'exact-zone-fingerprint', connectionId: 'cf-1' });
 });
 afterEach(() => { vi.restoreAllMocks(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
@@ -75,6 +77,34 @@ function cancelFixture() {
   return { ...f, actions };
 }
 
+function retargetFixture(managed = true) {
+  const f = fixture();
+  const old = parseHostingBindings(f.environment);
+  f.ctx.repos.environments.updatePlatformBindings(f.environment.id, {
+    services: { worker: { serviceId: 'rs-1', customDomains: ['app.example.com'] }, web: { serviceId: 'rs-2', customDomains: [] } },
+    domainDns: { ...old.domainDns, serviceName: 'worker', zoneId: 'zone-1', records: [
+      { id: 'old-record', name: 'app.example.com', type: 'CNAME', target: 'web.up.railway.app' },
+    ] },
+    ...(managed ? { dnsEngine: { version: 1, zone: f.descriptor.zone, recordsEncrypted: 'records', ownersEncrypted: 'owners',
+      configurationEncrypted: 'configuration', ownedOwners: ['hosting-domain'] } } : {}),
+  });
+  f.spec.environments.production = environmentSpecSchema.parse({ ...f.spec.environments.production,
+    services: { worker: { workloadKind: 'worker', public: false }, web: { workloadKind: 'web', public: true } } });
+  f.observed.services[0]!.name = 'worker';
+  f.observed.services[0]!.workloadKind = 'worker';
+  f.observed.services.push({ ...f.observed.services[0]!, name: 'web', externalId: 'rs-2', workloadKind: 'web',
+    customDomains: [], customDomainStatus: {} });
+  dns.owned.mockImplementation((environment?: unknown) => Boolean((environment as typeof f.environment | undefined)?.platformBindings
+    && ((environment as typeof f.environment).platformBindings as { dnsEngine?: { ownedOwners?: string[] } }).dnsEngine?.ownedOwners?.includes('hosting-domain')));
+  const current = f.ctx.repos.environments.findById(f.environment.id)!;
+  const actions = diffEnvironment({ spec: f.spec.environments.production, envName: 'production', observed: f.observed,
+    local: { projectExists: true, environmentExists: true, services: [], components: [], bindings: parseHostingBindings(current) },
+    customDomainManagement: 'managed', customDomainRetarget: 'managed' }).actions.filter(action => action.resource.kind === 'domain');
+  const engineActions: PlanAction[] = f.actions.map(action => ({ ...action, type: 'destroy', requiresConfirm: true, reason: 'Remove the old hosting DNS contribution' }));
+  dns.prepare.mockResolvedValue({ descriptor: f.descriptor, actions: engineActions, ready: false });
+  return { ...f, actions, engineActions };
+}
+
 function applyOrdinaryPlan(f: Pick<ReturnType<typeof fixture>, 'ctx' | 'project' | 'environment' | 'spec' | 'observed'>, actions: PlanAction[]) {
   vi.spyOn(PlanService.prototype, 'preflight').mockReturnValue([]);
   vi.spyOn(PlanService.prototype, 'providerPreflight').mockReturnValue([]);
@@ -86,6 +116,216 @@ function applyOrdinaryPlan(f: Pick<ReturnType<typeof fixture>, 'ctx' | 'project'
 }
 
 describe('hosting DNS saved-plan boundary', () => {
+  it('stages owned DNS removal without replacing the reviewed service retarget action', async () => {
+    const f = retargetFixture();
+    expect(f.actions[0]).toMatchObject({ type: 'replace', requiresConfirm: true, metadata: { operation: DOMAIN_RETARGET_OPERATION } });
+    const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!planned || 'blocked' in planned) throw Error('Expected staged DNS removal');
+    expect(dns.prepare).toHaveBeenCalledWith(expect.objectContaining({ remove: true, records: [], owner: 'hosting-domain' }));
+    expect(planned.confirmActions).toEqual(['dns:record']);
+    expect(f.actions[0]).toMatchObject({ type: 'replace', metadata: { operation: DOMAIN_RETARGET_OPERATION } });
+    expect(dns.execute).not.toHaveBeenCalled();
+  });
+
+  it('leaves a confirmed retarget intact after engine DNS removal', async () => {
+    const f = retargetFixture();
+    const current = f.ctx.repos.environments.findById(f.environment.id)!;
+    f.ctx.repos.environments.updatePlatformBindings(current.id, {
+      domainDns: { ...parseHostingBindings(current).domainDns, dnsEngineRemoved: true },
+      dnsEngine: { ...(current.platformBindings as { dnsEngine: object }).dnsEngine, ownedOwners: [] },
+    });
+    f.actions[0]!.metadata!.previousDomain = parseHostingBindings(f.ctx.repos.environments.findById(current.id)).domainDns;
+    dns.prepare.mockResolvedValue({ descriptor: f.descriptor, actions: [], ready: true });
+    expect(await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 })).toBeNull();
+    expect(f.actions[0]).toMatchObject({ type: 'replace', metadata: { operation: DOMAIN_RETARGET_OPERATION } });
+    expect(dns.prepare).not.toHaveBeenCalled();
+  });
+
+  it('retains the hosting retry when the exact old attachment is already absent after DNS removal', async () => {
+    const f = retargetFixture();
+    const current = f.ctx.repos.environments.findById(f.environment.id)!;
+    f.ctx.repos.environments.updatePlatformBindings(current.id, {
+      domainDns: { ...parseHostingBindings(current).domainDns, dnsEngineRemoved: true },
+      dnsEngine: { ...(current.platformBindings as { dnsEngine: object }).dnsEngine, ownedOwners: [] },
+    });
+    f.observed.services[0]!.customDomains = [];
+    f.observed.services[0]!.customDomainStatus = {};
+    f.actions[0]!.metadata!.previousDomain = parseHostingBindings(f.ctx.repos.environments.findById(current.id)).domainDns;
+    expect(await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 })).toBeNull();
+    expect(f.actions[0]).toMatchObject({ type: 'replace', metadata: { operation: DOMAIN_RETARGET_OPERATION } });
+    expect(dns.prepare).not.toHaveBeenCalled();
+  });
+
+  it('preserves an unrelated blocked domain action instead of treating old DNS readiness as authorization', async () => {
+    const f = fixture();
+    const actions: PlanAction[] = [{ id: 'domain:app.example.com', type: 'update', resource: { kind: 'domain', name: 'app.example.com', provider: 'railway' },
+      reason: 'Unknown destination', verified: false, metadata: { blockedReason: 'domain_target_identity_unknown' } }];
+    dns.prepare.mockResolvedValue({ descriptor: f.descriptor, actions: [], ready: true });
+    expect(await planHostedDns(f.ctx, { ...f, actions, environmentName: 'production', specRevision: 1 })).toBeNull();
+    expect(actions[0]?.metadata).toEqual({ blockedReason: 'domain_target_identity_unknown' });
+    expect(dns.prepare).not.toHaveBeenCalled();
+  });
+
+  it('requires explicit adoption before removing a legacy domain with no engine ownership', async () => {
+    const f = retargetFixture(false);
+    expect(await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 }))
+      .toMatchObject({ blocked: [expect.stringMatching(/adopt/i)] });
+    expect(dns.prepare).not.toHaveBeenCalled();
+    expect(parseHostingBindings(f.ctx.repos.environments.findById(f.environment.id)).domainDns?.dnsEngineRemoved).toBeUndefined();
+  });
+
+  it.each(['destination-binding', 'destination-observation', 'old-binding', 'spec-target'])('rejects retarget DNS apply after %s changes', async drift => {
+    const f = retargetFixture();
+    const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!planned || 'blocked' in planned) throw Error('Expected staged DNS removal');
+    const current = f.ctx.repos.environments.findById(f.environment.id)!;
+    const bindings = parseHostingBindings(current);
+    if (drift === 'destination-binding') f.ctx.repos.environments.updatePlatformBindings(current.id, { services: { ...bindings.services, web: { serviceId: 'replacement' } } });
+    if (drift === 'destination-observation') f.observed.services[1]!.externalId = 'replacement';
+    if (drift === 'old-binding') f.ctx.repos.environments.updatePlatformBindings(current.id, { domainDns: { ...bindings.domainDns, records: [] } });
+    if (drift === 'spec-target') f.spec.environments.production!.services.web!.public = false;
+    expect(await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: planned.planRunId, confirmActions: planned.confirmActions }))
+      .toHaveProperty('kind', 'blocked');
+    expect(dns.execute).not.toHaveBeenCalled();
+  });
+
+  it('records removal only after the saved engine stage succeeds and relinquishes its exact ownership', async () => {
+    const f = retargetFixture();
+    const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!planned || 'blocked' in planned) throw Error('Expected staged DNS removal');
+    dns.execute.mockImplementation(async () => {
+      const current = f.ctx.repos.environments.findById(f.environment.id)!;
+      f.ctx.repos.environments.updatePlatformBindings(current.id, { dnsEngine: { ...(current.platformBindings as { dnsEngine: object }).dnsEngine, ownedOwners: [] } });
+      return { outcomes: { 'cloudflare_dns_record.app': 'succeeded' }, diagnostics: [] };
+    });
+    expect(await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: planned.planRunId, confirmActions: planned.confirmActions }))
+      .toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(parseHostingBindings(f.ctx.repos.environments.findById(f.environment.id)).domainDns)
+      .toMatchObject({ serviceName: 'worker', providerDomainId: 'rd-1', dnsEngineRemoved: true });
+    expect(dns.execute).toHaveBeenCalledOnce();
+  });
+
+  it.each(['still-owned', 'missing-state', 'unreadable-state'])('does not release the hosting claim when engine removal leaves %s', async state => {
+    const f = retargetFixture();
+    const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!planned || 'blocked' in planned) throw Error('Expected staged DNS removal');
+    dns.execute.mockImplementation(async () => {
+      if (state !== 'still-owned') f.ctx.repos.environments.updatePlatformBindings(f.environment.id,
+        { dnsEngine: state === 'missing-state' ? undefined : { version: 1 } });
+      return { outcomes: { 'cloudflare_dns_record.app': 'succeeded' }, diagnostics: [] };
+    });
+    expect(await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: planned.planRunId, confirmActions: planned.confirmActions }))
+      .toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(parseHostingBindings(f.ctx.repos.environments.findById(f.environment.id)).domainDns?.dnsEngineRemoved).not.toBe(true);
+  });
+
+  it('does not transfer a removal receipt to a different hosting attachment created during DNS execution', async () => {
+    const f = retargetFixture();
+    const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!planned || 'blocked' in planned) throw Error('Expected staged DNS removal');
+    dns.execute.mockImplementation(async () => {
+      const current = f.ctx.repos.environments.findById(f.environment.id)!;
+      f.ctx.repos.environments.updatePlatformBindings(current.id, {
+        domainDns: { ...parseHostingBindings(current).domainDns, providerDomainId: 'replacement' },
+        dnsEngine: { ...(current.platformBindings as { dnsEngine: object }).dnsEngine, ownedOwners: [] },
+      });
+      return { outcomes: { 'cloudflare_dns_record.app': 'succeeded' }, diagnostics: [] };
+    });
+    expect(await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: planned.planRunId, confirmActions: planned.confirmActions }))
+      .toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(parseHostingBindings(f.ctx.repos.environments.findById(f.environment.id)).domainDns?.dnsEngineRemoved).not.toBe(true);
+  });
+
+  it('requires separate confirmation for the saved DNS removal', async () => {
+    const f = retargetFixture();
+    const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!planned || 'blocked' in planned) throw Error('Expected staged DNS removal');
+    await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: planned.planRunId, confirmActions: [] });
+    expect(dns.execute).not.toHaveBeenCalled();
+    expect(parseHostingBindings(f.ctx.repos.environments.findById(f.environment.id)).domainDns?.dnsEngineRemoved).not.toBe(true);
+  });
+
+  it('adopts explicitly selected legacy records in a separate stage before planning their removal', async () => {
+    const f = retargetFixture(false);
+    f.spec.environments.production!.dns!.adoptRecords = [{ id: 'old-record', name: 'app.example.com', type: 'CNAME', values: ['web.up.railway.app'] }];
+    dns.prepare.mockResolvedValue({ descriptor: f.descriptor, actions: f.engineActions.map(action => ({ ...action, type: 'update' })), ready: false });
+    const adoption = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
+    if (!adoption || 'blocked' in adoption) throw Error('Expected explicit DNS adoption');
+    expect(dns.prepare).toHaveBeenLastCalledWith(expect.objectContaining({ remove: false, records: [expect.objectContaining({ values: ['web.up.railway.app'] })] }));
+    dns.execute.mockImplementation(async () => {
+      f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: { version: 1, zone: f.descriptor.zone,
+        recordsEncrypted: 'records', ownersEncrypted: 'owners', configurationEncrypted: 'configuration', ownedOwners: ['hosting-domain'] } });
+      return { outcomes: { 'cloudflare_dns_record.app': 'succeeded' }, diagnostics: [] };
+    });
+    await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: adoption.planRunId, confirmActions: adoption.confirmActions });
+    const current = f.ctx.repos.environments.findById(f.environment.id)!;
+    expect(parseHostingBindings(current).domainDns?.dnsEngineRemoved).toBe(false);
+    f.actions[0]!.metadata!.previousDomain = parseHostingBindings(current).domainDns;
+    dns.prepare.mockResolvedValue({ descriptor: f.descriptor, actions: f.engineActions, ready: false });
+    expect(await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 })).not.toHaveProperty('blocked');
+    expect(dns.prepare).toHaveBeenLastCalledWith(expect.objectContaining({ remove: true, records: [] }));
+  });
+
+  it('moves the hosting owner only between separately reviewed DNS removal and creation plans', async () => {
+    const f = retargetFixture();
+    const current = () => f.ctx.repos.environments.findById(f.environment.id)!;
+    const domainActions = () => diffEnvironment({ spec: f.spec.environments.production!, envName: 'production', observed: f.observed,
+      local: { projectExists: true, environmentExists: true, services: [], components: [], bindings: parseHostingBindings(current()) },
+      customDomainManagement: 'managed', customDomainRetarget: 'managed' }).actions.filter(action => action.resource.kind === 'domain');
+    const newRecords = [{ name: 'app.example.com', type: 'CNAME', value: 'new-web.up.railway.app' }];
+    const detach = vi.fn(async () => {
+      f.observed.services[0]!.customDomains = [];
+      f.observed.services[0]!.customDomainStatus = {};
+      return { success: true, message: 'Removed exact old attachment' };
+    });
+    const attach = vi.fn(async () => {
+      f.observed.services[1]!.customDomains = ['app.example.com'];
+      f.observed.services[1]!.customDomainStatus = { 'app.example.com': { providerDomainId: 'rd-2', providerVerified: false, dnsRecords: newRecords } };
+      return { success: true, message: 'New attachment awaits DNS', data: { customDomainId: 'rd-2', providerVerified: false, dnsRecords: newRecords } };
+    });
+    vi.mocked(f.ctx.adapterFactory.getProviderAdapter).mockResolvedValue({ success: true,
+      adapter: { name: 'railway', capabilities: { supportsObserve: true }, observe: async () => f.observed,
+        detachCustomDomain: detach, attachCustomDomain: attach } as unknown as IProviderLifecycleAdapter });
+    const removal = await planHostedDns(f.ctx, { ...f, actions: domainActions(), environmentName: 'production', specRevision: 1 });
+    if (!removal || 'blocked' in removal) throw Error('Expected saved old DNS removal');
+    dns.execute.mockImplementation(async () => {
+      f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: { ...(current().platformBindings as { dnsEngine: object }).dnsEngine, ownedOwners: [] } });
+      return { outcomes: { 'cloudflare_dns_record.app': 'succeeded' }, diagnostics: [] };
+    });
+    await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: removal.planRunId, confirmActions: removal.confirmActions });
+    expect(detach).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+    const move = domainActions();
+    expect(await planHostedDns(f.ctx, { ...f, actions: move, environmentName: 'production', specRevision: 1 })).toBeNull();
+    expect(move[0]).toMatchObject({ type: 'replace', metadata: { operation: DOMAIN_RETARGET_OPERATION } });
+    await applyOrdinaryPlan(f, move);
+    expect(detach).toHaveBeenCalledExactlyOnceWith({ projectId: 'rp-1', environmentId: 're-1', serviceId: 'rs-1', domain: 'app.example.com', customDomainId: 'rd-1' });
+    expect(attach).toHaveBeenCalledOnce();
+    expect(parseHostingBindings(current()).domainDns).toMatchObject({ serviceName: 'web', serviceId: 'rs-2', providerDomainId: 'rd-2', dnsStagePending: true });
+    expect(dns.execute).toHaveBeenCalledOnce();
+    const nextSegment = { ...f.descriptor.segment, id: 'opentofu:dns-plan-2' };
+    dns.prepare.mockResolvedValue({ descriptor: { ...f.descriptor, planId: 'dns-plan-2', segment: nextSegment }, ready: false,
+      actions: f.engineActions.map(action => ({ ...action, type: 'create', metadata: { ...action.metadata,
+        engineSegment: { ...nextSegment, addresses: ['cloudflare_dns_record.app'] } } })) });
+    const creation = await planHostedDns(f.ctx, { ...f, actions: domainActions(), environmentName: 'production', specRevision: 1 });
+    if (!creation || 'blocked' in creation) throw Error('Expected saved new DNS creation');
+    expect(dns.prepare).toHaveBeenLastCalledWith(expect.objectContaining({ remove: false, records: [expect.objectContaining({ values: ['new-web.up.railway.app'] })] }));
+    dns.execute.mockImplementation(async () => {
+      f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: { ...(current().platformBindings as { dnsEngine: object }).dnsEngine, ownedOwners: ['hosting-domain'] } });
+      return { outcomes: { 'cloudflare_dns_record.app': 'succeeded' }, diagnostics: [] };
+    });
+    await applyDnsPlan(f.ctx, { ...f, specRevision: 1, planId: creation.planRunId, confirmActions: creation.confirmActions });
+    expect(parseHostingBindings(current()).domainDns).toMatchObject({ providerDomainId: 'rd-2', dnsStagePending: false, dnsEngineRemoved: false });
+    f.observed.services[1]!.customDomainStatus!['app.example.com']!.providerVerified = true;
+    dns.prepare.mockResolvedValue({ descriptor: f.descriptor, actions: [], ready: true });
+    const verified = domainActions();
+    expect(await planHostedDns(f.ctx, { ...f, actions: verified, environmentName: 'production', specRevision: 1 })).toBeNull();
+    expect(verified[0]).toMatchObject({ type: 'noop', metadata: { operation: 'domainDnsReady', serviceId: 'rs-2' } });
+    expect(detach).toHaveBeenCalledOnce();
+    expect(attach).toHaveBeenCalledOnce();
+    expect(dns.execute).toHaveBeenCalledTimes(2);
+  });
+
   it('persists the exact prepared segment from a fresh native hosting attachment', async () => {
     const f = fixture();
     const planned = await planHostedDns(f.ctx, { ...f, environmentName: 'production', specRevision: 1 });
@@ -219,9 +459,10 @@ describe('hosting DNS saved-plan boundary', () => {
     const attachCustomDomain = vi.fn(async () => ({ success: true, message: 'Native attachment created',
       data: { customDomainId: 'rd-new', providerVerified: false, dnsRecords: [] } }));
     vi.mocked(f.ctx.adapterFactory.getProviderAdapter).mockResolvedValue({ success: true,
-      adapter: { name: 'railway', observe: async () => f.observed, attachCustomDomain } as unknown as IProviderLifecycleAdapter });
+      adapter: { name: 'railway', capabilities: { supportsObserve: true }, observe: async () => f.observed, attachCustomDomain } as unknown as IProviderLifecycleAdapter });
     await applyOrdinaryPlan(f, [{ id: 'domain:app.example.com', type: 'create', verified: true,
-      resource: { kind: 'domain', name: 'app.example.com', provider: 'railway' }, reason: 'Attach the requested domain' }]);
+      resource: { kind: 'domain', name: 'app.example.com', provider: 'railway' }, reason: 'Attach the requested domain',
+      metadata: { projectId: 'rp-1', environmentId: 're-1', serviceName: 'web', serviceId: 'rs-1' } }]);
     expect(attachCustomDomain).toHaveBeenCalledOnce();
     expect(parseHostingBindings(f.ctx.repos.environments.findById(f.environment.id)).domainDns).toMatchObject({
       providerDomainId: 'rd-new', dnsStagePending: true, records: [], dnsSelection: {

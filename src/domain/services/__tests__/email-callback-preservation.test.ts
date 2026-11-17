@@ -95,6 +95,7 @@ describe('preserving an accepted inbound callback after provider URL refresh', (
       expect(url.origin).toBe('https://api.sendgrid.com');
       expect(request.method).toBe('GET');
       if (url.pathname === '/v3/whitelabel/domains') return Response.json([]);
+      if (url.pathname === `/v3/user/webhooks/parse/settings/${hostname}`) return Response.json({ hostname, url: callback, spam_check: true, send_raw: false });
       expect(url.pathname).toBe('/v3/user/webhooks/parse/settings');
       return Response.json({ result: [{ hostname, url: callback, spam_check: true, send_raw: false }] });
     });
@@ -132,13 +133,14 @@ describe('preserving an accepted inbound callback after provider URL refresh', (
     expect(requests).toHaveLength(requestsBeforeApply);
   });
 
-  it('still blocks a requested path change when the security-policy association is unknown', async () => {
+  it('blocks a requested path change until desired domain ownership is bound', async () => {
     const environmentSpec = desired('/api/webhooks/new-receipts');
     const plan = await planEmail({ project, environmentName: 'staging', environmentSpec, environment, observed });
     const action = plan.actions.find(item => item.id === `email:sendgrid:inbound:${hostname}`)!;
 
-    expect(action).toMatchObject({ type: 'replace', requiresConfirm: true });
-    expect(action.metadata?.blockedReason).toContain('Inbound policy association is unknown');
+    expect(action).toMatchObject({ type: 'update' });
+    expect(action.metadata?.blockedReason).toBe('email_callback_domain_pending');
+    expect(action).not.toHaveProperty('requiresConfirm', true);
     expect(requests.every(request => request.method === 'GET')).toBe(true);
   });
 
@@ -195,9 +197,10 @@ describe('preserving an accepted inbound callback after provider URL refresh', (
     };
     const plan = await planEmail({ project, environmentName: 'staging', environmentSpec, environment, observed });
     const action = plan.actions.find(item => item.id === `email:sendgrid:inbound:${hostname}`)!;
-    expect(action).toMatchObject({ type: 'replace', requiresConfirm: true });
-    expect(action.metadata?.expectedUrl).toBe('https://other.example.com/api/webhooks/canary-email-receipts');
-    expect(action.metadata?.blockedReason).toContain('Inbound policy association is unknown');
+    expect(action).toMatchObject({ type: 'update' });
+    expect(action.metadata?.expectedUrl).toBeUndefined();
+    expect(action.metadata?.blockedReason).toBe('email_callback_domain_pending');
+    expect(action).not.toHaveProperty('requiresConfirm', true);
   });
 
   it.each(['same', 'replaced', 'unknown'])('rechecks %s attachment evidence before recording alias changes', async state => {

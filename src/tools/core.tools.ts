@@ -1209,6 +1209,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         local,
         providerBehavior: hostingMetadata?.orchestration?.diff,
         customDomainManagement: hostingMetadata?.lifecycle?.hosting?.customDomains,
+        customDomainRetarget: hostingMetadata?.lifecycle?.hosting?.customDomainRetarget,
         customDomainTrafficProxy: hostingMetadata?.lifecycle?.hosting?.domainTrafficProxy,
         expectedSource: planService.expectedDeploySource(projectForStatus, envName, envSpec),
         managedDatabaseEnvVars,

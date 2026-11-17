@@ -3,6 +3,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { serviceBindingFor } from './spec.service.js';
+import { resolveEmailCallbackTarget } from './email-callback-target.js';
 import type { EventSigningReadiness } from './email-signing.service.js';
 import { SENDGRID_EVENT_PUBLIC_KEY, SENDGRID_INBOUND_PUBLIC_KEY } from '../spec/spec.schema.js';
 import { resolveInboundCallback } from './email-inbound-url.service.js';
@@ -110,7 +111,8 @@ export function inspectWebhookReadiness(params: {
       }
     }
     if (spec.email.deliveryEvents) {
-      addBound('sendgrid', 'delivery events', spec.email.deliveryEvents);
+      const url = resolveEmailCallbackTarget(environment, spec, spec.email.deliveryEvents).url;
+      add('sendgrid', 'delivery events', spec.email.deliveryEvents.service, url, url ? 'binding' : 'unavailable');
       if (spec.email.deliveryEvents.signatureVerification !== undefined) {
         const item = webhooks[webhooks.length - 1];
         const signing = params.eventSigningReadiness;

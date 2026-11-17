@@ -17,7 +17,7 @@ export interface DomainSetupResult {
   success: boolean; pending?: boolean; error?: string; reason?: 'no_connection' | 'no_zone';
   zone?: { id: string; name: string; status: string };
   hostingProvider?: string; service?: string; customDomainAttached?: boolean; customDomainId?: string;
-  recreated?: boolean; providerVerified?: boolean; customDomainError?: string; dnsConfigured?: boolean;
+  creationAcknowledged?: boolean; recreated?: boolean; providerVerified?: boolean; customDomainError?: string; dnsConfigured?: boolean;
   dnsRecords?: DomainDnsRecordResult[]; requiredDnsRecords?: NormalizedDnsRecord[]; dnsError?: string;
   verification?: { zoneStatus: string; customDomainAttached: boolean; dnsConfigured: boolean; providerVerified?: boolean };
 }
@@ -33,7 +33,7 @@ export async function setupCustomDomain(params: {
   const domain = normalizeDomainName(params.domain);
   const bindings = parseHostingBindings(params.environment);
   const services = bindings.services ?? {};
-  const serviceName = params.serviceName ?? (Object.keys(services).length === 1 ? Object.keys(services)[0] : bindings.domainDns?.serviceName);
+  const serviceName = params.serviceName;
   const service = serviceName ? services[serviceName] : undefined;
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const result: DomainSetupResult = { success: false, hostingProvider: provider, service: serviceName, dnsConfigured: false, dnsRecords: [] };
@@ -49,10 +49,19 @@ export async function setupCustomDomain(params: {
   }
   try {
     const target = { projectId: bindings.projectId, serviceId: service.serviceId,
-      environmentId: bindings.environmentId, domain, dnsZone: params.dnsZone ?? dnsZoneScopeForDomain(domain) };
+      environmentId: bindings.environmentId, domain, dnsZone: params.dnsZone ?? dnsZoneScopeForDomain(domain),
+      ...(bindings.domainDns?.providerDomainId ? { customDomainId: bindings.domainDns.providerDomainId } : {}) };
     const receipt = params.recreate ? await callCustomDomainRecreate(adapter, target) : await callCustomDomainAttach(adapter, target);
     if (!receipt.success || typeof receipt.data?.customDomainId !== 'string' || !receipt.data.customDomainId) {
-      return failed(receipt.error ?? (receipt.success ? 'The provider did not return the exact custom-domain identity.' : receipt.message));
+      const failure = failed(receipt.error ?? (receipt.success ? 'The provider did not return the exact custom-domain identity.' : receipt.message));
+      if (!receipt.success && receipt.data?.creationAcknowledged === true
+        && receipt.data.phase === 'customDomainCreateVerification'
+        && typeof receipt.data.customDomainId === 'string' && receipt.data.customDomainId.trim()
+        && receipt.data.projectId === bindings.projectId && receipt.data.environmentId === bindings.environmentId
+        && receipt.data.serviceId === service.serviceId && receipt.data.domain === domain) {
+        return { ...failure, creationAcknowledged: true, customDomainId: receipt.data.customDomainId };
+      }
+      return failure;
     }
     const records = Array.isArray(receipt.data.dnsRecords) ? receipt.data.dnsRecords : [];
     return { ...result, customDomainAttached: true, customDomainId: receipt.data.customDomainId,

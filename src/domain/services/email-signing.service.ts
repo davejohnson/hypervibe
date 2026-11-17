@@ -11,7 +11,7 @@ import type { ActionResult } from '../plan/converge.executor.js';
 import { SENDGRID_EVENT_PUBLIC_KEY, type EnvironmentSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
 import { syncHostingEnvVars, removeHostingEnvVars, serviceHasHostingBinding } from './hosting-env.service.js';
-import { serviceBindingFor } from './spec.service.js';
+import { resolveEmailCallbackTarget } from './email-callback-target.js';
 
 export const EMAIL_SIGNING_OPERATIONS = { signing: 'emailEventSigning', key: 'emailEventVerificationKey' } as const;
 export type EventSigningState = { status: 'known'; value: Awaited<ReturnType<SendGridAdapter['getEventWebhookSigning']>> } | { status: 'unknown' };
@@ -27,8 +27,8 @@ function hostingIdentity(environment: Environment | null, service: string | unde
 }
 export function eventSigningUrl(environment: Environment | null, spec: EnvironmentSpec): string | undefined {
   const target = spec.email.deliveryEvents;
-  const base = environment && target ? serviceBindingFor(environment, target.service)?.url : undefined;
-  try { const url = new URL(target!.path, String(base)); return url.protocol === 'https:' && !url.username && !url.password ? url.toString() : undefined; } catch { return undefined; }
+  const url = target ? resolveEmailCallbackTarget(environment, spec, target).url : undefined;
+  return url?.startsWith('https://') ? url : undefined;
 }
 export function runtimeKey(observed: ObservedState | null, service: string, environment: Environment | null, key: string = SENDGRID_EVENT_PUBLIC_KEY): { known: boolean; present?: boolean; hash?: string } {
   if (!observed || observed.partial || observed.completeness?.services === 'unknown') return { known: false };
@@ -54,7 +54,7 @@ export function planEventSigning(params: { spec: EnvironmentSpec; environment: E
   const hostingHash = hostingIdentity(params.environment, target?.service);
   let blocked = !target || target.signatureVerification === undefined ? 'Restore the managed signatureVerification setting. Set it to false and apply before removing signing intent.'
     : !params.deliveryReady ? 'Converge the delivery-event endpoint, then re-plan signing.'
-    : !url ? 'The receiving service needs a durable HTTPS URL.'
+    : !url ? 'The receiving service needs a durable HTTPS callback URL; converge its domain or service, then re-plan.'
     : !state || state.url !== url || !state.enabled ? 'Exact endpoint signing observation is unknown or no longer matches the delivery target.'
     : binding.disabled !== true && binding.hostingHash && binding.hostingHash !== hostingHash ? 'The receiving hosting identity changed; restore it before removing or moving managed signing.'
     : binding.disabled !== true && binding.endpointId && binding.endpointId !== state.id ? 'The bound signing endpoint identity changed; restore it before changing signing.'
@@ -70,7 +70,7 @@ export function planEventSigning(params: { spec: EnvironmentSpec; environment: E
   const make = (kind: 'signing' | 'key', noop: boolean, reason: string, blockedReason?: string): PlanAction => ({
     id: actionId(kind), type: noop ? 'noop' : 'update', resource: { kind: 'email', name: `delivery-${kind}`, provider: kind === 'signing' ? 'sendgrid' : params.spec.hosting.provider },
     reason, verified: !blockedReason && (kind === 'signing' ? Boolean(state) : runtime.known),
-    ...(!noop ? { requiresConfirm: true } : {}),
+    ...(!noop && !blockedReason ? { requiresConfirm: true } : {}),
     ...(kind === 'key' ? { dependsOn: [actionId('signing')] } : {}),
     metadata: { hostingHash, environmentId: params.environment?.id, operation: EMAIL_SIGNING_OPERATIONS[kind], endpointId: state?.id, service: target?.service, enabled: desired,
       ...(url ? { expectedUrl: url } : {}), ...(kind === 'key' ? { key: SENDGRID_EVENT_PUBLIC_KEY, expectedHash: desired ? expectedHash : null } : {}),

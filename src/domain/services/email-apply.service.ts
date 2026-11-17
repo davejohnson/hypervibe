@@ -480,7 +480,7 @@ async function applyInbound(params: {
   if (callback.blockedReason) return staleAction(callback.blockedReason);
   const expectedUrl = callback.url;
   if (!expectedUrl) {
-    return { success: false, status: 'blocked', message: `Inbound service ${inbound.service} has no public provider URL`, error: 'Apply its service action first, then re-run hv_plan.' };
+    return { success: false, status: 'blocked', message: `Inbound service ${inbound.service} has no ready public callback URL`, error: 'Converge its domain or service action first, then re-run hv_plan.' };
   }
   if (stringValue(metadata, 'expectedUrl') && stringValue(metadata, 'expectedUrl') !== expectedUrl) {
     return staleAction('The target service URL changed.');
@@ -600,7 +600,7 @@ async function applyDeliveryEvents(params: {
   const desired = params.environmentSpec.email.deliveryEvents;
   const metadata = asRecord(params.action.metadata);
   const expectedHash = emailDeliveryEventsConfigHash(params.environmentSpec);
-  const expectedUrl = desired ? deliveryEventsUrl(params.environment, desired) : undefined;
+  const expectedUrl = desired ? deliveryEventsUrl(params.environment, desired, params.environmentSpec) : undefined;
   if (
     !desired
     || !expectedHash

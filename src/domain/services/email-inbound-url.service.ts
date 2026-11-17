@@ -1,12 +1,13 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
+import { resolveEmailCallbackTarget } from './email-callback-target.js';
 import { serviceBindingFor } from './spec.service.js';
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value)
   ? value as Record<string, unknown> : {};
 
-/** Preserve an accepted callback, without choosing a new custom-domain default. */
+/** Preserve accepted callbacks through live ownership checks; new callbacks use the declared public target. */
 export function resolveInboundCallback(params: {
   environment: Environment | null;
   spec: EnvironmentSpec;
@@ -25,7 +26,7 @@ export function resolveInboundCallback(params: {
   const accepted = record(record(environment.platformBindings.email).inbound);
   if (typeof accepted.url !== 'string' || accepted.url === providerUrl
     || accepted.hostname !== target.hostname.toLowerCase()
-    || accepted.service !== target.service || accepted.path !== target.path) return { url: providerUrl };
+    || accepted.service !== target.service || accepted.path !== target.path) return resolveEmailCallbackTarget(environment, spec, target);
 
   const blocked = { blockedReason: 'The accepted inbound callback cannot be verified against its bound public service. Preserve the existing route and re-plan after its exact attachment is observable.' };
   let url: URL;

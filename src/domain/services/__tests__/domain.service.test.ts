@@ -23,7 +23,7 @@ function target(extra: Record<string, unknown> = {}) {
   const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: {
     provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 'rs-1' } }, ...extra,
   } });
-  return { project, environment, domain: 'app.example.com' };
+  return { project, environment, domain: 'app.example.com', serviceName: 'web' };
 }
 function base(): IProviderLifecycleAdapter {
   return { name: 'railway', capabilities: { supportedBuilders: [], supportedComponents: [], supportsAutoWiring: false,
@@ -91,7 +91,7 @@ describe('custom-domain hosting stages', () => {
   it('does not choose the first service when the target is ambiguous', async () => {
     const params = target({ services: { web: { serviceId: 'rs-1' }, other: { serviceId: 'rs-2' } } });
     const adapter = attachAdapter();
-    expect((await setupCustomDomain(params)).customDomainAttached).toBe(false);
+    expect((await setupCustomDomain({ ...params, serviceName: undefined })).customDomainAttached).toBe(false);
     expect(adapter.attachCustomDomain).not.toHaveBeenCalled();
   });
 

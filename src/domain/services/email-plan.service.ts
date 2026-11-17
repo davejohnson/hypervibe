@@ -29,7 +29,7 @@ import {
   resolveCloudflareEmailContext,
   routingRuleForAddress,
 } from './email-routing.service.js';
-import { serviceBindingFor } from './spec.service.js';
+import { resolveEmailCallbackTarget } from './email-callback-target.js';
 import { resolveInboundCallback } from './email-inbound-url.service.js';
 import { inspectEmailSenderReadiness, type EmailSenderReadiness } from './email-sender-readiness.service.js';
 
@@ -275,11 +275,15 @@ export async function resolveEmailIntegrationState(params: {
     if (wantsInbound) {
       try {
         inboundRoutes = known(await sendgrid.adapter.listInboundParseWebhooks());
-        if (environmentSpec.email.inbound?.signatureVerification !== undefined || Object.keys(inboundSigningBinding(params.environment ?? null)).length) {
-          inboundSigning = await observeInboundSigning(sendgrid.adapter, environmentSpec.email.inbound!.hostname.toLowerCase());
-          if (inboundSigning.status === 'known') {
-            const exact = inboundSigning.route;
-            inboundRoutes.items = inboundRoutes.items.map(route => route.hostname.toLowerCase() === exact.hostname.toLowerCase() ? exact : route);
+        const hostname = environmentSpec.email.inbound!.hostname.toLowerCase();
+        const wantsSigning = environmentSpec.email.inbound?.signatureVerification !== undefined
+          || Object.keys(inboundSigningBinding(params.environment ?? null)).length > 0;
+        if (wantsSigning) inboundSigning = { status: 'unknown' };
+        if (inboundRoutes.items.filter(route => route.hostname.toLowerCase() === hostname).length === 1) {
+          const exact = await sendgrid.adapter.getInboundParseWebhook(hostname);
+          inboundRoutes.items = inboundRoutes.items.map(route => route.hostname.toLowerCase() === hostname ? exact : route);
+          if (wantsSigning) {
+            inboundSigning = await observeInboundSigning(sendgrid.adapter, hostname, exact);
           }
         }
       } catch (error) {
@@ -403,17 +407,23 @@ function statefulKnown<T>(observation: EmailObservation<T>): observation is Know
   return observation.status === 'known';
 }
 
-function serviceUrl(environment: Environment | null, serviceName: string): string | undefined {
-  if (!environment) return undefined;
-  const binding = serviceBindingFor(environment, serviceName);
-  const value = stringValue(binding, 'url');
-  if (!value) return undefined;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : undefined;
-  } catch {
-    return undefined;
+/** Route diagnostics never expose credentials, query strings or provider policy objects. */
+function observedInboundRoute(route: SendGridInboundParseRoute): Record<string, unknown> {
+  let url: string | undefined;
+  if (typeof route.url === 'string' && route.url.length <= 2048 && !/[\s\\]/u.test(route.url)) {
+    try {
+      const parsed = new URL(route.url);
+      if (parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.search && !parsed.hash) {
+        url = parsed.toString();
+      }
+    } catch { /* Invalid provider URLs remain unavailable diagnostic evidence. */ }
   }
+  return {
+    ...(url ? { url } : {}),
+    ...(typeof route.spam_check === 'boolean' ? { spamCheck: route.spam_check } : {}),
+    ...(typeof route.send_raw === 'boolean' ? { sendRaw: route.send_raw } : {}),
+    policyAssociation: typeof route.security_policy === 'string' && route.security_policy.trim() ? 'known' : 'unknown',
+  };
 }
 
 export function emailRuntimeKeysForService(environmentSpec: EnvironmentSpec, serviceName: string): string[] {
@@ -483,10 +493,10 @@ export function emailInboundConfigHash(environmentSpec: EnvironmentSpec): string
 
 export function deliveryEventsUrl(
   environment: Environment | null,
-  deliveryEvents: NonNullable<EnvironmentSpec['email']['deliveryEvents']>
+  deliveryEvents: NonNullable<EnvironmentSpec['email']['deliveryEvents']>,
+  spec: EnvironmentSpec,
 ): string | undefined {
-  const base = serviceUrl(environment, deliveryEvents.service);
-  return base ? new URL(deliveryEvents.path, base).toString() : undefined;
+  return resolveEmailCallbackTarget(environment, spec, deliveryEvents).url;
 }
 
 export function emailDeliveryEventsConfigHash(environmentSpec: EnvironmentSpec): string | undefined {
@@ -539,18 +549,26 @@ function planDeliveryEvents(params: {
   state: EmailIntegrationState;
   bindings: Record<string, unknown>;
   serviceDependencies?: string[];
+  callbackDomainDependencies?: string[];
 }): PlanAction[] {
   const desired = params.environmentSpec.email.deliveryEvents;
   if (!desired) return [];
   const binding = asRecord(params.bindings.deliveryEvents);
   const configHash = emailDeliveryEventsConfigHash(params.environmentSpec)!;
-  const expectedUrl = deliveryEventsUrl(params.environment, desired);
+  const target = resolveEmailCallbackTarget(params.environment, params.environmentSpec, desired);
+  const domainDependencies = target.domainActionId && params.callbackDomainDependencies?.includes(target.domainActionId)
+    ? [target.domainActionId] : [];
+  const domainBlocked = target.blockedReason ?? (domainDependencies.length ? 'email_callback_domain_pending' : undefined);
+  const expectedUrl = domainBlocked ? undefined : target.url;
   let type: PlanAction['type'] = 'update';
   let operation: string = EMAIL_OPERATIONS.deliveryEventsEnsure;
   let reason = 'Configure the SendGrid account delivery-event webhook';
   let verified = false;
   let blockedReason: string | undefined;
-  if (params.state.deliveryEvents.status === 'unknown') {
+  if (domainBlocked) {
+    blockedReason = domainBlocked;
+    reason = 'Converge the receiving service public domain, then re-plan the delivery-event callback';
+  } else if (params.state.deliveryEvents.status === 'unknown') {
     if (stringValue(binding, 'configHash') === configHash && stringValue(binding, 'url') === expectedUrl) {
       type = 'noop';
       reason = 'Preserving the recorded delivery-event webhook because provider observation is unknown';
@@ -586,7 +604,8 @@ function planDeliveryEvents(params: {
     verified,
     reason,
     ...(type === 'replace' ? { requiresConfirm: true } : {}),
-    ...(params.serviceDependencies?.length ? { dependsOn: [...new Set(params.serviceDependencies)] } : {}),
+    ...((params.serviceDependencies?.length || domainDependencies.length)
+      ? { dependsOn: [...new Set([...(params.serviceDependencies ?? []), ...domainDependencies])] } : {}),
     metadata: {
       operation,
       service: desired.service,
@@ -916,6 +935,8 @@ export async function planEmail(params: {
   observed: ObservedState | null;
   serviceDependencies?: string[];
   domainDependencies?: string[];
+  /** Non-converged managed domains; callback decisions wait for a fresh plan. */
+  callbackDomainDependencies?: string[];
   /** Provider observation already resolved by the caller; primarily useful for deterministic contract tests. */
   integrationState?: EmailIntegrationState;
   /** Resolved private deploy inputs, used only for read-only sender checks. */
@@ -1173,8 +1194,12 @@ export async function planEmail(params: {
   if (environmentSpec.email.inbound) {
     const inbound = environmentSpec.email.inbound;
     const hostname = inbound.hostname.toLowerCase();
+    const target = resolveEmailCallbackTarget(environment, environmentSpec, inbound);
+    const domainDependencies = target.domainActionId && params.callbackDomainDependencies?.includes(target.domainActionId)
+      ? [target.domainActionId] : [];
     const callback = resolveInboundCallback({ environment, spec: environmentSpec, observed });
-    const expectedUrl = callback.url;
+    const domainBlocked = callback.blockedReason ?? (domainDependencies.length ? 'email_callback_domain_pending' : undefined);
+    const expectedUrl = domainBlocked ? undefined : callback.url;
     const inboundBinding = asRecord(bindings.inbound);
     const configHash = emailInboundConfigHash(environmentSpec)!;
     let type: PlanAction['type'] = 'update';
@@ -1184,7 +1209,10 @@ export async function planEmail(params: {
     let reason = `Create or reconcile SendGrid inbound parse for ${hostname}`;
     let blockedReason: string | undefined;
 
-    if (state.inboundRoutes.status === 'unknown') {
+    if (domainBlocked) {
+      blockedReason = domainBlocked;
+      reason = 'Converge the receiving service public domain, then re-plan the inbound callback';
+    } else if (state.inboundRoutes.status === 'unknown') {
       if (
         stringValue(inboundBinding, 'configHash') === configHash
         && stringValue(inboundBinding, 'hostname') === hostname
@@ -1225,8 +1253,10 @@ export async function planEmail(params: {
       }
     }
 
-    blockedReason = inboundSigningTargetBlock(environment, environmentSpec) ?? callback.blockedReason ?? blockedReason;
+    blockedReason = domainBlocked ?? inboundSigningTargetBlock(environment, environmentSpec) ?? blockedReason;
     const policyId = state.inboundRoutes.status === 'known' ? state.inboundRoutes.items.find(route => route.hostname.toLowerCase() === hostname)?.security_policy : undefined;
+    const matchedRoutes = state.inboundRoutes.status === 'known'
+      ? state.inboundRoutes.items.filter(route => route.hostname.toLowerCase() === hostname) : [];
     inboundAction = {
       id: `email:sendgrid:inbound:${hostname}`,
       type,
@@ -1237,6 +1267,7 @@ export async function planEmail(params: {
       dependsOn: [
         ...(dnsAction ? [dnsAction.id] : []),
         ...(params.serviceDependencies ?? []),
+        ...domainDependencies,
       ],
       metadata: {
         operation,
@@ -1249,13 +1280,15 @@ export async function planEmail(params: {
         ...(policyId ? { expectedPolicyId: policyId } : {}),
         configHash,
         ...(expectedUrl ? { expectedUrl } : {}),
+        ...(matchedRoutes.length === 1 ? { observedRoute: observedInboundRoute(matchedRoutes[0]) } : {}),
         ...(blockedReason ? blockedMetadata(blockedReason) : {}),
       },
     };
     actions.push(inboundAction);
   }
 
-  const deliveryActions = planDeliveryEvents({ environmentSpec, environment, state, bindings, serviceDependencies: params.serviceDependencies });
+  const deliveryActions = planDeliveryEvents({ environmentSpec, environment, state, bindings,
+    serviceDependencies: params.serviceDependencies, callbackDomainDependencies: params.callbackDomainDependencies });
   actions.push(...deliveryActions);
   const eventSigning = planEventSigning({ spec: environmentSpec, environment, observed, state: state.eventSigning,
     deliveryReady: deliveryActions.length === 1 && deliveryActions[0].type === 'noop' && deliveryActions[0].verified === true });

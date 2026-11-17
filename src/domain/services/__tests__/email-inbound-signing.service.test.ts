@@ -23,8 +23,8 @@ import { emailInboundConfigHash, EMAIL_OPERATIONS, planEmail, resolveEmailIntegr
 // https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks
 const hostname = 'inbound.example.com';
 const policyId = 'dd677638-a16d-4e19-95ea-20231c35511b';
-const oldUrl = 'https://api.example.com/old';
-const newUrl = 'https://api.example.com/new';
+const oldUrl = 'https://example.com/old';
+const newUrl = 'https://example.com/new';
 const spec = () => environmentSpecSchema.parse({domain: 'example.com', hosting: {provider: 'railway'}, services: {api: {workloadKind: 'web', public: true}},
   email: {enabled: true, inbound: {hostname, service: 'api', path: '/new'}}});
 
@@ -37,6 +37,7 @@ describe('Inbound Parse policy preservation through the real client', () => {
     project = new ProjectRepository().create({name: 'inbound-app', defaultPlatform: 'railway'});
     new EnvironmentRepository().create({projectId: project.id, name: 'production', platformBindings: {
       provider: 'railway', projectId: 'project-id', environmentId: 'production-id', services: {api: {serviceId: 'api-id', url: 'https://api.example.com'}},
+      domainDns: {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'production-id'},
     }});
     const connection = new ConnectionRepository().create({provider: 'sendgrid', credentialsEncrypted: getSecretStore().encryptObject({apiKey: 'test-only-key'})});
     new ConnectionRepository().updateStatus(connection.id, 'verified');
@@ -107,6 +108,7 @@ describe('Inbound signed-policy key lifecycle', () => {
     new ServiceRepository().create({projectId: project.id, name: 'api'});
     envId = new EnvironmentRepository().create({projectId: project.id, name: 'production', platformBindings: {
       provider: 'railway', projectId: 'project-id', environmentId: 'production-id', services: {api: {serviceId: 'api-id', url: 'https://api.example.com'}},
+      domainDns: {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'production-id'},
       email: {inbound: {hostname, configHash: emailInboundConfigHash(desiredSigning()), url: newUrl}},
     }}).id;
     const connection = new ConnectionRepository().create({provider: 'sendgrid', credentialsEncrypted: getSecretStore().encryptObject({apiKey: 'test-only-key'})});
@@ -147,6 +149,31 @@ describe('Inbound signed-policy key lifecycle', () => {
     vi.mocked(fetch).mockClear(); setEnv.mockClear();
     expect((await apply(next.actions[0])).success).toBe(true);
     expect(fetch).not.toHaveBeenCalled(); expect(setEnv).not.toHaveBeenCalled();
+  });
+  it('publishes the attached policy key for the canonical managed-domain receiver', async () => {
+    new EnvironmentRepository().updatePlatformBindings(envId, {
+      services: {api: {serviceId: 'api-id', url: 'https://provider.example.net'}},
+      domainDns: {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'production-id'},
+    });
+    route.url = 'https://example.com/new';
+    const action = (await plan()).actions[0];
+    expect(action.metadata?.blockedReason).toBeUndefined();
+    expect(action.metadata?.expectedUrl).toBe('https://example.com/new');
+    expect((await apply(action)).success).toBe(true);
+    expect(setEnv).toHaveBeenCalledTimes(1);
+    expect(providerMutations).toEqual([]);
+  });
+  it('rechecks managed-domain ownership before publishing an inbound verification key', async () => {
+    const domain = {name: 'example.com', providerDomainId: 'domain-id', serviceName: 'api', serviceId: 'api-id', environmentId: 'production-id'};
+    new EnvironmentRepository().updatePlatformBindings(envId, {domainDns: domain});
+    const action = (await plan()).actions[0];
+    new EnvironmentRepository().updatePlatformBindings(envId, {domainDns: {...domain, serviceId: 'other-service'}});
+    expect(await apply(action)).toMatchObject({success: false, status: 'blocked'});
+    const blocked = (await plan()).actions[0];
+    expect(blocked.metadata?.blockedReason).toBeTruthy();
+    expect(blocked.requiresConfirm).not.toBe(true);
+    expect(setEnv).not.toHaveBeenCalled();
+    expect(providerMutations).toEqual([]);
   });
   it('reports unknown missing associations and blocks speculative creation', async () => {
     delete route.security_policy;
