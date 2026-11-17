@@ -1,3 +1,4 @@
+import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
 import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
 import { pickRemoteCommit, sourceBuildProblem } from './release-source.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
@@ -1687,7 +1688,7 @@ export interface EngineWorkerStatus {
   service: string;
   mode: 'on-demand' | 'always-on';
   instances?: number;
-  waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: string };
+  waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: WakerReadFailure };
 }
 
 /**
@@ -1718,10 +1719,12 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
           let parsed: { pendingWork?: number | string; readError?: string } = {};
           try { const value = JSON.parse(latest.result ?? 'null'); if (value && typeof value === 'object') parsed = value; } catch { /* an older waker returns only a count */ }
           const pendingWork = parsed.pendingWork === undefined ? undefined : Number(parsed.pendingWork);
+          // The waker reports the provider's raw message; only a fixed local category leaves this function.
+          const readFailure = parsed.readError || pendingWork === -1 ? classifyWakerReadError(parsed.readError) : undefined;
           status.waker = { ...(latest.startTime ? { lastRunAt: latest.startTime } : {}), ...(latest.state ? { state: latest.state } : {}),
-            ...(pendingWork !== undefined && pendingWork >= 0 ? { pendingWork } : {}), ...(parsed.readError ? { readError: parsed.readError } : {}) };
-          if (parsed.readError || pendingWork === -1) {
-            warnings.push(`Worker ${name} is running all the time: its waker cannot read pending work (${parsed.readError || 'query failed'}). Run hv_plan scope="infrastructure" to repair its access.`);
+            ...(pendingWork !== undefined && pendingWork >= 0 ? { pendingWork } : {}), ...(readFailure ? { readError: readFailure } : {}) };
+          if (readFailure) {
+            warnings.push(`Worker ${name} is running all the time: its waker cannot read pending work (${readFailure}). Run hv_plan scope="infrastructure" to repair its access.`);
           } else if (latest.state === 'FAILED') {
             warnings.push(`Worker ${name}'s waker failed its last run, so it cannot start or stop the worker. Check hv_logs.`);
           }
