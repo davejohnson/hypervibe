@@ -63,7 +63,8 @@ export class GitHubCodeHostIdentityAdapter implements CodeHostIdentityPort {
         },
       };
     } catch (error) {
-      if (error instanceof GitHubApiError && error.status === 404) return { state: 'absent' };
+      // GitHub answers 404 for a private repository this token may not see, so 404 is not absence.
+      if (error instanceof GitHubApiError && error.status === 404) return { state: 'unknown', reason: `Repository ${scope} was not found, or this GitHub connection is not allowed to see it.` };
       return { state: 'unknown', reason: error instanceof Error ? error.message : String(error) };
     }
   }

@@ -451,6 +451,28 @@ export class GitHubAdapter {
     return this.listSecretNames(`/repos/${owner}/${repo}/actions/secrets`);
   }
 
+  /**
+   * GitHub answers 404 both for a missing environment and for one this token may not see.
+   * Absence is accepted only from a complete environment list that does not contain the name.
+   */
+  private async requireEnvironmentAbsent(owner: string, repo: string, environmentName: string): Promise<void> {
+    const unconfirmed = new Error(`Whether the GitHub environment "${environmentName}" exists cannot be confirmed with this connection. Nothing was changed.`);
+    const names: string[] = [];
+    try {
+      for (let page = 1; page <= 10; page++) {
+        const response = await this.request<{ total_count?: number; environments?: Array<{ name: string }> }>('GET', `/repos/${owner}/${repo}/environments?per_page=100&page=${page}`);
+        const environments = response.environments ?? [];
+        names.push(...environments.map((item) => item.name));
+        if (typeof response.total_count !== 'number') throw unconfirmed;
+        if (names.length >= response.total_count) break;
+        if (environments.length === 0 || page === 10) throw unconfirmed;
+      }
+    } catch {
+      throw unconfirmed;
+    }
+    if (names.some((name) => name.toLowerCase() === environmentName.toLowerCase())) throw unconfirmed;
+  }
+
   /** Every secret name at an endpoint. A list that never reaches GitHub's stated total is refused, never returned as if complete. */
   private async listSecretNames(endpoint: string): Promise<string[]> {
     const names: string[] = [];
@@ -618,8 +640,9 @@ export class GitHubAdapter {
     try {
       return await this.listSecretNames(`/repos/${owner}/${repo}/environments/${environment}/secrets`);
     } catch (error) {
-      if (isGitHubNotFound(error)) return [];
-      throw error;
+      if (!isGitHubNotFound(error)) throw error;
+      await this.requireEnvironmentAbsent(owner, repo, environmentName);
+      return [];
     }
   }
 
@@ -708,6 +731,7 @@ export class GitHubAdapter {
     } catch (error) {
       if (options) throw new Error('The reviewed GitHub environment cannot be verified.');
       if (!isGitHubNotFound(error)) throw error;
+      await this.requireEnvironmentAbsent(owner, repo, environmentName);
       await this.request<unknown>('PUT', `/repos/${owner}/${repo}/environments/${environment}`, {});
     }
     const publicKeyResponse = await this.request<{ key_id: string; key: string }>(
