@@ -399,8 +399,20 @@ Do not add a companion projection to `hv_plan`. If composing the existing calls 
 
 ## Refresh and action boundaries
 
-The companion refreshes on launch, foreground activation and manual request.
-Scheduled refresh and notifications are outside the implemented scope.
+The companion refreshes every project on launch, on manual request, when the
+menu opens with a status more than two minutes old, and about every 15 minutes
+in the background. Background checks can be turned off in Settings. Each check
+requests a public service's address once, which can wake an app that scales to
+zero. A cached snapshot from an earlier launch is shown as not checked, never
+as current.
+
+Status is presented in plain language from `ProjectStatus`: one headline, the
+things that need attention worst first, and for each a prompt the owner can
+copy into chat. A responding public address is reported as live without
+claiming provider settings were verified. The companion posts a notification
+only when a public address stops or resumes responding between two checks, and
+asks for notification permission the first time it has one to post. A single
+failed check is enough to notify; there is no retry before alerting.
 
 Resource-provider changes remain requests to the existing chat-driven
 spec/plan/apply workflow. The companion never edits infrastructure state or calls
@@ -455,9 +467,10 @@ The app does not reproduce apply precondition logic.
 
 The companion includes manual status refresh and recent runs, self-contained
 distribution/onboarding, provider
-connection management, explicit hosting-variable inventory, and the narrow
-production-deploy action. Scheduling, notifications, general plan review, and
-other lifecycle mutations remain out of scope.
+connection management, explicit hosting-variable inventory, background status
+checks, down and back-up notifications, and the narrow production-deploy
+action. Per-project schedules, notifications for runs or deployments, general
+plan review, and other lifecycle mutations remain out of scope.
 
 ## Acceptance criteria
 

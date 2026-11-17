@@ -23,6 +23,7 @@ struct CompanionMenuView: View {
                 } else if let project = model.selectedProject {
                     ProjectDashboardView(
                         project: project,
+                        status: model.status(for: project),
                         snapshot: model.selectedSnapshot,
                         connections: model.selectedConnections,
                         refreshError: model.refreshErrors[project.id],
@@ -40,6 +41,9 @@ struct CompanionMenuView: View {
             await model.loadIfNeeded()
             await model.checkForCompanionUpdate()
         }
+        .onAppear {
+            Task { await model.refreshSelectedProjectIfStale() }
+        }
     }
 
     private var header: some View {
@@ -54,22 +58,30 @@ struct CompanionMenuView: View {
             } else {
                 Picker("Project", selection: $model.selectedProjectID) {
                     ForEach(model.projects) { project in
-                        Text(project.displayName)
-                            .tag(Optional(project.id))
+                        Label(
+                            project.displayName,
+                            systemImage: model.status(for: project).level.systemImage
+                        )
+                        .tag(Optional(project.id))
                     }
                 }
                 .labelsHidden()
+                .labelStyle(.titleAndIcon)
                 .frame(maxWidth: 250)
                 .clickTargetCursor()
             }
 
             Spacer()
 
-            if let snapshot = model.selectedSnapshot {
-                Text(snapshot.generatedAt, style: .relative)
+            if model.projects.count > 1 {
+                let troubled = model.projects.filter {
+                    model.status(for: $0).level >= .attention
+                }.count
+                Text(troubled == 0
+                    ? "All \(model.projects.count) projects OK"
+                    : "\(troubled) of \(model.projects.count) need attention")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .help("Last successful companion snapshot")
+                    .foregroundStyle(troubled == 0 ? Color.secondary : CompanionColor.warning)
             }
         }
         .padding(.horizontal, 14)
@@ -80,7 +92,7 @@ struct CompanionMenuView: View {
         ContentUnavailableView {
             Label("No projects yet", systemImage: "shippingbox")
         } description: {
-            Text("Add a repository and the local Hypervibe command that should observe it.")
+            Text("Add your project folder and Hypervibe will keep an eye on it from here.")
         } actions: {
             Button("Add Project…") {
                 showProjectSetup()

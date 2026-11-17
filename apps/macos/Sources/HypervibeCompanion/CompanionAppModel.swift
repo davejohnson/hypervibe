@@ -50,6 +50,8 @@ final class CompanionAppModel: ObservableObject {
     private let releaseClient = GitHubReleaseClient()
     private let updateInstaller = CompanionUpdateInstaller()
     private var didLoad = false
+    private var backgroundTask: Task<Void, Never>?
+    private var lastRefreshAttempts: [UUID: Date] = [:]
 
     var selectedProject: CompanionProject? {
         guard let selectedProjectID else { return projects.first }
@@ -71,6 +73,47 @@ final class CompanionAppModel: ObservableObject {
             snapshots: Array(snapshots.values),
             hasRefreshFailure: loadError != nil || !refreshErrors.isEmpty
         )
+    }
+
+    func status(for project: CompanionProject) -> ProjectStatus {
+        ProjectStatus.evaluate(
+            snapshot: snapshots[project.id],
+            refreshError: refreshErrors[project.id],
+            isInitialized: project.readiness == .initialized
+        )
+    }
+
+    /// Loads and checks every project at launch, then keeps checking in the
+    /// background so the menu bar icon is right before the menu is opened.
+    func start() {
+        guard backgroundTask == nil else { return }
+        backgroundTask = Task { [weak self] in
+            await self?.loadIfNeeded()
+            await self?.checkForCompanionUpdate()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard let self else { return }
+                guard CompanionPreferences.automaticChecksEnabled else { continue }
+                await self.refreshProjects(
+                    olderThan: TimeInterval(CompanionPreferences.checkIntervalMinutes * 60)
+                )
+            }
+        }
+    }
+
+    /// Opening the menu should never show a status more than a couple of
+    /// minutes old.
+    func refreshSelectedProjectIfStale() async {
+        guard didLoad, let projectID = selectedProject?.id else { return }
+        await refreshProjects(olderThan: 120, only: projectID)
+    }
+
+    private func refreshProjects(olderThan age: TimeInterval, only: UUID? = nil) async {
+        let cutoff = Date().addingTimeInterval(-age)
+        for project in projects where only == nil || project.id == only {
+            if let last = lastRefreshAttempts[project.id], last > cutoff { continue }
+            await refresh(projectID: project.id)
+        }
     }
 
     func loadIfNeeded() async {
@@ -133,6 +176,7 @@ final class CompanionAppModel: ObservableObject {
         }
 
         refreshingProjectIDs.insert(projectID)
+        lastRefreshAttempts[projectID] = Date()
         defer { refreshingProjectIDs.remove(projectID) }
 
         do {
@@ -167,10 +211,17 @@ final class CompanionAppModel: ObservableObject {
             project.readiness = .initialized
             project.updatedAt = Date()
             projects = try await registry.upsert(project)
+            let notices = StatusChanges.notices(
+                previous: snapshots[projectID],
+                current: refresh.snapshot
+            )
             snapshots[projectID] = refresh.snapshot
             connections[projectID] = refresh.connections
             try await cache.replace(refresh.snapshot)
             refreshErrors.removeValue(forKey: projectID)
+            if CompanionPreferences.notificationsEnabled {
+                await CompanionNotifier.post(notices)
+            }
         } catch {
             refreshErrors[projectID] = userFacingMessage(for: error)
         }

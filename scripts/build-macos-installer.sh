@@ -58,7 +58,6 @@ NODE_ARCHIVE_NAME="node-v$NODE_VERSION-darwin-$NODE_ARCH.tar.gz"
 NODE_ARCHIVE="$WORK_DIR/$NODE_ARCHIVE_NAME"
 NODE_SHASUMS="$WORK_DIR/node-v$NODE_VERSION-SHASUMS256.txt"
 NODE_DIR="$WORK_DIR/node-v$NODE_VERSION-darwin-$NODE_ARCH"
-DMG_STAGE="$WORK_DIR/dmg"
 DMG="$OUTPUT_DIR/Hypervibe-$COMPANION_VERSION-$ARCH.dmg"
 
 rm -rf "$WORK_DIR"
@@ -67,8 +66,7 @@ mkdir -p \
     "$RESOURCES/runtime" \
     "$RESOURCES/licenses" \
     "$RESOURCES/server" \
-    "$SERVER_STAGE" \
-    "$DMG_STAGE"
+    "$SERVER_STAGE"
 export CLANG_MODULE_CACHE_PATH="$WORK_DIR/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$WORK_DIR/module-cache"
 mkdir -p "$CLANG_MODULE_CACHE_PATH"
@@ -172,15 +170,7 @@ node "$ROOT/scripts/smoke-macos-mcp.mjs" \
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-cp -R "$APP" "$DMG_STAGE/Hypervibe.app"
-ln -s /Applications "$DMG_STAGE/Applications"
-rm -f "$DMG"
-hdiutil create \
-    -volname "Hypervibe" \
-    -srcfolder "$DMG_STAGE" \
-    -ov \
-    -format UDZO \
-    "$DMG"
+"$ROOT/scripts/build-macos-dmg.sh" "$APP" "$DMG" "$WORK_DIR"
 
 if [ "$CODESIGN_IDENTITY" != "-" ]; then
     codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG"

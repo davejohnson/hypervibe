@@ -6,6 +6,8 @@ struct CompanionSettingsView: View {
     @ObservedObject var model: CompanionAppModel
     @ObservedObject var loginItemController: CompanionLoginItemController
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(CompanionPreferences.automaticChecksKey) private var automaticChecks = true
+    @AppStorage(CompanionPreferences.notificationsKey) private var statusNotifications = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -14,6 +16,10 @@ struct CompanionSettingsView: View {
             Divider()
 
             launchAtLogin
+
+            Divider()
+
+            statusChecks
 
             Divider()
 
@@ -71,13 +77,55 @@ struct CompanionSettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 620, height: 750)
+        .frame(width: 620, height: 800)
         .background(WindowFocusBridge())
         .task {
             await model.loadIfNeeded()
             await model.refreshMCPHostStatuses()
             await model.checkForCompanionUpdate()
             loginItemController.refresh()
+        }
+    }
+
+    private var statusChecks: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            preferenceRow(
+                systemImage: "arrow.clockwise.circle",
+                title: "Keep status up to date",
+                detail: "Checks every project about every \(CompanionPreferences.checkIntervalMinutes) minutes. Each check opens your app's address once, which can wake an app that sleeps when idle.",
+                isOn: $automaticChecks
+            )
+            preferenceRow(
+                systemImage: "bell.badge",
+                title: "Tell me when an app goes down",
+                detail: "A notification when an app stops responding, and another when it is back.",
+                isOn: $statusNotifications
+            )
+        }
+    }
+
+    private func preferenceRow(
+        systemImage: String,
+        title: String,
+        detail: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: systemImage)
+                .frame(width: 24)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
         }
     }
 
