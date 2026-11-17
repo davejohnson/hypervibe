@@ -1,5 +1,6 @@
 import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
+import { HEALTH_CHECK_PATH_PATTERN } from '../domain/spec/spec.schema.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -80,7 +81,22 @@ export interface ReleaseWorkflowInput {
 }
 
 /** A GitHub Actions workflow with no stored cloud credentials; a package token is referenced only by its repository secret name. */
+/** Values written into workflow YAML and shell lines must be plain identifiers, never shell or YAML source. */
+function plain(label: string, value: string): string {
+  if (!/^[A-Za-z0-9._/:@-]+$/.test(value)) throw new Error(`The ${label} ${JSON.stringify(value)} is not supported in a workflow: use only letters, digits and . _ / : @ -`);
+  return value;
+}
+
 export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
+  plain('environment name', input.environmentName); plain('Google Cloud project', input.gcpProjectId); plain('region', input.region);
+  plain('identity provider', input.provider); plain('release identity', input.releaseIdentity);
+  if (input.releaseCommand) plain('release job', input.releaseCommand.job);
+  for (const service of input.services) {
+    plain('service name', service.name); plain('resource', service.resource); plain('image', service.image);
+    if (service.healthPath !== undefined && !HEALTH_CHECK_PATH_PATTERN.test(service.healthPath)) {
+      throw new Error(`The health check path ${JSON.stringify(service.healthPath)} of ${service.name} must be a path on the service itself, for example /health.`);
+    }
+  }
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
   const lines: string[] = [
     `# Managed by Hypervibe. Releases ${input.environmentName} on every push to ${input.branch}.`,
@@ -157,7 +173,7 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
       '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
       '        run: |',
       ...script,
-      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
+      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ? `'${service.healthPath}'` : '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
     );
   }
   return lines.join('\n') + '\n';
