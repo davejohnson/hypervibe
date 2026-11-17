@@ -1,6 +1,6 @@
 import { observeManagedEngineDatabase } from '../domain/services/engine-database-access.service.js';
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
-import { secretAges } from '../application/secret-rotation.js';
+import { secretAgeNotes, secretAges } from '../application/secret-rotation.js';
 import { engineWorkerStatus, isEngineManaged } from '../application/infrastructure-engine.js';
 import { classifyPlanBlocks } from '../domain/plan/plan-block.js';
 import { planApiPolicy } from '../domain/services/api-policy.js';
@@ -1125,8 +1125,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
         const ages = await secretAges(ctx, project, specResult.spec, envName);
         if (!('blocked' in ages)) {
-          const overdue = ages.secrets.filter((secret) => secret.overdue);
-          if (overdue.length) engine.warnings.push(`${overdue.length} secret(s) are older than ${ages.everyDays} days (${overdue.map((secret) => `${secret.key} ${secret.ageDays}d`).join(', ')}). Rotate them with hv_secrets action="rotate".`);
+          const notes = secretAgeNotes(ages);
+          if (notes.overdue) engine.warnings.push(notes.overdue);
+          // A failed read is not "fresh": say the age is unknown instead of staying silent.
+          if (notes.unreadable) engine.warnings.push(notes.unreadable);
         }
         return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: engine.workers }, {
           warnings: engine.warnings,

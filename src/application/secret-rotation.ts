@@ -39,6 +39,8 @@ export interface SecretAge {
   kind: SecretKind;
   createdAt?: string;
   ageDays?: number;
+  /** known: Hypervibe created the value. at-least: only when it was stored here is known; the credential may be older. unknown: it could not be read. */
+  age: 'known' | 'at-least' | 'unknown';
   overdue: boolean;
   service?: string;
 }
@@ -46,9 +48,37 @@ export interface SecretAge {
 export const DEFAULT_ROTATION_DAYS = 90;
 
 async function latestCreated(token: string, gcpProjectId: string, secretId: string): Promise<string | undefined> {
-  const response = await latestSecretVersion(token, gcpProjectId, secretId);
-  if (!response.ok) return undefined;
+  const response = await latestSecretVersion(token, gcpProjectId, secretId).catch(() => undefined);
+  if (!response?.ok) return undefined;
   return ((await response.json()) as { createTime?: string }).createTime;
+}
+
+const ROTATABLE: readonly SecretKind[] = ['generated', 'database', 'third-party'];
+
+/**
+ * Secret Manager records when a value was stored, not when the credential was issued.
+ * That is the real age only for values Hypervibe created; for a key the owner supplied
+ * it is a minimum. A value that could not be read has no known age and is never fresh.
+ */
+export function describeSecretAge(kind: SecretKind, storedAt: string | undefined, everyDays: number, now = Date.now()): Pick<SecretAge, 'createdAt' | 'ageDays' | 'age' | 'overdue'> {
+  if (!storedAt || Number.isNaN(Date.parse(storedAt))) return { age: 'unknown', overdue: false };
+  const ageDays = Math.floor((now - Date.parse(storedAt)) / 86_400_000);
+  return { createdAt: storedAt, ageDays, age: kind === 'third-party' ? 'at-least' : 'known', overdue: ROTATABLE.includes(kind) && ageDays >= everyDays };
+}
+
+/** The sentences hv_status and hv_secrets show about secret ages. */
+export function secretAgeNotes(ages: { secrets: SecretAge[]; everyDays: number }): { overdue?: string; unreadable?: string; minimumOnly?: string; summary: string } {
+  const rotatable = ages.secrets.filter((secret) => ROTATABLE.includes(secret.kind));
+  const overdue = rotatable.filter((secret) => secret.overdue);
+  const unreadable = rotatable.filter((secret) => secret.age === 'unknown');
+  const minimumOnly = rotatable.filter((secret) => secret.age === 'at-least' && !secret.overdue);
+  const notes = {
+    ...(overdue.length ? { overdue: `${overdue.length} secret(s) are older than ${ages.everyDays} days (${overdue.map((secret) => `${secret.key} ${secret.ageDays}d`).join(', ')}). Rotate them with hv_secrets action="rotate".` } : {}),
+    ...(unreadable.length ? { unreadable: `The age of ${unreadable.length} secret(s) could not be read (${unreadable.map((secret) => secret.key).join(', ')}), so it is unknown whether they are due for rotation.` } : {}),
+    ...(minimumOnly.length ? { minimumOnly: `${minimumOnly.length} key(s) from outside services show only when they were saved here, not when they were issued (${minimumOnly.map((secret) => secret.key).join(', ')}); they may be older.` } : {}),
+  };
+  const parts = [notes.overdue, notes.unreadable, notes.minimumOnly].filter(Boolean);
+  return { ...notes, summary: parts.length ? parts.join(' ') : `Every secret is newer than ${ages.everyDays} days.` };
 }
 
 type Engine = Exclude<Awaited<ReturnType<typeof resolveEngineContext>>, { blocked: string }>;
@@ -75,10 +105,8 @@ export async function secretAges(ctx: CommandContext, project: Project, spec: Pr
   ];
   const secrets: SecretAge[] = [];
   for (const [key, kind] of kinds) {
-    const createdAt = await latestCreated(token, engine.gcpProjectId, engineSecretId(environmentName, key));
-    const ageDays = createdAt ? Math.floor((Date.now() - Date.parse(createdAt)) / 86_400_000) : undefined;
-    secrets.push({ key, kind, ...(createdAt ? { createdAt } : {}), ...(ageDays !== undefined ? { ageDays } : {}),
-      overdue: (kind === 'generated' || kind === 'database' || kind === 'third-party') && ageDays !== undefined && ageDays >= everyDays,
+    const storedAt = await latestCreated(token, engine.gcpProjectId, engineSecretId(environmentName, key));
+    secrets.push({ key, kind, ...describeSecretAge(kind, storedAt, everyDays),
       ...(KNOWN_SECRETS[key] ? { service: KNOWN_SECRETS[key]!.service } : {}) });
   }
   return { secrets, everyDays };
