@@ -1,3 +1,4 @@
+import { pickRemoteCommit, sourceBuildProblem } from './release-source.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
@@ -1521,7 +1522,20 @@ async function resolveReleaseSource(params: { project: Project; spec: ProjectSpe
   }
   const repoUrl = normalizeGitRemoteForBuild(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
   if (!repoUrl) return { blocked: 'Hypervibe needs either this project\'s local git repository or a git remote to build from.' };
-  return { repoUrl, summary: { kind: 'git-remote', revision: params.revision ?? 'main' } };
+  // Freeze the branch to one exact commit now: every service builds that commit, and a branch that moves later changes nothing.
+  const revision = params.revision ?? 'main';
+  let commitSha: string | undefined = /^[0-9a-f]{40}$/i.test(revision) ? revision.toLowerCase() : undefined;
+  if (!commitSha) {
+    try {
+      const listed = await execFileAsync('git', ['ls-remote', repoUrl, revision, `${revision}^{}`, `refs/heads/${revision}`, `refs/tags/${revision}`, `refs/tags/${revision}^{}`],
+        { timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+      commitSha = pickRemoteCommit(String(listed.stdout), revision);
+    } catch {
+      return { blocked: `Hypervibe could not read ${revision} from the git remote to pin the exact commit. Run this from the project's local git repository, or check the remote is reachable. Nothing was built.` };
+    }
+  }
+  if (!commitSha) return { blocked: `The git remote has no branch or tag named ${revision}. Nothing was built.` };
+  return { repoUrl, summary: { kind: 'git-remote', revision, commitSha } };
 }
 
 /** Builds (or reuses) the digest-pinned image for one service from the release source. */
@@ -1554,10 +1568,13 @@ async function buildServiceImage(
   const build = source.archive
     ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId),
       ...(packageTokenVersion ? { packageTokenVersion } : {}) })
-    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision, ...(packageTokenVersion ? { packageTokenVersion } : {}) });
+    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.commitSha!, ...(packageTokenVersion ? { packageTokenVersion } : {}) });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { success: false, error: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   }
+  // A remote build fetched the source itself: it must report the exact frozen commit before anything is released.
+  const mismatch = source.archive ? undefined : sourceBuildProblem(source.summary.commitSha!, build.resolvedCommitSha);
+  if (mismatch) return { success: false, error: mismatch, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   const built = { imageUri: build.imageUri, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   builtImages.set(name, built);
   return { success: true, ...built };
