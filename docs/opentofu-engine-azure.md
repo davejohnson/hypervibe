@@ -214,7 +214,13 @@ adds almost nothing.
   have no fixed outbound address, so the firewall allows all addresses; Flexible Server
   requires TLS by default and every password is generated. This is the same tradeoff
   as Aurora on AWS, and it is also what lets Hypervibe create the login from this
-  computer.
+  computer. Anyone on the internet can open a connection and is stopped only at
+  the password; this is the recorded exception to the rule in
+  [ARCHITECTURE.md](../ARCHITECTURE.md#database-provisioning-and-persistence).
+  Unlike AWS, a private option may be cheap here (a Container Apps environment
+  in a virtual network with a privately integrated Flexible Server), but it is
+  not built and its cost is not verified; it would also need another way to
+  create logins, since this computer could no longer reach the server.
 - **On-demand worker.** KEDA's PostgreSQL scaler counts `onDemand.pendingWorkQuery`
   once a minute with the read-only login and starts one replica while the count is
   above zero; it scales back to zero after 5 idle minutes.

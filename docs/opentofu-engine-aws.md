@@ -114,10 +114,18 @@ not current quotes.
 - **Database network: public endpoint, TLS required (decided 2026-11-10).**
   Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
   $32/mo and would be more than the rest of a staging environment. The database
-  accepts only TLS and a generated 32-character password, similar to Cloud SQL's
-  public IP. Private networking (NAT gateway, or a NAT instance that Hypervibe
-  would have to patch) was considered for production; it is not an implemented
-  option in this engine path.
+  accepts only TLS and a generated 32-character password. This is weaker than
+  Google Cloud, where the database has a public IP but accepts no direct network
+  connections (only the Cloud SQL connector under IAM): here anyone on the
+  internet can open a connection to port 5432 and is stopped only at the
+  password. Known consequences, accepted with this decision: the database is
+  exposed to any flaw that can be reached before login, to connection floods on
+  a small instance, and to scanners, whose connection attempts may keep a
+  paused staging cluster awake (not measured). Private networking (NAT gateway,
+  or a NAT instance that Hypervibe would have to patch) was considered for
+  production; it is not an implemented option in this engine path. This is the
+  recorded exception to the rule in
+  [ARCHITECTURE.md](../ARCHITECTURE.md#database-provisioning-and-persistence).
 - **Secrets: SSM Parameter Store `SecureString`**, which is free. Secrets Manager
   costs $0.40 per secret per month.
 - **Lambda secrets are read at start, not stored in Lambda.** Lambda has no

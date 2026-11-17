@@ -286,6 +286,15 @@ Cloud database resources belong to the engine lifecycle. Keep SQL authentication
 connectivity, migrations and data operations in explicit operational capabilities.
 Treat persistence, backup coverage and teardown dependencies as data-bearing
 boundaries. Do not open public database access to bypass missing private access.
+The AWS and Azure engines are a recorded exception to that rule, decided for cost
+on 2026-11-10 and 2026-11-12: their databases have a public endpoint that accepts
+connections from any address, protected by required TLS and generated passwords
+only. The provider guides ([AWS](docs/opentofu-engine-aws.md),
+[Azure](docs/opentofu-engine-azure.md)) record the reasons and the known
+consequences. Google Cloud is not an exception: its database accepts no direct
+network connections, only the Cloud SQL connector under IAM. Narrowing the
+exception, or adding a private option, is a product decision; nothing else may
+widen database access on its authority.
 Preserve exact-identity cleanup of previously recorded access.
 
 ## Database Resilience
