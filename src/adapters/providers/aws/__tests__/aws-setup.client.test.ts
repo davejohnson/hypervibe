@@ -14,8 +14,12 @@ describe('AWS setup', () => {
     // No IAM write outside app roles: every allowed iam:* write is scoped to /hypervibe/app/.
     for (const statement of statements.filter((entry) => entry.Effect === 'Allow')) {
       const actions = ([] as string[]).concat(statement.Action);
+      if (statement.Sid === 'PassWebInfrastructureRole') continue;
       if (actions.some((action) => /^iam:(Create|Put|Attach|Delete|Update|Pass)/.test(action) && action !== 'iam:CreateServiceLinkedRole')) expect(statement.Resource).toBe('arn:aws:iam::123456789012:role/hypervibe/app/*');
     }
+    // The one role outside the app path can only be handed to Amazon ECS, never assumed or changed by the deploy role.
+    expect(statements.find((statement) => statement.Sid === 'PassWebInfrastructureRole')).toEqual({ Sid: 'PassWebInfrastructureRole', Effect: 'Allow', Action: 'iam:PassRole',
+      Resource: 'arn:aws:iam::123456789012:role/hypervibe/hypervibe-web-infrastructure', Condition: { StringEquals: { 'iam:PassedToService': 'ecs.amazonaws.com' } } });
     expect(JSON.stringify(appBoundaryDocument())).not.toMatch(/"iam:(Create|Put|Attach)/);
   });
 

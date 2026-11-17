@@ -61,7 +61,7 @@ export async function executeEngineCiRelease(input: EngineCiReleaseInput): Promi
     if (environment.migrations?.mode === 'releaseCommand' || Object.values(environment.services).some((s) => s.releaseCommand)) throw new Error('Release commands are not implemented for these engine CI releases.');
     if (binding.provider === 'aws') {
       const web = Object.values(environment.services).filter((s) => (s.workloadKind ?? 'web') === 'web');
-      // One image carries one web command; Lambda currently has no per-service
+      // One image carries one web command; web services have no per-service
       // override. An omitted command is not proof of equivalence to an explicit one.
       if (new Set(web.map((s) => s.startCommand)).size > 1) return { version: 1, status: 'blocked', message: 'AWS web services share one image and cannot use different start commands in CI yet. Declare the same startCommand for every web service before releasing.' };
       if (web.some((s) => s.startCommand)) {

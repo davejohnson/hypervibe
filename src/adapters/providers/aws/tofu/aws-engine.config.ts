@@ -1,5 +1,4 @@
 import { awsDatabaseQuerySecretName } from '../aws-database-query-secret.js';
-import { LOAD_SECRETS_PATH } from '../runtime/load-secrets.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
 import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
@@ -24,7 +23,7 @@ export interface AwsEngineInput {
   /** The environment's own database on the project's shared testing cluster. */
   database?: AwsEnvironmentDatabaseInput;
   storage?: Array<{ name: string; bucket: string }>;
-  /** Web services on Lambda (container image with the Lambda Web Adapter). */
+  /** Web services on Fargate; public ones get an HTTPS address through ECS Express Mode. */
   services?: AwsWebServiceInput[];
   /** Background workers on Fargate; on-demand ones sit at zero tasks until there is work. */
   workers?: AwsWorkerInput[];
@@ -62,12 +61,6 @@ export interface AwsJobInput extends AwsTaskInput {
 }
 
 /** Converts a five-field cron to EventBridge Scheduler's six-field form (day-of-week 1-7, one day field '?'). */
-/** Environment variables Lambda reserves: it sets them and rejects functions that define them. */
-export const LAMBDA_RESERVED_ENV = new Set(['_HANDLER', '_X_AMZN_TRACE_ID', 'AWS_DEFAULT_REGION', 'AWS_REGION', 'AWS_EXECUTION_ENV',
-  'AWS_LAMBDA_FUNCTION_NAME', 'AWS_LAMBDA_FUNCTION_MEMORY_SIZE', 'AWS_LAMBDA_FUNCTION_VERSION', 'AWS_LAMBDA_INITIALIZATION_TYPE',
-  'AWS_LAMBDA_LOG_GROUP_NAME', 'AWS_LAMBDA_LOG_STREAM_NAME', 'AWS_ACCESS_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN', 'AWS_LAMBDA_RUNTIME_API', 'LAMBDA_TASK_ROOT', 'LAMBDA_RUNTIME_DIR']);
-
 export function schedulerCron(schedule: string): string {
   const fields = schedule.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error(`Schedule "${schedule}" must have five fields.`);
@@ -79,23 +72,22 @@ export function schedulerCron(schedule: string): string {
   return `cron(${minute} ${hour} ${dayOfMonth} ${month} ${dayOfWeek} *)`;
 }
 
-export interface AwsWebServiceInput {
-  logicalName: string;
-  /** Physical function name. */
-  resourceName: string;
-  /**
-   * Image for first creation, already pushed to this environment's registry.
-   * Afterwards the release path owns the image and plans ignore it.
-   */
-  initialImageUri: string;
-  /** MB; Lambda CPU scales with memory. */
-  memory?: number;
-  /** Seconds per request (up to 900). */
-  timeout?: number;
-  /** Non-secret configuration only; secrets are read from the parameter path at start. */
+/**
+ * The account role ECS Express Mode manages a web service's load balancer,
+ * certificate and scaling with. Setup creates it; the deploy role can only pass it to ECS.
+ */
+export const AWS_WEB_INFRASTRUCTURE_ROLE = 'hypervibe-web-infrastructure';
+export const awsWebInfrastructureRoleArn = (accountId: string): string => `arn:aws:iam::${accountId}:role/hypervibe/${AWS_WEB_INFRASTRUCTURE_ROLE}`;
+export const AWS_WEB_PORT = 8080;
+
+export interface AwsWebServiceInput extends AwsTaskInput {
+  /** Non-secret configuration only; secrets are wired by reference from the parameter path. */
   env?: Record<string, string>;
+  /** A public service gets an HTTPS address; a private one runs with no route from the internet. */
   public: boolean;
   healthCheckPath?: string;
+  /** Most containers the service may scale out to under load (it always keeps one running). */
+  maxInstances?: number;
 }
 
 export interface AwsEnvironmentDatabaseInput {
@@ -130,7 +122,7 @@ export interface AwsClusterInput {
 
 export const awsKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 
-function checkedProvider(input: Pick<AwsEngineInput, 'accountId' | 'region' | 'prefix' | 'environmentId'>): Record<string, unknown> {
+export function checkedProvider(input: Pick<AwsEngineInput, 'accountId' | 'region' | 'prefix' | 'environmentId'>): Record<string, unknown> {
   if (!/^\d{12}$/.test(input.accountId)) throw new Error('AWS account id is invalid.');
   if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(input.region)) throw new Error('AWS region is invalid.');
   if (!/^[a-z][a-z0-9-]{2,30}$/.test(input.prefix)) throw new Error('AWS name prefix is invalid.');
@@ -204,19 +196,19 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       ...(input.database ? [{ Sid: 'WakerCount', Effect: 'Allow', Action: 'rds-data:ExecuteStatement', Resource: input.database.clusterArn }] : []),
       { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: `arn:aws:secretsmanager:${account}:secret:hypervibe/${input.prefix}/*` },
       { Sid: 'WakerScale', Effect: 'Allow', Action: ['ecs:UpdateService', 'ecs:DescribeServices'], Resource: `arn:aws:ecs:${account}:service/${input.prefix}/*` },
-      { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
       { Sid: 'WakerWebRequests', Effect: 'Allow', Action: 'cloudwatch:GetMetricData', Resource: '*' },
+      { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
     );
   }
   files['base.tf.json'] = {
-    // The default VPC: databases and tasks use its public subnets (no NAT gateway).
+    // The default VPC: tasks run in its public subnets (no NAT gateway) and reach the database on its private address.
     data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
     resource: {
       aws_iam_role: { runtime: {
         name: `${input.prefix}-runtime`, path: '/hypervibe/app/',
         permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
         assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole',
-          Principal: { Service: ['lambda.amazonaws.com', 'ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com', 'events.amazonaws.com'] } }] }),
+          Principal: { Service: ['ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com', 'events.amazonaws.com'] } }] }),
       } },
       aws_iam_role_policy: { runtime: { name: 'runtime', role: '${aws_iam_role.runtime.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: runtimeStatements }) } },
     },
@@ -234,53 +226,6 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       for (const type of Object.keys(bucketResources)) resources[`${type}.${key}`] = mapping;
     }
     files['storage.tf.json'] = { resource: bucketResources };
-  }
-
-  // Web services: Lambda behind a function URL; requests reach the app through the Lambda Web Adapter.
-  const services = input.services ?? [];
-  if (services.length) {
-    const functions: Record<string, unknown> = {};
-    const urls: Record<string, unknown> = {};
-    const permissions: Record<string, unknown> = {};
-    const logGroups: Record<string, unknown> = {};
-    const outputs: Record<string, unknown> = {};
-    for (const service of services) {
-      const key = awsKey(service.logicalName);
-      const mapping: EngineResourceMapping = { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true };
-      logGroups[key] = { name: `/aws/lambda/${service.resourceName}`, retention_in_days: 30 };
-      functions[key] = {
-        function_name: service.resourceName, role: '${aws_iam_role.runtime.arn}', package_type: 'Image', image_uri: service.initialImageUri,
-        memory_size: service.memory ?? 1024, timeout: service.timeout ?? 60, architectures: ['x86_64'],
-        environment: [{ variables: {
-          // Lambda sets its reserved variables itself (the region among them) and rejects them here.
-          ...Object.fromEntries(Object.entries(service.env ?? {}).filter(([key]) => !LAMBDA_RESERVED_ENV.has(key) && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key))), HYPERVIBE_PARAMETER_PATH: input.parameterPath, HYPERVIBE_SECRET_KEYS: runtimeSecretKeys.join(','),
-          // The image's loader reads secrets from Parameter Store before the app starts; npm writes only to /tmp.
-          NODE_OPTIONS: `--require ${LOAD_SECRETS_PATH}`, NPM_CONFIG_CACHE: '/tmp/.npm',
-          // The function URL streams responses, so the adapter must stream too (otherwise clients receive Lambda's envelope).
-          AWS_LWA_INVOKE_MODE: 'response_stream', AWS_LWA_PORT: service.env?.PORT ?? '8080', ...(service.healthCheckPath ? { AWS_LWA_READINESS_CHECK_PATH: service.healthCheckPath } : {}),
-        } }],
-        depends_on: [`aws_cloudwatch_log_group.${key}`, 'aws_iam_role_policy.runtime'],
-        // The release path (CI or hv_deploy) owns the image after creation.
-        lifecycle: [{ ignore_changes: ['image_uri'] }],
-      };
-      urls[key] = { function_name: `\${aws_lambda_function.${key}.function_name}`, authorization_type: service.public ? 'NONE' : 'AWS_IAM', invoke_mode: 'RESPONSE_STREAM' };
-      for (const address of [`aws_cloudwatch_log_group.${key}`, `aws_lambda_function.${key}`, `aws_lambda_function_url.${key}`]) resources[address] = mapping;
-      if (service.public) {
-        // Public function URLs need both permissions (Lambda requires InvokeFunction alongside InvokeFunctionUrl).
-        // The URL and both permissions each write the function's policy, and Lambda rejects concurrent writes (409), so they run in turn.
-        permissions[`${key}_url`] = { statement_id: 'public-url', action: 'lambda:InvokeFunctionUrl', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*', function_url_auth_type: 'NONE',
-          depends_on: [`aws_lambda_function_url.${key}`] };
-        permissions[`${key}_invoke`] = { statement_id: 'public-invoke', action: 'lambda:InvokeFunction', function_name: `\${aws_lambda_function.${key}.function_name}`, principal: '*',
-          depends_on: [`aws_lambda_permission.${key}_url`] };
-        resources[`aws_lambda_permission.${key}_url`] = mapping;
-        resources[`aws_lambda_permission.${key}_invoke`] = mapping;
-      }
-      outputs[`service_${key}_url`] = { value: `\${aws_lambda_function_url.${key}.function_url}` };
-    }
-    files['services.tf.json'] = {
-      resource: { aws_cloudwatch_log_group: logGroups, aws_lambda_function: functions, aws_lambda_function_url: urls, ...(Object.keys(permissions).length ? { aws_lambda_permission: permissions } : {}) },
-      output: outputs,
-    };
   }
 
   addTasks({ ...input, secretKeys: runtimeSecretKeys }, files, resources);
@@ -308,7 +253,7 @@ export function awsSharedClusterArn(input: Pick<AwsSharedInput, 'accountId' | 'r
 /**
  * The project's shared testing cluster, in its own state so each testing
  * environment adds only a database and logins (seconds, not a new cluster).
- * Aurora Serverless v2 on a public, TLS-only endpoint (see docs/opentofu-engine-aws.md).
+ * Aurora Serverless v2 with no public address: only workloads in the same network can connect (see docs/opentofu-engine-aws.md).
  */
 export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfiguration {
   const files: Record<string, unknown> = checkedProvider(input);
@@ -324,7 +269,8 @@ export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfig
     data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
     resource: {
       aws_security_group: { postgres: { name: `${input.prefix}-postgres`, description: 'Hypervibe: Postgres over TLS', vpc_id: '${data.aws_vpc.default.id}',
-        ingress: [{ description: 'Postgres (TLS required by the cluster)', from_port: 5432, to_port: 5432, protocol: 'tcp', cidr_blocks: ['0.0.0.0/0'], ipv6_cidr_blocks: [], prefix_list_ids: [], security_groups: [], self: false }],
+        // No public address: only workloads inside this network reach the port. Hypervibe itself uses the Data API.
+        ingress: [{ description: 'Postgres from this network only (TLS required by the cluster)', from_port: 5432, to_port: 5432, protocol: 'tcp', cidr_blocks: ['${data.aws_vpc.default.cidr_block}'], ipv6_cidr_blocks: [], prefix_list_ids: [], security_groups: [], self: false }],
         egress: [] } },
       aws_db_subnet_group: { postgres: { name: `${input.prefix}-postgres`, subnet_ids: '${data.aws_subnets.default.ids}' } },
       aws_rds_cluster_parameter_group: { postgres: { name: `${input.prefix}-postgres`, family: `aurora-postgresql${major}`,
@@ -347,7 +293,7 @@ export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfig
       aws_rds_cluster_instance: { postgres: {
         identifier: `${input.prefix}-postgres-1`, cluster_identifier: '${aws_rds_cluster.postgres.id}', instance_class: 'db.serverless',
         engine: '${aws_rds_cluster.postgres.engine}', engine_version: '${aws_rds_cluster.postgres.engine_version}',
-        publicly_accessible: true, db_subnet_group_name: '${aws_db_subnet_group.postgres.name}',
+        publicly_accessible: false, db_subnet_group_name: '${aws_db_subnet_group.postgres.name}',
       } },
     },
     output: {

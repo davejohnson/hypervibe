@@ -24,7 +24,7 @@ const group = `/subscriptions/${sub}/resourceGroups/hv-app`;
 const appId = `${group}/providers/Microsoft.App/containerApps/exact-staging-web`;
 const managedEnvironmentId = `${group}/providers/Microsoft.App/managedEnvironments/exact-staging`;
 const workspaceId = '22222222-2222-4222-8222-222222222222';
-const functionArn = `arn:aws:lambda:eu-west-1:${account}:function:exact-staging-web`;
+const webArn = `arn:aws:ecs:eu-west-1:${account}:service/exact-staging/exact-staging-web`; const webCluster = `arn:aws:ecs:eu-west-1:${account}:cluster/exact-staging`;
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(`${tmpdir()}/hv-engine-diag-`); SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(`${dir}/db`).migrate(); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(dir, { recursive: true, force: true }); });
@@ -36,7 +36,7 @@ function fixture(provider: 'aws' | 'azure') {
   new ConnectionRepository().updateStatus(connection.id, 'verified');
   const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging', platformBindings: {
     provider, projectId: provider === 'aws' ? account : sub, environmentId: provider === 'aws' ? 'eu-west-1' : 'hv-app', engine: { kind: 'opentofu' }, services: { web: provider === 'aws'
-      ? { serviceId: functionArn, resourceType: 'lambda', workloadKind: 'web', region: 'eu-west-1', logGroup: '/aws/lambda/exact-staging-web' }
+      ? { serviceId: webArn, resourceType: 'ecs-express', workloadKind: 'web', region: 'eu-west-1', clusterArn: webCluster, logGroup: '/hypervibe/exact-staging/tasks', logStreamPrefix: 'exact-staging-web/Main/' }
       : { serviceId: appId, resourceType: 'container-app', workloadKind: 'web', region: 'northeurope', managedEnvironmentId, workspaceId } },
   } });
   return { project, environment };
@@ -48,19 +48,19 @@ function awsTransport(route?: (request: { host: string; path: string; body: any;
     requests.push({ host: request.hostname, path: request.path, body: body.startsWith('{') ? JSON.parse(body) : body, target: request.headers['x-amz-target'] ?? '' });
     let data: unknown;
     if (request.hostname.startsWith('sts.')) data = '<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>AKIASYNTHETIC00000</AccessKeyId><SecretAccessKey>temporary-secret</SecretAccessKey><SessionToken>temporary-session</SessionToken><Expiration>2030-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>';
-    else if (request.hostname.startsWith('lambda.')) data = { FunctionArn: functionArn, State: 'Active', LastUpdateStatus: 'Failed', LoggingConfig: { LogGroup: '/aws/lambda/exact-staging-web' } };
+    else if (String(request.headers['x-amz-target'] ?? '').endsWith('DescribeServices')) data = { services: [{ serviceArn: webArn, clusterArn: webCluster, status: 'ACTIVE', desiredCount: 1, runningCount: 0, pendingCount: 0, deployments: [{ status: 'PRIMARY', rolloutState: 'FAILED' }] }] };
     else data = requests.filter((r) => r.target.endsWith('FilterLogEvents')).length === 1 ? { events: [], nextToken: 'page-two' } : { events: [{ timestamp: 1700000000000, message: 'ERROR temporary-session' }] };
     const custom = route?.(requests.at(-1)!); if (custom) data = custom.data;
     return { response: { statusCode: custom?.status ?? 200, headers: { 'content-type': typeof data === 'string' ? 'text/xml' : 'application/json' }, body: Readable.from([typeof data === 'string' ? data : JSON.stringify(data)]) } };
   });
   return requests;
 }
-it('reads exact AWS environment logs through serialized clients, follows empty pages, and distinguishes failed updates from active functions', async () => {
+it('reads exact AWS environment logs through serialized clients, follows empty pages, and distinguishes a failed rollout from a running web service', async () => {
   const { project, environment } = fixture('aws'); const requests = awsTransport();
   const result = await fetchProviderLogs('aws', project, environment, 'web', 1);
   expect(result.logs).toHaveLength(1); expect(result.logs[0]!.message).not.toContain('temporary-session');
   expect(requests.filter((r) => !r.host.startsWith('sts.')).every((r) => r.host.includes('eu-west-1'))).toBe(true);
-  expect(requests.find((r) => r.target.endsWith('FilterLogEvents'))!.body.logGroupName).toBe('/aws/lambda/exact-staging-web');
+  expect(requests.find((r) => r.target.endsWith('FilterLogEvents'))!.body).toMatchObject({ logGroupName: '/hypervibe/exact-staging/tasks', logStreamNamePrefix: 'exact-staging-web/Main/' });
   const health = await collectProjectDeploymentHealth({ project, environments: [environment], desiredServiceNamesByEnvironment: { staging: ['web'] } });
   expect(health.state).toBe('failed');
 });
@@ -108,7 +108,7 @@ it('keeps repeated CloudWatch pages and provider read failures distinct from suc
 });
 it('does not use credentials for an AWS binding in another account', async () => {
   const { project, environment } = fixture('aws'); const requests = awsTransport();
-  const bound = environment.platformBindings as any; bound.services.web.serviceId = functionArn.replace(account, '444455556666');
+  const bound = environment.platformBindings as any; bound.services.web.serviceId = webArn.replace(account, '444455556666');
   await expect(fetchProviderLogs('aws', project, environment, 'web', 1)).rejects.toThrow(/account/);
   expect(requests).toEqual([]);
 });
@@ -184,11 +184,11 @@ it('retains the exact new scheduled-task revision returned by AWS for subsequent
 it('keeps equal logical service names isolated between AWS environment bindings', async () => {
   const { project, environment } = fixture('aws');
   const other = { ...environment, id: 'other', name: 'other', platformBindings: { ...environment.platformBindings, services: { web: {
-    serviceId: functionArn.replace('staging', 'preview'), resourceType: 'lambda', workloadKind: 'web', region: 'eu-west-1', logGroup: '/aws/lambda/exact-preview-web',
+    serviceId: webArn.replaceAll('staging', 'preview'), resourceType: 'ecs-express', workloadKind: 'web', region: 'eu-west-1', clusterArn: webCluster.replace('staging', 'preview'), logGroup: '/hypervibe/exact-preview/tasks', logStreamPrefix: 'exact-preview-web/Main/',
   } } } };
   const requests = awsTransport((r) => r.target.endsWith('FilterLogEvents') ? { data: { events: [] } } : undefined);
   await fetchProviderLogs('aws', project, environment, 'web', 1); await fetchProviderLogs('aws', project, other, 'web', 1);
-  expect(requests.filter((r) => r.target.endsWith('FilterLogEvents')).map((r) => r.body.logGroupName)).toEqual(['/aws/lambda/exact-staging-web', '/aws/lambda/exact-preview-web']);
+  expect(requests.filter((r) => r.target.endsWith('FilterLogEvents')).map((r) => r.body.logGroupName)).toEqual(['/hypervibe/exact-staging/tasks', '/hypervibe/exact-preview/tasks']);
 });
 it('redacts a credential crossing a log truncation boundary before shortening the message', async () => {
   const { project, environment } = fixture('aws');

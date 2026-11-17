@@ -173,7 +173,5 @@ observations and required missing keys stop them. GCP uses Secret Manager build
 references, AWS uses CodeBuild Parameter Store references, and Azure uses a managed
 ACR task identity with an exact Key Vault secret reference and file mount. All
 expose the BuildKit secret id `npm_token`; the running app does not receive it.
-New build identities and grants remain part of reviewed engine plans. Existing
-AWS Lambda images must be verified with the new secret loader before runtime
-permissions are narrowed. Offline provider and generated-program checks are not
+New build identities and grants remain part of reviewed engine plans. Offline provider and generated-program checks are not
 live private-package build evidence.

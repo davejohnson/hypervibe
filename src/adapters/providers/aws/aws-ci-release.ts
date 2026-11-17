@@ -1,13 +1,11 @@
 import { strictHealthCheck } from '../../../domain/services/release-health.js';
 import { BatchGetProjectsCommand, CodeBuildClient } from '@aws-sdk/client-codebuild';
-import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient } from '@aws-sdk/client-ecs';
-import { GetFunctionConfigurationCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { DescribeExpressGatewayServiceCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient } from '@aws-sdk/client-ecs';
 import type { EngineCiReleaseTarget, GitHubOidcContext } from '../../../domain/ports/engine-ci.port.js';
 import type { EngineCiBinding } from '../../../domain/spec/engine-ci-binding.js';
 import type { ProjectSpec } from '../../../domain/spec/spec.schema.js';
 import { awsCiAccess } from './aws-ci-auth.js';
-import { AWS_DOCKERFILE, LOADER_IN_SOURCE, awsReleaseDockerfile, buildImage, releaseFunction, releaseTask, type AwsReleaseTarget } from './aws-release.client.js';
-import { LOAD_SECRETS_SOURCE } from './runtime/load-secrets.js';
+import { AWS_DOCKERFILE, awsReleaseDockerfile, buildImage, releaseTask, releaseWebService, type AwsReleaseTarget } from './aws-release.client.js';
 import { matchesTaskDefinitionFamily, taskDefinitionIdentity } from './aws-task-identity.js';
 
 export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context: GitHubOidcContext, spec: ProjectSpec): Promise<EngineCiReleaseTarget> {
@@ -15,14 +13,14 @@ export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context
   const target: AwsReleaseTarget = { region: binding.region, accountId: a.accountId, prefix: binding.prefix, credentials: access.credentials,
     deadlineMs: context.deadlineMs ?? Date.now() + 35 * 60_000, requestTimeoutMs: 30_000, buildProjectArn: a.buildProjectArn, sourceBucket: a.sourceBucket, repositoryUrl: a.repositoryUrl, ...(a.packageParameter ? { packageTokenParameter: a.packageParameter } : {}) };
   const options = { region: binding.region, credentials: access.credentials, maxAttempts: 1, requestHandler: { requestTimeout: 30_000, connectionTimeout: 5000 } };
-  const ecs = new ECSClient(options); const lambda = new LambdaClient(options);
+  const ecs = new ECSClient(options);
   const taskDefinitions = new Map<string, string>();
   const inspect = async (name: string) => {
     if (Date.now() + 30_000 >= target.deadlineMs!) throw new Error('The release observation deadline has elapsed.');
     const w = binding.services[name]!;
-    if (w.resourceType === 'lambda') {
-      const found = await lambda.send(new GetFunctionConfigurationCommand({ FunctionName: w.serviceId }));
-      if (found.FunctionArn !== w.serviceId || found.LastUpdateStatus === 'InProgress') throw new Error('AWS did not confirm an available exact Lambda target.');
+    if (w.resourceType === 'ecs-express') {
+      const found = (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn: w.serviceId }))).service;
+      if (found?.serviceArn !== w.serviceId || found.status?.statusCode !== 'ACTIVE') throw new Error('AWS did not confirm an active exact web service target.');
       return;
     }
     const recorded = taskDefinitionIdentity(w.taskDefinitionArn);
@@ -44,7 +42,7 @@ export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context
     taskDefinitions.set(name, current.taskDefinitionArn!);
   };
   return { cloudName: 'AWS', buildPhrase: 'in CodeBuild', format: 'zip', dockerfileName: AWS_DOCKERFILE,
-    addFiles: { [LOADER_IN_SOURCE]: LOAD_SECRETS_SOURCE }, dockerfileFor: awsReleaseDockerfile, redact: access.redact,
+    dockerfileFor: awsReleaseDockerfile, redact: access.redact,
     preflight: async () => {
       const observed = await new CodeBuildClient(options).send(new BatchGetProjectsCommand({ names: [a.buildProjectArn] }));
       const project = observed.projects?.[0]; const tags = Object.fromEntries((project?.tags ?? []).map((t) => [t.key, t.value]));
@@ -55,12 +53,12 @@ export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context
     build: async (source) => { const built = await buildImage(target, source); return 'error' in built ? built : { image: built.imageUri, ...(built.logsUrl ? { logsUrl: built.logsUrl } : {}) }; },
     releaseWorkload: async ({ name, image }) => {
       await inspect(name); const w = binding.services[name]!;
-      const result = await (w.resourceType === 'lambda'
-        ? releaseFunction(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/', strictHealthCheck(spec.environments[binding.environmentName]!.services[name]!))
+      const result = await (w.resourceType === 'ecs-express'
+        ? releaseWebService(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/', strictHealthCheck(spec.environments[binding.environmentName]!.services[name]!))
         : releaseTask(target, name, w.serviceId, image, w.resourceType === 'ecs-service', { clusterArn: w.clusterArn!, taskDefinitionArn: taskDefinitions.get(name)!, ...(w.resourceType === 'ecs-service' ? { serviceArn: w.serviceId } : {}) }));
       if (result.status !== 'released') return result;
-      if (w.resourceType === 'lambda') return result.health && result.health.status >= 200 && result.health.status < 400 ? result
-        : { ...result, status: 'failed', message: 'The released function did not pass its application HTTP check.' };
+      if (w.resourceType === 'ecs-express') return result.health && result.health.status >= 200 && result.health.status < 400 ? result
+        : { ...result, status: 'failed', message: 'The released web service did not pass its application HTTP check.' };
       if (w.resourceType !== 'ecs-service') return result;
       for (let attempt = 0; attempt < 60 && Date.now() < target.deadlineMs!; attempt++) {
         const observed = await ecs.send(new DescribeServicesCommand({ cluster: w.clusterArn!, services: [w.serviceId] }));

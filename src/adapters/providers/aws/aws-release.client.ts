@@ -1,18 +1,19 @@
 import { healthCheckFailed } from '../../../domain/services/release-health.js';
 import { BatchGetBuildsCommand, CodeBuildClient, StartBuildCommand, type CodeBuildClientConfig } from '@aws-sdk/client-codebuild';
 import { DescribeImagesCommand, ECRClient } from '@aws-sdk/client-ecr';
-import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, RegisterTaskDefinitionCommand, UpdateServiceCommand, type RegisterTaskDefinitionCommandInput } from '@aws-sdk/client-ecs';
-import { GetFunctionCommand, GetFunctionUrlConfigCommand, LambdaClient, ResourceNotFoundException, UpdateFunctionCodeCommand, waitUntilFunctionUpdatedV2 } from '@aws-sdk/client-lambda';
+import {
+  DescribeExpressGatewayServiceCommand, DescribeServiceDeploymentsCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, RegisterTaskDefinitionCommand,
+  UpdateExpressGatewayServiceCommand, UpdateServiceCommand, type ECSExpressGatewayService, type RegisterTaskDefinitionCommandInput,
+} from '@aws-sdk/client-ecs';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import type { EngineReleaseResult } from '../../../domain/ports/infrastructure-engine.port.js';
 import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
 import type { ProjectRuntime } from '../../../domain/spec/project-runtime.js';
 import { fetchWithRetry } from '../../../utils/fetch-retry.js';
-import { LOAD_SECRETS_PATH } from './runtime/load-secrets.js';
 
 /**
- * AWS calls a release makes: build an image in CodeBuild, then point a Lambda
- * function or an ECS service at it. Orchestration, receipts and bindings stay in
+ * AWS calls a release makes: build an image in CodeBuild, then move a web
+ * service, worker or scheduled job to it. Orchestration, receipts and bindings stay in
  * the application layer; this module only talks to AWS.
  */
 export interface AwsReleaseTarget {
@@ -28,20 +29,16 @@ export interface AwsReleaseTarget {
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
 }
 
-/** Pinned Lambda Web Adapter: lets an ordinary HTTP server answer Lambda function URL requests. */
-export const LAMBDA_WEB_ADAPTER_IMAGE = 'public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1';
 /** Amazon RDS's certificate authorities, so database clients that verify TLS (node-postgres does) trust Aurora. */
 export const RDS_CA_BUNDLE_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem';
 const RDS_CA_PATH = '/opt/hypervibe/rds-ca.pem';
-/** The packaged loader is part of the image identity, even when the repository commit is unchanged. */
-export const awsImageTag = (commitSha: string): string => `${commitSha}-hv-secrets-v2`;
+/** What Hypervibe adds to the image is part of its identity, even when the repository commit is unchanged. */
+export const awsImageTag = (commitSha: string): string => `${commitSha}-hv3`;
 export const AWS_DOCKERFILE = '.hypervibe-aws.Dockerfile';
-export const LOADER_IN_SOURCE = '.hypervibe-aws/load-secrets.cjs';
 
 /**
  * One image serves every workload: the repository's Dockerfile (or the generated
- * one) plus the web adapter, which only activates inside Lambda, and the secrets
- * loader. Generated images pull their base from ECR Public, avoiding Docker Hub
+ * one) plus the RDS certificate authorities. Generated images pull their base from ECR Public, avoiding Docker Hub
  * pull limits on shared CodeBuild hosts.
  */
 export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; runtime?: ProjectRuntime; startCommand?: string }): string {
@@ -51,9 +48,7 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
   return [
     base.trimEnd(),
     '',
-    '# Added by Hypervibe for AWS: the Lambda Web Adapter (inactive outside Lambda), the secrets loader and the RDS certificate authorities.',
-    `COPY --from=${LAMBDA_WEB_ADAPTER_IMAGE} /lambda-adapter /opt/extensions/lambda-adapter`,
-    `COPY ${LOADER_IN_SOURCE} ${LOAD_SECRETS_PATH}`,
+    '# Added by Hypervibe for AWS: the RDS certificate authorities.',
     `ADD --chmod=644 ${RDS_CA_BUNDLE_URL} ${RDS_CA_PATH}`,
     `ENV NODE_EXTRA_CA_CERTS=${RDS_CA_PATH} PGSSLROOTCERT=${RDS_CA_PATH}`,
     '',
@@ -111,48 +106,68 @@ async function imageFor(ecr: ECRClient, target: AwsReleaseTarget, tag: string): 
   }
 }
 
-export async function releaseFunction(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false): Promise<EngineReleaseResult> {
-  const lambda = new LambdaClient({ region: target.region, credentials: target.credentials, ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}) });
-  let current = await lambda.send(new GetFunctionCommand({ FunctionName: resource }));
-  if (resource.startsWith('arn:') && current.Configuration?.FunctionArn !== resource) return { service: name, status: 'unknown', message: 'AWS did not confirm the exact function identity before release.' };
-  const alreadyRunning = current.Code?.ImageUri === imageUri && current.Configuration?.LastUpdateStatus === 'Successful';
-  let ready = alreadyRunning;
-  if (!alreadyRunning) {
-    if (target.deadlineMs && Date.now() + 30_000 >= target.deadlineMs) return { service: name, status: 'unknown', message: 'The release deadline elapsed before updating the function.' };
-    await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: resource, ImageUri: imageUri, ...(current.Configuration?.RevisionId ? { RevisionId: current.Configuration.RevisionId } : {}) }));
-    ready = Boolean(await waitUntilFunctionUpdatedV2({ client: lambda, maxWaitTime: target.deadlineMs ? Math.min(600, Math.max(1, Math.floor((target.deadlineMs - Date.now()) / 1000))) : 600 }, { FunctionName: resource }).catch(() => undefined));
-    current = await lambda.send(new GetFunctionCommand({ FunctionName: resource }));
+/** The ARN of an environment's web service: its cluster is named after the environment prefix. */
+export const awsWebServiceArn = (target: Pick<AwsReleaseTarget, 'region' | 'accountId' | 'prefix'>, resource: string): string =>
+  resource.startsWith('arn:') ? resource : `arn:aws:ecs:${target.region}:${target.accountId}:service/${target.prefix}/${resource}`;
+
+const ecsClient = (target: AwsReleaseTarget) => new ECSClient({ region: target.region, credentials: target.credentials, ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}) });
+
+/** The HTTPS address AWS gave a web service. */
+export function webServiceUrl(service: ECSExpressGatewayService | undefined): string | undefined {
+  const endpoint = (service?.activeConfigurations ?? []).flatMap((configuration) => configuration.ingressPaths ?? []).find((path) => path.endpoint && path.accessType !== 'PRIVATE')?.endpoint;
+  return endpoint ? (/^https?:\/\//.test(endpoint) ? endpoint : `https://${endpoint}`) : undefined;
+}
+
+const ROLLED_BACK = new Set(['ROLLBACK_REQUESTED', 'ROLLBACK_IN_PROGRESS', 'ROLLBACK_SUCCESSFUL', 'ROLLBACK_FAILED', 'STOP_REQUESTED', 'STOPPED']);
+
+/**
+ * Moves a public web service (ECS Express Mode) to a new image. AWS starts the
+ * new containers beside the old ones, shifts traffic once they pass health
+ * checks, and rolls the release back by itself if they fail. The release is
+ * reported only when AWS confirms the rollout finished on the new image.
+ */
+export async function releaseWebService(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false, pollMs = 10_000): Promise<EngineReleaseResult> {
+  const ecs = ecsClient(target);
+  const serviceArn = awsWebServiceArn(target, resource);
+  const read = async () => (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
+  const running = (service: ECSExpressGatewayService | undefined) => (service?.activeConfigurations ?? []).length === 1 && service!.activeConfigurations![0]!.primaryContainer?.image === imageUri;
+  let current = await read();
+  if (current?.serviceArn !== serviceArn || current.status?.statusCode !== 'ACTIVE') return { service: name, status: 'unknown', message: 'AWS did not confirm the exact active web service before release.' };
+  const deadline = target.deadlineMs ?? Date.now() + 20 * 60_000;
+  if (!running(current)) {
+    const configurations = current.activeConfigurations ?? [];
+    if (configurations.length !== 1 || !configurations[0]!.primaryContainer) return { service: name, status: 'unknown', message: `${name} is still rolling out an earlier release; try again when it finishes.` };
+    if (Date.now() + 30_000 >= deadline) return { service: name, status: 'unknown', message: 'The release deadline elapsed before updating the web service.' };
+    const before = current.currentDeployment;
+    await ecs.send(new UpdateExpressGatewayServiceCommand({ serviceArn, primaryContainer: { ...configurations[0]!.primaryContainer, image: imageUri } }));
+    let deployment: string | undefined;
+    let finished = false;
+    for (let attempt = 0; !finished && Date.now() < deadline; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, pollMs));
+      current = await read();
+      if (current?.serviceArn !== serviceArn) return { service: name, imageUri, status: 'unknown', message: 'AWS did not confirm the exact web service after release.' };
+      if (!deployment && current.currentDeployment && current.currentDeployment !== before) deployment = current.currentDeployment;
+      if (!deployment) continue;
+      const observed = (await ecs.send(new DescribeServiceDeploymentsCommand({ serviceDeploymentArns: [deployment] }))).serviceDeployments?.[0];
+      if (observed?.serviceDeploymentArn !== deployment) continue;
+      if (ROLLED_BACK.has(String(observed.status))) {
+        return { service: name, imageUri, status: 'failed', message: `The new release of ${name} did not become healthy, so AWS kept the previous one running${observed.statusReason ? ` (${observed.statusReason})` : ''}. Check hv_logs.` };
+      }
+      finished = observed.status === 'SUCCESSFUL';
+    }
+    if (!finished || !running(current)) return { service: name, imageUri, status: 'unknown', message: `${name} did not report the new image as fully rolled out before the deadline; it may still be starting.` };
   }
-  if (!ready || current.Code?.ImageUri !== imageUri || current.Configuration?.LastUpdateStatus !== 'Successful' || resource.startsWith('arn:') && current.Configuration?.FunctionArn !== resource) {
-    return { service: name, imageUri, status: 'unknown', message: `${resource} did not report the new image as ready (${current.Configuration?.LastUpdateStatusReason ?? 'no reason given'}).` };
-  }
-  const url = (await lambda.send(new GetFunctionUrlConfigCommand({ FunctionName: resource }))).FunctionUrl;
-  const result: EngineReleaseResult = { service: name, imageUri, status: 'released', message: `Released to ${resource}.`, ...(url ? { url } : {}) };
+  const url = webServiceUrl(current);
+  const result: EngineReleaseResult = { service: name, imageUri, status: 'released', message: `Released to ${name}.`, ...(url ? { url } : {}) };
   if (!url) return result;
   try {
     const response = await fetchWithRetry(new URL(healthCheckPath, url), { redirect: 'manual', signal: AbortSignal.timeout(60_000) });
     result.health = { status: response.status, path: healthCheckPath };
-    // A function URL answers HTTP 200 with a Lambda error body when the app fails to start.
-    const crashed = await lambdaErrorType(response);
-    if (crashed) Object.assign(result, { status: 'failed', message: `The new release did not start (${crashed}): the app exited while starting. Check hv_logs for its error.` });
-    else if (healthCheckFailed(response.status, strictHealth)) Object.assign(result, { status: 'failed', message: `The new release is serving, but ${healthCheckPath} returned HTTP ${response.status}. Check hv_logs.` });
+    if (healthCheckFailed(response.status, strictHealth)) Object.assign(result, { status: 'failed', message: `The new release is serving, but ${healthCheckPath} returned HTTP ${response.status}. Check hv_logs.` });
   } catch {
     Object.assign(result, { health: { status: 0, path: healthCheckPath }, status: 'unknown', message: `The new release is ready, but ${healthCheckPath} could not be reached to verify health.` });
   }
   return result;
-}
-
-/** The Lambda error type when a function URL response is Lambda's own error rather than the app's. */
-export async function lambdaErrorType(response: Response): Promise<string | undefined> {
-  const header = response.headers.get('x-amz-function-error');
-  if (header) return header;
-  if (!(response.headers.get('content-type') ?? '').includes('json')) return undefined;
-  try {
-    const body = JSON.parse((await response.text()).slice(0, 4096)) as { errorType?: unknown };
-    return typeof body.errorType === 'string' && /^Runtime\.|^Function\./.test(body.errorType) ? body.errorType : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -161,7 +176,7 @@ export async function lambdaErrorType(response: Response): Promise<string | unde
  * Scheduled jobs reference the family, so their next run uses the new revision.
  */
 export async function releaseTask(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, worker: boolean, exact?: { clusterArn: string; taskDefinitionArn: string; serviceArn?: string }): Promise<EngineReleaseResult> {
-  const ecs = new ECSClient({ region: target.region, credentials: target.credentials, ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}) });
+  const ecs = ecsClient(target);
   const described = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: exact?.taskDefinitionArn ?? resource, include: ['TAGS'] }));
   const latest = described.taskDefinition;
   if (exact && latest?.taskDefinitionArn !== exact.taskDefinitionArn) return { service: name, status: 'unknown', message: 'AWS did not confirm the exact bound task definition before release.' };
@@ -185,11 +200,15 @@ export async function releaseTask(target: AwsReleaseTarget, name: string, resour
   return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: service.desiredCount ? `Released to ${resource}; its tasks are being replaced.` : `Released to ${resource}; it starts with the new image when work is queued.` };
 }
 
-export async function functionExists(target: AwsReleaseTarget, resource: string): Promise<boolean | 'unknown'> {
+/** Whether a web service exists: a public one through Express Mode, a private one as an ordinary service. */
+export async function webServiceExists(target: AwsReleaseTarget, resource: string, isPublic: boolean): Promise<boolean | 'unknown'> {
+  const serviceArn = awsWebServiceArn(target, resource);
   try {
-    await new LambdaClient({ region: target.region, credentials: target.credentials, ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}) }).send(new GetFunctionCommand({ FunctionName: resource }));
-    return true;
+    if (isPublic) return (await ecsClient(target).send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service?.serviceArn === serviceArn ? true : 'unknown';
+    const found = await ecsClient(target).send(new DescribeServicesCommand({ cluster: target.prefix, services: [serviceArn] }));
+    if (found.services?.length === 1 && found.services[0]!.serviceArn === serviceArn) return found.services[0]!.status === 'ACTIVE';
+    return found.failures?.length === 1 && found.failures[0]!.reason === 'MISSING' ? false : 'unknown';
   } catch (error) {
-    return error instanceof ResourceNotFoundException ? false : 'unknown';
+    return error instanceof Error && ['ResourceNotFoundException', 'ServiceNotFoundException', 'ClusterNotFoundException'].includes(error.name) ? false : 'unknown';
   }
 }

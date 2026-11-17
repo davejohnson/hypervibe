@@ -1,7 +1,6 @@
 import { strictHealthCheck } from '../domain/services/release-health.js';
-import { LOAD_SECRETS_SOURCE } from '../adapters/providers/aws/runtime/load-secrets.js';
 import {
-  AWS_DOCKERFILE, LOADER_IN_SOURCE, awsReleaseDockerfile, buildImage, functionExists, releaseFunction, releaseTask, type AwsReleaseTarget,
+  AWS_DOCKERFILE, awsReleaseDockerfile, buildImage, releaseTask, releaseWebService, webServiceExists, type AwsReleaseTarget,
 } from '../adapters/providers/aws/aws-release.client.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
@@ -34,7 +33,7 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   if ('blocked' in workloads) return workloads;
   const { selected, web, startCommand } = workloads;
   const source = await packageLocalCommit(params.sourceDirectory, {
-    format: 'zip', dockerfileName: AWS_DOCKERFILE, addFiles: { [LOADER_IN_SOURCE]: LOAD_SECRETS_SOURCE },
+    format: 'zip', dockerfileName: AWS_DOCKERFILE,
     dockerfileFor: (repositoryDockerfile) => awsReleaseDockerfile({
       ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(params.spec.runtime ? { runtime: params.spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
     }),
@@ -44,7 +43,7 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   // Workloads exist only once an image does; until then this release only builds.
   const firstImage = !awsBinding(context.environment).imageUri;
   if (!firstImage && web) {
-    const exists = await functionExists(target, awsResourceName(context.prefix, web));
+    const exists = await webServiceExists(target, awsResourceName(context.prefix, web), environmentSpec.services[web]!.public ?? true);
     if (exists === 'unknown') return { blocked: 'Hypervibe could not read the web service on AWS; try again.' };
     if (!exists) return { blocked: `Create the infrastructure first: ${web} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   }
@@ -60,9 +59,10 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
       ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri } });
     },
     releaseWorkload: async ({ name, kind, resource, image }) => {
-      const result = kind === 'web'
-        ? await releaseFunction(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!))
-        : await releaseTask(target, name, resource, image, kind === 'worker');
+      // A private web service is an ordinary ECS service, released like a worker.
+      const result = kind === 'web' && (environmentSpec.services[name]!.public ?? true)
+        ? await releaseWebService(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!))
+        : await releaseTask(target, name, resource, image, kind !== 'cron');
       if (result.status === 'released' && result.taskDefinitionArn) {
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
         const services = (current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {};
@@ -84,25 +84,11 @@ export async function buildAwsCommitImage(target: AwsReleaseTarget, spec: Projec
   const workloads = selectReleaseWorkloads(spec.environments[environmentName]!, undefined);
   const startCommand = 'blocked' in workloads ? undefined : workloads.startCommand;
   const source = await packageLocalCommit(directory, {
-    format: 'zip', dockerfileName: AWS_DOCKERFILE, addFiles: { [LOADER_IN_SOURCE]: LOAD_SECRETS_SOURCE }, commitSha,
+    format: 'zip', dockerfileName: AWS_DOCKERFILE, commitSha,
     dockerfileFor: (repositoryDockerfile) => awsReleaseDockerfile({
       ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(spec.runtime ? { runtime: spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
     }),
   });
   if ('blocked' in source) return { error: source.blocked };
   return buildImage(target, source);
-}
-
-/** Upgrade existing Lambda images before the engine narrows their secret permissions. */
-export async function upgradeAwsRuntimeImage(target: AwsReleaseTarget, spec: ProjectSpec, environmentName: string, image: string): Promise<string | undefined> {
-  for (const [name, service] of Object.entries(spec.environments[environmentName]!.services)) {
-    if ((service.workloadKind ?? 'web') !== 'web') continue;
-    const resource = awsResourceName(target.prefix, name);
-    const exists = await functionExists(target, resource);
-    if (exists === 'unknown') return `Could not verify ${name} before updating its secrets loader; runtime permissions were not changed.`;
-    if (!exists) continue;
-    const released = await releaseFunction(target, name, resource, image, service.healthCheckPath ?? '/', strictHealthCheck(service));
-    if (released.status !== 'released') return `The secrets loader update for ${name} did not finish: ${released.message}`;
-  }
-  return undefined;
 }

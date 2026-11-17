@@ -16,7 +16,7 @@ export function hasWorkloadDiagnostics(value: unknown): value is WorkloadDiagnos
 export interface EngineWorkloadBinding {
   serviceId: string;
   workloadKind: string;
-  resourceType: 'lambda' | 'ecs-service' | 'ecs-task' | 'container-app' | 'container-job';
+  resourceType: 'ecs-express' | 'ecs-service' | 'ecs-task' | 'container-app' | 'container-job';
   region: string;
   url?: string;
   logGroup?: string;

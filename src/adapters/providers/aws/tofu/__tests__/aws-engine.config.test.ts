@@ -4,13 +4,18 @@ import { awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildA
 const base = { accountId: '111122223333', region: 'us-west-2', prefix: 'hv-app-aws', environmentId: 'ENV1', parameterPath: '/hypervibe/env1/' };
 
 describe('AWS engine configuration', () => {
-  it('keeps the database TLS-only, its password out of state, and its deletion confirmable', () => {
+  it('keeps the database off the internet and TLS-only, its password out of state, and its deletion confirmable', () => {
     const config = buildAwsSharedConfiguration({ accountId: base.accountId, region: base.region, prefix: 'hv-app-shared', environmentId: 'shared-testing',
       database: { engineVersion: '18.6', minCapacity: 0, maxCapacity: 2 } });
     const database = config.files['database.tf.json'] as { resource: Record<string, Record<string, Record<string, unknown>>> };
     const cluster = database.resource.aws_rds_cluster!.postgres!;
     expect(cluster.manage_master_user_password).toBe(true);
     expect(cluster).not.toHaveProperty('master_password');
+    // No route from the internet (#728): no public address, and the port opens only to the environment's own network.
+    expect(database.resource.aws_rds_cluster_instance!.postgres!.publicly_accessible).toBe(false);
+    const ingress = (database.resource.aws_security_group!.postgres!.ingress as Array<{ cidr_blocks: string[]; ipv6_cidr_blocks: string[] }>);
+    expect(ingress.map((rule) => rule.cidr_blocks)).toEqual([['${data.aws_vpc.default.cidr_block}']]);
+    expect(JSON.stringify(database)).not.toMatch(/0\.0\.0\.0\/0|::\/0/);
     expect(database.resource.aws_rds_cluster_parameter_group!.postgres!.parameter).toEqual([{ name: 'rds.force_ssl', value: '1' }]);
     expect(cluster.serverlessv2_scaling_configuration).toEqual([{ min_capacity: 0, max_capacity: 2, seconds_until_auto_pause: 600 }]);
     expect(config.resources['aws_rds_cluster.postgres']).toMatchObject({ actionId: 'shared:database', dataBearing: true, billable: true });
@@ -43,17 +48,42 @@ describe('AWS image builds', () => {
 });
 
 describe('AWS web services', () => {
-  it('leaves Lambda-reserved variables to Lambda and points it at the secrets loader', () => {
-    const config = buildAwsConfiguration({ ...base, services: [{ logicalName: 'web', resourceName: 'hv-app-web', initialImageUri: 'x', public: true,
-      env: { AWS_DEFAULT_REGION: 'us-west-2', AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1' } }] });
-    const fn = (config.files['services.tf.json'] as { resource: { aws_lambda_function: Record<string, { environment: Array<{ variables: Record<string, string> }> }> } }).resource.aws_lambda_function.web!;
-    const variables = fn.environment[0]!.variables;
-    expect(variables).not.toHaveProperty('AWS_DEFAULT_REGION');
-    expect(variables).toMatchObject({ AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1', NODE_OPTIONS: '--require /opt/hypervibe/load-secrets.cjs', AWS_LWA_INVOKE_MODE: 'response_stream' });
-    // The URL and both public permissions write one function policy; Lambda rejects concurrent writes with 409.
-    const permissions = (config.files['services.tf.json'] as { resource: { aws_lambda_permission: Record<string, { depends_on?: string[] }> } }).resource.aws_lambda_permission;
-    expect(permissions.web_url!.depends_on).toEqual(['aws_lambda_function_url.web']);
-    expect(permissions.web_invoke!.depends_on).toEqual(['aws_lambda_permission.web_url']);
+  it('runs a public web service as an Express Mode container service with secrets by reference and the release path owning its image', () => {
+    const config = buildAwsConfiguration({ ...base, secretKeys: ['API_KEY'], services: [{ logicalName: 'web', resourceName: 'hv-app-aws-web', initialImageUri: 'x', public: true,
+      healthCheckPath: '/health', env: { AWS_S3_BUCKET_NAME: 'b', APP_VERSION: 'v1' } }] });
+    expect(JSON.stringify(config.files)).not.toMatch(/aws_lambda|lambda\.amazonaws\.com/);
+    const tasks = (config.files['tasks.tf.json'] as { resource: Record<string, Record<string, Record<string, any>>>; output: Record<string, { value: string }> });
+    const service = tasks.resource.aws_ecs_express_gateway_service!.web!;
+    expect(service).toMatchObject({
+      service_name: 'hv-app-aws-web', cluster: '${aws_ecs_cluster.main.name}', health_check_path: '/health', wait_for_steady_state: true,
+      infrastructure_role_arn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-web-infrastructure',
+      execution_role_arn: '${aws_iam_role.runtime.arn}', task_role_arn: '${aws_iam_role.runtime.arn}',
+      scaling_target: [{ min_task_count: 1, max_task_count: 3 }],
+      lifecycle: [{ ignore_changes: ['primary_container[0].image'] }],
+    });
+    const container = service.primary_container[0];
+    expect(container.container_port).toBe(8080);
+    expect(container.environment).toEqual(expect.arrayContaining([{ name: 'PORT', value: '8080' }, { name: 'APP_VERSION', value: 'v1' }, { name: 'HYPERVIBE_PARAMETER_PATH', value: '/hypervibe/env1/' }]));
+    expect(container.secret).toEqual([{ name: 'API_KEY', value_from: 'arn:aws:ssm:us-west-2:111122223333:parameter/hypervibe/env1/API_KEY' }]);
+    // Containers have a public address for outbound calls, but accept web traffic only from inside the network (the load balancer).
+    expect(service.network_configuration[0].security_groups).toEqual(['${aws_security_group.tasks.id}']);
+    expect(tasks.resource.aws_security_group!.tasks!.ingress).toMatchObject([{ from_port: 8080, to_port: 8080, cidr_blocks: ['${data.aws_vpc.default.cidr_block}'] }]);
+    expect(tasks.resource.aws_ecs_cluster_capacity_providers!.main).toMatchObject({ capacity_providers: ['FARGATE'] });
+    expect(tasks.output.service_web_url!.value).toBe('${aws_ecs_express_gateway_service.web.ingress_paths[0].endpoint}');
+    expect(config.resources['aws_ecs_express_gateway_service.web']).toMatchObject({ actionId: 'service:web', billable: true });
+    // An environment created on Lambda moves over in one reviewed replacement instead of blocking on resources the plan no longer declares.
+    for (const address of ['aws_lambda_function.web', 'aws_lambda_function_url.web', 'aws_lambda_permission.web_url', 'aws_lambda_permission.web_invoke', 'aws_cloudwatch_log_group.web']) {
+      expect(config.resources[address]).toMatchObject({ actionId: 'service:web' });
+    }
+  });
+
+  it('runs a private web service as an ordinary service with no route from the internet', () => {
+    const config = buildAwsConfiguration({ ...base, services: [{ logicalName: 'api', resourceName: 'hv-app-aws-api', initialImageUri: 'x', public: false, env: { PORT: '3000' } }] });
+    const tasks = (config.files['tasks.tf.json'] as { resource: Record<string, Record<string, Record<string, any>>> }).resource;
+    expect(tasks.aws_ecs_express_gateway_service).toBeUndefined();
+    expect(tasks.aws_ecs_service!.api).toMatchObject({ desired_count: 1, deployment_circuit_breaker: [{ enable: true, rollback: true }] });
+    expect(tasks.aws_security_group!.tasks!.ingress).toEqual([]);
+    expect(JSON.parse(tasks.aws_ecs_task_definition!.api!.container_definitions)[0].environment).toContainEqual({ name: 'PORT', value: '3000' });
   });
 });
 
@@ -84,8 +114,12 @@ describe('AWS tasks', () => {
     expect(policy.Statement.find((statement: { Sid: string }) => statement.Sid === 'WakerCount').Resource).toBe('arn:aws:rds:us-west-2:111122223333:cluster:hv-app-shared-postgres');
     expect(definition.States.Route.Default).toBe('Running');
     expect(definition.States.Route.Choices[0]).toMatchObject({ Next: 'Count' });
-    expect(definition.States.IsRunning).toMatchObject({ Choices: [{ Next: 'Count' }], Default: 'Requests' });
-    expect(definition.States.Requests.Arguments.MetricDataQueries[0].MetricStat.Metric).toMatchObject({ Namespace: 'AWS/Lambda', MetricName: 'Invocations', Dimensions: [{ Name: 'FunctionName', Value: 'hv-app-web' }] });
+    expect(definition.States.IsRunning).toMatchObject({ Choices: [{ Next: 'Count' }], Default: 'HasGroups' });
+    // AWS creates the web service's target group, so the waker reads it with the worker's state; an unreadable one counts as activity.
+    expect(definition.States.Running.Arguments.Services).toEqual(['hv-app-worker', 'hv-app-web']);
+    expect(definition.States.Running.Output).toContain('Services[ServiceName = "hv-app-worker"].DesiredCount > 0');
+    expect(definition.States.HasGroups).toMatchObject({ Choices: [{ Next: 'Requests' }], Default: 'Count' });
+    expect(definition.States.Requests.Arguments.MetricDataQueries).toContain('"Namespace": "AWS/ApplicationELB", "MetricName": "RequestCountPerTarget"');
     expect(definition.States.Requests.Catch).toEqual([{ ErrorEquals: ['States.ALL'], Next: 'Count' }]);
     // Nothing about the database's own state decides whether to count: counting would keep it awake.
     expect(JSON.stringify(definition)).not.toContain('ServerlessDatabaseCapacity');
@@ -118,7 +152,7 @@ describe('private package build token boundary', () => {
   });
 });
 
-it('excludes package token keys from Lambda, worker, cron and runtime permissions', () => {
+it('excludes package token keys from web, worker, cron and runtime permissions', () => {
   const image = `${awsRegistryUrl(base)}:commit`;
   const env = { API_MODE: 'live', NPM_TOKEN: 'must-not-render', NODE_AUTH_TOKEN: 'also-private' };
   const config = buildAwsConfiguration({ ...base, secretKeys: ['API_KEY', 'NPM_TOKEN', 'NODE_AUTH_TOKEN'],
@@ -130,7 +164,6 @@ it('excludes package token keys from Lambda, worker, cron and runtime permission
   expect(rendered).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|must-not-render|also-private|GetParametersByPath/);
   expect(rendered).toContain('API_KEY');
   expect(rendered).toContain('API_MODE');
-  expect(rendered).toContain('HYPERVIBE_SECRET_KEYS');
 });
 
 

@@ -47,8 +47,8 @@ describe('engine-managed release identities', () => {
       'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com', 'token.actions.githubusercontent.com:sub': 'repo:owner/app:ref:refs/heads/main',
     } } });
     const statements = JSON.parse(file.resource.aws_iam_role_policy.ci.policy).Statement;
-    expect(statements.find((statement: any) => statement.Sid === 'ReleaseWeb')).toMatchObject({ Resource: ['arn:aws:lambda:us-west-2:111122223333:function:hv-app-test-web'] });
-    expect(JSON.stringify(statements)).not.toMatch(/CreateFunction|DeleteFunction|iam:\*|ssm:/);
+    expect(statements.find((statement: any) => statement.Sid === 'ReleaseWeb')).toMatchObject({ Action: ['ecs:DescribeExpressGatewayService', 'ecs:UpdateExpressGatewayService'], Resource: ['arn:aws:ecs:us-west-2:111122223333:service/hv-app-test/hv-app-test-web'] });
+    expect(JSON.stringify(statements)).not.toMatch(/lambda:|CreateExpressGatewayService|DeleteExpressGatewayService|CreateService|DeleteService|iam:\*|ssm:/);
     expect(config.resources['aws_iam_role.ci']).toMatchObject({ requiresConfirm: true });
   });
 

@@ -33,7 +33,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 
 | Capability | GCP | AWS | Azure |
 | --- | --- | --- | --- |
-| Web services | yes | yes | yes |
+| Web services | yes | yes: always-on containers with an HTTPS address; built 2026-11-17, not yet run live | yes |
 | Background workers, on-demand workers | yes | yes | yes |
 | Scheduled jobs | yes | yes | yes, UTC schedules only |
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |

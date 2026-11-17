@@ -17,7 +17,7 @@ let shared: unknown; let own: unknown; let calls: string[];
 beforeEach(() => {
   calls = [];
   shared = document([resource('aws_rds_cluster.postgres', 'aws_rds_cluster', { arn: clusterArn, endpoint: 'original.cluster.us-west-2.rds.amazonaws.com' })]);
-  own = document([resource('aws_lambda_function.web', 'aws_lambda_function', { environment: [{ variables: { HYPERVIBE_PARAMETER_PATH: '/hypervibe/environment-id/' } }] })]);
+  own = document([resource('aws_ecs_express_gateway_service.web', 'aws_ecs_express_gateway_service', { primary_container: [{ environment: [{ name: 'HYPERVIBE_PARAMETER_PATH', value: '/hypervibe/environment-id/' }] }] })]);
   engine.inspectState.mockImplementation(async ({ project: projectState, state }) => ({ ok: true, present: true, value: projectState(state.partition === 'project-shared' ? shared : own) }));
   vi.spyOn(NodeHttpHandler.prototype, 'handle').mockImplementation(async (request: any) => {
     calls.push(request.hostname);
@@ -41,7 +41,7 @@ it.each(['duplicate', 'scope', 'missing-reference', 'other-environment'])('refus
   if (variant === 'duplicate') shared = document([resource('aws_rds_cluster.postgres', 'aws_rds_cluster', {}), resource('aws_rds_cluster.postgres', 'aws_rds_cluster', {})]);
   if (variant === 'scope') shared = document([resource('aws_rds_cluster.postgres', 'aws_rds_cluster', { arn: clusterArn.replace('111122223333', '444455556666') })]);
   if (variant === 'missing-reference') own = document([]);
-  if (variant === 'other-environment') own = document([resource('aws_lambda_function.web', 'aws_lambda_function', { environment: [{ variables: { HYPERVIBE_PARAMETER_PATH: '/hypervibe/another/' } }] })]);
+  if (variant === 'other-environment') own = document([resource('aws_ecs_express_gateway_service.web', 'aws_ecs_express_gateway_service', { primary_container: [{ environment: [{ name: 'HYPERVIBE_PARAMETER_PATH', value: '/hypervibe/another/' }] }] })]);
   await expect(recoverEngineDatabaseBinding(project, environment, 'aws', aws)).rejects.toThrow();
   expect(calls.some(host => host.startsWith('ssm.'))).toBe(false);
 });

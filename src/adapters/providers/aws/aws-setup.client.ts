@@ -4,6 +4,7 @@ import {
   ListAccessKeysCommand, ListOpenIDConnectProvidersCommand, ListPolicyVersionsCommand, NoSuchEntityException, PutUserPolicyCommand, UpdateAssumeRolePolicyCommand,
 } from '@aws-sdk/client-iam';
 import type { AwsSignInSession } from './aws-signin.client.js';
+import { AWS_WEB_INFRASTRUCTURE_ROLE } from './tofu/aws-engine.config.js';
 
 /**
  * One-time AWS setup, mirroring GCP: the person signs in once (any admin,
@@ -17,6 +18,8 @@ import type { AwsSignInSession } from './aws-signin.client.js';
  * - hypervibe-app-boundary (policy): the most any role Hypervibe creates for
  *   the app can do. The deploy role can create app roles only under
  *   /hypervibe/app/ and only with this boundary, so it cannot escalate.
+ * - hypervibe-web-infrastructure (role): only Amazon ECS can use it, to manage
+ *   the load balancer, certificate and scaling of web services (AWS's own policy).
  */
 export const AWS_SETUP_VERSION = 'aws-v1';
 export const AWS_PATH = '/hypervibe/';
@@ -25,6 +28,9 @@ const LOCAL_USER = 'hypervibe-local';
 const BOUNDARY = 'hypervibe-app-boundary';
 const DEPLOY_POLICY = 'hypervibe-deploy';
 const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
+/** AWS's managed policy for the role ECS Express Mode manages web service infrastructure with. */
+const WEB_INFRASTRUCTURE_POLICY = 'arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices';
+const WEB_INFRASTRUCTURE_TRUST = { Version: '2012-10-17', Statement: [{ Sid: 'AllowAccessInfrastructureForECSExpressServices', Effect: 'Allow', Principal: { Service: 'ecs.amazonaws.com' }, Action: 'sts:AssumeRole' }] };
 
 /** Earlier versions created one deploy role per project; setup retires them in favor of the account role. */
 export const deployRoleName = (project: string) => `hypervibe-deploy-${project.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40)}`;
@@ -62,7 +68,7 @@ export function appBoundaryDocument(): Record<string, unknown> {
       // A separate, environment-scoped CI role uses these operations. A boundary
       // is a ceiling only: runtime/build roles do not gain these permissions.
       { Sid: 'CiReleaseCeiling', Effect: 'Allow', Resource: '*', Action: [
-        'lambda:GetFunction', 'lambda:GetFunctionConfiguration', 'lambda:GetFunctionUrlConfig', 'lambda:ListTags', 'lambda:UpdateFunctionCode',
+        'ecs:DescribeExpressGatewayService', 'ecs:UpdateExpressGatewayService', 'ecs:DescribeServiceDeployments',
         'codebuild:BatchGetProjects', 'codebuild:StartBuild', 'codebuild:BatchGetBuilds', 'ecr:DescribeImages', 'ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition',
       ] },
       { Sid: 'CiTaskRevisionTags', Effect: 'Allow', Action: ['ecs:TagResource'], Resource: 'arn:aws:ecs:*:*:task-definition/hv-*:*',
@@ -111,6 +117,9 @@ export function deployPolicyDocument(accountId: string): Record<string, unknown>
       { Sid: 'ListAppRoles', Effect: 'Allow', Action: 'iam:ListRoles', Resource: appRoles },
       { Sid: 'ServiceLinkedRoles', Effect: 'Allow', Action: 'iam:CreateServiceLinkedRole', Resource: '*',
         Condition: { StringLike: { 'iam:AWSServiceName': ['ecs.amazonaws.com', 'rds.amazonaws.com', 'elasticloadbalancing.amazonaws.com', 'application-autoscaling.amazonaws.com', 'ecs.application-autoscaling.amazonaws.com'] } } },
+      // AWS manages each web service's load balancer, certificate and scaling with this role; the deploy role can only hand it to ECS.
+      { Sid: 'PassWebInfrastructureRole', Effect: 'Allow', Action: 'iam:PassRole', Resource: `arn:aws:iam::${accountId}:role${AWS_PATH}${AWS_WEB_INFRASTRUCTURE_ROLE}`,
+        Condition: { StringEquals: { 'iam:PassedToService': 'ecs.amazonaws.com' } } },
       { Sid: 'ReadIam', Effect: 'Allow', Action: ['iam:GetPolicy', 'iam:GetPolicyVersion', 'iam:ListPolicyVersions', 'iam:GetOpenIDConnectProvider', 'iam:ListOpenIDConnectProviders'], Resource: '*' },
       // The boundary and Hypervibe's own access are set up by the person, never changed by the deploy role.
       { Sid: 'KeepBoundaryFixed', Effect: 'Deny', Resource: [boundaryArn, `arn:aws:iam::${accountId}:policy${AWS_PATH}${DEPLOY_POLICY}`],
@@ -174,6 +183,14 @@ async function policyMatches(iam: IAMClient, arn: string, document: Record<strin
   }
 }
 
+/** Whether the web infrastructure role exists with AWS's policy attached (undefined: it does not exist). */
+async function webInfrastructureRoleReady(iam: IAMClient): Promise<boolean | undefined> {
+  let trust: string | undefined;
+  if (!(await exists(async () => { trust = (await iam.send(new GetRoleCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE }))).Role?.AssumeRolePolicyDocument; }))) return undefined;
+  const attached = (await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE }))).AttachedPolicies ?? [];
+  return JSON.stringify(JSON.parse(decodeURIComponent(trust ?? '{}'))) === JSON.stringify(WEB_INFRASTRUCTURE_TRUST) && attached.some((policy) => policy.PolicyArn === WEB_INFRASTRUCTURE_POLICY);
+}
+
 /**
  * Whether the account's Hypervibe policies match this version of Hypervibe, read
  * with the deploy role. A newer Hypervibe can need more access (one sign-in to
@@ -199,7 +216,10 @@ export async function planAwsSetup(session: AwsSignInSession, params: { project:
   const boundary = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${BOUNDARY}`, appBoundaryDocument());
   changes.push({ id: 'boundary', state: boundary === undefined ? 'create' : boundary ? 'ok' : 'update', change: `Policy ${BOUNDARY}: the most any role Hypervibe creates for your app can do (no admin or IAM access)` });
   const deploy = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${DEPLOY_POLICY}`, deployPolicyDocument(account));
-  changes.push({ id: 'deploy-policy', state: deploy === undefined ? 'create' : deploy ? 'ok' : 'update', change: `Policy ${DEPLOY_POLICY}: run your app on Lambda, Fargate, Aurora/RDS, S3 and schedules, and build its images on CodeBuild; create app roles only within ${BOUNDARY}` });
+  changes.push({ id: 'deploy-policy', state: deploy === undefined ? 'create' : deploy ? 'ok' : 'update', change: `Policy ${DEPLOY_POLICY}: run your app on Fargate, Aurora/RDS, S3 and schedules, and build its images on CodeBuild; create app roles only within ${BOUNDARY}` });
+  const webRole = await webInfrastructureRoleReady(iam);
+  changes.push({ id: 'web-infrastructure-role', state: webRole === undefined ? 'create' : webRole ? 'ok' : 'update',
+    change: `Role ${AWS_WEB_INFRASTRUCTURE_ROLE}: lets Amazon ECS (and nothing else) manage the load balancer, HTTPS certificate and scaling of your web services` });
   if (params.repository) {
     const providers = await iam.send(new ListOpenIDConnectProvidersCommand({}));
     const hasGithub = (providers.OpenIDConnectProviderList ?? []).some((entry) => entry.Arn?.endsWith(`oidc-provider/${GITHUB_OIDC_HOST}`));
@@ -275,6 +295,13 @@ export async function applyAwsSetup(session: AwsSignInSession, plan: AwsSetupPla
   const tags = [{ Key: 'managed-by', Value: 'hypervibe' }];
   await putPolicy(iam, account, BOUNDARY, appBoundaryDocument(), 'Hypervibe: the most any app role may do');
   const deployArn = await putPolicy(iam, account, DEPLOY_POLICY, deployPolicyDocument(account), 'Hypervibe: deploy and run apps');
+  if (await exists(() => iam.send(new GetRoleCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE })))) {
+    await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE, PolicyDocument: JSON.stringify(WEB_INFRASTRUCTURE_TRUST) }));
+  } else {
+    await iam.send(new CreateRoleCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE, Path: AWS_PATH, AssumeRolePolicyDocument: JSON.stringify(WEB_INFRASTRUCTURE_TRUST), Tags: tags,
+      Description: 'Hypervibe: Amazon ECS manages web service load balancers, certificates and scaling with this role' }));
+  }
+  await iam.send(new AttachRolePolicyCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE, PolicyArn: WEB_INFRASTRUCTURE_POLICY }));
   if (plan.changes.some((change) => change.id === 'github-oidc' && change.state === 'create')) {
     // IAM no longer checks the thumbprint for GitHub's issuer; one value is still required.
     await iam.send(new CreateOpenIDConnectProviderCommand({ Url: `https://${GITHUB_OIDC_HOST}`, ClientIDList: ['sts.amazonaws.com'], ThumbprintList: ['6938fd4d98bab03faadb97b34396831e3780aea1'], Tags: tags }));

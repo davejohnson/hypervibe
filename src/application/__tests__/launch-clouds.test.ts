@@ -80,7 +80,7 @@ describe('hv_launch on AWS and Azure', () => {
 
   it('prices AWS with AWS resources', () => {
     const lines = estimateAwsMonthlyCost(environment('aws', { database: { provider: 'rds' } }) as never).map((line) => line.item).join('\n');
-    expect(lines).toMatch(/Lambda/);
+    expect(lines).toMatch(/Fargate, always running/);
     expect(lines).toMatch(/Aurora/);
     expect(lines).not.toMatch(/Cloud Run|Cloud SQL/);
   });
