@@ -1,3 +1,4 @@
+import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
 import { pickRemoteCommit, sourceBuildProblem } from './release-source.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
@@ -7,7 +8,7 @@ import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
 import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
-  cloudRunGet, googleErrorMessage, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type PendingJobRun, type WorkloadKind,
+  cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -140,6 +141,8 @@ export interface EngineBinding {
   queues?: string[];
   /** Cloud Run job that runs the release command. */
   releaseJob?: string;
+  /** Access IDs of storage HMAC keys that were created but not fully stored; each is deleted before another is created. Not secret. */
+  unpublishedHmacKeys?: string[];
   /** A release command run that was started and not yet seen to finish; reconciled before another start. */
   releaseRun?: PendingJobRun;
   /** IAM database user that was granted read access for on-demand worker wakers. */
@@ -476,19 +479,27 @@ async function ensureStorageS3Key(token: string, action: PlanAction): Promise<Ac
       return { success: false, status: 'blocked', message: 'Create the owned S3 credential containers with hv_plan/hv_apply before generating an access key.' };
     }
   }
-  let created: Response;
-  try {
-    created = await createStorageHmacKey(token, gcpProjectId, runtimeServiceAccountEmail);
-  } catch {
-    return { success: false, status: 'pending', message: `Creating the S3 access key for ${storageName} has an unknown outcome. Run the same command again.` };
-  }
-  if (!created.ok) return { success: false, message: `Cloud Storage could not create an S3 access key (HTTP ${created.status}): ${await googleErrorMessage(created)}` };
-  const key = await created.json() as { secret?: string; metadata?: { accessId?: string } };
-  if (!key.secret || !key.metadata?.accessId) return { success: false, message: 'Cloud Storage returned an incomplete S3 access key.' };
-  for (const [name, value] of [['AWS_ACCESS_KEY_ID', key.metadata.accessId], ['AWS_SECRET_ACCESS_KEY', key.secret]] as const) {
-    const failure = await writeSecretVersion(token, gcpProjectId, secretIds[name]!, labels, value);
-    if (failure) return failure;
-  }
+  const environments = new EnvironmentRepository();
+  const environment = environments.findById(labels['hv-environment']!);
+  const binding = (): EngineBinding => ((environment && environments.findById(environment.id)?.platformBindings as { engine?: EngineBinding } | undefined)?.engine) ?? {};
+  const savePending = (ids: string[]) => { if (environment) environments.updatePlatformBindings(environment.id, { engine: { ...binding(), unpublishedHmacKeys: ids } }); };
+  const published = await publishNewHmacKey({
+    create: () => createStorageHmacKey(token, gcpProjectId, runtimeServiceAccountEmail),
+    publish: async (accessId, secret) => {
+      for (const [name, value] of [['AWS_ACCESS_KEY_ID', accessId], ['AWS_SECRET_ACCESS_KEY', secret]] as const) {
+        const failure = await writeSecretVersion(token, gcpProjectId, secretIds[name]!, labels, value);
+        if (failure) return failure.message ?? 'The S3 access key could not be stored in Secret Manager.';
+      }
+      return undefined;
+    },
+    retire: (accessId) => retireStorageHmacKey(token, gcpProjectId, accessId),
+    pending: {
+      list: () => binding().unpublishedHmacKeys ?? [],
+      add: (accessId) => savePending([...(binding().unpublishedHmacKeys ?? []), accessId]),
+      remove: (accessId) => savePending((binding().unpublishedHmacKeys ?? []).filter((id) => id !== accessId)),
+    },
+  });
+  if (!published.ok) return { success: false, ...(published.pending ? { status: 'pending' as const } : {}), message: published.message };
   return { success: true, message: `An S3-compatible access key for ${storageName} is stored in Secret Manager.` };
 }
 
