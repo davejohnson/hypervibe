@@ -47,7 +47,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
 | Buying a domain | blocked (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
-| Migrations as a release step | yes (`releaseCommand` mode) | blocked at release | blocked at release |
+| Migrations as a release step | yes (`releaseCommand` mode) | blocked in spec and planning | blocked in spec and planning |
 | Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
 | Promotion and promotion tests | blocked (#252) | blocked (#252) | blocked (#252) |
 | Email, webhooks, iOS releases | blocked (#626) | blocked (#626) | blocked (#626) |
