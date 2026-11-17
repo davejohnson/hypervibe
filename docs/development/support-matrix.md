@@ -37,7 +37,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Background workers, on-demand workers | yes | yes | yes |
 | Scheduled jobs | yes | yes | yes, UTC schedules only |
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
-| Managed database query and inspection | Cloud SQL connector; retained regression coverage, live query unverified here | Aurora Data API, exact environment database; offline contracts, live unverified | Shared Flexible Server, exact environment database and private credential; offline contracts, live unverified |
+| Managed database query and inspection | Cloud SQL connector; retained regression coverage, live query unverified here | Aurora Data API with environment app login; offline contracts and local SQL isolation regression, live unverified | Shared Flexible Server, exact environment database and private credential; offline contracts, live unverified |
 | Production-shaped environments | yes: dedicated database, deletion protection, 14 daily backups, 7 days point-in-time recovery | blocked (#625) | blocked (#625) |
 | Database size (`database.size`), deletion protection | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
@@ -48,6 +48,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
 | Buying a domain | blocked (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
+| Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
 | Migrations as a release step | yes (`releaseCommand` mode) | blocked at release | blocked at release |
 | Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
@@ -65,6 +66,11 @@ require an HTTP endpoint. See [engine diagnostics](../engine-diagnostics.md) for
 native coverage, log windows, pagination bounds and execution-history limits.
 Build-log and deployment-history listing remain unavailable on these engines.
 GCP and Railway retain their existing observation paths and evidence status.
+
+See [AWS and Azure branch releases](../engine-ci-releases.md) for setup, applied
+binding admission, build isolation, workflow generation and live-verification
+limits. This implementation needs a published package before generated workflows
+can use its runner.
 
 Database query/inspection evidence is documented in
 [engine database access](../engine-database-access.md). Queries do not create

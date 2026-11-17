@@ -1,3 +1,4 @@
+import { azureCiRegistry, azureSelectedBuildRegistry, type AzureBuildRegistry } from '../azure-ci-registry.js';
 import { azureBuildTaskContent, azureBuildTaskName } from '../azure-build-task.js';
 import crypto from 'crypto';
 import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
@@ -60,6 +61,8 @@ export interface AzureEngineInput extends AzurePlacement {
   secretKeys?: string[];
   /** Declared, present package token; only the build task can read it. */
   packageTokenKey?: string;
+  /** Exact applied CI registry retained even when branch CI is disabled. */
+  buildRegistry?: AzureBuildRegistry;
   /** Role assignments an interrupted apply created but the engine never recorded: address → Azure id, imported instead of recreated. */
   adoptRoleAssignments?: Record<string, string>;
 }
@@ -257,6 +260,11 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   const assignments: Record<string, unknown> = {
     runtime_pull: roleAssignment(input.shared.registryId, ROLE.acrPull, 'Hypervibe: the app pulls its images'),
   };
+  const buildRegistry = azureSelectedBuildRegistry(input);
+  if (buildRegistry.id !== input.shared.registryId) {
+    assignments.runtime_ci_pull = roleAssignment(buildRegistry.id, ROLE.acrPull, 'Hypervibe: the app pulls images built for this environment');
+    resources['azurerm_role_assignment.runtime_ci_pull'] = runtime;
+  }
   // One role per secret, so an environment reads only its own secrets in the project vault.
   for (const secret of secrets) {
     const key = `secret_${azureKey(secret.key)}`;
@@ -333,7 +341,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   const shared = {
     resource_group_name: input.resourceGroup, container_app_environment_id: '${azurerm_container_app_environment.main.id}', tags,
     identity: [{ type: 'UserAssigned', identity_ids: ['${azurerm_user_assigned_identity.runtime.id}'] }],
-    registry: [{ server: input.shared.registryLoginServer, identity: '${azurerm_user_assigned_identity.runtime.id}' }],
+    registry: [...new Set([input.shared.registryLoginServer, buildRegistry.loginServer])].map((server) => ({ server, identity: '${azurerm_user_assigned_identity.runtime.id}' })),
     secret: secrets.map(({ name, vaultName }) => ({ name, key_vault_secret_id: `${input.vault.uri}secrets/${vaultName}`, identity: '${azurerm_user_assigned_identity.runtime.id}' })),
     // The pull and secret roles must have applied before the first revision starts.
     depends_on: ['time_sleep.roles'],
@@ -413,24 +421,38 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
 export function buildAzureBuildConfiguration(input: AzureEngineInput): EngineConfiguration {
   checkPlacement(input);
   const files: Record<string, unknown> = { 'provider.tf.json': providerFile(input) };
-  if (!input.packageTokenKey) return { files, resources: {} };
-  if (!['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(input.packageTokenKey)) throw new Error('Invalid package token key.');
-  const secretName = azureVaultSecretName(input.environmentName, input.packageTokenKey);
+  const resources: Record<string, EngineResourceMapping> = {};
+  const registry = azureSelectedBuildRegistry(input);
+  const managedRegistry = Boolean(input.ci || input.buildRegistry);
+  const resource: Record<string, unknown> = {};
+  if (managedRegistry) {
+    const expected = azureCiRegistry(input);
+    resource.azurerm_container_registry = { ci_images: { name: expected.name, resource_group_name: input.resourceGroup, location: input.location,
+      // Tasks get default data-plane access to their own registry only in RBAC-only mode.
+      sku: 'Basic', admin_enabled: false, anonymous_pull_enabled: false, role_assignment_mode: 'LegacyRegistryPermissions',
+      tags: { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() } } };
+    resources['azurerm_container_registry.ci_images'] = { actionId: 'registry:ci-images', kind: 'service', name: 'CI image registry', billable: true, requiresConfirm: true };
+  }
+  files['builds.tf.json'] = { resource };
+  if (!input.packageTokenKey && !managedRegistry) return { files, resources };
+  if (input.packageTokenKey && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(input.packageTokenKey)) throw new Error('Invalid package token key.');
+  const secretName = input.packageTokenKey ? azureVaultSecretName(input.environmentName, input.packageTokenKey) : undefined;
   const mapping: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'image builds' };
-  files['builds.tf.json'] = { resource: {
+  Object.assign(resource, {
     azurerm_container_registry_task: { images: {
-      name: azureBuildTaskName(input.prefix), container_registry_id: input.shared.registryId,
+      name: azureBuildTaskName(input.prefix), container_registry_id: managedRegistry ? '${azurerm_container_registry.ci_images.id}' : registry.id,
       identity: [{ type: 'SystemAssigned' }], platform: [{ os: 'Linux', architecture: 'amd64' }],
-      encoded_step: [{ task_content: Buffer.from(azureBuildTaskContent(`${input.vault.uri}secrets/${secretName}`)).toString('base64'), values: { IMAGE_TAG: 'unrequested' } }],
+      encoded_step: [{ task_content: Buffer.from(azureBuildTaskContent(secretName ? `${input.vault.uri}secrets/${secretName}` : undefined)).toString('base64'), values: { IMAGE_TAG: 'unrequested' } }],
       tags: { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() },
     } },
-    azurerm_role_assignment: { build_token: {
+    ...(secretName ? { azurerm_role_assignment: { build_token: {
       scope: `${input.vault.id}/secrets/${secretName}`,
       role_definition_id: `/subscriptions/${input.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${ROLE.keyVaultSecretsUser}`,
       principal_id: '${azurerm_container_registry_task.images.identity[0].principal_id}', principal_type: 'ServicePrincipal',
       description: 'Hypervibe: image builds read the private package token',
     } },
-    time_sleep: { build_roles: { create_duration: '90s', depends_on: ['azurerm_role_assignment.build_token'] } },
-  } };
-  return { files, resources: Object.fromEntries(['azurerm_container_registry_task.images', 'azurerm_role_assignment.build_token', 'time_sleep.build_roles'].map((address) => [address, mapping])) };
+    time_sleep: { build_roles: { create_duration: '90s', depends_on: ['azurerm_role_assignment.build_token'] } } } : {}),
+  });
+  for (const address of ['azurerm_container_registry_task.images', ...(secretName ? ['azurerm_role_assignment.build_token', 'time_sleep.build_roles'] : [])]) resources[address] = mapping;
+  return { files, resources };
 }

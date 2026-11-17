@@ -75,10 +75,13 @@ export class AuroraQueryClient {
       this.pending.add(transactionId);
       const execute = (statementSql: string, extra = {}) => this.client.send(new ExecuteStatementCommand({ ...this.identity, transactionId, sql: statementSql, ...extra }), { abortSignal: AbortSignal.timeout(35_000) });
       if (options.readOnly !== false) await execute('SET TRANSACTION READ ONLY');
-      await execute(`SET LOCAL ROLE "${this.target.owner}"`);
+      const identity = await execute('SELECT session_user AS session_user, current_user AS current_user, current_database() AS database', { formatRecordsAs: 'JSON' });
+      const authenticated: unknown = JSON.parse(identity.formattedRecords ?? 'null');
+      if (!Array.isArray(authenticated) || authenticated.length !== 1 || authenticated[0]?.session_user !== this.target.owner
+        || authenticated[0]?.current_user !== this.target.owner || authenticated[0]?.database !== this.target.database) throw new Error('The Data API session did not authenticate as the accepted application login.');
       const timeout = Math.min(30_000, Math.max(1, Math.floor(options.statementTimeoutMs ?? 30_000)));
       await execute(`SET LOCAL statement_timeout = ${timeout}`);
-      const response = await execute(statement.sql, { parameters: statement.parameters, formatRecordsAs: 'JSON', includeResultMetadata: true });
+      const response = await execute(statement.sql, { parameters: statement.parameters, formatRecordsAs: 'JSON', includeResultMetadata: true, resultSetOptions: { longReturnType: 'STRING', decimalReturnType: 'STRING' } });
       const scalar = (field: Field): unknown => {
         if (field.isNull === true) return null;
         if (field.stringValue !== undefined) return field.stringValue;

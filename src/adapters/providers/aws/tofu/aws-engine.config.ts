@@ -1,3 +1,4 @@
+import { awsDatabaseQuerySecretName } from '../aws-database-query-secret.js';
 import { LOAD_SECRETS_PATH } from '../runtime/load-secrets.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
@@ -283,6 +284,14 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   }
 
   addTasks({ ...input, secretKeys: runtimeSecretKeys }, files, resources);
+  if (input.database) {
+    files['database-access.tf.json'] = { resource: { aws_secretsmanager_secret: { database_query: {
+      name: awsDatabaseQuerySecretName(input.environmentId), recovery_window_in_days: 0,
+      description: 'Hypervibe environment application login for database diagnostics; value managed by the approved login operation.',
+      tags: { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() },
+    } } } };
+    resources['aws_secretsmanager_secret.database_query'] = { actionId: 'database-query:credential', kind: 'secret', name: 'database query access', billable: true, requiresConfirm: true };
+  }
   addAwsCiConfiguration(input, files, resources);
 
   files['outputs.tf.json'] = { output: {

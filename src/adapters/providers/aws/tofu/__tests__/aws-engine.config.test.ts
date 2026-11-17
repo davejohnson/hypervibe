@@ -132,3 +132,13 @@ it('excludes package token keys from Lambda, worker, cron and runtime permission
   expect(rendered).toContain('API_MODE');
   expect(rendered).toContain('HYPERVIBE_SECRET_KEYS');
 });
+
+
+it('plans a separate environment-owned query credential without a secret value or runtime grant', () => {
+  const config = buildAwsConfiguration({ ...base, database: { clusterArn: 'arn:aws:rds:us-west-2:111122223333:cluster:shared', name: 'app_test' } });
+  expect(config.resources['aws_secretsmanager_secret.database_query']).toMatchObject({ actionId: 'database-query:credential', billable: true, requiresConfirm: true });
+  const credential = (config.files['database-access.tf.json'] as any).resource.aws_secretsmanager_secret.database_query;
+  expect(credential.name).toBe('hypervibe/env1/database-query');
+  expect(credential).not.toHaveProperty('secret_string');
+  expect(JSON.stringify((config.files['base.tf.json'] as any).resource.aws_iam_role_policy.runtime)).not.toContain('database-query');
+});

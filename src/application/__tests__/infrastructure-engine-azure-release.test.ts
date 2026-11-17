@@ -96,7 +96,7 @@ describe('Container Apps releases', () => {
     if (url.startsWith('https://hv-app-test-web.example.azurecontainerapps.io/')) return health();
     if (url.includes('/revisions/')) return json(200, { properties: { healthState: revisionHealth } });
     if (method === 'PATCH') return json(202);
-    return json(200, { properties: { provisioningState: 'Succeeded', template, latestRevisionName: method === 'GET' && releaseCalls++ ? 'rev-2' : 'rev-1',
+    return json(200, { location: 'northeurope', properties: { provisioningState: 'Succeeded', template, latestRevisionName: method === 'GET' && releaseCalls++ ? 'rev-2' : 'rev-1',
       configuration: { ingress: { fqdn: 'hv-app-test-web.example.azurecontainerapps.io' } } } });
   });
   let releaseCalls = 0;
@@ -107,6 +107,7 @@ describe('Container Apps releases', () => {
     const result = await releaseAzureApp(azure.tokens, { id: appId, name: 'web', image: 'img@sha256:1', healthCheckPath: '/health', web: true, waitMs: 1000, fetchTimeoutMs: 1, retryMs: 1 });
     expect(result).toMatchObject({ status: 'released', url: 'https://hv-app-test-web.example.azurecontainerapps.io', health: { status: 200, path: '/health' } });
     const patch = azure.calls.find((call) => call.method === 'PATCH')!;
+    expect(JSON.parse(patch.body!).location).toBe('northeurope');
     expect(JSON.parse(patch.body!).properties.template.containers[0].image).toBe('img@sha256:1');
   });
 

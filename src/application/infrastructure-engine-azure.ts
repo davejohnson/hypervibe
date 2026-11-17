@@ -1,9 +1,11 @@
+import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
+import { azureSelectedBuildRegistry, projectAzureCiRegistry, type AzureBuildRegistry } from '../adapters/providers/azure/azure-ci-registry.js';
 import { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
@@ -27,7 +29,7 @@ import {
   AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
   type AzureKeyVaultSecretStore, type SqlRunner,
 } from '../adapters/providers/azure/azure-ops.client.js';
-import { azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
+import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
 import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import type { EngineSecretStore } from './engine-secrets.js';
@@ -63,6 +65,8 @@ export interface AzureEngineBinding {
   /** Digest-pinned image of the last build; new workloads are created from it. */
   image?: string;
   imageCommit?: string;
+  /** Persisted from exact build state; retained on switch back to manual deploys. */
+  buildRegistry?: AzureBuildRegistry;
   /** The app's database login exists and DATABASE_URL is in Key Vault. */
   databaseLoginAt?: string;
   /** The read-only login on-demand workers count pending work with exists. */
@@ -213,7 +217,7 @@ export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngi
 }
 
 /** One environment's configuration input. Workloads are created from `image` (the last build, or the commit this apply builds). */
-export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & { environment: Pick<Environment, 'id'> },
+export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
   extra: { secretKeys: string[]; image?: string }): AzureEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const storageAccount = azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix });
@@ -235,6 +239,7 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer },
+    ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
     vault: { id: context.vault.id, uri: context.vault.uri },
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((name) => ({ name, container: azureContainerName(name) })),
     services: services.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => {
@@ -336,6 +341,11 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const context = await resolveAzureEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
 
+  if (engineCiIntent(spec, environmentName)) {
+    const ready = await azureCiSetupReady(context.connection).catch(() => false);
+    if (!ready) return { blocked: ['Azure CI access needs reviewed setup. Run hv_launch (or hv_connections provider="azure" action="connect") to update access.'] };
+  }
+
   // Outside keys must already have a value; Hypervibe never invents them.
   const store = azureEnvironmentSecretStore(context);
   const keys = azureEnvironmentSecretKeys(spec, environmentName, importedOf(context.environment));
@@ -376,7 +386,8 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const binding = azureBinding(context.environment);
   const workloads = Object.keys(environmentSpec.services).length;
   const commit = !binding.image && workloads ? await localCommit(project) : undefined;
-  const image = binding.image ?? (commit ? `${context.shared.registryLoginServer}/${AZURE_IMAGE_REPOSITORY}:${commit.commitSha}` : undefined);
+  const buildRegistry = azureSelectedBuildRegistry(buildInput);
+  const image = binding.image ?? (commit ? `${buildRegistry.loginServer}/${AZURE_IMAGE_REPOSITORY}:${commit.commitSha}` : undefined);
   const buildActions: PlanAction[] = commit ? [{
     id: 'build:image', type: 'create', verified: true, resource: { kind: 'service', name: 'image', provider: 'azure' },
     reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} with ACR Tasks (about 2 cents) so the workloads start from it.`,
@@ -410,7 +421,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
     if (planned.blockers.length) return { blocked: planned.blockers };
   }
-  const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildActions), ...changing(loginActions)];
+  const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildInfrastructureActions), ...changing(buildActions), ...changing(loginActions)];
   const actions = [...sharedActions, ...secretActions, ...buildInfrastructureActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [
     `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero; the shared database server is about $16/month for all testing environments.`,
@@ -526,6 +537,18 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       return failed ? { success: false, message: failed } : { success: true, message: `Stored a generated ${key} in Key Vault.` };
     }
     case AZURE_IMAGE_BUILD_OPERATION: {
+      if (engineCiIntent(params.spec, context.environmentName) && !azureBinding(context.environment).buildRegistry) {
+        const engine = await engineFor();
+        if ('blocked' in engine) return { success: false, status: 'blocked', message: engine.blocked };
+        const observed = await engine.inspectState({ backend: azureEngineBackend,
+          configuration: buildAzureBuildConfiguration(buildAzureEngineInput(params.spec, context.environmentName, context, { secretKeys: [] })),
+          auth: context.auth, state: context.buildState,
+          project: (state) => projectAzureCiRegistry(state, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, environmentId: context.environment.id }),
+        });
+        if (!observed.ok || !observed.present) return { success: false, status: 'blocked', message: 'The applied environment build registry could not be verified; image builds stopped.' };
+        updateBinding(ctx, context, { buildRegistry: observed.value });
+        context.environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+      }
       const build = deps.buildImage ?? (await import('./infrastructure-engine-azure-release.js')).buildAzureImage;
       const built = await build(context, { directory: String(metadata.directory), commitSha: String(metadata.commitSha) });
       if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error, ...(built.logsUrl ? { data: { buildLogsUrl: built.logsUrl } } : {}) };
@@ -589,7 +612,7 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  type Reviewed = { planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
+  type Reviewed = { teardown?: boolean; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
   const document = loaded.document as PlanRunDocument & { engine?: Reviewed };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
@@ -600,6 +623,7 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     || reviewed.azure.subscriptionId !== context.connection.subscriptionId || reviewed.azure.resourceGroup !== context.connection.resourceGroup || reviewed.azure.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different Azure subscription, resource group or environment. Re-run hv_plan.' };
   }
+  clearEngineCiBinding(ctx, context.environment);
   const engine = await engineFor();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const result = await executor.execute({
@@ -619,6 +643,19 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
       const target = reviewed.shared && segment.id === `opentofu:${reviewed.shared.planId}` ? reviewed.shared : reviewed.build && segment.id === `opentofu:${reviewed.build.planId}` ? reviewed.build : { planId: reviewed.planId, state: context.state };
       const outcome = await engine.apply({ backend: azureEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
+      if (!reviewed.teardown && reviewed.build?.planId === target.planId && (engineCiIntent(params.spec, environmentName) || azureBinding(context.environment).buildRegistry)) {
+        const inspected = await engine.inspectState({ backend: azureEngineBackend, configuration: buildAzureBuildConfiguration(buildAzureEngineInput(params.spec, environmentName, context, { secretKeys: [] })),
+          auth: context.auth, state: context.buildState,
+          project: (state) => projectAzureCiRegistry(state, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, environmentId: context.environment.id }),
+        });
+        if (inspected.ok && inspected.present) {
+          updateBinding(ctx, context, { buildRegistry: inspected.value });
+          context.environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        } else if (addresses.includes('azurerm_container_registry.ci_images') && outcome.outcomes['azurerm_container_registry.ci_images'] === 'succeeded') {
+          outcome.outcomes['azurerm_container_registry.ci_images'] = 'unknown';
+          outcome.diagnostics.push('The build registry was applied but its exact state identity could not be verified; image builds stopped.');
+        }
+      }
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
@@ -630,5 +667,8 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
       project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
   }
+  await recordEngineCiBindings(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName,
+    location: azureLocationFor(params.spec, environmentName, context.connection),
+    succeeded: Boolean(result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) });
   return { kind: 'executed', envName: environmentName, result };
 }

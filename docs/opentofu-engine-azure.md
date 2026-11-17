@@ -27,7 +27,8 @@ testing environments, production profiles or subsequent revisions.
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
-| Production profile (staging, production), `hv_migrate`, CI releases, custom domains | Not built |
+| CI releases | Implemented with a dedicated environment registry; offline verification, live unverified; see [branch releases](engine-ci-releases.md) |
+| Production profile (staging, production), `hv_migrate`, custom domains | Not built |
 
 Current planner limits (code reviewed 2026-11-13):
 [`azureEngineProblems`](../src/application/infrastructure-engine-azure.ts) blocks
@@ -292,7 +293,7 @@ The testing demo's sign-in, setup, plan/apply, deployment and teardown are recor
 above. That run does not prove the complete
 [common user journey](development/user-journey.md).
 
-The production profile, `hv_migrate`, CI releases and custom
+The production profile, `hv_migrate` and custom
 hosting domains remain unavailable as recorded above. Live evidence is still
 missing here for outside-key collection and more than one testing environment
 sharing resources. BuildKit-dependent repository Dockerfiles now have an implemented

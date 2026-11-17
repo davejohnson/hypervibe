@@ -6,12 +6,11 @@ import type { Project } from '../domain/entities/project.entity.js';
 import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
+import type { LocalCommitSource } from '../domain/ports/commit-release.port.js';
+export type { LocalCommitSource } from '../domain/ports/commit-release.port.js';
 import { ENGINE_PLAN_SCOPE as RELEASE_PLAN_SCOPE, ENGINE_RELEASE_OPERATION as RELEASE_OPERATION, type EngineReleaseResult } from './infrastructure-engine.js';
 
 const execFileAsync = promisify(execFile);
-
-/** One exact commit, packaged for a cloud's managed build service. */
-export interface LocalCommitSource { commitSha: string; archive: Buffer; uncommittedChangesExcluded: boolean }
 
 /**
  * Packages a local commit without git credentials or Docker: the tracked files

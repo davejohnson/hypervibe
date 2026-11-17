@@ -6,7 +6,7 @@ import type { Project } from '../../entities/project.entity.js';
 const engine = vi.hoisted(() => ({ inspectState: vi.fn() }));
 vi.mock('../../../adapters/engine/opentofu/install.js', () => ({ ensureEngineBinary: async () => ({ ok: true, binary: '/synthetic/tofu' }), enginePluginCacheDir: () => '/synthetic/cache' }));
 vi.mock('../../../adapters/engine/opentofu/engine.js', () => ({ OpenTofuEngine: class { inspectState = engine.inspectState; } }));
-import { recoverEngineDatabaseBinding } from '../engine-database-state.service.js';
+import { recoverNativeEngineDatabaseBinding as recoverEngineDatabaseBinding } from '../../../adapters/providers/database/engine-database-state.js';
 const project = { id: 'project-id', name: 'renamed-project' } as Project;
 const environment = { id: 'environment-id', projectId: project.id, name: 'renamed-preview' } as Environment;
 const aws = { accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'private-local-secret-value-32-characters', roleArn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-deploy', accountId: '111122223333', region: 'us-west-2' };

@@ -27,7 +27,8 @@ and runs. They do not verify other profiles, workloads or subsequent revisions.
 | `hv_launch` for testing environments (one reviewed plan: registry and build project in their own state, the first image built inside the apply, then everything else) | Built; verified live (demo app, 2026-11-14): one round, no sign-in (account access reused), web health-checked, database, secret, storage and cron working, worker jobs done 87 s (cold start) and 0.7 s after due, empty plan after |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
 | Production-profile database (RDS `db.t4g.micro`) | Not built; planning blocks it |
-| CI releases, data copy, `hv_launch` for staging and production | Not built |
+| CI releases | Implemented; offline verification, live unverified; see [branch releases](engine-ci-releases.md) |
+| Data copy, `hv_launch` for staging and production | Not built |
 | Live worker state in `hv_status` | Not built; use `hv_health` and `hv_plan` |
 
 Current planner limits (code reviewed 2026-11-13):

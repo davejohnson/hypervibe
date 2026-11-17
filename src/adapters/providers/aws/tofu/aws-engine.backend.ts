@@ -27,9 +27,9 @@ const AWS_PROVIDER_LOCK_HASHES = [
  * OpenTofu runs as the project's deploy role: Hypervibe's stored key assumes
  * it for one hour and passes only those short-lived credentials to the engine.
  */
-export async function awsEngineAuthentication(connection: AwsEngineCredentials): Promise<EngineAuthentication> {
+export async function awsEngineAuthentication(connection: AwsEngineCredentials, sessionPolicy?: Record<string, unknown>): Promise<EngineAuthentication> {
   const sts = new STSClient({ region: connection.region, credentials: { accessKeyId: connection.accessKeyId, secretAccessKey: connection.secretAccessKey } });
-  const assumed = await sts.send(new AssumeRoleCommand({ RoleArn: connection.roleArn, RoleSessionName: 'hypervibe-engine', DurationSeconds: 3600 }));
+  const assumed = await sts.send(new AssumeRoleCommand({ RoleArn: connection.roleArn, RoleSessionName: sessionPolicy ? 'hypervibe-database' : 'hypervibe-engine', DurationSeconds: sessionPolicy ? 900 : 3600, ...(sessionPolicy ? { Policy: JSON.stringify(sessionPolicy) } : {}) }));
   const credentials = assumed.Credentials;
   if (!credentials?.AccessKeyId || !credentials.SecretAccessKey || !credentials.SessionToken) throw new Error('AWS did not return deploy role credentials.');
   return {

@@ -18,6 +18,11 @@ import { connectAzure } from './azure-connect.js';
 import { connectAws } from './aws-connect.js';
 import { awsProfileFor, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import { azureProfileFor, resolveAzureConnection } from './infrastructure-engine-azure.js';
+import { azureCiSetupReady } from '../adapters/providers/azure/azure-setup.client.js';
+import { cloudEngineFor } from './cloud-engines.js';
+import { engineCiIntent } from '../domain/spec/engine-ci.js';
+import { parseEngineCiBinding } from '../domain/spec/engine-ci-binding.js';
+import { environmentDeploymentContractHashForApply } from '../domain/services/deployment-contract.service.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
@@ -91,6 +96,7 @@ export function estimateAzureMonthlyCost(environment: EnvironmentSpec): CostLine
   if (cron) lines.push({ item: `${cron} scheduled job(s)`, estimate: '$0 between runs; a few cents a month for short runs' });
   if (environment.database) lines.push({ item: 'Postgres (Burstable B1ms, 32 GB), shared by all of the project\'s testing environments', estimate: 'about $16 per month for the project' });
   lines.push({ item: 'Container Registry (Basic), shared by the project', estimate: 'about $5 per month for the project' });
+  if (environment.deploy?.strategy === 'branch') lines.push({ item: 'Dedicated Container Registry (Basic) for this CI environment', estimate: 'an additional registry charge; shown in the reviewed infrastructure plan' });
   const buckets = Object.keys(environment.storage ?? {}).length;
   if (buckets) lines.push({ item: `${buckets} Blob storage container(s)`, estimate: 'about $0.02 per GB stored per month' });
   lines.push({ item: 'Key Vault, logs, image builds', estimate: 'usually under $1 per month' });
@@ -197,9 +203,8 @@ async function runLaunch(ctx: CommandContext, params: {
     if (profile === 'production') {
       return { status: 'blocked', message: `hv_launch runs only ${cloud} testing environments for now; ${params.environmentName} uses the production profile, which is not built yet. Launch a testing environment (for example "dev" or "preview").` };
     }
-    if (environmentSpec.deploy?.strategy === 'branch') {
-      return { status: 'blocked', message: `Releases from GitHub Actions are not built for ${cloud} yet. Set deploy.strategy="manual" with hv_spec; hv_deploy releases from this computer.` };
-    }
+    try { engineCiIntent(params.spec, params.environmentName); }
+    catch (error) { return { status: 'blocked', message: error instanceof Error ? error.message : 'CI release intent is invalid.' }; }
   }
 
   const validation = firstProviderSpecValidationFailure(params.spec, params.environmentName);
@@ -453,7 +458,12 @@ async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof r
  * together with the subscription it was shown for.
  */
 async function prepareAzureLaunch(params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
-  if (!('blocked' in resolveAzureConnection(params.project))) return undefined;
+  const access = resolveAzureConnection(params.project);
+  if (!('blocked' in access)) {
+    if (params.spec.environments[params.environmentName]?.deploy?.strategy !== 'branch') return undefined;
+    try { if (await azureCiSetupReady(access.connection)) return undefined; }
+    catch { return { status: 'blocked', message: 'Azure CI access could not be verified. Retry when Azure can be read; no access change was attempted.' }; }
+  }
   const approved = approvedAccess.has('azure-setup');
   if (approved && !params.azureSubscriptionId) return { status: 'blocked', message: 'Approving Azure setup needs the azureSubscriptionId it was shown for.' };
   const connected = await connectAzure({ project: params.project, spec: params.spec,
@@ -495,6 +505,17 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
   if (!repository) return { status: 'blocked', message: 'CI releases need this project on GitHub (set gitRemoteUrl with hv_spec).' };
   if (!params.sourceDirectory) return { status: 'blocked', message: 'CI releases need the local repository so Hypervibe can add the workflow file.' };
+  const engine = cloudEngineFor(params.spec, params.environmentName);
+  if (engine?.ciWorkflow) {
+    const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+    try {
+      const binding = parseEngineCiBinding(environment?.platformBindings.engineCi);
+      if (binding.provider !== engine.id || binding.environmentName !== params.environmentName || binding.repository !== repository
+        || binding.appliedContractHash !== environmentDeploymentContractHashForApply(params.spec, params.environmentName)) throw new Error('Applied CI binding is stale.');
+      return await engine.ciWorkflow(params.sourceDirectory, binding);
+    }
+    catch { return { status: 'blocked', message: 'CI needs complete applied resource and access bindings. Run hv_plan and hv_apply, then hv_launch again to generate the workflow.' }; }
+  }
   const context = await resolveEngineContext(ctx, params.project, params.spec, params.environmentName);
   if ('blocked' in context) return { status: 'blocked', message: context.blocked };
   const environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;

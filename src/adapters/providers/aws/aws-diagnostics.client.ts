@@ -8,6 +8,7 @@ import { redactEngineOutput } from '../../engine/opentofu/runner.js';
 import type { AwsEngineCredentials } from './aws-engine.adapter.js';
 import { awsEngineAuthentication } from './tofu/aws-engine.backend.js';
 import { awsKey } from './tofu/aws-engine.config.js';
+import { taskDefinitionIdentity, matchesTaskDefinitionFamily } from './aws-task-identity.js';
 
 export function projectAwsWorkloadBindings(state: unknown, services: Record<string, { workloadKind?: string }>, scope: { accountId: string; region: string }): Record<string, EngineWorkloadBinding> {
   const resources = stateResources(state); const result: Record<string, EngineWorkloadBinding> = {};
@@ -83,12 +84,17 @@ export class AwsWorkloadDiagnostics {
         return { presence: 'present', status: failed ? 'failed' : r.State === 'Active' && r.LastUpdateStatus === 'Successful' ? 'ready' : 'unknown' };
       }
       if (!b.clusterArn || !b.taskDefinitionArn) throw new Error('The exact ECS cluster or task definition is missing.');
+      const recorded = taskDefinitionIdentity(b.taskDefinitionArn);
+      if (!recorded) throw new Error('The recorded task definition is not an exact native ARN.');
       const ecs = new ECSClient(access.options);
       if (b.resourceType === 'ecs-task') {
-        const r = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: b.serviceId }));
-        if (r.taskDefinition?.taskDefinitionArn !== b.serviceId) throw new Error('AWS returned a different or missing task definition.');
-        const family = r.taskDefinition.family;
-        if (!family) throw new Error('AWS did not return the bound task definition family.');
+        if (!matchesTaskDefinitionFamily(b.serviceId, b.taskDefinitionArn)) throw new Error('The scheduled task identity has inconsistent native families.');
+        // CI creates new revisions without editing the local state binding. ECS resolves
+        // the latest ACTIVE revision from the family extracted from that exact ARN.
+        const r = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: recorded.family }));
+        const currentArn = r.taskDefinition?.taskDefinitionArn; const current = taskDefinitionIdentity(currentArn);
+        if (!current || current.familyArn !== recorded.familyArn || current.revision < recorded.revision || r.taskDefinition?.status !== 'ACTIVE' || r.taskDefinition.family !== recorded.family) throw new Error('AWS did not confirm the current active revision of the bound task family.');
+        const family = recorded.family;
         const arns = new Set<string>();
         for (const desiredStatus of ['RUNNING', 'STOPPED'] as const) {
           let nextToken: string | undefined; const seen = new Set<string>();
@@ -111,12 +117,13 @@ export class AwsWorkloadDiagnostics {
           const chunk = ids.slice(offset, offset + 100);
           const described = await ecs.send(new DescribeTasksCommand({ cluster: b.clusterArn, tasks: chunk }));
           if (described.failures?.length || described.tasks?.length !== chunk.length || new Set(described.tasks.map((task) => task.taskArn)).size !== chunk.length || described.tasks.some((task) => !task.taskArn || !chunk.includes(task.taskArn) || task.clusterArn !== b.clusterArn)) throw new Error('AWS did not confirm every exact scheduled task identity.');
-          tasks.push(...described.tasks.filter((task) => task.taskDefinitionArn === b.serviceId));
+          tasks.push(...described.tasks.filter((task) => task.taskDefinitionArn === currentArn));
         }
         if (tasks.some((task) => !task.createdAt || !Number.isFinite(task.createdAt.getTime()))) throw new Error('AWS task history has no reliable ordering.');
         tasks.sort((a, b) => b.createdAt!.getTime() - a.createdAt!.getTime());
         const latest = tasks[0];
         if (!latest) return { presence: 'present', status: 'unknown', reason: 'No retained execution for the current task definition was observed. ECS keeps stopped task history for a limited time.' };
+        if (tasks[1]?.createdAt?.getTime() === latest.createdAt!.getTime()) return { presence: 'present', status: 'unknown', reason: 'Current task executions have an ambiguous latest timestamp.' };
         const containers = latest.containers ?? [];
         const failed = latest.stopCode === 'TaskFailedToStart' || containers.some((c) => typeof c.exitCode === 'number' && c.exitCode !== 0);
         return { presence: 'present', status: failed ? 'failed' : latest.lastStatus === 'STOPPED' && containers.length > 0 && containers.every((c) => c.exitCode === 0) ? 'succeeded' : 'unknown', reason: 'Observes the latest retained execution of the exact task definition; it does not prove schedule delivery or older execution history.' };
@@ -127,9 +134,11 @@ export class AwsWorkloadDiagnostics {
       const service = r.services[0]; const primary = service.deployments?.filter((d) => d.status === 'PRIMARY');
       if (primary?.length !== 1) return { presence: 'present', status: 'unknown', reason: 'No unique primary ECS deployment was observed.' };
       const latest = primary[0]!;
-      return { presence: 'present', status: latest.rolloutState === 'FAILED' ? 'failed' : latest.rolloutState === 'COMPLETED' && latest.taskDefinition === b.taskDefinitionArn && service.taskDefinition === b.taskDefinitionArn && service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.runningCount === service.desiredCount ? 'ready' : 'unknown' };
+      const current = taskDefinitionIdentity(service.taskDefinition);
+      if (!current || current.familyArn !== recorded.familyArn || current.revision < recorded.revision || latest.taskDefinition !== service.taskDefinition) return { presence: 'present', status: 'unknown', reason: 'The current service and primary revision do not confirm the bound task family release.' };
+      return { presence: 'present', status: latest.rolloutState === 'FAILED' ? 'failed' : latest.rolloutState === 'COMPLETED' && service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.runningCount === service.desiredCount ? 'ready' : 'unknown' };
     } catch (error) {
-      if (error instanceof Error && error.name === 'ResourceNotFoundException') return { presence: 'absent', status: 'failed', reason: 'AWS reports that the bound function is missing.' };
+      if (b.resourceType === 'lambda' && error instanceof Error && error.name === 'ResourceNotFoundException') return { presence: 'absent', status: 'failed', reason: 'AWS reports that the bound function is missing.' };
       throw new Error(redactEngineOutput(error instanceof Error ? error.message : String(error), access.redact));
     }
   }

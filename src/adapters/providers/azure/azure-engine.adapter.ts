@@ -1,3 +1,5 @@
+import type { Project } from '../../../domain/entities/project.entity.js';
+import type { IEngineDatabaseAccess } from '../../../domain/ports/engine-database-access.port.js';
 import { AzureWorkloadDiagnostics } from './azure-diagnostics.client.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ProviderRuntimeLogsRequest } from '../../../domain/ports/provider-logs.port.js';
@@ -64,7 +66,7 @@ export async function verifyAzureDeployAccess(access: AzureDeployAccess, options
   return { ok: false, message: `The deploy identity was not usable yet (${lastError}).` };
 }
 
-export class AzureEngineAdapter {
+export class AzureEngineAdapter implements IEngineDatabaseAccess {
   readonly name = 'azure';
   readonly capabilities = { supportedBuilders: ['dockerfile'], supportedComponents: [], supportsAutoWiring: false, supportsHealthChecks: true };
   private credentials: AzureEngineCredentials | null = null;
@@ -81,6 +83,24 @@ export class AzureEngineAdapter {
   readDeployment(environment: Environment, serviceName: string) {
     if (!this.credentials) throw new Error('Not connected.');
     return new AzureWorkloadDiagnostics(this.credentials).readDeployment(environment, serviceName);
+  }
+
+  async acquireManagedDatabaseAccess(project: Project, environment: Environment) {
+    if (!this.credentials) throw new Error('Not connected.');
+    const { acquireNativeEngineDatabaseAccess } = await import('../database/engine-database-access.js');
+    return acquireNativeEngineDatabaseAccess(project, environment, { provider: 'azure', credentials: this.credentials });
+  }
+
+  async observeManagedDatabase(project: Project, environment: Environment) {
+    if (!this.credentials) throw new Error('Not connected.');
+    const { observeNativeEngineDatabase } = await import('../database/engine-database-access.js');
+    return observeNativeEngineDatabase(project, environment, { provider: 'azure', credentials: this.credentials });
+  }
+
+  async recoverManagedDatabaseBinding(project: Project, environment: Environment) {
+    if (!this.credentials) throw new Error('Not connected.');
+    const { recoverNativeEngineDatabaseBinding } = await import('../database/engine-database-state.js');
+    return recoverNativeEngineDatabaseBinding(project, environment, 'azure', this.credentials);
   }
 
   async verify(): Promise<VerifyResult> {

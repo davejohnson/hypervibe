@@ -203,3 +203,31 @@ it('does not report a completed older ECS deployment as the newly bound release'
   awsTransport((r) => r.target.endsWith('DescribeServices') ? { data: { services: [{ serviceArn: serviceId, clusterArn, taskDefinition: `${ecs}:task-definition/worker:7`, status: 'ACTIVE', desiredCount: 0, runningCount: 0, pendingCount: 0, deployments: [{ status: 'PRIMARY', rolloutState: 'COMPLETED', taskDefinition: `${ecs}:task-definition/worker:7` }] }] } } : undefined);
   expect((await collectProjectDeploymentHealth({ project, environments: [environment], desiredServiceNamesByEnvironment: { staging: ['web'] } })).state).toBe('unknown');
 });
+
+it('observes a CI-created worker revision in the exact bound task family', async () => {
+  const { project, environment } = fixture('aws'); const ecs = `arn:aws:ecs:eu-west-1:${account}`; const clusterArn = `${ecs}:cluster/exact`; const serviceId = `${ecs}:service/exact/worker`;
+  const current = `${ecs}:task-definition/worker:2`;
+  (environment.platformBindings as any).services.web = { serviceId, clusterArn, taskDefinitionArn: `${ecs}:task-definition/worker:1`, resourceType: 'ecs-service', workloadKind: 'worker', region: 'eu-west-1' };
+  let definition = current;
+  awsTransport((r) => r.target.endsWith('DescribeServices') ? { data: { services: [{ serviceArn: serviceId, clusterArn, taskDefinition: definition, status: 'ACTIVE', desiredCount: 1, runningCount: 1, pendingCount: 0, deployments: [{ status: 'PRIMARY', rolloutState: 'COMPLETED', taskDefinition: definition }] }] } } : undefined);
+  const request = { project, environments: [environment], desiredServiceNamesByEnvironment: { staging: ['web'] } };
+  expect((await collectProjectDeploymentHealth(request)).state).toBe('healthy');
+  definition = `${ecs}:task-definition/unrelated:2`;
+  expect((await collectProjectDeploymentHealth(request)).state).toBe('unknown');
+});
+it('matches cron history to the latest ACTIVE revision after CI without accepting an older successful execution', async () => {
+  const { project, environment } = fixture('aws'); const ecs = `arn:aws:ecs:eu-west-1:${account}`; const clusterArn = `${ecs}:cluster/exact`;
+  const recorded = `${ecs}:task-definition/nightly:1`; const current = `${ecs}:task-definition/nightly:2`; const taskOld = `${ecs}:task/exact/old`; const taskNew = `${ecs}:task/exact/new`;
+  (environment.platformBindings as any).services.web = { serviceId: recorded, taskDefinitionArn: recorded, clusterArn, resourceType: 'ecs-task', workloadKind: 'cron', region: 'eu-west-1' };
+  let active = current;
+  const requests = awsTransport((r) => {
+    if (r.target.endsWith('DescribeTaskDefinition')) return { data: { taskDefinition: { taskDefinitionArn: r.body.taskDefinition === recorded ? recorded : active, family: 'nightly', status: 'ACTIVE' } } };
+    if (r.target.endsWith('ListTasks')) return { data: { taskArns: r.body.desiredStatus === 'STOPPED' ? [taskOld, taskNew] : [] } };
+    if (r.target.endsWith('DescribeTasks')) return { data: { tasks: [{ taskArn: taskOld, taskDefinitionArn: recorded, clusterArn, createdAt: 1700000000, lastStatus: 'STOPPED', containers: [{ name: 'app', exitCode: 0 }] }, { taskArn: taskNew, taskDefinitionArn: current, clusterArn, createdAt: 1700000100, lastStatus: 'STOPPED', containers: [{ name: 'app', exitCode: 1 }] }] } };
+  });
+  const request = { project, environments: [environment], desiredServiceNamesByEnvironment: { staging: ['web'] } };
+  expect((await collectProjectDeploymentHealth(request)).state).toBe('failed');
+  expect(requests.find((r) => r.target.endsWith('DescribeTaskDefinition'))?.body.taskDefinition).toBe('nightly');
+  active = `${ecs}:task-definition/unrelated:2`;
+  expect((await collectProjectDeploymentHealth(request)).state).toBe('unknown');
+});

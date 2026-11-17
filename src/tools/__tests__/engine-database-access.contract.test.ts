@@ -1,3 +1,4 @@
+import '../../application/providers.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
 import { registerCoreTools } from '../core.tools.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
@@ -42,12 +43,15 @@ let calls: Array<{ host: string; path: string; body: Record<string, any> }>;
 let failQuery = false;
 let wrongCluster = false;
 let wrongSecret = false;
+let wrongLogin = false;
+let queryArn = '';
+let queryEnvironmentId = '';
 let resuming = 0;
 let failRollback = false;
 let rows: unknown[] = [{ answer: 42 }];
 beforeEach(() => {
   SqliteAdapter.resetInstance(); temp = mkdtempSync(path.join(tmpdir(), 'hv-engine-db-'));
-  SqliteAdapter.getInstance(path.join(temp, 'db.sqlite')).migrate(); calls = []; wire.sql = []; wire.password = undefined; wire.startup = undefined; wire.ended = false; wire.configuredUrl = ''; failQuery = false; wrongCluster = false; wrongSecret = false; resuming = 0; failRollback = false; rows = [{ answer: 42 }];
+  SqliteAdapter.getInstance(path.join(temp, 'db.sqlite')).migrate(); calls = []; wire.sql = []; wire.password = undefined; wire.startup = undefined; wire.ended = false; wire.configuredUrl = ''; failQuery = false; wrongCluster = false; wrongSecret = false; wrongLogin = false; queryArn = ''; queryEnvironmentId = ''; resuming = 0; failRollback = false; rows = [{ answer: 42 }];
   vi.spyOn(NodeHttpHandler.prototype, 'handle').mockImplementation(async (req: any) => {
     const wireBody = Buffer.isBuffer(req.body) || req.body instanceof Uint8Array ? Buffer.from(req.body).toString('utf8') : String(req.body);
     const body = wireBody.startsWith('{') ? JSON.parse(wireBody) : Object.fromEntries(new URLSearchParams(wireBody));
@@ -56,6 +60,8 @@ beforeEach(() => {
     let payload: string;
     if (req.hostname.startsWith('sts.')) payload = '<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>ASSUMEDACCESSKEY123</AccessKeyId><SecretAccessKey>private-assumed-secret</SecretAccessKey><SessionToken>private-session-token</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>';
     else if (req.hostname.startsWith('rds.')) payload = `<DescribeDBClustersResponse xmlns="http://rds.amazonaws.com/doc/2014-10-31/"><DescribeDBClustersResult><DBClusters><DBCluster><DBClusterIdentifier>accepted-cluster</DBClusterIdentifier><DBClusterArn>${wrongCluster ? clusterArn.replace('111122223333', '444455556666') : clusterArn}</DBClusterArn><Engine>aurora-postgresql</Engine><Status>available</Status><HttpEndpointEnabled>true</HttpEndpointEnabled><Endpoint>accepted.cluster.us-west-2.rds.amazonaws.com</Endpoint><MasterUserSecret><SecretArn>${wrongSecret ? secretArn.replace('111122223333', '444455556666') : secretArn}</SecretArn><SecretStatus>active</SecretStatus></MasterUserSecret></DBCluster></DBClusters></DescribeDBClustersResult></DescribeDBClustersResponse>`;
+    else if (req.hostname.startsWith('secretsmanager.')) payload = JSON.stringify({ ARN: wrongSecret ? secretArn : queryArn, Name: `hypervibe/${queryEnvironmentId}/database-query`,
+      Tags: [{ Key: 'managed-by', Value: 'hypervibe' }, { Key: 'hv-environment', Value: queryEnvironmentId }], VersionIdsToStages: { current: ['AWSCURRENT'] } });
     else if (req.path === '/BeginTransaction') {
       if (resuming-- > 0) { statusCode = 400; payload = JSON.stringify({ __type: 'DatabaseResumingException', message: 'Resuming' }); }
       else payload = JSON.stringify({ transactionId: 'private-transaction' });
@@ -65,10 +71,11 @@ beforeEach(() => {
     }
     else if (req.path === '/CommitTransaction') payload = JSON.stringify({ transactionStatus: 'Transaction Committed' });
     else if (req.path === '/Execute') {
-      if (failQuery && body.sql.startsWith('SELECT')) { statusCode = 400; payload = JSON.stringify({ message: 'private SQL/private-assumed-secret/private-session-token' }); }
+      if (body.sql.startsWith('SELECT session_user')) payload = JSON.stringify({ formattedRecords: JSON.stringify([{ session_user: wrongLogin ? 'hvadmin' : 'app_accepted_owner', current_user: wrongLogin ? 'hvadmin' : 'app_accepted_owner', database: 'app_accepted' }]) });
+      else if (failQuery && body.sql.startsWith('SELECT')) { statusCode = 400; payload = JSON.stringify({ message: 'private SQL/private-assumed-secret/private-session-token' }); }
       else payload = JSON.stringify(body.sql.startsWith('SELECT') ? { formattedRecords: JSON.stringify(rows), numberOfRecordsUpdated: 0 } : {});
     } else throw new Error(`Unexpected synthetic request ${req.hostname}${req.path}`);
-    return { response: { statusCode, headers: { 'content-type': req.hostname.startsWith('rds-data.') ? 'application/json' : 'text/xml' }, body: Readable.from([payload]) } };
+    return { response: { statusCode, headers: { 'content-type': req.hostname.startsWith('rds-data.') || req.hostname.startsWith('secretsmanager.') ? 'application/json' : 'text/xml' }, body: Readable.from([payload]) } };
   });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(temp, { recursive: true, force: true }); });
@@ -76,6 +83,10 @@ function seed() {
   const project = new ProjectRepository().create({ name: 'renamed-app', defaultPlatform: 'aws' });
   const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'renamed-preview', platformBindings: { provider: 'aws', aws: { kind: 'opentofu', databaseLoginAt: '2026-01-01T00:00:00Z', sharedDatabase: true,
     database: { clusterArn, name: 'app_accepted', owner: 'app_accepted_owner', accountId: '111122223333', region: 'us-west-2' } } } });
+  queryEnvironmentId = environment.id.toLowerCase();
+  queryArn = `arn:aws:secretsmanager:us-west-2:111122223333:secret:hypervibe/${queryEnvironmentId}/database-query-AbCd12`;
+  const aws = environment.platformBindings.aws as { database: object };
+  new EnvironmentRepository().updatePlatformBindings(environment.id, { aws: { ...aws, database: { ...aws.database, querySecretArn: queryArn } } });
   const connection = new ConnectionRepository().create({ provider: 'aws', credentialsEncrypted: getSecretStore().encryptObject({ accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'private-local-secret-value-32-characters', roleArn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-deploy', accountId: '111122223333', region: 'us-west-2' }) });
   new ConnectionRepository().updateStatus(connection.id, 'verified');
   return { project, environment };
@@ -97,9 +108,9 @@ it('queries the accepted per-environment Aurora database through the public comm
   expect(result.data.rows).toEqual([{ answer: 42 }]);
   const data = calls.filter(call => call.host.startsWith('rds-data.'));
   expect(data.map(call => call.path)).toEqual(['/BeginTransaction', '/Execute', '/Execute', '/Execute', '/Execute', '/RollbackTransaction']);
-  expect(data[0]!.body).toMatchObject({ resourceArn: clusterArn, secretArn, database: 'app_accepted' });
+  expect(data[0]!.body).toMatchObject({ resourceArn: clusterArn, secretArn: queryArn, database: 'app_accepted' });
   expect(data[1]!.body.sql).toBe('SET TRANSACTION READ ONLY');
-  expect(data[2]!.body.sql).toBe('SET LOCAL ROLE "app_accepted_owner"');
+  expect(data[2]!.body.sql).toBe('SELECT session_user AS session_user, current_user AS current_user, current_database() AS database');
   expect(data[3]!.body.sql).toBe('SET LOCAL statement_timeout = 30000');
   expect(data.slice(1).every(call => call.body.transactionId === 'private-transaction')).toBe(true);
   expect(JSON.stringify(result)).not.toMatch(/private-|accepted-master/);
@@ -110,7 +121,7 @@ it('fails closed before SQL for contradictory native scope', async () => {
   expect(result.ok).toBe(false);
   expect(calls.some(call => call.host.startsWith('rds-data.'))).toBe(false);
 });
-it('rejects an out-of-scope master secret before SQL', async () => {
+it('rejects an out-of-scope application secret before SQL', async () => {
   const { project, environment } = seed(); wrongSecret = true;
   const result = await query({ project: project.name, env: environment.name, sql: 'SELECT 1' });
   expect(result.ok).toBe(false); expect(calls.some(call => call.host.startsWith('rds-data.'))).toBe(false);
@@ -200,7 +211,7 @@ it('keeps parameters bound rather than interpolated into executable SQL', async 
   const { project, environment } = seed();
   const result = await query({ project: project.name, env: environment.name, sql: "SELECT $1::text AS answer, '$2' AS literal /* $3 */", params: ["private-value'; DROP TABLE t --"] });
   expect(result.ok).toBe(true);
-  const statement = calls.find(call => call.path === '/Execute' && call.body.sql.startsWith('SELECT'))!;
+  const statement = calls.find(call => call.path === '/Execute' && call.body.sql.startsWith('SELECT :hv1'))!;
   expect(statement.body.sql).toBe("SELECT :hv1::text AS answer, '$2' AS literal /* $3 */");
   expect(statement.body.parameters).toEqual([{ name: 'hv1', value: { stringValue: "private-value'; DROP TABLE t --" } }]);
 });
@@ -230,5 +241,36 @@ it('blocks mutation before cloud access unless explicitly allowed, then commits 
   expect(allowed.ok, JSON.stringify(allowed)).toBe(true);
   expect(calls.filter(call => call.path === '/CommitTransaction')).toHaveLength(1);
   expect(calls.some(call => call.path === '/Execute' && call.body.sql === 'SET TRANSACTION READ ONLY')).toBe(false);
-  expect(calls.some(call => call.path === '/Execute' && call.body.sql === 'SET LOCAL ROLE "app_accepted_owner"')).toBe(true);
+  expect(calls.some(call => call.path === '/Execute' && call.body.sql?.startsWith('SET LOCAL ROLE'))).toBe(false);
+});
+
+
+it('never authenticates caller SQL using the control-plane database secret', async () => {
+  const { project, environment } = seed();
+  const scopedArn = `arn:aws:secretsmanager:us-west-2:111122223333:secret:hypervibe/${environment.id.toLowerCase()}/database-query-AbCd12`;
+  const aws = environment.platformBindings.aws as { database: object };
+  new EnvironmentRepository().updatePlatformBindings(environment.id, { aws: { ...aws, database: { ...aws.database, querySecretArn: scopedArn } } });
+  await query({ project: project.name, env: environment.name, sql: "WITH elevate AS MATERIALIZED (SELECT set_config('role','none',true)) SELECT current_user FROM elevate" });
+  const requests = calls.filter(call => call.host.startsWith('rds-data.'));
+  expect(requests.length).toBeGreaterThan(0);
+  expect(requests.every(call => call.body.secretArn === scopedArn)).toBe(true);
+  expect(requests.some(call => call.body.sql?.startsWith('SET LOCAL ROLE'))).toBe(false);
+  const policy = JSON.parse(calls.find(call => call.host.startsWith('sts.'))!.body.Policy);
+  expect(JSON.stringify(policy)).toContain(scopedArn);
+  expect(JSON.stringify(policy)).not.toContain('rds!');
+});
+
+
+it('checks the actual SQL session identity before executing any supplied statement', async () => {
+  const { project, environment } = seed(); wrongLogin = true;
+  const result = await query({ project: project.name, env: environment.name, sql: 'SELECT 42 AS answer' });
+  expect(result.ok).toBe(false);
+  expect(calls.some(call => call.body.sql === 'SELECT 42 AS answer')).toBe(false);
+  expect(calls.at(-1)?.path).toBe('/RollbackTransaction');
+});
+it('preserves database bigint precision with the documented Data API string option', async () => {
+  const { project, environment } = seed(); rows = [{ id: '9007199254740993' }];
+  const result = await query({ project: project.name, env: environment.name, sql: 'SELECT id FROM counters' });
+  expect(result.data.rows).toEqual([{ id: '9007199254740993' }]);
+  expect(calls.find(call => call.body.sql === 'SELECT id FROM counters')?.body.resultSetOptions).toEqual({ longReturnType: 'STRING', decimalReturnType: 'STRING' });
 });

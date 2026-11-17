@@ -9,16 +9,18 @@ export function addAwsCiConfiguration(input: AwsEngineInput, files: EngineConfig
   const scope = `${input.region}:${input.accountId}`;
   const statement = (Sid: string, Action: string[], Resource: string | string[], extra = {}) => ({ Sid, Effect: 'Allow', Action, Resource, ...extra });
   const tasks = [...(input.workers ?? []), ...(input.jobs ?? [])];
+  const taskFamilies = tasks.map((task) => `arn:aws:ecs:${scope}:task-definition/${task.resourceName}:*`);
   const statements = [
-    statement('BuildImage', ['codebuild:StartBuild', 'codebuild:BatchGetBuilds'], [`arn:aws:codebuild:${scope}:project/${input.prefix}-images`, `arn:aws:codebuild:${scope}:build/${input.prefix}-images:*`]),
+    statement('BuildImage', ['codebuild:BatchGetProjects', 'codebuild:StartBuild', 'codebuild:BatchGetBuilds'], [`arn:aws:codebuild:${scope}:project/${input.prefix}-images`]),
     statement('UploadSource', ['s3:PutObject'], `arn:aws:s3:::${input.prefix}-build-${input.accountId}/sources/*`),
     statement('ReadImages', ['ecr:DescribeImages'], `arn:aws:ecr:${scope}:repository/${input.prefix}`),
     ...((input.services ?? []).length ? [statement('ReleaseWeb', ['lambda:GetFunction', 'lambda:GetFunctionConfiguration', 'lambda:GetFunctionUrlConfig', 'lambda:ListTags', 'lambda:UpdateFunctionCode'],
       input.services!.map((service) => `arn:aws:lambda:${scope}:function:${service.resourceName}`))] : []),
     ...(tasks.length ? [
-      statement('ReadTasks', ['ecs:DescribeTaskDefinition'], tasks.map((task) => `arn:aws:ecs:${scope}:task-definition/${task.resourceName}:*`)),
-      // RegisterTaskDefinition does not support resource-level authorization; PassRole remains exact.
-      statement('RegisterTaskRevision', ['ecs:RegisterTaskDefinition'], '*'),
+      // DescribeTaskDefinition has no resource-level scope; writes remain family-scoped.
+      statement('ReadTasks', ['ecs:DescribeTaskDefinition'], '*'),
+      statement('RegisterTaskRevision', ['ecs:RegisterTaskDefinition'], taskFamilies),
+      statement('TagTaskRevision', ['ecs:TagResource'], taskFamilies, { Condition: { StringEquals: { 'ecs:CreateAction': 'RegisterTaskDefinition' } } }),
       statement('PassRuntimeRole', ['iam:PassRole'], `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`, { Condition: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } } }),
       statement('ReleaseWorkers', ['ecs:DescribeServices', 'ecs:UpdateService'], (input.workers ?? []).map((worker) => `arn:aws:ecs:${scope}:service/${input.prefix}/${worker.resourceName}`)),
     ] : []),

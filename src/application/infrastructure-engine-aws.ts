@@ -1,3 +1,5 @@
+import { projectAwsDatabaseQuerySecret } from '../adapters/providers/aws/aws-database-query-secret.js';
+import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
@@ -470,21 +472,24 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const wakers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
   const wakerSecrets = wakers.map((worker) => `hypervibe/${context.prefix}/${worker.resourceName}-waker`);
   const appLogin = !binding.databaseLoginAt;
+  const queryCredential = appLogin || !binding.database?.querySecretArn || engineActions.some(action => action.id === 'database-query:credential' && action.type !== 'noop');
   const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));
   const loginDependsOn = [
     ...sharedChanging,
+    ...engineActions.filter(action => action.id === 'database-query:credential' && action.type !== 'noop').map(action => action.id),
     ...wakers.map((worker) => engineActions.find((action) => action.id === `service:${worker.logicalName}`))
       .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
   ];
-  const loginActions: PlanAction[] = environmentSpec.database && (appLogin || missingWakers.length) ? [{
-    id: appLogin ? 'database-login:postgres' : 'database-login:waker', type: 'create', verified: true,
-    resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : 'worker waker login', provider: 'aws' },
+  const loginActions: PlanAction[] = environmentSpec.database && (appLogin || queryCredential || missingWakers.length) ? [{
+    id: appLogin ? 'database-login:postgres' : queryCredential ? 'database-login:query' : 'database-login:waker', type: 'create', verified: true, ...(queryCredential ? { requiresConfirm: true } : {}),
+    resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : queryCredential ? 'database query access' : 'worker waker login', provider: 'aws' },
     reason: appLogin
-      ? `Hypervibe will create ${environmentName}'s database ${context.database.name} on the shared testing cluster with the app's login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
+      ? `Hypervibe will create ${environmentName}'s database ${context.database.name} on the shared testing cluster with the app's login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store the same application login in Parameter Store and the environment-owned query secret.`
+      : queryCredential ? 'Hypervibe will copy the existing environment application login from Parameter Store into its reviewed query credential. The application password will not change.'
       : 'Hypervibe will create the read-only database login the worker waker counts pending work with. The app login is unchanged.',
     ...(loginDependsOn.length ? { dependsOn: loginDependsOn } : {}),
     metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: context.shared.clusterIdentifier,
-      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, wakerSecrets, database: context.database },
+      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, queryCredential, wakerSecrets, database: context.database },
   }] : [];
   const actions = [...secretActions, ...sharedActions, ...buildPlanned.actions, ...imageActions, ...engineActions, ...loginActions];
   const warnings = [
@@ -515,6 +520,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     || reviewed.aws.region !== context.connection.region || reviewed.aws.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different AWS account, region or environment. Re-run hv_plan.' };
   }
+  clearEngineCiBinding(ctx, context.environment);
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const access = awsAccess(context);
@@ -577,15 +583,23 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           const identifier = (action.metadata as { clusterIdentifier: string }).clusterIdentifier;
           const { clusterArn, secretArn, endpoint } = await describeDatabaseCluster(access, identifier);
           if (!clusterArn || !secretArn || !endpoint) return { success: false, status: 'blocked', message: `Database ${identifier} is not ready yet; re-run hv_plan.` };
-          const login = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean; database: AwsEnvironmentDatabase };
+          const login = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean; queryCredential?: boolean; database: AwsEnvironmentDatabase };
+          let querySecretArn: string | undefined;
+          if (login.queryCredential) {
+            const observed = await engine.inspectState({ backend: awsEngineBackend, auth: context.auth, state: context.state, configuration: { files: {}, resources: {} },
+              project: document => projectAwsDatabaseQuerySecret(document, { accountId: context.connection.accountId, region: context.connection.region, environmentId: context.environment.id }) });
+            if (!observed.ok || !observed.present) return { success: false, status: 'blocked', message: 'The exact environment query credential was not verified after apply. Run hv_plan and hv_apply again.' };
+            querySecretArn = observed.value;
+          }
           const created = await ensureDatabaseLogin(access, { parameter: login.parameter, wakerSecrets: login.wakerSecrets, ...(login.appLogin !== undefined ? { appLogin: login.appLogin } : {}),
+            ...(querySecretArn ? { queryCredential: { arn: querySecretArn, environmentId: context.environment.id, accountId: context.connection.accountId } } : {}),
             clusterArn, masterSecretArn: secretArn, endpoint, databaseUrlKey: ENGINE_DATABASE_URL_KEY, database: login.database });
           if (created.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const previous = awsBinding(current);
             const written = (action.metadata as { wakerSecrets: string[] }).wakerSecrets;
             ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu', sharedDatabase: true,
-              database: { clusterArn, accountId: context.connection.accountId, region: context.connection.region, name: login.database.name, owner: login.database.owner },
+              database: { clusterArn, accountId: context.connection.accountId, region: context.connection.region, name: login.database.name, owner: login.database.owner, ...(querySecretArn ? { querySecretArn } : previous.database?.querySecretArn ? { querySecretArn: previous.database.querySecretArn } : {}) },
               databaseLoginAt: previous.databaseLoginAt ?? new Date().toISOString(), wakerLogins: [...new Set([...(previous.wakerLogins ?? []), ...written])] } });
           }
           return created;
@@ -611,6 +625,8 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       project: (state) => projectAwsWorkloadBindings(state, params.spec.environments[environmentName]!.services, { accountId: context.connection.accountId, region: context.connection.region }) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
   }
+  await recordEngineCiBindings(ctx, engine, { provider: 'aws', context, spec: params.spec, environmentName,
+    succeeded: Boolean(result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) });
   return { kind: 'executed', envName: environmentName, result };
 }
 

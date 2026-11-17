@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { environmentDeploymentContractHash } from '../services/deployment-contract.service.js';
-import { engineCiIntent } from './engine-ci.js';
+import { assertEngineCiIntent, engineCiIntent } from './engine-ci.js';
 import { projectSpecSchema } from './spec.schema.js';
+import { azureCiRegistry } from './engine-ci-registry.js';
+import { repoBindingsFileSchema } from './repo-bindings.schema.js';
 
 const id = z.string().min(1).max(1024);
 const workload = z.object({
@@ -24,6 +26,7 @@ export type EngineCiBinding = z.infer<typeof engineCiBindingSchema>;
 /** Only public native identities belong in the committed release contract. */
 export function parseEngineCiBinding(value: unknown): EngineCiBinding {
   const b = engineCiBindingSchema.parse(value);
+  assertEngineCiIntent(b);
   const fail = () => { throw new Error('CI resource bindings do not match the applied cloud and environment scope.'); };
   if (b.provider === 'aws') {
     if (!b.aws || b.azure) fail();
@@ -46,13 +49,14 @@ export function parseEngineCiBinding(value: unknown): EngineCiBinding {
   } else {
     if (!b.azure || b.aws) fail();
     const a = b.azure!; const group = `/subscriptions/${a.subscriptionId}/resourceGroups/${a.resourceGroup}`;
+    const registry = azureCiRegistry({ subscriptionId: a.subscriptionId, resourceGroup: a.resourceGroup, environmentId: b.environmentId });
     if (!/^[A-Za-z0-9_.()-]+$/.test(a.resourceGroup)
-      || !a.registryId.startsWith(`${group}/providers/Microsoft.ContainerRegistry/registries/`)
-      || a.registryId.split('/').length !== 9
-      || a.buildTaskId && a.buildTaskId !== `${a.registryId}/tasks/${b.prefix}-images`) fail();
+      || a.registryId !== registry.id || a.registryLoginServer !== registry.loginServer
+      || a.buildTaskId !== `${a.registryId}/tasks/${b.prefix}-images`) fail();
     for (const w of Object.values(b.services)) {
       const job = w.workloadKind === 'cron';
       if (w.region !== b.region || w.resourceType !== (job ? 'container-job' : 'container-app')
+        || w.managedEnvironmentId !== `${group}/providers/Microsoft.App/managedEnvironments/${b.prefix}-apps`
         || !w.serviceId.startsWith(`${group}/providers/Microsoft.App/${job ? 'jobs' : 'containerApps'}/${b.prefix}-`)
         || w.serviceId.split('/').length !== 9 || /[\s*?]/.test(w.serviceId)) fail();
     }
@@ -64,7 +68,7 @@ export function parseEngineCiBinding(value: unknown): EngineCiBinding {
 export function admitEngineCiRelease(input: { rawSpec: unknown; bindings: unknown; environmentName: string; repository: string; ref: string; sha: string }):
   { status: 'ready'; binding: EngineCiBinding; spec: z.infer<typeof projectSpecSchema> } | { status: 'skipped'; message: string } {
   const spec = projectSpecSchema.parse(input.rawSpec);
-  const envelope = input.bindings as { version?: unknown; project?: unknown; environments?: Record<string, { platformBindings?: Record<string, unknown> }> } | undefined;
+  const envelope = input.bindings === undefined ? undefined : repoBindingsFileSchema.parse(input.bindings);
   const value = envelope?.environments?.[input.environmentName]?.platformBindings?.engineCi;
   if (value === undefined || value === null) return { status: 'skipped', message: 'No applied CI binding is recorded. Apply the infrastructure and commit its bindings before enabling releases.' };
   const binding = parseEngineCiBinding(value); const intent = engineCiIntent(spec, input.environmentName);
