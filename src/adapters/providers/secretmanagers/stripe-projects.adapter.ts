@@ -116,8 +116,26 @@ function parseReferencePath(referencePath: string): EnvironmentSelection {
   return { environment, provider, service };
 }
 
-function findStripeProjectRoot(startDirectory: string): string {
+/** The nearest ancestor that is a git repository root (a `.git` directory or worktree file), if any. */
+function repositoryRoot(startDirectory: string): string | undefined {
+  let current = startDirectory;
+  while (true) {
+    if (fs.existsSync(path.join(current, '.git'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+/**
+ * The Stripe project of this repository. The search never leaves the repository:
+ * a `.projects` directory in a folder above it belongs to some other project, and
+ * its credentials must not be read or written from here. Outside any repository,
+ * only the starting folder itself counts.
+ */
+export function findStripeProjectRoot(startDirectory: string): string {
   let current = fs.realpathSync(startDirectory);
+  const boundary = repositoryRoot(current) ?? current;
   while (true) {
     const projectsDirectory = path.join(current, '.projects');
     try {
@@ -130,7 +148,7 @@ function findStripeProjectRoot(startDirectory: string): string {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     const parent = path.dirname(current);
-    if (parent === current) {
+    if (current === boundary || parent === current) {
       throw new Error('No Stripe Projects project found. Run `stripe projects init` in this repository first.');
     }
     current = parent;

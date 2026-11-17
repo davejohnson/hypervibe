@@ -95,6 +95,6 @@ describe('DNS consumer engine staging', () => {
     expect(await verifyDnsIntegrationSource(ctx, project, spec.environments.production!, source)).toMatchObject({ ready: false });
     auth = { ...sendgridAuth, dns: { ...sendgridAuth.dns, dkim1: { ...sendgridAuth.dns.dkim1, data: 'changed.sendgrid.net' } } };
     expect(await verifyDnsIntegrationSource(ctx, project, spec.environments.production!, source)).toMatchObject({ ready: false });
-    expect(requests).toEqual(Array(3).fill('https://api.sendgrid.com/v3/whitelabel/domains'));
+    expect(requests).toEqual(Array(3).fill('https://api.sendgrid.com/v3/whitelabel/domains?limit=100&offset=0'));
   });
 });

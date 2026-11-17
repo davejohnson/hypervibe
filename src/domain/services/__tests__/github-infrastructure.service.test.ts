@@ -241,7 +241,7 @@ describe('GitHub infrastructure compiler', () => {
   it('keeps the model key out of the generated patch-running job and separates PR writes', () => {
     const files = compileManagedGitHubFiles(githubSpec());
     const workflow = files.find((file) => file.path.endsWith('hypervibe-fix-tests.yml'))!.content;
-    expect(workflow).toContain('uses: openai/codex-action@v1');
+    expect(workflow).toContain('uses: openai/codex-action@306c6a196a99dcc6582530c396a19d2672d5e9ec # v1');
     expect(workflow).toContain('model: gpt-5.6-sol');
     expect(workflow).toContain('Ask the configured AI agent for a focused fix');
     expect(workflow).toContain('AGENT_MODEL: "gpt-5.6-sol"');

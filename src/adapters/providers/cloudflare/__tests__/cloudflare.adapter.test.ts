@@ -157,6 +157,7 @@ describe('CloudflareAdapter maintenance edge', () => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       if (url.includes('/workers/routes') && method === 'GET') return cfResponse(routes);
+      if (url.includes('/workers/scripts/') && method === 'GET') return new Response('', { status: 404 });
       if (url.includes('/workers/scripts/') && method === 'PUT') {
         uploadedScript = String(init?.body ?? '');
         return new Response('', { status: 200 });
@@ -187,6 +188,37 @@ describe('CloudflareAdapter maintenance edge', () => {
       state: 'active',
       markerVerified: true,
     });
+  });
+
+  // #272: the Worker name is predictable from the hostname and lives at the account level.
+  // A script with that name that Hypervibe never recorded is someone else's until proven otherwise.
+  it.each([
+    ['a different script', 'export default { fetch() { return new Response("customer code"); } }', false],
+    ['an unreadable script', 503, false],
+    ['the same maintenance script from an interrupted first attempt', 'same', true],
+  ] as const)('with no binding, an existing account Worker of that name that is %s is overwritten: %s', async (_label, existing, overwritten) => {
+    const hostname = 'production.example.com';
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_maintenance', accountId: 'account-1' });
+    vi.spyOn(adapter, 'resolveZoneScope').mockResolvedValue({ accountId: 'account-1', zoneId: 'zone-1' });
+    const contentHash = adapter.maintenanceContentHash(hostname);
+    const puts: string[] = []; let source = '';
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input); const method = init?.method ?? 'GET';
+      if (url.includes('/workers/routes') && method === 'GET') return cfResponse([]);
+      if (url.includes('/workers/scripts/') && method === 'GET') {
+        if (existing === 503) return new Response('', { status: 503 });
+        return new Response(existing === 'same' ? source : existing, { status: 200 });
+      }
+      if (url.includes('/workers/scripts/') && method === 'PUT') { puts.push(url); return new Response('', { status: 200 }); }
+      if (url.includes('/workers/routes') && method === 'POST') return cfResponse({ id: 'route-1', ...JSON.parse(String(init?.body)) });
+      return new Response('Temporarily unavailable', { status: 503, headers: { 'X-Hypervibe-Maintenance': contentHash } });
+    }));
+    source = (adapter as unknown as { maintenanceScript(hostname: string): { source: string } }).maintenanceScript(hostname).source;
+    const result = await adapter.ensureMaintenanceEdge(hostname, contentHash);
+    expect(puts.length > 0).toBe(overwritten);
+    expect(result.success).toBe(overwritten);
+    if (!overwritten) expect(result.error).toMatch(/Worker named|could not be read/);
   });
 
   it('does not replace an existing unrelated Worker route', async () => {

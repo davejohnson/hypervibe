@@ -1,3 +1,4 @@
+import { PINNED_ACTIONS } from './pinned-actions.js';
 import { createHash } from 'crypto';
 import { parse as parseYaml } from 'yaml';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
@@ -647,7 +648,7 @@ function buildAutofixWorkflow(
     '      - name: Ask the configured AI agent for a focused fix',
     "        if: steps.evidence.outputs.actionable == 'true'",
     '        id: codex',
-    '        uses: openai/codex-action@v1',
+    `        uses: ${PINNED_ACTIONS.codex}`,
     '        with:',
     `          model: ${automation.agent.model}`,
     `          effort: ${automation.agent.effort}`,
@@ -797,7 +798,7 @@ function buildReviewWorkflow(id: string, automation: Extract<GitHubAutomationSpe
     '          ref: ${{ github.event.pull_request.head.sha }}',
     '          fetch-depth: 0',
     '          persist-credentials: false',
-    '      - uses: openai/codex-action@v1',
+    `      - uses: ${PINNED_ACTIONS.codex}`,
     '        id: review',
     '        with:',
     `          model: ${automation.agent.model}`,
@@ -886,7 +887,7 @@ function buildAuditJob(
     '      - uses: actions/checkout@v7',
     '        with:',
     '          persist-credentials: false',
-    '      - uses: openai/codex-action@v1',
+    `      - uses: ${PINNED_ACTIONS.codex}`,
     '        id: audit',
     '        with:',
     `          model: ${automation.agent.model}`,

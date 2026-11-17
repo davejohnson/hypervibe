@@ -102,6 +102,8 @@ function isGitHubNotFound(error: unknown): error is GitHubApiError {
   return error instanceof GitHubApiError && error.status === 404;
 }
 
+const GITHUB_REQUEST_TIMEOUT_MS = 60_000;
+
 export class GitHubAdapter {
   readonly name = 'github';
   private credentials: GitHubCredentials | null = null;
@@ -152,6 +154,8 @@ export class GitHubAdapter {
     const options: RequestInit = {
       method,
       headers,
+      // No request waits forever on a stalled connection.
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     };
 
     if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE')) {
@@ -201,6 +205,7 @@ export class GitHubAdapter {
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': GITHUB_API_VERSION,
       },
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -443,11 +448,43 @@ export class GitHubAdapter {
   }
 
   async listRepositorySecrets(owner: string, repo: string): Promise<string[]> {
-    const response = await this.request<{ secrets: Array<{ name: string }> }>(
-      'GET',
-      `/repos/${owner}/${repo}/actions/secrets?per_page=100`
-    );
-    return response.secrets.map((secret) => secret.name);
+    return this.listSecretNames(`/repos/${owner}/${repo}/actions/secrets`);
+  }
+
+  /**
+   * GitHub answers 404 both for a missing environment and for one this token may not see.
+   * Absence is accepted only from a complete environment list that does not contain the name.
+   */
+  private async requireEnvironmentAbsent(owner: string, repo: string, environmentName: string): Promise<void> {
+    const unconfirmed = new Error(`Whether the GitHub environment "${environmentName}" exists cannot be confirmed with this connection. Nothing was changed.`);
+    const names: string[] = [];
+    try {
+      for (let page = 1; page <= 10; page++) {
+        const response = await this.request<{ total_count?: number; environments?: Array<{ name: string }> }>('GET', `/repos/${owner}/${repo}/environments?per_page=100&page=${page}`);
+        const environments = response.environments ?? [];
+        names.push(...environments.map((item) => item.name));
+        if (typeof response.total_count !== 'number') throw unconfirmed;
+        if (names.length >= response.total_count) break;
+        if (environments.length === 0 || page === 10) throw unconfirmed;
+      }
+    } catch {
+      throw unconfirmed;
+    }
+    if (names.some((name) => name.toLowerCase() === environmentName.toLowerCase())) throw unconfirmed;
+  }
+
+  /** Every secret name at an endpoint. A list that never reaches GitHub's stated total is refused, never returned as if complete. */
+  private async listSecretNames(endpoint: string): Promise<string[]> {
+    const names: string[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const response = await this.request<{ total_count?: number; secrets?: Array<{ name: string }> }>('GET', `${endpoint}?per_page=100&page=${page}`);
+      const secrets = response.secrets ?? [];
+      names.push(...secrets.map((secret) => secret.name));
+      const total = response.total_count ?? names.length;
+      if (names.length >= total) return names;
+      if (secrets.length === 0) break;
+    }
+    throw new Error('GitHub returned an incomplete list of Actions secrets.');
   }
 
   /** Inventory is strictly read-only. A 404 alone cannot distinguish hidden
@@ -601,14 +638,11 @@ export class GitHubAdapter {
   ): Promise<string[]> {
     const environment = encodeURIComponent(environmentName);
     try {
-      const response = await this.request<{ secrets: Array<{ name: string }> }>(
-        'GET',
-        `/repos/${owner}/${repo}/environments/${environment}/secrets?per_page=100`
-      );
-      return response.secrets.map((secret) => secret.name);
+      return await this.listSecretNames(`/repos/${owner}/${repo}/environments/${environment}/secrets`);
     } catch (error) {
-      if (isGitHubNotFound(error)) return [];
-      throw error;
+      if (!isGitHubNotFound(error)) throw error;
+      await this.requireEnvironmentAbsent(owner, repo, environmentName);
+      return [];
     }
   }
 
@@ -697,6 +731,7 @@ export class GitHubAdapter {
     } catch (error) {
       if (options) throw new Error('The reviewed GitHub environment cannot be verified.');
       if (!isGitHubNotFound(error)) throw error;
+      await this.requireEnvironmentAbsent(owner, repo, environmentName);
       await this.request<unknown>('PUT', `/repos/${owner}/${repo}/environments/${environment}`, {});
     }
     const publicKeyResponse = await this.request<{ key_id: string; key: string }>(

@@ -609,6 +609,120 @@ describe('declarative email apply', () => {
     }), undefined);
   });
 
+  // #332: with no endpoint on record SendGrid resolves the request to the account's oldest webhook.
+  it('does not change a webhook that points somewhere else when no endpoint is on record', async () => {
+    const spec = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' },
+      services: { api: { workloadKind: 'web', public: true } },
+      domain: 'example.com',
+      email: {
+        enabled: true,
+        deliveryEvents: { service: 'api', events: ['bounce', 'delivered'] },
+      },
+    });
+    const disabled = {
+      enabled: false,
+      url: '',
+      group_resubscribe: false,
+      delivered: false,
+      group_unsubscribe: false,
+      spam_report: false,
+      bounce: false,
+      deferred: false,
+      unsubscribe: false,
+      processed: false,
+      open: false,
+      click: false,
+      dropped: false,
+    };
+    const enabled = { ...disabled, enabled: true, url: 'https://example.com/webhooks/sendgrid/events', bounce: true, delivered: true };
+    vi.spyOn(SendGridAdapter.prototype, 'getEventWebhookSettings')
+      .mockResolvedValue({ ...enabled, id: 'wh-someone-else', url: 'https://other-app.example/hooks/sendgrid' } as never);
+    const update = vi.spyOn(SendGridAdapter.prototype, 'updateEventWebhookSettings').mockResolvedValue(enabled);
+    const result = await applyEmailAction({
+      project,
+      environmentName: 'production',
+      environmentSpec: spec,
+      action: {
+        id: 'email:sendgrid:delivery-events',
+        type: 'update',
+        resource: { kind: 'email', name: 'delivery-events', provider: 'sendgrid' },
+        verified: false,
+        reason: 'sync',
+        metadata: {
+          operation: EMAIL_OPERATIONS.deliveryEventsEnsure,
+          service: 'api',
+          path: '/webhooks/sendgrid/events',
+          events: ['bounce', 'delivered'],
+          configHash: emailDeliveryEventsConfigHash(spec),
+          expectedUrl: 'https://example.com/webhooks/sendgrid/events',
+        },
+      },
+    });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('targets the exact unused webhook it observed instead of whichever is oldest', async () => {
+    const spec = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' },
+      services: { api: { workloadKind: 'web', public: true } },
+      domain: 'example.com',
+      email: {
+        enabled: true,
+        deliveryEvents: { service: 'api', events: ['bounce', 'delivered'] },
+      },
+    });
+    const disabled = {
+      enabled: false,
+      url: '',
+      group_resubscribe: false,
+      delivered: false,
+      group_unsubscribe: false,
+      spam_report: false,
+      bounce: false,
+      deferred: false,
+      unsubscribe: false,
+      processed: false,
+      open: false,
+      click: false,
+      dropped: false,
+    };
+    const enabled = { ...disabled, enabled: true, url: 'https://example.com/webhooks/sendgrid/events', bounce: true, delivered: true };
+    vi.spyOn(SendGridAdapter.prototype, 'getEventWebhookSettings')
+      .mockResolvedValueOnce({ ...disabled, id: 'wh-1' } as never)
+      .mockResolvedValueOnce({ ...enabled, id: 'wh-1' } as never);
+    const update = vi.spyOn(SendGridAdapter.prototype, 'updateEventWebhookSettings').mockResolvedValue(enabled);
+    const result = await applyEmailAction({
+      project,
+      environmentName: 'production',
+      environmentSpec: spec,
+      action: {
+        id: 'email:sendgrid:delivery-events',
+        type: 'update',
+        resource: { kind: 'email', name: 'delivery-events', provider: 'sendgrid' },
+        verified: false,
+        reason: 'sync',
+        metadata: {
+          operation: EMAIL_OPERATIONS.deliveryEventsEnsure,
+          service: 'api',
+          path: '/webhooks/sendgrid/events',
+          events: ['bounce', 'delivered'],
+          configHash: emailDeliveryEventsConfigHash(spec),
+          expectedUrl: 'https://example.com/webhooks/sendgrid/events',
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      enabled: true,
+      url: 'https://example.com/webhooks/sendgrid/events',
+      bounce: true,
+      delivered: true,
+      click: false,
+    }), 'wh-1');
+  });
+
   it('creates a forwarding destination through a parent-zone Cloudflare connection and stops pending verification', async () => {
     const connection = new ConnectionRepository().create({
       provider: 'cloudflare',
