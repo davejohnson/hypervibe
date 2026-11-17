@@ -211,18 +211,12 @@ public enum AggregateHealth {
         hasRefreshFailure: Bool
     ) -> Bool {
         if hasRefreshFailure { return true }
-        return snapshots.contains { snapshot in
-            snapshot.environments.contains { environment in
-                if environment.publicEndpointHealth?.contains(where: { !$0.ok }) == true {
-                    return true
-                }
-                switch environment.observation?.health {
-                case .drifted, .blocked, .failed:
-                    return true
-                default:
-                    return false
-                }
-            }
+        return snapshots.contains {
+            ProjectStatus.evaluate(
+                snapshot: $0,
+                refreshError: nil,
+                isInitialized: true
+            ).level >= .attention
         }
     }
 }

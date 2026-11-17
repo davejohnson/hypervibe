@@ -24,6 +24,10 @@ The current v0 slice contains:
   `hv_status`;
 - public endpoint health from `hv_health`, displayed independently from
   credentialed provider drift;
+- a plain-language status headline per project, with a copyable chat prompt
+  for each thing that needs attention;
+- status checks at launch and about every 15 minutes, with a notification when
+  an app stops or resumes responding (both can be turned off in Settings);
 - recent plan/apply activity from `hv_runs`;
 - memory-only connected-app summaries and provider form metadata from
   `hv_connections`;

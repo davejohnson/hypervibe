@@ -264,9 +264,7 @@ struct ProjectSetupView: View {
         .background(WindowFocusBridge())
     }
 
-    private var starterPrompt: String {
-        "Use Hypervibe to inspect this repository. Tell me what is configured, what you can verify from this Mac, and what I should do next."
-    }
+    private var starterPrompt: String { ChatPrompts.starter }
 
     private var setupHelp: String {
         if CompanionDistribution.includesBundledServer {

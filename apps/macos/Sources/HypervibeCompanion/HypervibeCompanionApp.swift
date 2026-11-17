@@ -30,6 +30,7 @@ struct HypervibeCompanionApp: App {
         _model = StateObject(wrappedValue: model)
         needsInitialOnboarding = !ProjectRegistryStore.hasStoredProjects()
         NSApplication.shared.setActivationPolicy(.accessory)
+        model.start()
     }
 
     var body: some Scene {

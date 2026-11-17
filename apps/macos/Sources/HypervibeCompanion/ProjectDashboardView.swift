@@ -7,9 +7,11 @@ struct ProjectDashboardView: View {
     @State private var expandedEnvironments: [String: Bool] = [:]
     @State private var recentRunsExpanded = false
     @State private var connectionsExpanded = false
-    @State private var githubExpanded = true
+    @State private var githubExpanded = false
+    @State private var copiedPromptID: String?
 
     let project: CompanionProject
+    let status: ProjectStatus
     let snapshot: ProjectSnapshot?
     let connections: [ConnectionSummary]
     let refreshError: String?
@@ -18,31 +20,18 @@ struct ProjectDashboardView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
-                if isRefreshing {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Observing \(project.displayName)…")
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 14)
-                }
-
-                if let refreshError {
-                    Label(refreshError, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout)
-                        .foregroundStyle(CompanionColor.warning)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
-                        .padding(.horizontal, 12)
-                }
+                statusCard
 
                 if let snapshot {
-                    githubCard(snapshot.github)
-
                     ForEach(snapshot.environments) { environment in
-                        environmentCard(environment)
+                        environmentCard(
+                            environment,
+                            status: EnvironmentStatus.evaluate(
+                                environment,
+                                projectName: snapshot.projectName
+                            ),
+                            isOnlyEnvironment: snapshot.environments.count == 1
+                        )
                     }
 
                     if !snapshot.recentRuns.isEmpty {
@@ -50,26 +39,109 @@ struct ProjectDashboardView: View {
                     }
 
                     connectionGrid
-                } else if project.readiness == .uninitialized, !isRefreshing {
-                    ContentUnavailableView {
-                        Label("Ready for chat", systemImage: "bubble.left.and.text.bubble.right")
-                    } description: {
-                        Text("This repository does not have a Hypervibe spec yet. Restart your connected coding agent and ask it to inspect or initialize the project.")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 40)
-                } else if !isRefreshing {
-                    ContentUnavailableView(
-                        "No snapshot yet",
-                        systemImage: "arrow.clockwise.circle",
-                        description: Text("Refresh to read this project through Hypervibe.")
-                    )
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 40)
+
+                    githubCard(snapshot.github)
                 }
             }
             .padding(.vertical, 12)
         }
+    }
+
+    /// The answer to "is my app OK?", then what to do about it if not.
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: status.level.systemImage)
+                    .font(.system(size: 26))
+                    .foregroundStyle(status.level.color)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(status.headline)
+                        .font(.title3.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail = status.detail {
+                        Text(detail)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    freshness
+                }
+                Spacer(minLength: 0)
+                if let url = status.liveURL {
+                    Link(destination: url) {
+                        Label("Open app", systemImage: "arrow.up.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Open \(url.absoluteString)")
+                    .clickTargetCursor()
+                }
+            }
+
+            if status.issues.count > 1 || status.issues.first?.chatPrompt != nil {
+                Divider()
+                ForEach(status.issues) { issue in
+                    issueRow(issue, showsTitle: status.issues.count > 1)
+                }
+            } else if snapshot == nil, project.readiness == .uninitialized {
+                copyPromptButton(id: "starter", prompt: ChatPrompts.starter, title: "Copy starter prompt")
+            }
+        }
+        .padding(12)
+        .companionCardSurface(cornerRadius: 12)
+        .padding(.horizontal, 12)
+    }
+
+    private var freshness: some View {
+        HStack(spacing: 5) {
+            if isRefreshing {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Checking now…")
+            } else if let snapshot {
+                Text("Checked \(snapshot.generatedAt.formatted(.relative(presentation: .named)))")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func issueRow(_ issue: StatusIssue, showsTitle: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if showsTitle {
+                Image(systemName: issue.level.systemImage)
+                    .font(.caption)
+                    .foregroundStyle(issue.level.color)
+                Text(issue.title)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Paste this into Claude or Codex to get it fixed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if let prompt = issue.chatPrompt {
+                copyPromptButton(id: issue.id, prompt: prompt, title: "Copy fix prompt")
+            }
+        }
+    }
+
+    private func copyPromptButton(id: String, prompt: String, title: String) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(prompt, forType: .string)
+            copiedPromptID = id
+        } label: {
+            Label(
+                copiedPromptID == id ? "Copied" : title,
+                systemImage: copiedPromptID == id ? "checkmark" : "doc.on.doc"
+            )
+        }
+        .controlSize(.small)
+        .help("Copies a request to paste into Claude or Codex:\n\(prompt)")
+        .clickTargetCursor()
     }
 
     private func githubCard(_ github: GitHubInfrastructureSummary?) -> some View {
@@ -242,11 +314,20 @@ struct ProjectDashboardView: View {
     }
 
     private func environmentCard(
-        _ environment: EnvironmentSnapshot
+        _ environment: EnvironmentSnapshot,
+        status: EnvironmentStatus,
+        isOnlyEnvironment: Bool
     ) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             DisclosureGroup(
-                isExpanded: environmentExpansion(environment.name)
+                isExpanded: environmentExpansion(
+                    environment.name,
+                    // Healthy extra environments start folded so the ones
+                    // that matter fit without scrolling.
+                    default: isOnlyEnvironment
+                        || environment.isProductionTarget
+                        || status.level >= .attention
+                )
             ) {
                 VStack(alignment: .leading, spacing: 9) {
                     if let observation = environment.observation {
@@ -260,7 +341,7 @@ struct ProjectDashboardView: View {
                             }
                             if observation.driftCount > 0 {
                                 Label(
-                                    "\(observation.driftCount) drifted",
+                                    "\(observation.driftCount) \(observation.driftCount == 1 ? "change" : "changes") waiting",
                                     systemImage: "arrow.triangle.2.circlepath"
                                 )
                                 .foregroundStyle(CompanionColor.warning)
@@ -271,6 +352,7 @@ struct ProjectDashboardView: View {
                                     "\(observation.unmanagedCount) unmanaged",
                                     systemImage: "questionmark.diamond"
                                 )
+                                .help("Found in your cloud account but not set up by Hypervibe")
                             }
                             Spacer()
                             if environment.resources.contains(where: { $0.kind == .service }) {
@@ -304,8 +386,8 @@ struct ProjectDashboardView: View {
                             let failed = checks.filter { !$0.ok }
                             Label(
                                 failed.isEmpty
-                                    ? "\(checks.count) public \(checks.count == 1 ? "endpoint responded" : "endpoints responded")"
-                                    : "\(failed.count) public \(failed.count == 1 ? "endpoint check failed" : "endpoint checks failed")",
+                                    ? (checks.count == 1 ? "App address responded" : "\(checks.count) app addresses responded")
+                                    : (failed.count == 1 ? "App address is not responding" : "\(failed.count) app addresses are not responding"),
                                 systemImage: failed.isEmpty
                                     ? "heart.fill"
                                     : "heart.slash.fill"
@@ -318,7 +400,7 @@ struct ProjectDashboardView: View {
                         }
 
                         if !observation.blockedProviders.isEmpty {
-                            Text("Blocked: \(observation.blockedProviders.joined(separator: ", "))")
+                            Text("Needs access: \(observation.blockedProviders.joined(separator: ", "))")
                                 .font(.caption)
                                 .foregroundStyle(CompanionColor.warning)
                         }
@@ -332,7 +414,7 @@ struct ProjectDashboardView: View {
                 }
                 .padding(.top, 8)
             } label: {
-                environmentHeader(environment)
+                environmentHeader(environment, status: status)
                     .clickTargetCursor()
             }
         }
@@ -342,28 +424,18 @@ struct ProjectDashboardView: View {
     }
 
     private func environmentHeader(
-        _ environment: EnvironmentSnapshot
+        _ environment: EnvironmentSnapshot,
+        status: EnvironmentStatus
     ) -> some View {
         HStack {
-            if let observation = environment.observation {
-                Image(systemName: observation.health.systemImage)
-                    .foregroundStyle(observation.health.color)
-                Text(environment.name)
-                    .font(.headline)
-                Spacer()
-                Text(observation.health.title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(observation.health.color)
-            } else {
-                Image(systemName: "questionmark.circle")
-                    .foregroundStyle(.secondary)
-                Text(environment.name)
-                    .font(.headline)
-                Spacer()
-                Text("Unknown")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Image(systemName: status.level.systemImage)
+                .foregroundStyle(status.level.color)
+            Text(environment.name)
+                .font(.headline)
+            Spacer()
+            Text(status.label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(status.level.color)
         }
         .help("Spec revision \(environment.specRevision)")
     }
@@ -371,7 +443,7 @@ struct ProjectDashboardView: View {
     private func driftSummary(_ observation: ObservationSummary) -> String {
         let drifted = observation.driftedResources ?? []
         guard !drifted.isEmpty else {
-            return "Run hv_plan for details."
+            return "Ask chat to review and apply these changes."
         }
         return drifted
             .map { "\($0.name): \($0.actionType) pending on \($0.provider)" }
@@ -411,10 +483,13 @@ struct ProjectDashboardView: View {
         menuPanel?.orderOut(nil)
     }
 
-    private func environmentExpansion(_ environment: String) -> Binding<Bool> {
+    private func environmentExpansion(
+        _ environment: String,
+        default defaultValue: Bool
+    ) -> Binding<Bool> {
         let key = "\(project.id.uuidString):\(environment)"
         return Binding(
-            get: { expandedEnvironments[key] ?? true },
+            get: { expandedEnvironments[key] ?? defaultValue },
             set: { expandedEnvironments[key] = $0 }
         )
     }
@@ -518,7 +593,7 @@ struct ProjectDashboardView: View {
 
     private func recentRunsLabel(_ runs: [RecentRunSummary]) -> some View {
         HStack(spacing: 6) {
-            Text("Recent runs")
+            Text("Recent activity")
                 .font(.headline)
             Spacer()
             if !recentRunsExpanded, let latest = runs.first {
@@ -546,37 +621,23 @@ struct ProjectDashboardView: View {
     }
 }
 
-private extension EnvironmentHealth {
-    var title: String {
-        switch self {
-        case .inSync: "In sync"
-        case .drifted: "Drifted"
-        case .blocked: "Blocked"
-        case .unverified: "Unverified"
-        case .failed: "Refresh failed"
-        case .stale: "Stale"
-        case .unknown: "Unknown"
-        }
-    }
-
+extension StatusLevel {
+    /// Shape differs per level so colour is never the only signal.
     var systemImage: String {
         switch self {
-        case .inSync: "checkmark.circle.fill"
-        case .drifted: "arrow.triangle.2.circlepath.circle.fill"
-        case .blocked: "exclamationmark.octagon.fill"
-        case .unverified: "questionmark.circle.fill"
-        case .failed: "xmark.circle.fill"
-        case .stale: "clock.badge.exclamationmark"
+        case .good: "checkmark.circle.fill"
         case .unknown: "circle.dashed"
+        case .attention: "exclamationmark.triangle.fill"
+        case .down: "xmark.octagon.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .inSync: CompanionColor.success
-        case .drifted: CompanionColor.warning
-        case .blocked, .failed: .red
-        case .unverified, .stale, .unknown: .secondary
+        case .good: CompanionColor.success
+        case .unknown: .secondary
+        case .attention: CompanionColor.warning
+        case .down: .red
         }
     }
 }
