@@ -36,7 +36,10 @@ export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   for (const [field, value] of unsupported) {
     if (present(value)) problems.push(`${field} is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.`);
   }
-  if (environment.migrations?.mode === 'tool') problems.push('migrations.mode="tool" is not yet supported by the OpenTofu engine; use "releaseCommand".');
+  if (environment.migrations?.mode === 'tool') {
+    problems.push('migrations.mode="tool" is not yet supported by the OpenTofu engine'
+      + (environment.hosting.provider === 'cloudrun' ? '; use "releaseCommand".' : '.'));
+  }
   for (const field of ['seedCommand', 'resilience', 'credentialAliases', 'freshInitialization'] as const) {
     if (environment.database?.[field] !== undefined) {
       problems.push(field === 'seedCommand'
@@ -56,6 +59,7 @@ export function commonEngineProblems(environment: EnvironmentSpec): string[] {
 function googleOnlyProblems(environment: EnvironmentSpec): string[] {
   const cloud = environment.hosting.provider === 'aws' ? 'AWS' : 'Azure';
   const problems: string[] = [];
+  if (environment.migrations?.mode === 'releaseCommand') problems.push(`migrations.mode="releaseCommand" is not yet supported on ${cloud}.`);
   for (const [name, service] of Object.entries(environment.services)) {
     if (service.alwaysOn) problems.push(`Service ${name}: alwaysOn is not yet supported on ${cloud}.`);
   }

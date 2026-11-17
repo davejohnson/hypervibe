@@ -50,7 +50,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Generated and outside secrets | yes | yes | yes |
 | Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
-| Migrations as a release step | yes (`releaseCommand` mode) | blocked at release | blocked at release |
+| Migrations as a release step | yes (`releaseCommand` mode) | blocked in spec and planning | blocked in spec and planning |
 | Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
 | Promotion and promotion tests | blocked (#252) | blocked (#252) | blocked (#252) |
 | Email, webhooks, iOS releases | blocked (#626) | blocked (#626) | blocked (#626) |
