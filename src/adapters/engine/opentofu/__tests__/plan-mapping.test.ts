@@ -48,6 +48,18 @@ describe('Cloud Run engine configuration', () => {
 });
 
 describe('engine plan translation', () => {
+  // #552: growing a cache in place changes the bill, so it needs the same exact confirmation as creating one.
+  it('treats an in-place cache size change as billable and confirmation-gated, but not an unrelated update', () => {
+    const cached = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [], cache: { instanceName: 'cache-staging', memorySizeGb: 2, tier: 'BASIC', network: 'default', subnetwork: 'default' } } as never);
+    expect(cached.resources['google_redis_instance.cache']).toMatchObject({ actionId: 'cache:redis', costAttributes: expect.arrayContaining(['memory_size_gb']) });
+    const translate = (before: unknown, after: unknown) => translateEnginePlan({ provider: 'gcp', configuration: cached, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_redis_instance.cache', type: 'google_redis_instance', actions: ['update'], before, after },
+    ])) }).actions.find((action) => action.id === 'cache:redis')!;
+    expect(translate({ memory_size_gb: 1, labels: {} }, { memory_size_gb: 2, labels: {} })).toMatchObject({ type: 'update', billable: true, requiresConfirm: true });
+    const relabel = translate({ memory_size_gb: 1, labels: { a: '1' } }, { memory_size_gb: 1, labels: { a: '2' } });
+    expect(relabel.billable).toBeUndefined(); expect(relabel.requiresConfirm).toBeUndefined();
+  });
+
   it('maps service and IAM changes to one reviewed action', () => {
     const parsed = parseEnginePlan(plan([
       { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['create'], after: { name: 'web-staging' } },

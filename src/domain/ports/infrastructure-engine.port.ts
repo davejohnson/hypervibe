@@ -63,6 +63,8 @@ export interface EngineResourceMapping {
   dataBearing?: boolean;
   /** Creating or replacing this resource can charge the provider account. */
   billable?: boolean;
+  /** Top-level attributes whose in-place change alters what this resource costs (for example its size). Such an update is billable and needs exact confirmation. */
+  costAttributes?: readonly string[];
   /** Permission/trust changes require review even when they have no usage charge. */
   requiresConfirm?: boolean;
 }
