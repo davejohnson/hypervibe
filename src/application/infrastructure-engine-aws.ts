@@ -28,6 +28,7 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
 import { engineOutsideKeys, optionalOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
+import { engineCiIntent } from '../domain/spec/engine-ci.js';
 
 /**
  * The OpenTofu lifecycle for AWS environments: spec → configuration, Hypervibe-owned
@@ -174,6 +175,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   };
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
+    ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     environmentId: context.environment.id, parameterPath: context.parameterPath,
     ...(environmentSpec.database ? { database: { clusterArn: context.shared.clusterArn, name: context.database.name } } : {}),
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: bucketName(storage) })),

@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
+import { addAzureCiConfiguration } from './azure-engine-ci.config.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 
 /**
@@ -39,6 +41,7 @@ export interface AzureSharedInput extends AzurePlacement {
 export interface AzureSharedNames { server: string; registry: string }
 
 export interface AzureEngineInput extends AzurePlacement {
+  ci?: EngineCiIntent;
   kind?: 'environment';
   /** Environment id stamped on owned resources so adoption can prove ownership. */
   environmentId: string;
@@ -394,6 +397,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     };
   }
   if (Object.keys(jobs).length) files['jobs.tf.json'] = { resource: { azurerm_container_app_job: jobs } };
+  addAzureCiConfiguration(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_identity_client_id: { value: '${azurerm_user_assigned_identity.runtime.client_id}' },

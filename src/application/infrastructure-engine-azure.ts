@@ -27,6 +27,7 @@ import {
 } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
+import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import type { EngineSecretStore } from './engine-secrets.js';
 import { engineOutsideKeys, optionalOutsideKeys } from './engine-secrets.js';
 import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
@@ -226,6 +227,7 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
+    ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer },
     vault: { id: context.vault.id, uri: context.vault.uri },

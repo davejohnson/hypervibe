@@ -1,6 +1,8 @@
 import { LOAD_SECRETS_PATH } from '../runtime/load-secrets.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
+import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
+import { addAwsCiConfiguration } from './aws-engine-ci.config.js';
 
 /**
  * Pure OpenTofu configuration for one AWS environment. Values are non-secret:
@@ -9,6 +11,7 @@ import { addTasks } from './aws-engine.tasks.js';
  * RDS itself, so no secret ever enters engine state.
  */
 export interface AwsEngineInput {
+  ci?: EngineCiIntent;
   accountId: string;
   region: string;
   /** Short stable prefix for physical names, e.g. `hv-billforge-aws`. */
@@ -277,6 +280,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   }
 
   addTasks(input, files, resources);
+  addAwsCiConfiguration(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },
