@@ -15,7 +15,7 @@ import {
 import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import {
-  awsKey, awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsSharedConfiguration, LAMBDA_RESERVED_ENV, type AwsEngineInput, type AwsSharedInput,
+  awsKey, awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsSharedConfiguration, type AwsEngineInput, type AwsSharedInput,
 } from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { awsImageTag } from '../adapters/providers/aws/aws-release.client.js';
 import { localRepositoryFor } from './local-repository.js';
@@ -56,8 +56,6 @@ export interface AwsEngineBinding {
   kind?: 'opentofu';
   /** Image built by the release path; services are created once it exists. */
   imageUri?: string;
-  /** Version 2 images are ready for explicit runtime secret names. */
-  runtimeSecretsVersion?: 2;
   /** The app's database login exists and DATABASE_URL is in Parameter Store. */
   databaseLoginAt?: string;
   /** The environment's database is on the project's shared testing cluster (earlier versions gave each environment its own). */
@@ -137,10 +135,6 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
   if (environment.cache) problems.push('Redis caches are not available on the AWS engine yet.');
   if (Object.keys(environment.queues ?? {}).length) problems.push('Queues are not available on the AWS engine yet.');
   if (environment.domain) problems.push('Custom domains are not available on the AWS engine yet; use the service URL or route traffic with domainTarget.');
-  const reserved = Object.keys(environment.envVars).filter((key) => LAMBDA_RESERVED_ENV.has(key));
-  if (reserved.length && Object.values(environment.services).some((service) => (service.workloadKind ?? 'web') === 'web')) {
-    problems.push(`${reserved.join(', ')} ${reserved.length === 1 ? 'is' : 'are'} set by AWS Lambda itself and cannot be configured; remove ${reserved.length === 1 ? 'it' : 'them'} from envVars.`);
-  }
   for (const [name, service] of Object.entries(environment.services)) {
     if (environment.database && service.onDemand && !service.onDemand.nextWorkAtQuery) {
       problems.push(`${name} starts on demand, and this database pauses when idle: add onDemand.nextWorkAtQuery (one SELECT returning the earliest time queued work becomes due) so work scheduled for later starts on time.`);
@@ -152,7 +146,7 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
   return problems;
 }
 
-/** The AWS name of a workload: its Lambda function, ECS service and task family. */
+/** The AWS name of a workload: its ECS service and task family. */
 export function awsResourceName(prefix: string, service: string): string {
   return `${prefix}-${service}`.slice(0, 60);
 }
@@ -169,8 +163,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   // Workloads need an image in this environment's registry, so they are created after the first build.
   const withImage = imageUri ? services : [];
   const bucketName = (storage: string) => `${context.prefix}-${storage}-${context.connection.accountId}`.slice(0, 63);
-  // The shared S3 contract, minus keys: the runtime role is the credential (Lambda puts its
-  // AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN in the environment; Fargate serves it to SDKs).
+  // The shared S3 contract, minus keys: the runtime role is the credential (Fargate serves it to SDKs).
   const envFor = (service: string): Record<string, string> => {
     const buckets = Object.entries(environmentSpec.storage ?? {}).filter(([, storage]) => storage.injectInto.includes(service)).map(([name]) => name);
     if (buckets.length > 1) throw new Error(`Service ${service} can receive only one bucket's variables.`);
@@ -357,7 +350,8 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     }
   }
   const engineActions = [...environmentActions, ...buildActions, ...dropActions, ...sharedActions];
-  const families = [...(built.input.workers ?? []), ...(built.input.jobs ?? [])].map((task) => task.resourceName);
+  // Private web services are ordinary ECS services with their own task family; AWS owns a public web service's.
+  const families = [...(built.input.workers ?? []), ...(built.input.jobs ?? []), ...(built.input.services ?? []).filter((service) => !service.public)].map((task) => task.resourceName);
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'aws' },
@@ -420,9 +414,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // The first image is built in this apply from the local commit, so the workloads are created in the same reviewed plan.
   const workloads = Object.keys(environmentSpec.services).length;
   const previous = awsBinding(context.environment);
-  const runtimeUpgrade = Boolean(previous.imageUri && previous.runtimeSecretsVersion !== 2 && Object.values(environmentSpec.services).some((service) => (service.workloadKind ?? 'web') === 'web'));
-  const commit = (!previous.imageUri || runtimeUpgrade) && workloads ? localCommit(project) : undefined;
-  if (runtimeUpgrade && !commit) return { blocked: ['The AWS runtime secret update needs this project’s local repository to rebuild and release its image before changing secret permissions. Run Hypervibe from the repository and plan again.'] };
+  const commit = !previous.imageUri && workloads ? localCommit(project) : undefined;
   const firstImage = commit ? `${awsRegistryUrl({ accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix })}:${awsImageTag(commit.commitSha)}` : undefined;
   // An optional key without a value is left out, so no workload references a parameter that does not exist.
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported.filter((key) => !secrets.unset?.includes(key))], firstImage);
@@ -456,9 +448,9 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // 2. The first image.
   const imageActions: PlanAction[] = commit ? [{
     id: 'build:image', type: 'create', verified: true, resource: { kind: 'service', name: 'image', provider: 'aws' },
-    reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} in CodeBuild (a few cents) so the services start from it.${runtimeUpgrade ? ' It will release the new secrets loader to existing web services before narrowing runtime secret access.' : ''}`,
+    reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} in CodeBuild (a few cents) so the services start from it.`,
     ...(buildChanging.length ? { dependsOn: buildChanging } : {}),
-    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory, image: firstImage, runtimeUpgrade },
+    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory, image: firstImage },
   }] : [];
   // 3. Everything else.
   const planId = crypto.randomUUID();
@@ -533,20 +525,16 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       try {
         if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureGeneratedParameter(access, (action.metadata as { name: string }).name);
         if (metadata.operation === AWS_IMAGE_BUILD_OPERATION) {
-          const { buildAwsCommitImage, upgradeAwsRuntimeImage } = await import('./infrastructure-engine-aws-release.js');
+          const { buildAwsCommitImage } = await import('./infrastructure-engine-aws-release.js');
           const { directory, commitSha, image } = action.metadata as { directory: string; commitSha: string; image: string };
           const token = await presentBuildTokenKey(params.spec, environmentName, (key) => parameterExists(access, `${context.parameterPath}${key}`));
           if ('error' in token) return { success: false, status: 'blocked', message: token.error };
           const target = { ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}), region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
           const built = await buildAwsCommitImage(target, params.spec, environmentName, directory, commitSha);
           if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
-          if ((action.metadata as { runtimeUpgrade?: boolean }).runtimeUpgrade) {
-            const upgraded = await upgradeAwsRuntimeImage(target, params.spec, environmentName, built.imageUri);
-            if (upgraded) return { success: false, status: 'blocked', message: upgraded };
-          }
           // Record the reference the reviewed plan creates the services from (the registry's tags are immutable), not the digest, or the next plan replaces them.
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image, runtimeSecretsVersion: 2 } });
+          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image } });
           return { success: true, message: `Built ${built.imageUri}.`, data: { imageUri: built.imageUri } };
         }
         if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {

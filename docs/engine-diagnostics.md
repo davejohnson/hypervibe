@@ -16,9 +16,9 @@ logical service name. ECS releases retain their returned task-definition ARN.
 
 | Capability | AWS | Azure |
 | --- | --- | --- |
-| Web logs | Bound Lambda CloudWatch group | Exact Container App in its environment's verified Log Analytics workspace |
+| Web logs | Bound ECS group and the web container's exact stream prefix | Exact Container App in its environment's verified Log Analytics workspace |
 | Worker/job logs | Bound ECS group and exact container stream prefix | Exact Container App or Container Apps Job in that workspace |
-| Web deployment | Function state and last update result | Current revision identity, provisioning and health; an older ready revision cannot establish success |
+| Web deployment | The exact ECS service's primary rollout and running count | Current revision identity, provisioning and health; an older ready revision cannot establish success |
 | Worker deployment | Exact ECS service and primary rollout; zero desired tasks can be converged | Current Container App revision |
 | Job execution | Latest retained task for the exact task-definition ARN and cluster | Latest observed execution matching the current container images |
 
@@ -53,7 +53,6 @@ SQLite connection resolution, shared commands, AWS request serialization and
 Azure requests execute normally.
 
 - AWS [FilterLogEvents](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_FilterLogEvents.html): empty pages can carry a continuation token; results are ordered oldest first.
-- AWS [GetFunctionConfiguration](https://docs.aws.amazon.com/lambda/latest/api/API_GetFunctionConfiguration.html): function state and last update status are separate evidence.
 - AWS [DescribeServices](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeServices.html) and [failure reasons](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/api_failures_messages.html): exact ARN failures and primary rollout state.
 - AWS [ListTasks](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ListTasks.html) and [DescribeTasks](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeTasks.html): exact cluster/family scope, pagination, task-definition identity and limited stopped-task retention.
 - Azure Container Apps API `2025-01-01`: [current revisions](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps-revisions/get-revision?view=rest-resource-manager-containerapps-2025-01-01) and [job executions](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/jobs-executions/list?view=rest-resource-manager-containerapps-2025-01-01).

@@ -1,6 +1,5 @@
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { DescribeServicesCommand, DescribeTaskDefinitionCommand, DescribeTasksCommand, ListTasksCommand, ECSClient, type Task } from '@aws-sdk/client-ecs';
-import { GetFunctionConfigurationCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ProviderRuntimeLogsRequest, ProviderRuntimeLogsResult } from '../../../domain/ports/provider-logs.port.js';
 import { stateResources, stateString, workloadBinding, type EngineWorkloadBinding, type WorkloadDeploymentObservation } from '../../../domain/ports/workload-diagnostics.port.js';
@@ -10,18 +9,32 @@ import { awsEngineAuthentication } from './tofu/aws-engine.backend.js';
 import { awsKey } from './tofu/aws-engine.config.js';
 import { taskDefinitionIdentity, matchesTaskDefinitionFamily } from './aws-task-identity.js';
 
+/** Parses an ECS service ARN into its cluster ARN. */
+const clusterOfService = (serviceArn: string): string | undefined => {
+  const match = /^(arn:aws:ecs:[^:]+:\d{12}):service\/([^/]+)\/[^/]+$/.exec(serviceArn);
+  return match ? `${match[1]}:cluster/${match[2]}` : undefined;
+};
+
 export function projectAwsWorkloadBindings(state: unknown, services: Record<string, { workloadKind?: string }>, scope: { accountId: string; region: string }): Record<string, EngineWorkloadBinding> {
   const resources = stateResources(state); const result: Record<string, EngineWorkloadBinding> = {};
   for (const [name, spec] of Object.entries(services)) {
     const key = awsKey(name); const kind = spec.workloadKind ?? 'web';
-    const resource = resources.get(`${kind === 'web' ? 'aws_lambda_function' : kind === 'worker' ? 'aws_ecs_service' : 'aws_ecs_task_definition'}.${key}`);
-    const serviceId = stateString(resource?.arn) ?? stateString(resource?.id);
+    // A public web service is an Express Mode service; a private one is an ordinary ECS service, like a worker.
+    const express = kind === 'web' ? resources.get(`aws_ecs_express_gateway_service.${key}`) : undefined;
+    const resource = express ?? resources.get(`${kind === 'cron' ? 'aws_ecs_task_definition' : 'aws_ecs_service'}.${key}`);
+    const serviceId = stateString(express?.service_arn) ?? stateString(resource?.arn) ?? stateString(resource?.id);
     if (!serviceId) continue;
-    if (!serviceId.startsWith(`arn:aws:${kind === 'web' ? 'lambda' : 'ecs'}:${scope.region}:${scope.accountId}:`)) throw new Error('Engine workload identity is outside the reviewed account or region.');
-    const binding: EngineWorkloadBinding = { serviceId, workloadKind: kind, resourceType: kind === 'web' ? 'lambda' : kind === 'worker' ? 'ecs-service' : 'ecs-task', region: scope.region };
-    if (kind === 'web') {
-      binding.logGroup = stateString(resources.get(`aws_cloudwatch_log_group.${key}`)?.name);
-      binding.url = stateString(resources.get(`aws_lambda_function_url.${key}`)?.function_url);
+    if (!serviceId.startsWith(`arn:aws:ecs:${scope.region}:${scope.accountId}:`)) throw new Error('Engine workload identity is outside the reviewed account or region.');
+    const binding: EngineWorkloadBinding = { serviceId, workloadKind: kind, resourceType: express ? 'ecs-express' : kind === 'cron' ? 'ecs-task' : 'ecs-service', region: scope.region };
+    if (express) {
+      const container = (Array.isArray(express.primary_container) ? express.primary_container[0] : undefined) as { aws_logs_configuration?: Array<{ log_group?: string; log_stream_prefix?: string }> } | undefined;
+      const logs = container?.aws_logs_configuration?.[0];
+      binding.clusterArn = clusterOfService(serviceId);
+      binding.logGroup = logs?.log_group;
+      // Express Mode names its container Main.
+      binding.logStreamPrefix = logs?.log_stream_prefix ? `${logs.log_stream_prefix}/Main/` : undefined;
+      const endpoint = (Array.isArray(express.ingress_paths) ? express.ingress_paths as Array<{ access_type?: string; endpoint?: string }> : []).find((path) => path.endpoint && path.access_type !== 'PRIVATE')?.endpoint;
+      binding.url = endpoint ? (/^https?:\/\//.test(endpoint) ? endpoint : `https://${endpoint}`) : undefined;
     } else {
       binding.clusterArn = stateString(resources.get('aws_ecs_cluster.main')?.arn);
       const task = resources.get(`aws_ecs_task_definition.${key}`);
@@ -40,8 +53,8 @@ export class AwsWorkloadDiagnostics {
   constructor(private readonly connection: AwsEngineCredentials) {}
   private binding(environment: Environment, name: string): EngineWorkloadBinding {
     const b = workloadBinding(environment, name);
-    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(b.region) || !b.serviceId.startsWith(`arn:aws:${b.resourceType === 'lambda' ? 'lambda' : 'ecs'}:${b.region}:${this.connection.accountId}:`)
-      || !['lambda', 'ecs-service', 'ecs-task'].includes(b.resourceType)) throw new Error('The workload binding does not match the connected AWS account and recorded environment region.');
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(b.region) || !b.serviceId.startsWith(`arn:aws:ecs:${b.region}:${this.connection.accountId}:`)
+      || !['ecs-express', 'ecs-service', 'ecs-task'].includes(b.resourceType)) throw new Error('The workload binding does not match the connected AWS account and recorded environment region.');
     for (const arn of [b.clusterArn, b.taskDefinitionArn]) if (arn && !arn.startsWith(`arn:aws:ecs:${b.region}:${this.connection.accountId}:`)) throw new Error('ECS binding scope is inconsistent.');
     return b;
   }
@@ -52,7 +65,7 @@ export class AwsWorkloadDiagnostics {
   async readProviderLogs(request: ProviderRuntimeLogsRequest): Promise<ProviderRuntimeLogsResult> {
     const b = this.binding(request.environment, request.serviceName); const access = await this.access(b.region);
     try {
-      if (!b.logGroup || (b.resourceType !== 'lambda' && !b.logStreamPrefix)) throw new Error('The exact workload log destination is missing from engine state.');
+      if (!b.logGroup || !b.logStreamPrefix) throw new Error('The exact workload log destination is missing from engine state.');
       const client = new CloudWatchLogsClient(access.options); const logs: ProviderRuntimeLogsResult['logs'] = []; const seen = new Set<string>(); let nextToken: string | undefined;
       const limit = Math.max(1, Math.min(500, request.limit));
       // A fixed 24-hour window and page budget bound even empty CloudWatch pages.
@@ -77,16 +90,21 @@ export class AwsWorkloadDiagnostics {
   async readDeployment(environment: Environment, serviceName: string): Promise<WorkloadDeploymentObservation> {
     const b = this.binding(environment, serviceName); const access = await this.access(b.region);
     try {
-      if (b.resourceType === 'lambda') {
-        const r = await new LambdaClient(access.options).send(new GetFunctionConfigurationCommand({ FunctionName: b.serviceId }));
-        if (r.FunctionArn !== b.serviceId) throw new Error('AWS returned a different or missing function identity.');
-        const failed = r.State === 'Failed' || r.LastUpdateStatus === 'Failed';
-        return { presence: 'present', status: failed ? 'failed' : r.State === 'Active' && r.LastUpdateStatus === 'Successful' ? 'ready' : 'unknown' };
+      const ecs = new ECSClient(access.options);
+      if (b.resourceType === 'ecs-express') {
+        // Express Mode owns the task definition, so the service's own rollout is the evidence.
+        if (!b.clusterArn) throw new Error('The exact ECS cluster is missing.');
+        const r = await ecs.send(new DescribeServicesCommand({ cluster: b.clusterArn, services: [b.serviceId] }));
+        if (r.failures?.some((f) => f.arn === b.serviceId && f.reason === 'MISSING') && !r.services?.length) return { presence: 'absent', status: 'failed', reason: 'AWS reports that the bound web service is missing.' };
+        if (r.failures?.length || r.services?.length !== 1 || r.services[0]?.serviceArn !== b.serviceId || r.services[0].clusterArn !== b.clusterArn) throw new Error('AWS did not confirm the exact web service identity.');
+        const service = r.services[0]; const primary = service.deployments?.filter((d) => d.status === 'PRIMARY');
+        if (primary?.length !== 1) return { presence: 'present', status: 'unknown', reason: 'No unique primary deployment was observed.' };
+        const settled = service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.desiredCount > 0 && service.runningCount === service.desiredCount;
+        return { presence: 'present', status: primary[0]!.rolloutState === 'FAILED' ? 'failed' : settled && service.deployments?.length === 1 && primary[0]!.rolloutState !== 'IN_PROGRESS' ? 'ready' : 'unknown' };
       }
       if (!b.clusterArn || !b.taskDefinitionArn) throw new Error('The exact ECS cluster or task definition is missing.');
       const recorded = taskDefinitionIdentity(b.taskDefinitionArn);
       if (!recorded) throw new Error('The recorded task definition is not an exact native ARN.');
-      const ecs = new ECSClient(access.options);
       if (b.resourceType === 'ecs-task') {
         if (!matchesTaskDefinitionFamily(b.serviceId, b.taskDefinitionArn)) throw new Error('The scheduled task identity has inconsistent native families.');
         // CI creates new revisions without editing the local state binding. ECS resolves
@@ -138,7 +156,6 @@ export class AwsWorkloadDiagnostics {
       if (!current || current.familyArn !== recorded.familyArn || current.revision < recorded.revision || latest.taskDefinition !== service.taskDefinition) return { presence: 'present', status: 'unknown', reason: 'The current service and primary revision do not confirm the bound task family release.' };
       return { presence: 'present', status: latest.rolloutState === 'FAILED' ? 'failed' : latest.rolloutState === 'COMPLETED' && service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.runningCount === service.desiredCount ? 'ready' : 'unknown' };
     } catch (error) {
-      if (b.resourceType === 'lambda' && error instanceof Error && error.name === 'ResourceNotFoundException') return { presence: 'absent', status: 'failed', reason: 'AWS reports that the bound function is missing.' };
       throw new Error(redactEngineOutput(error instanceof Error ? error.message : String(error), access.redact));
     }
   }

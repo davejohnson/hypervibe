@@ -81,14 +81,15 @@ function awsEnvironment(state: unknown, params: Extract<Params, { provider: 'aws
   const policy = get('aws_iam_role_policy.ci'); match(policy.role, roleName); text(policy.id); JSON.parse(text(policy.policy));
   for (const [name, service] of Object.entries(spec.environments[environmentName]!.services)) {
     const kind = service.workloadKind ?? 'web';
-    owned(get(`${kind === 'web' ? 'aws_lambda_function' : kind === 'worker' ? 'aws_ecs_service' : 'aws_ecs_task_definition'}.${awsKey(name)}`), context.environment.id, true);
-    if (kind !== 'web') { owned(get(`aws_ecs_task_definition.${awsKey(name)}`), context.environment.id, true); owned(get('aws_ecs_cluster.main'), context.environment.id, true); }
+    const express = kind === 'web' && (service.public ?? true);
+    owned(get(`${express ? 'aws_ecs_express_gateway_service' : kind === 'cron' ? 'aws_ecs_task_definition' : 'aws_ecs_service'}.${awsKey(name)}`), context.environment.id, true);
+    if (!express) { owned(get(`aws_ecs_task_definition.${awsKey(name)}`), context.environment.id, true); owned(get('aws_ecs_cluster.main'), context.environment.id, true); }
   }
   const services = projectAwsWorkloadBindings(state, spec.environments[environmentName]!.services, context.connection);
   complete(services, spec, environmentName);
   const files: EngineConfiguration['files'] = {};
   const workloads = Object.entries(services).map(([name, service]) => ({ logicalName: name,
-    resourceName: service.workloadKind === 'web' ? service.serviceId.split(':').at(-1)! : text(service.taskDefinitionArn).split('/').at(-1)!.split(':')[0]!, initialImageUri: '', public: spec.environments[environmentName]!.services[name]!.public ?? false, workloadKind: service.workloadKind }));
+    resourceName: service.resourceType === 'ecs-express' ? service.serviceId.split('/').at(-1)! : text(service.taskDefinitionArn).split('/').at(-1)!.split(':')[0]!, initialImageUri: '', public: service.resourceType === 'ecs-express', workloadKind: service.workloadKind }));
   addAwsCiConfiguration({ ci: intent, accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
     environmentId: context.environment.id, parameterPath: context.parameterPath,
     services: workloads.filter(service => service.workloadKind === 'web'), workers: workloads.filter(service => service.workloadKind === 'worker'),

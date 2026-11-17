@@ -8,7 +8,7 @@ import { repoBindingsFileSchema } from './repo-bindings.schema.js';
 const id = z.string().min(1).max(1024);
 const workload = z.object({
   serviceId: id, workloadKind: z.enum(['web', 'worker', 'cron']),
-  resourceType: z.enum(['lambda', 'ecs-service', 'ecs-task', 'container-app', 'container-job']), region: id,
+  resourceType: z.enum(['ecs-express', 'ecs-service', 'ecs-task', 'container-app', 'container-job']), region: id,
   url: z.string().url().optional(), logGroup: id.optional(), logStreamPrefix: id.optional(),
   clusterArn: id.optional(), taskDefinitionArn: id.optional(), managedEnvironmentId: id.optional(), workspaceId: id.optional(),
 }).strict();
@@ -38,12 +38,12 @@ export function parseEngineCiBinding(value: unknown): EngineCiBinding {
       || a.packageParameter && !new RegExp(`^/hypervibe/${b.environmentId.toLowerCase()}/(?:NODE_AUTH_TOKEN|NPM_TOKEN)$`).test(a.packageParameter)) fail();
     for (const w of Object.values(b.services)) {
       if (w.region !== b.region) fail();
-      const expected = w.workloadKind === 'web' ? 'lambda' : w.workloadKind === 'worker' ? 'ecs-service' : 'ecs-task';
-      if (w.resourceType !== expected) fail();
-      const path = w.resourceType === 'lambda' ? `arn:aws:lambda:${scope}:function:${b.prefix}-`
-        : w.resourceType === 'ecs-service' ? `arn:aws:ecs:${scope}:service/${b.prefix}/${b.prefix}-` : `arn:aws:ecs:${scope}:task-definition/${b.prefix}-`;
+      // A public web service is an Express Mode service; a private one is an ordinary ECS service.
+      const expected = w.workloadKind === 'web' ? ['ecs-express', 'ecs-service'] : w.workloadKind === 'worker' ? ['ecs-service'] : ['ecs-task'];
+      if (!expected.includes(w.resourceType)) fail();
+      const path = w.resourceType === 'ecs-task' ? `arn:aws:ecs:${scope}:task-definition/${b.prefix}-` : `arn:aws:ecs:${scope}:service/${b.prefix}/${b.prefix}-`;
       if (!w.serviceId.startsWith(path) || /[\s*?]/.test(w.serviceId)) fail();
-      if (w.resourceType !== 'lambda' && (w.clusterArn !== `arn:aws:ecs:${scope}:cluster/${b.prefix}`
+      if (w.resourceType !== 'ecs-express' && (w.clusterArn !== `arn:aws:ecs:${scope}:cluster/${b.prefix}`
         || !w.taskDefinitionArn?.startsWith(`arn:aws:ecs:${scope}:task-definition/${b.prefix}-`) || !/:\d+$/.test(w.taskDefinitionArn))) fail();
     }
   } else {

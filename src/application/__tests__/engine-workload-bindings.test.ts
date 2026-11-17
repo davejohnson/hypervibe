@@ -6,9 +6,8 @@ const state = (entries: Record<string, Record<string, unknown>>) => ({ format_ve
 const accountId = '111122223333'; const region = 'eu-west-1'; const ecs = `arn:aws:ecs:${region}:${accountId}`;
 it('projects exact retained AWS native identities and log destinations for web, worker, and job, excluding private state', () => {
   const native = state({
-    'aws_lambda_function.web': { arn: `arn:aws:lambda:${region}:${accountId}:function:historical-native-web`, environment: [{ variables: { SECRET: 'private-state-secret' } }] },
-    'aws_cloudwatch_log_group.web': { name: '/aws/lambda/historical-native-web' },
-    'aws_lambda_function_url.web': { function_url: 'https://native.lambda-url.eu-west-1.on.aws/' },
+    'aws_ecs_express_gateway_service.web': { service_arn: `${ecs}:service/historical/historical-native-web`, ingress_paths: [{ access_type: 'PUBLIC', endpoint: 'historical-native-web.ecs.eu-west-1.on.aws' }],
+      primary_container: [{ aws_logs_configuration: [{ log_group: '/exact/logs', log_stream_prefix: 'native-web' }], secret: [{ name: 'SECRET', value_from: 'private-state-secret' }] }] },
     'aws_ecs_cluster.main': { arn: `${ecs}:cluster/historical` },
     'aws_ecs_service.worker': { id: `${ecs}:service/historical/worker` },
     'aws_ecs_task_definition.worker': { arn: `${ecs}:task-definition/worker:5`, container_definitions: JSON.stringify([{ name: 'app', secrets: [{ valueFrom: 'private-state-secret' }], logConfiguration: { options: { 'awslogs-group': '/exact/logs', 'awslogs-stream-prefix': 'native-worker' } } }]) },
@@ -16,7 +15,8 @@ it('projects exact retained AWS native identities and log destinations for web, 
   });
   const result = projectAwsWorkloadBindings(native, { web: {}, worker: { workloadKind: 'worker' }, nightly: { workloadKind: 'cron' } }, { accountId, region });
   expect(result.worker).toMatchObject({ serviceId: `${ecs}:service/historical/worker`, clusterArn: `${ecs}:cluster/historical`, taskDefinitionArn: `${ecs}:task-definition/worker:5`, logGroup: '/exact/logs', logStreamPrefix: 'native-worker/app/' });
-  expect(result.nightly!.resourceType).toBe('ecs-task'); expect(result.web!.serviceId).toContain('historical-native-web');
+  expect(result.nightly!.resourceType).toBe('ecs-task'); expect(result.web).toEqual({ serviceId: `${ecs}:service/historical/historical-native-web`, workloadKind: 'web', resourceType: 'ecs-express', region, clusterArn: `${ecs}:cluster/historical`,
+    logGroup: '/exact/logs', logStreamPrefix: 'native-web/Main/', url: 'https://historical-native-web.ecs.eu-west-1.on.aws' });
   expect(JSON.stringify(result)).not.toContain('private-state-secret');
   expect(() => projectAwsWorkloadBindings(native, { web: {} }, { accountId, region: 'us-west-2' })).toThrow(/outside/);
 });
@@ -37,7 +37,7 @@ it('projects Azure app, worker, and job ARM identities and workspace UUID withou
 it('repairs bindings from existing state and preserves recovery identities on unavailable state', async () => {
   const environment = { id: 'env', platformBindings: { services: { retained: { serviceId: 'old' } }, engine: { existing: true } } };
   const update = vi.fn(); const ctx = { repos: { environments: { findById: () => environment, updatePlatformBindings: update } } } as never;
-  const engine = { inspectState: vi.fn(async () => ({ ok: true, present: true, value: { web: { serviceId: 'native', resourceType: 'lambda', workloadKind: 'web', region: 'eu-west-1' } } })) };
+  const engine = { inspectState: vi.fn(async () => ({ ok: true, present: true, value: { web: { serviceId: 'native', resourceType: 'ecs-express', workloadKind: 'web', region: 'eu-west-1' } } })) };
   const params = { environment, backend: {}, auth: { env: {}, redact: [] }, state: {}, provider: 'aws', projectId: accountId, environmentId: region, project: () => ({}) } as never;
   expect(await recordEngineWorkloadBindings(ctx, engine as never, params)).toEqual({ ok: true });
   expect(update).toHaveBeenCalledWith('env', expect.objectContaining({ services: { retained: { serviceId: 'old' }, web: expect.objectContaining({ serviceId: 'native' }) }, engine: { existing: true, kind: 'opentofu' } }));

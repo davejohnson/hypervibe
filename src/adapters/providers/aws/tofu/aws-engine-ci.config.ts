@@ -8,21 +8,28 @@ export function addAwsCiConfiguration(input: AwsEngineInput, files: EngineConfig
   assertEngineCiIntent(input.ci);
   const scope = `${input.region}:${input.accountId}`;
   const statement = (Sid: string, Action: string[], Resource: string | string[], extra = {}) => ({ Sid, Effect: 'Allow', Action, Resource, ...extra });
-  const tasks = [...(input.workers ?? []), ...(input.jobs ?? [])];
+  // A public web service is an Express Mode service; a private one is released like a worker.
+  const express = (input.services ?? []).filter((service) => service.public);
+  const services = [...(input.workers ?? []), ...(input.services ?? []).filter((service) => !service.public)];
+  const tasks = [...services, ...(input.jobs ?? [])];
   const taskFamilies = tasks.map((task) => `arn:aws:ecs:${scope}:task-definition/${task.resourceName}:*`);
   const statements = [
     statement('BuildImage', ['codebuild:BatchGetProjects', 'codebuild:StartBuild', 'codebuild:BatchGetBuilds'], [`arn:aws:codebuild:${scope}:project/${input.prefix}-images`]),
     statement('UploadSource', ['s3:PutObject'], `arn:aws:s3:::${input.prefix}-build-${input.accountId}/sources/*`),
     statement('ReadImages', ['ecr:DescribeImages'], `arn:aws:ecr:${scope}:repository/${input.prefix}`),
-    ...((input.services ?? []).length ? [statement('ReleaseWeb', ['lambda:GetFunction', 'lambda:GetFunctionConfiguration', 'lambda:GetFunctionUrlConfig', 'lambda:ListTags', 'lambda:UpdateFunctionCode'],
-      input.services!.map((service) => `arn:aws:lambda:${scope}:function:${service.resourceName}`))] : []),
+    ...(express.length ? [
+      statement('ReleaseWeb', ['ecs:DescribeExpressGatewayService', 'ecs:UpdateExpressGatewayService'], express.map((service) => `arn:aws:ecs:${scope}:service/${input.prefix}/${service.resourceName}`)),
+      statement('ReadWebRollout', ['ecs:DescribeServiceDeployments'], express.map((service) => `arn:aws:ecs:${scope}:service-deployment/${input.prefix}/${service.resourceName}/*`)),
+    ] : []),
+    ...(express.length || tasks.length ? [
+      statement('PassRuntimeRole', ['iam:PassRole'], `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`, { Condition: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } } }),
+    ] : []),
     ...(tasks.length ? [
       // DescribeTaskDefinition has no resource-level scope; writes remain family-scoped.
       statement('ReadTasks', ['ecs:DescribeTaskDefinition'], '*'),
       statement('RegisterTaskRevision', ['ecs:RegisterTaskDefinition'], taskFamilies),
       statement('TagTaskRevision', ['ecs:TagResource'], taskFamilies, { Condition: { StringEquals: { 'ecs:CreateAction': 'RegisterTaskDefinition' } } }),
-      statement('PassRuntimeRole', ['iam:PassRole'], `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`, { Condition: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } } }),
-      statement('ReleaseWorkers', ['ecs:DescribeServices', 'ecs:UpdateService'], (input.workers ?? []).map((worker) => `arn:aws:ecs:${scope}:service/${input.prefix}/${worker.resourceName}`)),
+      statement('ReleaseWorkers', ['ecs:DescribeServices', 'ecs:UpdateService'], services.map((worker) => `arn:aws:ecs:${scope}:service/${input.prefix}/${worker.resourceName}`)),
     ] : []),
   ].filter((s) => !Array.isArray(s.Resource) || s.Resource.length);
   files['ci.tf.json'] = { resource: {

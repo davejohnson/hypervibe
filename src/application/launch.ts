@@ -73,7 +73,7 @@ export function estimateAwsMonthlyCost(environment: EnvironmentSpec): CostLine[]
   const lines: CostLine[] = [];
   const workloads = Object.values(environment.services);
   const web = workloads.filter((service) => (service.workloadKind ?? 'web') === 'web').length;
-  if (web) lines.push({ item: `${web} web service(s) on Lambda`, estimate: '$0 while idle; the first million requests and 400,000 GB-seconds a month are free, then about $0.20 per million requests plus compute time' });
+  if (web) lines.push({ item: `${web} web service(s) on Fargate, always running`, estimate: 'about $15 a month each (a quarter CPU, 1 GB and a public address), plus about $25 a month for one load balancer shared by every web service in the AWS account' });
   const workers = workloads.filter((service) => service.workloadKind === 'worker').length;
   if (workers) lines.push({ item: `${workers} worker(s) on Fargate that start when jobs are due`, estimate: '$0 while idle; about 1–2 cents per hour while working' });
   const cron = workloads.filter((service) => service.workloadKind === 'cron').length;

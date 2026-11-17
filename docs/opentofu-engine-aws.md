@@ -22,7 +22,8 @@ and runs. They do not verify other profiles, workloads or subsequent revisions.
 | Registry, runtime role, storage, database, app login | Built; applied live (billforge `aws`) |
 | Image builds and releases (`hv_deploy`) | Built; verified live (demo app) |
 | Private package tokens in CodeBuild / BuildKit | Built; offline request, generated command and runtime-isolation regressions; not live verified |
-| Web (Lambda), on-demand worker and cron (Fargate) | Built; verified live (demo app): database over verified TLS, generated secret, storage with the runtime role, worker woken by requests and by the next-due timer while Aurora was paused, no drift after releases |
+| Web services as containers (Fargate, ECS Express Mode) with a database that has no public address | Built 2026-11-17; the generated configuration passes `tofu validate` against the pinned provider and offline request tests. **Not yet run live**: launch, release, rollback, the HTTPS address and the move of an existing Lambda environment are unverified |
+| On-demand worker and cron (Fargate) | Built; verified live (demo app) while web ran on Lambda: generated secret, storage with the runtime role, worker woken by the next-due timer while Aurora was paused, no drift after releases. The waker's web-request check now reads load balancer metrics and is not yet run live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
 | `hv_launch` for testing environments (one reviewed plan: registry and build project in their own state, the first image built inside the apply, then everything else) | Built; verified live (demo app, 2026-11-14): one round, no sign-in (account access reused), web health-checked, database, secret, storage and cron working, worker jobs done 87 s (cold start) and 0.7 s after due, empty plan after |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
@@ -77,10 +78,22 @@ readiness for an environment without a database either.
 Cost figures below are estimates recorded during the November 2026 design work,
 not current quotes.
 
-- **Web: Lambda in the current engine path.** The container image uses Lambda
-  Web Adapter and scales to zero. The earlier design considered Fargate for
-  WebSockets, long requests, steady traffic or cold-start-sensitive apps; this
-  engine path does not implement that selection.
+- **Web: containers on Fargate through ECS Express Mode (decided 2026-11-17).**
+  One container is always running, so there are no cold starts, one container
+  serves many requests on a shared database connection pool, and WebSockets and
+  long requests work. AWS gives each public service an HTTPS address
+  (`<service>.ecs.<region>.on.aws`), shares one load balancer between up to 25
+  services in the account's network, replaces containers gradually on release
+  and rolls a failed release back. A web service that is not public is an
+  ordinary ECS service with no route to it. Each service scales from one to
+  three containers on CPU. Lambda was the earlier path: it cost nothing while
+  idle, but it sits outside the network, so it could reach the database only
+  through a public database address or a NAT gateway (about $33/mo, estimated).
+  Lambda as an opt-in for apps without a database is not built.
+- **Why not a plain load balancer behind CloudFront.** A load balancer without
+  a certificate needs CloudFront for HTTPS, and then reports every request to
+  the app as plain HTTP (`X-Forwarded-Proto: http`), which breaks secure cookies
+  and HTTPS redirects. Express Mode terminates HTTPS on the load balancer.
 - **No App Runner.** It closed to new customers on 2026-04-30.
 - **No Elastic Beanstalk for workers.** It runs always-on EC2 instances.
 - **Worker: on demand.** A Fargate service at zero tasks, woken by an
@@ -111,23 +124,20 @@ not current quotes.
   waker login was refused on the other environment's database
   (`permission denied for database`). Tearing it down dropped only its database,
   and tearing down the last environment removed the cluster.
-- **Database network: public endpoint, TLS required (decided 2026-11-10).**
-  Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
-  $32/mo and would be more than the rest of a staging environment. The database
-  accepts only TLS and a generated 32-character password, similar to Cloud SQL's
-  public IP. Private networking (NAT gateway, or a NAT instance that Hypervibe
-  would have to patch) was considered for production; it is not an implemented
-  option in this engine path.
+- **Database network: no public address (decided 2026-11-17, replacing the
+  2026-11-10 public endpoint).** The cluster is not publicly accessible and its
+  security group admits port 5432 only from the account's default network
+  range, so nothing on the internet can connect. Web services, workers and
+  jobs run in that network's public subnets (a public address for outbound
+  calls, no NAT gateway) and reach the database on its private address over
+  TLS. Hypervibe's own SQL goes through the RDS Data API and needs no network
+  path. Other workloads the account owner runs in the same default network
+  can reach the port and still need the generated password.
 - **Secrets: SSM Parameter Store `SecureString`**, which is free. Secrets Manager
   costs $0.40 per secret per month.
-- **Lambda secrets are read at start, not stored in Lambda.** Lambda has no
-  native Parameter Store references, and putting values in its environment
-  would copy them into function configuration and engine state. The image
-  Hypervibe builds reads `/hypervibe/<environment>/` at start; only the runtime
-  role can read that path. The reader is a dependency-free script loaded with
-  `NODE_OPTIONS=--require`, so it works with any start command. It fails closed:
-  the function errors instead of starting without its secrets. Python web
-  services need an equivalent loader before they can run on Lambda.
+- **Secrets reach containers by reference.** ECS reads each declared secret
+  from Parameter Store when a container starts; values never enter the service
+  configuration or engine state, and only the runtime role can read them.
 - **The database master password is managed by RDS**
   (`manage_master_user_password`, one Secrets Manager secret), so it never enters
   engine state. Hypervibe creates the app login through the RDS Data API, the
@@ -136,15 +146,14 @@ not current quotes.
   time. Aurora PostgreSQL 18 is available (18.6 in us-west-2 on 2026-11-10), so
   apps on Postgres 18 elsewhere move without a downgrade.
 - **Image builds: AWS CodeBuild**, like Cloud Build on GCP, so no local Docker.
-  Hypervibe uploads the exact local commit (`git archive`) and adds the Lambda
-  Web Adapter (pinned, inactive outside Lambda) and the secrets reader to the
-  repository's or the generated Dockerfile. Generated images pull their base from
+  Hypervibe uploads the exact local commit (`git archive`) and adds the RDS
+  certificate authorities to the repository's or the generated Dockerfile. Generated images pull their base from
   ECR Public, which avoids Docker Hub's pull limits on shared build hosts. Tags
   are immutable commit SHAs, and an already-built commit reuses its image.
 - **One image for every workload.** The first release only builds it, because
   workloads are created from an existing image; the next infrastructure plan
-  creates them. Later releases update Lambda code and register a new task
-  revision. Task definitions use `track_latest`, so released revisions are not
+  creates them. Later releases update the web service's image and register a
+  new task revision for workers and jobs. Task definitions use `track_latest`, so released revisions are not
   drift, and scheduled jobs reference the family, so they run the latest.
 
 ## Teardown
@@ -178,14 +187,15 @@ environments.
 Aurora pauses only after ten minutes with no connections, and every pending-work
 count is a connection. So the waker never counts just because the database is
 awake. It counts when the app could have queued work: the worker is running,
-the web service had requests in the last five minutes (Lambda's `Invocations`
-metric), a scheduled job just finished (an ECS event), or the next-due timer
+the web service had requests in the last five minutes (the load balancer's
+`RequestCountPerTarget` metric for the service's target group), a scheduled job just finished (an ECS event), or the next-due timer
 fired. With nothing pending, it moves a one-time EventBridge Scheduler wake to
 `onDemand.nextWorkAtQuery`'s time. Failures keep one worker running.
 
-A frozen Lambda can hold its idle database connection until AWS reclaims the
-sandbox (about 8 minutes on the demo), so Aurora pauses roughly 20 minutes after
-the app goes quiet. An uptime monitor that calls the app keeps it awake.
+A web container is always running. If the app keeps idle database connections
+open in its pool, Aurora never pauses and bills its minimum capacity around the
+clock; an app that closes idle connections lets it pause. This is unmeasured on
+the container path. An uptime monitor that calls the app also keeps it awake.
 
 ## Provider pin
 
@@ -198,15 +208,17 @@ the app goes quiet. An uptime monitor that calls the app keeps it awake.
 Declared outside `NODE_AUTH_TOKEN` or `NPM_TOKEN` secrets are resolved by
 CodeBuild from this environment's Parameter Store path and supplied as the
 BuildKit secret `npm_token`. The build role can read only the selected token.
-Neither token key is wired into Lambda, worker or scheduled-job settings; ordinary
+Neither token key is wired into web, worker or scheduled-job settings; ordinary
 runtime secrets use an explicit name list and exact parameter permissions.
 Optional absent tokens are omitted, and an unknown observation blocks the build.
 Repository Dockerfiles can use `RUN --mount=type=secret,id=npm_token`.
 
-Existing Lambda environments transition through a reviewed image rebuild and
-verified release before runtime secret permissions change. The packaged loader
-revision is part of the immutable image tag, so the same source commit does not
-reuse the old loader. The new image supports the previous settings during that
-transition while filtering token keys. Failure or an uncertain release stops the
-permission update. Without the local repository, planning blocks this transition.
-These changes have offline evidence; no new live deployment is claimed.
+## Moving an environment off Lambda
+
+An environment created while web services ran on Lambda moves in one reviewed
+plan: each web service shows as a replacement (the function, its URL and log
+group are removed and the container service is created), the service gets a new
+address, and the shared database loses its public address. The plan is blocked
+until the account's Hypervibe access is updated once (`hv_connections
+provider="aws" action="connect"`), because AWS needs a new role to manage web
+service load balancers. This path has offline evidence only.

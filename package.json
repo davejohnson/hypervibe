@@ -78,7 +78,6 @@
     "@aws-sdk/client-ecr": "^3.1106.0",
     "@aws-sdk/client-ecs": "^3.1106.0",
     "@aws-sdk/client-iam": "^3.1106.0",
-    "@aws-sdk/client-lambda": "^3.1106.0",
     "@aws-sdk/client-rds": "^3.1092.0",
     "@aws-sdk/client-rds-data": "^3.1106.0",
     "@aws-sdk/client-route-53": "3.1167.0",

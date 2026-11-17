@@ -12,7 +12,7 @@ const binding: EngineCiBinding = { version: 1, provider: 'aws', repository: 'own
   prefix: 'hv-app-dev', region: 'us-west-2', appliedContractHash: environmentDeploymentContractHash(rawSpec, 'dev'),
   aws: { accountId: '111122223333', roleArn: 'arn:aws:iam::111122223333:role/hypervibe/app/hv-app-dev-ci',
     buildProjectArn: 'arn:aws:codebuild:us-west-2:111122223333:project/hv-app-dev-images', sourceBucket: 'hv-app-dev-build-111122223333', repositoryUrl: '111122223333.dkr.ecr.us-west-2.amazonaws.com/hv-app-dev' },
-  services: { web: { serviceId: 'arn:aws:lambda:us-west-2:111122223333:function:hv-app-dev-web', workloadKind: 'web', resourceType: 'lambda', region: 'us-west-2' } },
+  services: { web: { serviceId: 'arn:aws:ecs:us-west-2:111122223333:service/hv-app-dev/hv-app-dev-web', workloadKind: 'web', resourceType: 'ecs-express', region: 'us-west-2' } },
 };
 const request = (value: unknown = binding) => ({ rawSpec, environmentName: 'dev', repository: 'owner/app', ref: 'refs/heads/main', sha: 'a'.repeat(40),
   bindings: { version: 1, project: 'app', environments: { dev: { platformBindings: { engineCi: value } } } } });

@@ -440,7 +440,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrls: [{ label: 'AWS sign-in (Hypervibe opens it for you with hv_connections provider="aws" action="connect")', url: 'https://signin.aws.amazon.com/' }],
     permissions: [
       'One-time setup, approved on Hypervibe\'s page right after sign-in: a hypervibe-deploy policy and hypervibe-deploy-<project> role, a hypervibe-app-boundary policy capping every app role, GitHub OIDC for keyless CI, and a hypervibe-local user that can only assume deploy roles.',
-      'The deploy role manages Lambda, ECS/Fargate, Aurora/RDS, S3, EventBridge Scheduler, Step Functions, CodeBuild and Parameter Store under /hypervibe/*; it creates IAM roles only under /hypervibe/app/ with the boundary and cannot change the boundary.',
+      'The deploy role manages ECS/Fargate, Aurora/RDS, S3, EventBridge Scheduler, Step Functions, CodeBuild and Parameter Store under /hypervibe/*; it creates IAM roles only under /hypervibe/app/ with the boundary and cannot change the boundary.',
     ],
     credentialExample: 'hv_connections provider="aws" action="connect"',
     notes: [

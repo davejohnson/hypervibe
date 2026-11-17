@@ -35,8 +35,12 @@ function credentialReference(state: unknown, provider: 'aws' | 'azure'): string 
   for (const resource of resources(state)) {
     if (resource.mode !== 'managed' || resource.tainted === true) continue;
     const values = object(resource.values);
-    if (provider === 'aws' && resource.type === 'aws_lambda_function') {
-      for (const environment of Array.isArray(values.environment) ? values.environment : []) refs.push(text(object(object(environment).variables).HYPERVIBE_PARAMETER_PATH));
+    if (provider === 'aws' && resource.type === 'aws_ecs_express_gateway_service') {
+      for (const container of Array.isArray(values.primary_container) ? values.primary_container : []) {
+        for (const variable of Array.isArray(object(container).environment) ? object(container).environment as unknown[] : []) {
+          if (object(variable).name === 'HYPERVIBE_PARAMETER_PATH') refs.push(text(object(variable).value));
+        }
+      }
     } else if (provider === 'aws' && resource.type === 'aws_ecs_task_definition') {
       const containers: unknown = JSON.parse(text(values.container_definitions) || '[]');
       for (const container of Array.isArray(containers) ? containers : []) {

@@ -37,8 +37,8 @@ absence from an error. Failed or unknown steps stop dependent releases.
 
 ## Access and build isolation
 
-AWS grants image release access to exact Lambda functions, ECS services and task
-families. Task-definition reads require AWS's unscoped read permission; new task
+AWS grants image release access to exact web services (ECS Express Mode), ECS
+services and task families. Task-definition reads require AWS's unscoped read permission; new task
 revisions, tag preservation and passing the runtime role use the provider's
 supported restrictions. Source uploads and CodeBuild access target this
 environment's existing build resources. An older setup may need the normal
