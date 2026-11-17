@@ -208,6 +208,14 @@ it('releasing an already-running Lambda digest performs no workload mutation', a
   expect(result.status).toBe('released'); expect(calls.filter((r) => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(r.method) && r.host.startsWith('lambda.'))).toEqual([]);
 });
 
+// #557: a declared health check that answers 4xx fails the release; the "/" fallback keeps the lenient rule.
+it.each([[true, 'failed'], [false, 'released']] as const)('treats HTTP 403 from an AWS health check by whether the path was declared (strict: %s)', async (strict, expected) => {
+  const { releaseFunction } = await import('../../adapters/providers/aws/aws-release.client.js');
+  const f = fixture(); transport(f.github, { alreadyRunning: true, privateHealth: true });
+  const result = await releaseFunction({ region, accountId: account, prefix, credentials: { accessKeyId: 'AKIACI000000000000', secretAccessKey: 'private-cloud-secret', sessionToken: 'private-cloud-session' } }, 'web', functionArn, `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}`, '/health', strict);
+  expect(result).toMatchObject({ status: expected, health: { status: 403, path: '/health' } });
+});
+
 it.each([true, false])('admits AWS web startCommand only with its generated Dockerfile (repository Dockerfile: %s)', async (dockerfile) => {
   const f = fixture({ startCommand: 'npm start', dockerfile }); const calls = transport(f.github);
   const result = await executeEngineCiRelease(f);

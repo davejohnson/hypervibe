@@ -1,3 +1,4 @@
+import { strictHealthCheck } from '../domain/services/release-health.js';
 import { LOAD_SECRETS_SOURCE } from '../adapters/providers/aws/runtime/load-secrets.js';
 import {
   AWS_DOCKERFILE, LOADER_IN_SOURCE, awsReleaseDockerfile, buildImage, functionExists, releaseFunction, releaseTask, type AwsReleaseTarget,
@@ -60,7 +61,7 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
     },
     releaseWorkload: async ({ name, kind, resource, image }) => {
       const result = kind === 'web'
-        ? await releaseFunction(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/')
+        ? await releaseFunction(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!))
         : await releaseTask(target, name, resource, image, kind === 'worker');
       if (result.status === 'released' && result.taskDefinitionArn) {
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
@@ -100,7 +101,7 @@ export async function upgradeAwsRuntimeImage(target: AwsReleaseTarget, spec: Pro
     const exists = await functionExists(target, resource);
     if (exists === 'unknown') return `Could not verify ${name} before updating its secrets loader; runtime permissions were not changed.`;
     if (!exists) continue;
-    const released = await releaseFunction(target, name, resource, image, service.healthCheckPath ?? '/');
+    const released = await releaseFunction(target, name, resource, image, service.healthCheckPath ?? '/', strictHealthCheck(service));
     if (released.status !== 'released') return `The secrets loader update for ${name} did not finish: ${released.message}`;
   }
   return undefined;

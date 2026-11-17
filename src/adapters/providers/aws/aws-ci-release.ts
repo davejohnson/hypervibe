@@ -1,3 +1,4 @@
+import { strictHealthCheck } from '../../../domain/services/release-health.js';
 import { BatchGetProjectsCommand, CodeBuildClient } from '@aws-sdk/client-codebuild';
 import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient } from '@aws-sdk/client-ecs';
 import { GetFunctionConfigurationCommand, LambdaClient } from '@aws-sdk/client-lambda';
@@ -55,7 +56,7 @@ export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context
     releaseWorkload: async ({ name, image }) => {
       await inspect(name); const w = binding.services[name]!;
       const result = await (w.resourceType === 'lambda'
-        ? releaseFunction(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/')
+        ? releaseFunction(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/', strictHealthCheck(spec.environments[binding.environmentName]!.services[name]!))
         : releaseTask(target, name, w.serviceId, image, w.resourceType === 'ecs-service', { clusterArn: w.clusterArn!, taskDefinitionArn: taskDefinitions.get(name)!, ...(w.resourceType === 'ecs-service' ? { serviceArn: w.serviceId } : {}) }));
       if (result.status !== 'released') return result;
       if (w.resourceType === 'lambda') return result.health && result.health.status >= 200 && result.health.status < 400 ? result

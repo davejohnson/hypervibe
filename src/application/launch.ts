@@ -1,3 +1,4 @@
+import { strictHealthCheck } from '../domain/services/release-health.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
 import { buildTokenKey, collectOutsideKeys } from './engine-secrets.js';
@@ -494,7 +495,7 @@ export function ciReleaseTargets(environmentSpec: EnvironmentSpec, bindings: Rec
     const resource = bound?.serviceId ?? bound?.jobName ?? bound?.workerPoolName;
     const kind = bound?.serviceId ? 'services' as const : bound?.jobName ? 'jobs' as const : 'workerPools' as const;
     return resource ? [{
-      name, resource, kind, ...(kind === 'services' && service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/' } : {}),
+      name, resource, kind, ...(kind === 'services' && service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/', ...(strictHealthCheck(service) ? { strictHealth: true } : {}) } : {}),
       ...(kind !== 'jobs' && service.startCommand ? { startCommand: service.startCommand } : {}),
       image: `${target.region}-docker.pkg.dev/${target.gcpProjectId}/hypervibe/${target.environmentName}-${name}`.toLowerCase(),
     }] : [];

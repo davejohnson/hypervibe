@@ -1,3 +1,4 @@
+import { strictHealthCheck } from '../../../domain/services/release-health.js';
 import { azureCiRegistry } from './azure-ci-registry.js';
 import type { EngineCiReleaseTarget, GitHubOidcContext } from '../../../domain/ports/engine-ci.port.js';
 import type { EngineCiBinding } from '../../../domain/spec/engine-ci-binding.js';
@@ -41,7 +42,7 @@ export async function createAzureCiReleaseTarget(binding: EngineCiBinding, conte
     releaseWorkload: async ({ name, image }) => {
       await inspect(name); const w = binding.services[name]!;
       const result = w.workloadKind === 'cron' ? await releaseAzureJob(tokens, { id: w.serviceId, name, image, requireExactIdentity: true })
-        : await releaseAzureApp(tokens, { id: w.serviceId, name, image, requireExactIdentity: true, waitMs: Math.max(1, deadline - Date.now()), fetchTimeoutMs: Math.max(1, Math.min(3 * 60_000, deadline - Date.now())), web: w.workloadKind === 'web', healthCheckPath: spec.environments[binding.environmentName]!.services[name]!.healthCheckPath });
+        : await releaseAzureApp(tokens, { id: w.serviceId, name, image, requireExactIdentity: true, waitMs: Math.max(1, deadline - Date.now()), fetchTimeoutMs: Math.max(1, Math.min(3 * 60_000, deadline - Date.now())), web: w.workloadKind === 'web', healthCheckPath: spec.environments[binding.environmentName]!.services[name]!.healthCheckPath, strictHealth: strictHealthCheck(spec.environments[binding.environmentName]!.services[name]!) });
       if (result.status !== 'released') return result;
       for (let attempt = 0; attempt < 60 && Date.now() < deadline; attempt++) {
         const current = await inspect(name); const p = current.properties as { provisioningState?: string; template?: Record<string, unknown>; latestRevisionName?: string; latestReadyRevisionName?: string };

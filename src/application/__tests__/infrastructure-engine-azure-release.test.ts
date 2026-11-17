@@ -131,6 +131,17 @@ describe('Container Apps releases', () => {
     const unhealthy = release(() => new Response('ok', { status: 200 }), 'Unhealthy');
     await expect(releaseAzureApp(unhealthy.tokens, { id: appId, name: 'web', image: 'img', web: true, waitMs: 1000, fetchTimeoutMs: 1, retryMs: 1 })).resolves.toMatchObject({ status: 'failed', message: expect.stringMatching(/unhealthy/) });
   });
+
+  // #557: a declared health check that answers 4xx is not a healthy release; the "/" fallback keeps the lenient rule.
+  it.each([401, 404])('fails a release whose declared health check answers HTTP %s', async (status) => {
+    releaseCalls = 0;
+    const strict = release(() => new Response('no', { status }));
+    await expect(releaseAzureApp(strict.tokens, { id: appId, name: 'web', image: 'img', web: true, healthCheckPath: '/health', strictHealth: true, waitMs: 1000, fetchTimeoutMs: 1, retryMs: 1 }))
+      .resolves.toMatchObject({ status: 'failed', health: { status, path: '/health' }, message: expect.stringContaining(`HTTP ${status}`) });
+    releaseCalls = 0;
+    const lenient = release(() => new Response('no', { status }));
+    await expect(releaseAzureApp(lenient.tokens, { id: appId, name: 'web', image: 'img', web: true, waitMs: 1000, fetchTimeoutMs: 1, retryMs: 1 })).resolves.toMatchObject({ status: 'released', health: { status, path: '/' } });
+  });
 });
 
 describe('Azure image builds', () => {
