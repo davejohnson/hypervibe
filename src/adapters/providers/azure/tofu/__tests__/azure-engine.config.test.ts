@@ -9,7 +9,7 @@ import { fullEnvironmentInput, fullSharedInput } from './azure-fixtures.js';
 type Resources = Record<string, Record<string, Record<string, unknown>>>;
 const resourcesOf = (config: ReturnType<typeof buildAzureConfiguration>, file: string) => (config.files[file] as { resource: Resources }).resource;
 
-describe('Azure shared configuration (server and registry)', () => {
+describe('Azure shared configuration (network, app environment, server and registry)', () => {
   it('keeps the administrator password out of configuration, plan and state, with Entra administration and TLS by default', () => {
     const config = buildAzureSharedConfiguration(fullSharedInput);
     const file = config.files['database.tf.json'] as { ephemeral: Resources; resource: Resources };
@@ -23,9 +23,41 @@ describe('Azure shared configuration (server and registry)', () => {
     expect(JSON.stringify(config.files)).not.toMatch(/require_secure_transport/);
   });
 
-  it('has only a registry when no environment in the group has a database', () => {
+  // #728: the server was open to every address on the internet.
+  it('keeps the database off the internet: no public access, no firewall rule, reached through a private endpoint', () => {
+    const config = buildAzureSharedConfiguration(fullSharedInput);
+    const database = resourcesOf(config, 'database.tf.json');
+    expect(database.azurerm_postgresql_flexible_server!.postgres!.public_network_access_enabled).toBe(false);
+    expect(database).not.toHaveProperty('azurerm_postgresql_flexible_server_firewall_rule');
+    expect(JSON.stringify(config.files)).not.toMatch(/0\.0\.0\.0|255\.255\.255\.255/);
+    expect(database.azurerm_private_endpoint!.postgres).toMatchObject({ subnet_id: '${azurerm_subnet.endpoints.id}',
+      private_service_connection: [{ private_connection_resource_id: '${azurerm_postgresql_flexible_server.postgres.id}', subresource_names: ['postgresqlServer'] }],
+      private_dns_zone_group: [{ private_dns_zone_ids: ['${azurerm_private_dns_zone.postgres.id}'] }] });
+    // The server's usual host name resolves privately inside the network, so DATABASE_URL keeps it.
+    expect(database.azurerm_private_dns_zone!.postgres!.name).toBe('privatelink.postgres.database.azure.com');
+    expect(database.azurerm_private_dns_zone_virtual_network_link!.postgres!.virtual_network_id).toBe('${azurerm_virtual_network.main.id}');
+    // A project that had the open rule gets a reviewed removal, not a blocked plan.
+    expect(config.resources['azurerm_postgresql_flexible_server_firewall_rule.public']).toMatchObject({ actionId: 'shared:database' });
+  });
+
+  it('runs the group\'s apps in one environment inside the private network', () => {
+    const config = buildAzureSharedConfiguration(fullSharedInput);
+    const network = resourcesOf(config, 'network.tf.json');
+    expect(network.azurerm_subnet!.apps).toMatchObject({ address_prefixes: ['10.61.0.0/23'], delegation: [{ service_delegation: [{ name: 'Microsoft.App/environments' }] }] });
+    expect(network.azurerm_subnet!.endpoints).not.toHaveProperty('delegation');
+    expect(resourcesOf(config, 'apps.tf.json').azurerm_container_app_environment!.main).toMatchObject({ name: 'hv-billforge-shared-apps',
+      infrastructure_subnet_id: '${azurerm_subnet.apps.id}', workload_profile: [{ name: 'Consumption', workload_profile_type: 'Consumption' }] });
+    for (const file of ['network.tf.json', 'apps.tf.json', 'database.tf.json', 'registry.tf.json']) {
+      for (const [type, entries] of Object.entries(resourcesOf(config, file))) for (const name of Object.keys(entries)) expect(config.resources[`${type}.${name}`], `${type}.${name}`).toBeDefined();
+    }
+  });
+
+  it('has no server or private endpoint when no environment in the group has a database', () => {
     const { database: _database, ...withoutDatabase } = fullSharedInput;
-    expect(Object.keys(buildAzureSharedConfiguration(withoutDatabase).resources)).toEqual(['azurerm_container_registry.images']);
+    const config = buildAzureSharedConfiguration(withoutDatabase);
+    expect(config.files).not.toHaveProperty('database.tf.json');
+    expect(Object.keys(config.resources).sort()).toEqual(['azurerm_container_app_environment.main', 'azurerm_container_registry.images', 'azurerm_log_analytics_workspace.logs',
+      'azurerm_subnet.apps', 'azurerm_subnet.endpoints', 'azurerm_virtual_network.main']);
   });
 });
 
@@ -34,9 +66,10 @@ describe('Azure environment configuration', () => {
   const apps = resourcesOf(config, 'apps.tf.json').azurerm_container_app!;
 
   it('scales the web service to zero and reads its secrets from the project vault by reference', () => {
-    expect(resourcesOf(config, 'base.tf.json').azurerm_container_app_environment!.main).not.toHaveProperty('workload_profile');
-    // Azure adds its own Consumption profile; that must not read as drift.
-    expect(resourcesOf(config, 'base.tf.json').azurerm_container_app_environment!.main).toMatchObject({ lifecycle: [{ ignore_changes: ['workload_profile'] }] });
+    // The apps run in the project's shared environment; an environment's own old one is removed by a reviewed action.
+    expect(resourcesOf(config, 'base.tf.json')).not.toHaveProperty('azurerm_container_app_environment');
+    expect(apps.web!.container_app_environment_id).toBe(fullEnvironmentInput.shared.appsEnvironmentId);
+    expect(config.resources['azurerm_container_app_environment.main']).toMatchObject({ actionId: 'environment:base' });
     const web = apps.web as { template: Array<{ min_replicas: number; container: Array<{ env: Array<Record<string, string>> }> }>; secret: unknown[]; registry: unknown[]; depends_on: string[] };
     expect(web.template[0]!.min_replicas).toBe(0);
     expect(web.secret).toContainEqual({ name: 'database-url', key_vault_secret_id: 'https://hv-billforge-abc123.vault.azure.net/secrets/test--database-url', identity: '${azurerm_user_assigned_identity.runtime.id}' });

@@ -45,6 +45,8 @@ async function fixture(provider: 'aws' | 'azure') {
   const group = `/subscriptions/${subscriptionId}/resourceGroups/hv-ci-app`;
   const roleArn = `arn:aws:iam::${accountId}:role/hypervibe/app/${prefix}-ci`;
   const registry = azureCiRegistry({ subscriptionId, resourceGroup: 'hv-ci-app', environmentId: env.id }); const registryId = registry.id;
+  // The project's shared app environment, as the shared state records it.
+  const appsEnvironmentId = 'shared' in context && 'appsEnvironmentId' in context.shared ? context.shared.appsEnvironmentId : '';
   const roleDefinition = azureCiRoleDefinitions(subscriptionId, 'hv-ci-app').release.id;
   let environmentState = provider === 'aws' ? state([
     resource('aws_iam_role.ci', { id: `${prefix}-ci`, arn: roleArn, permissions_boundary: `arn:aws:iam::${accountId}:policy/hypervibe/hypervibe-app-boundary`, tags_all: tags, assume_role_policy: JSON.stringify({ Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRoleWithWebIdentity', Principal: { Federated: `arn:aws:iam::${accountId}:oidc-provider/token.actions.githubusercontent.com` }, Condition: { StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com', 'token.actions.githubusercontent.com:sub': 'repo:owner/app:ref:refs/heads/main' } } }] }) }),
@@ -61,8 +63,8 @@ async function fixture(provider: 'aws' | 'azure') {
   ]) : state([
     resource('azurerm_user_assigned_identity.ci', { id: `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${prefix}-ci`, client_id: clientId, principal_id: principalId, tenant_id: subscriptionId, location: 'westus2', tags }),
     resource('azurerm_federated_identity_credential.ci', { id: `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${prefix}-ci/federatedIdentityCredentials/github-release`, user_assigned_identity_id: `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${prefix}-ci`, issuer: 'https://token.actions.githubusercontent.com', audience: ['api://AzureADTokenExchange'], subject: 'repo:owner/app:ref:refs/heads/main' }),
-    resource('azurerm_container_app.web', { id: `${group}/providers/Microsoft.App/containerApps/${prefix}-web`, tags, location: 'westus2', container_app_environment_id: `${group}/providers/Microsoft.App/managedEnvironments/${prefix}-apps` }),
-    resource('azurerm_container_app_environment.main', { id: `${group}/providers/Microsoft.App/managedEnvironments/${prefix}-apps`, location: 'westus2', tags }),
+    resource('azurerm_container_app.web', { id: `${group}/providers/Microsoft.App/containerApps/${prefix}-web`, tags, location: 'westus2', container_app_environment_id: appsEnvironmentId }),
+    resource('azurerm_container_app_environment.main', { id: appsEnvironmentId, location: 'westus2', tags }),
     resource('azurerm_role_assignment.ci_web', { id: `${group}/providers/Microsoft.Authorization/roleAssignments/ci-web`, scope: `${group}/providers/Microsoft.App/containerApps/${prefix}-web`, principal_id: principalId, role_definition_id: roleDefinition }),
     resource('azurerm_role_assignment.ci_build', { id: `${group}/providers/Microsoft.Authorization/roleAssignments/ci-build`, scope: registryId, principal_id: principalId, role_definition_id: azureCiRoleDefinitions(subscriptionId, 'hv-ci-app').build.id }),
   ]);

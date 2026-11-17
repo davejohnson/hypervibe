@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { projectAwsWorkloadBindings } from '../../adapters/providers/aws/aws-diagnostics.client.js';
-import { projectAzureWorkloadBindings } from '../../adapters/providers/azure/azure-diagnostics.client.js';
+import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../../adapters/providers/azure/azure-diagnostics.client.js';
 import { recordEngineWorkloadBindings } from '../engine-workload-bindings.js';
 const state = (entries: Record<string, Record<string, unknown>>) => ({ format_version: '1.0', values: { root_module: { resources: Object.entries(entries).map(([address, values]) => ({ address, values })) } } });
 const accountId = '111122223333'; const region = 'eu-west-1'; const ecs = `arn:aws:ecs:${region}:${accountId}`;
@@ -25,12 +25,16 @@ it('projects Azure app, worker, and job ARM identities and workspace UUID withou
   const native = state({
     'azurerm_container_app_environment.main': { id: `${group}/providers/Microsoft.App/managedEnvironments/exact` },
     'azurerm_log_analytics_workspace.logs': { workspace_id: '22222222-2222-4222-8222-222222222222', primary_shared_key: 'private-state-secret' },
-    'azurerm_container_app.web': { id: `${group}/providers/Microsoft.App/containerApps/historical-web`, ingress: [{ fqdn: 'web.example' }], secret: [{ value: 'private-state-secret' }] },
+    'azurerm_container_app.web': { id: `${group}/providers/Microsoft.App/containerApps/historical-web`, container_app_environment_id: `${group}/providers/Microsoft.App/managedEnvironments/exact`, ingress: [{ fqdn: 'web.example' }], secret: [{ value: 'private-state-secret' }] },
     'azurerm_container_app.worker': { id: `${group}/providers/Microsoft.App/containerApps/historical-worker` },
     'azurerm_container_app_job.nightly': { id: `${group}/providers/Microsoft.App/jobs/historical-job` },
   });
-  const result = projectAzureWorkloadBindings(native, { web: {}, worker: { workloadKind: 'worker' }, nightly: { workloadKind: 'cron' } }, { subscriptionId, resourceGroup, location: 'northeurope' });
-  expect(result.web).toMatchObject({ url: 'https://web.example', workspaceId: '22222222-2222-4222-8222-222222222222', region: 'northeurope' });
+  // The app environment and its logs are shared by the project's testing environments, so they come from the shared state.
+  const shared = projectAzureSharedApps(native);
+  const result = projectAzureWorkloadBindings(native, { web: {}, worker: { workloadKind: 'worker' }, nightly: { workloadKind: 'cron' } }, { subscriptionId, resourceGroup, location: 'northeurope' }, shared);
+  expect(result.web).toMatchObject({ url: 'https://web.example', workspaceId: '22222222-2222-4222-8222-222222222222', region: 'northeurope', managedEnvironmentId: `${group}/providers/Microsoft.App/managedEnvironments/exact` });
+  // A workload that state does not place in that environment gets neither its identity nor its logs.
+  expect(result.worker).not.toHaveProperty('managedEnvironmentId'); expect(result.worker).not.toHaveProperty('workspaceId');
   expect(result.nightly!.resourceType).toBe('container-job'); expect(JSON.stringify(result)).not.toContain('private-state-secret');
   expect(() => projectAzureWorkloadBindings(native, { web: {} }, { subscriptionId, resourceGroup: 'hv-other', location: 'northeurope' })).toThrow(/outside/);
 });

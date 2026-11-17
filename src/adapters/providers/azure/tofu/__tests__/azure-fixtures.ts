@@ -15,7 +15,8 @@ const image = 'hvbillforgeshared123456.azurecr.io/app:0123456789abcdef0123456789
 /** A testing environment with every supported piece: web, on-demand worker, cron job, storage and secrets. */
 export const fullEnvironmentInput: AzureEngineInput = {
   ...placement, kind: 'environment', prefix: 'hv-billforge-test', environmentId: 'ENV1', environmentName: 'test',
-  shared: { registryId: `${group}/providers/Microsoft.ContainerRegistry/registries/hvbillforgeshared123456`, registryLoginServer: 'hvbillforgeshared123456.azurecr.io' },
+  shared: { registryId: `${group}/providers/Microsoft.ContainerRegistry/registries/hvbillforgeshared123456`, registryLoginServer: 'hvbillforgeshared123456.azurecr.io',
+    appsEnvironmentId: `${group}/providers/Microsoft.App/managedEnvironments/hv-billforge-shared-apps` },
   vault: { id: `${group}/providers/Microsoft.KeyVault/vaults/hv-billforge-abc123`, uri: 'https://hv-billforge-abc123.vault.azure.net/' },
   storage: [{ name: 'documents', container: 'documents' }],
   services: [{ logicalName: 'web', resourceName: 'hv-billforge-test-web', initialImage: image, public: true, targetPort: 3000, healthCheckPath: '/health', env: { NODE_ENV: 'production', PORT: '3000' } }],

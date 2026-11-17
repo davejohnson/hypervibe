@@ -28,7 +28,7 @@ const GRAPH = 'https://graph.microsoft.com/v1.0';
 const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 /** Resource providers the engine uses; registering them is free and needs the subscription Owner, so setup does it. */
 export const AZURE_RESOURCE_PROVIDERS = ['Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.DBforPostgreSQL', 'Microsoft.KeyVault',
-  'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights', 'Microsoft.Storage'] as const;
+  'Microsoft.ManagedIdentity', 'Microsoft.Network', 'Microsoft.OperationalInsights', 'Microsoft.Storage'] as const;
 
 /** Built-in role ids (identical in every tenant). */
 export const AZURE_ROLES = {

@@ -186,7 +186,8 @@ export type SqlRunner = (database: string, statements: (query: (sql: string, val
 /**
  * Runs statements on the server as the deploy identity (its Entra administrator)
  * with a short-lived Entra token as the password, over TLS with the certificate
- * verified against the host name. Flexible Server has no SQL-over-HTTPS API.
+ * verified against the host name. The server is closed to the internet, so this
+ * only connects inside withAzureSetupAccess.
  */
 export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: string): SqlRunner {
   return async (database, statements) => {
@@ -197,6 +198,75 @@ export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: s
     await client.connect();
     try { await statements((sql, values) => client.query(sql, values)); } finally { await client.end().catch(() => undefined); }
   };
+}
+
+/** The one firewall rule Hypervibe ever adds: this computer's address, only while it runs setup SQL. */
+export const AZURE_SETUP_RULE = 'hypervibe-setup';
+const POSTGRES_API = 'api-version=2024-08-01';
+const blockedAddress = (error: unknown): string | undefined =>
+  /no pg_hba\.conf entry for host "(\d{1,3}(?:\.\d{1,3}){3})"/.exec(error instanceof Error ? error.message : '')?.[1];
+
+/**
+ * Flexible Server has no SQL-over-HTTPS API, and the server is closed to the
+ * internet. To create or drop a login, Hypervibe turns public access on, allows
+ * exactly this computer's address (the one Azure reports refusing), runs `work`,
+ * then removes the rule and turns public access off again. Closing is attempted
+ * whatever happened before it, and a failure to close is an error.
+ */
+export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, serverId: string, probe: () => Promise<void>, work: () => Promise<T>, pollMs = 5000): Promise<T> {
+  const server = `${ARM}${serverId}`;
+  const rule = `${server}/firewallRules/${AZURE_SETUP_RULE}?${POSTGRES_API}`;
+  const wait = () => new Promise((done) => setTimeout(done, pollMs));
+  /** Sets public access and waits until Azure reports the server ready with that setting. */
+  const publicAccess = async (wanted: 'Enabled' | 'Disabled'): Promise<string | undefined> => {
+    const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${server}?${POSTGRES_API}`, { properties: { network: { publicNetworkAccess: wanted } } });
+    if (![200, 201, 202].includes(patched.status)) return azureError(patched);
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${server}?${POSTGRES_API}`);
+      const properties = (read.body.properties ?? {}) as { state?: string; network?: { publicNetworkAccess?: string } };
+      if (read.status === 200 && properties.state === 'Ready' && properties.network?.publicNetworkAccess === wanted) return undefined;
+      await wait();
+    }
+    return 'Azure did not confirm the change in time';
+  };
+  const close = async (): Promise<string | undefined> => {
+    const removed = await azureRest(tokens, AZURE_SCOPES.arm, 'DELETE', rule).catch(() => undefined);
+    const closed = await publicAccess('Disabled').catch((error: unknown) => error instanceof Error ? error.message : 'error');
+    if (closed) return `Hypervibe could not turn the database server's public access off again (${closed}). Run hv_plan and hv_apply to close it.`;
+    if (!removed || ![200, 202, 204, 404].includes(removed.status)) return `The database server is closed to the internet again, but its unused ${AZURE_SETUP_RULE} firewall rule could not be removed${removed ? ` (${azureError(removed)})` : ''}.`;
+    return undefined;
+  };
+  let result: T | undefined;
+  let failure: unknown;
+  try {
+    const opened = await publicAccess('Enabled');
+    if (opened) throw new Error(`Hypervibe could not open the database server to this computer (${opened}).`);
+    let address: string | undefined;
+    let allowed = false;
+    for (let attempt = 0; !address && !allowed; attempt++) {
+      try { await probe(); allowed = true; } catch (error) {
+        address = blockedAddress(error);
+        if (!address && attempt >= 11) throw new Error('Hypervibe could not learn which address Azure sees this computer as, so it did not open the database server to anything.');
+        if (!address) await wait();
+      }
+    }
+    if (address) {
+      const added = await azureRest(tokens, AZURE_SCOPES.arm, 'PUT', rule, { properties: { startIpAddress: address, endIpAddress: address } });
+      if (![200, 201, 202].includes(added.status)) throw new Error(`Hypervibe could not allow this computer to reach the database server (${azureError(added)}).`);
+      // The rule takes up to a few minutes to apply.
+      for (let attempt = 0; ; attempt++) {
+        try { await probe(); break; } catch (error) {
+          if (!blockedAddress(error) || attempt >= 59) throw error;
+          await wait();
+        }
+      }
+    }
+    result = await work();
+  } catch (error) { failure = error; }
+  const unclosed = await close();
+  if (unclosed) throw new Error(`${failure instanceof Error ? `${failure.message} ` : ''}${unclosed}`);
+  if (failure) throw failure;
+  return result as T;
 }
 
 const ident = (name: string) => {

@@ -10,6 +10,13 @@ complete supported Azure journey.
 
 ## Recorded evidence (2026-11-13)
 
+**Changed 2026-11-17, not run live:** the database left the internet (#728). The
+shared state now also holds a private network, the Container Apps environment and
+its logs, and the server is reached through a private endpoint. Every live result
+below predates this and used a public database endpoint and one Container Apps
+environment per environment. See [database network](#database-network) for what
+is unverified.
+
 The first live run described below exercised a testing environment on the demo
 app. "Built" describes implementation; only rows explicitly marked live record a
 live result. Those results do not verify other subscriptions, multiple simultaneous
@@ -24,6 +31,7 @@ testing environments, production profiles or subsequent revisions.
 | Outside keys, `needs_secrets` and `hv_secrets action="collect"` (Key Vault store) | Built; generated secrets verified live, outside keys not yet |
 | Testing environments: `hv_plan scope="infrastructure"` → `hv_apply` → `hv_deploy` for web, on-demand worker, cron, database, storage and secrets | Built; verified live on the demo app (westus2): web over HTTPS, database over verified TLS with the environment's own login, a Key Vault secret, Blob storage with the managed identity, the on-demand worker (jobs done 0.3–1.9 s after due), cron on time, two releases with an empty plan after |
 | Shared server and registry for testing environments (one database and login each) | Built; verified live with one environment |
+| Shared private network and Container Apps environment; database behind a private endpoint with public access off; login created through a one-address window | Built 2026-11-17; offline tests and `tofu validate` against the pinned provider only, no live run |
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
@@ -41,7 +49,7 @@ custom hosting domains. Testing environments must share a PostgreSQL version.
 - **Saved plans** were refused by `hv_apply` until the Azure operations were on the engine allowlist.
 - **Burstable B1ms was refused in eastus2** for a new pay-as-you-go subscription (`SkuNotAvailable`) although the capability API lists it. The demo moved to westus2, and environments now honor their spec `hosting.region` (the shared server and registry follow the testing environments, which must agree).
 - **The original quick Docker build did not enable BuildKit.** Builds now use the documented ACR multi-step task format with `DOCKER_BUILDKIT=1`; generated and repository Dockerfile secret mounts are preserved. This change has offline evidence only.
-- **Azure assigns a Consumption workload profile** to the environment and to each app and job; it is ignored so plans stay empty.
+- **Azure assigns a Consumption workload profile** to the environment and to each app and job; it is ignored so plans stay empty. (Since 2026-11-17 the environment declares that profile, which joining a network requires, and still ignores later changes to it.)
 - **Dropped connections** (three in one session) left role assignments created but unrecorded; planning now adopts them, as a separately confirmed step.
 - **Slow deletes:** a Container Apps environment drained for over 20 minutes before its Log Analytics workspace went, past the 30-minute engine limit; Azure engine runs now get 60 minutes. Re-planning finished each interrupted teardown.
 - **Build failures** report the run id and link the registry's portal page. Raw log tails and signed log URLs are excluded from results because build output can contain secrets.
@@ -125,7 +133,8 @@ custom hosting domains. Testing environments must share a PostgreSQL version.
 The current classifier uses the environment name: names matching `/prod|stag/i`
 select the unimplemented production profile and planning blocks them; everything
 else is testing. A project's testing environments share **one PostgreSQL server
-and one registry** (decided 2026-11-12). Separate resources for staging and
+and one registry** (decided 2026-11-12) and, since 2026-11-17, **one private
+network and one Container Apps environment**. Separate resources for staging and
 production are a design proposal, not current behavior.
 
 | Piece | Choice | Idle cost (eastus2) |
@@ -133,23 +142,29 @@ production are a design proposal, not current behavior.
 | Web | Container Apps, consumption plan, `min_replicas = 0`, 0.25 vCPU / 0.5 GiB | $0 |
 | On-demand worker | Container App at zero replicas, KEDA PostgreSQL scale rule | $0 |
 | Cron | Container Apps Job, schedule trigger (UTC) | $0 between runs |
-| Container Apps environment | Consumption only, per environment: no workload profile, private endpoint or maintenance window | $0 |
-| Database | Shared Flexible Server, Burstable B1ms, 32 GiB; one database and login per environment | about $16.10/mo per project |
+| Private network and Container Apps environment | One per project, shared: a virtual network, a workload-profiles environment with only the Consumption profile, no maintenance window. Joining a network bills a standard load balancer and two static public addresses | about $26/mo per project (estimate, see below) |
+| Database | Shared Flexible Server, Burstable B1ms, 32 GiB, public access off, one private endpoint and private DNS zone; one database and login per environment | about $24/mo per project ($16.10 server, about $8 endpoint and zone, estimate) |
 | Images | Shared Container Registry Basic, built with ACR Tasks | about $5.00/mo per project |
 | Secrets | Project Key Vault (Standard, RBAC), referenced by the Container Apps | about $0 |
 | Files | Storage account per environment (Standard LRS), private containers, no shared keys | $0.0184/GB-mo |
-| Logs | Log Analytics per environment, 30-day retention, 0.15 GB/day cap | $0 (inside the 5 GB/mo free allowance) |
+| Logs | One Log Analytics workspace per project, shared, 30-day retention, 0.15 GB/day cap | $0 (inside the 5 GB/mo free allowance) |
 
-The first testing environment costs about **$21/month idle**; each additional one
-adds almost nothing.
+The first testing environment costs about **$55/month idle** with a database
+(about $31 without one); each additional one adds almost nothing. Before
+2026-11-17 it was about $21, with the database on a public endpoint. The network
+and private endpoint figures are estimates from standard list prices (load
+balancer $0.025/hour, public address $0.005/hour each, private endpoint
+$0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
+2026-11-17 and are not from a bill.
 
 ### Two states per environment
 
 - The **shared** state (`project-shared` partition, `shared-testing`) holds the
-  server and registry. Every testing environment's plan includes it, so the first one
-  creates them and later ones see no changes.
-- The **environment** state holds the Container Apps environment, logs, the runtime
-  identity and its roles, storage and the workloads.
+  private network, the Container Apps environment and its logs, the server with
+  its private endpoint, and the registry. Every testing environment's plan
+  includes it, so the first one creates them and later ones see no changes.
+- The **environment** state holds the runtime identity and its roles, storage and
+  the workloads, which run in the shared Container Apps environment.
 - One `hv_plan` reviews both as two engine segments, plus Hypervibe's own actions,
   in dependency order: shared resources → generated secrets → image build →
   database login → environment resources.
@@ -201,7 +216,8 @@ adds almost nothing.
   Aurora's Data API or Cloud SQL's, so there is no Azure-native way to create a login
   without connecting to the server.
   - Hypervibe connects as the deploy identity, which is the server's Entra
-    administrator. It uses a short-lived Entra token as the password, so no password
+    administrator, through the one-address window described under
+    [database network](#database-network). It uses a short-lived Entra token as the password, so no password
     is stored, and TLS with the certificate verified against the host name (Node's CA
     store includes Azure's roots).
   - It creates `app_<env>` (login and database owner) and, for on-demand workers, a
@@ -210,11 +226,39 @@ adds almost nothing.
   - `DATABASE_URL` (`sslmode=require`) goes to Key Vault.
   - The administrator password comes from an ephemeral `random_password`, sent as
     the write-only `administrator_password_wo`. Nobody holds it.
-- **Database network: public endpoint, TLS required.** Consumption-plan Container Apps
-  have no fixed outbound address, so the firewall allows all addresses; Flexible Server
-  requires TLS by default and every password is generated. This is the same tradeoff
-  as Aurora on AWS, and it is also what lets Hypervibe create the login from this
-  computer.
+- <a id="database-network"></a>**Database network: private (decided 2026-11-17, #728).**
+  The server has public access off and no firewall rule. The apps reach it
+  through a private endpoint in the project's virtual network; a private DNS zone
+  (`privatelink.postgres.database.azure.com`) makes the server's usual host name
+  resolve to the private address there, so `DATABASE_URL` is unchanged.
+  - **Why one shared Container Apps environment.** Consumption apps have no fixed
+    outbound address, so they can reach a private server only from inside its
+    network, and an environment can join a network only when it is created
+    ([docs](https://learn.microsoft.com/en-us/azure/container-apps/custom-virtual-networks)).
+    A networked environment bills a load balancer and public addresses, so the
+    project's testing environments share one instead of paying for one each.
+    The apps subnet is a /23 delegated to `Microsoft.App/environments`.
+  - **The one-address window.** Azure has no way to run SQL except a connection to
+    the server. To create or drop a login, `withAzureSetupAccess` turns public
+    access on, reads the address Azure reports refusing (this computer's), adds
+    the single-address rule `hypervibe-setup`, runs the SQL, then deletes the rule
+    and turns public access off. It closes whatever happened in between, and a
+    failure to close is reported as an error; the next plan also shows public
+    access as a change to turn off. The plan step says it does this. It happens
+    when an environment's database is first created, when a worker's counting
+    login is added, and when a database is dropped.
+  - **`hv_db_query` is refused** for Azure engine databases: a query never
+    changes network access, and nothing runs SQL from inside the network yet.
+  - **Older projects.** The next plan removes the all-address firewall rule, turns
+    public access off, and moves each environment's apps into the shared
+    environment: they are recreated, are briefly unavailable (the database
+    closes before the apps move) and get new addresses. Connections made before
+    2026-11-17 never turned on `Microsoft.Network`; the plan says to run
+    `hv_connections provider="azure" action="connect"` once.
+  - **Not verified live:** switching public access on a running server and how
+    long it takes, the wording of the refusal Hypervibe reads its address from,
+    the private endpoint and DNS resolution from the apps, the KEDA scale rule
+    reaching the private address, and moving an older project.
 - **On-demand worker.** KEDA's PostgreSQL scaler counts `onDemand.pendingWorkQuery`
   once a minute with the read-only login and starts one replica while the count is
   above zero; it scales back to zero after 5 idle minutes.
@@ -265,10 +309,10 @@ every destructive action confirmed separately:
 
 1. Hypervibe empties each storage container.
 2. OpenTofu destroys the environment's resources.
-3. Hypervibe drops the environment's database and logins from the shared server.
-   Other environments' databases are untouched.
+3. Hypervibe drops the environment's database and logins from the shared server,
+   through the one-address window. Other environments' databases are untouched.
 4. When no other testing environment remains in the spec, OpenTofu also destroys
-   the shared server and registry.
+   the shared network, Container Apps environment, server and registry.
 5. Hypervibe deletes and purges the environment's Key Vault secrets, confirms nothing
    tagged for the environment (or the shared group, if removed) remains, clears the
    bindings and removes the environment from the spec.
