@@ -35,7 +35,7 @@ describe('AwsSecretsAdapter', () => {
     const headers = requestHeaders(fetchMock);
     expect(headers['X-Amz-Security-Token']).toBe('sts-session-token');
     expect(headers['Authorization']).toContain(
-      'SignedHeaders=content-type;host;x-amz-date;x-amz-security-token'
+      'SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target'
     );
   });
 
@@ -53,7 +53,7 @@ describe('AwsSecretsAdapter', () => {
     expect(result.success).toBe(true);
     const headers = requestHeaders(fetchMock);
     expect(headers['X-Amz-Security-Token']).toBeUndefined();
-    expect(headers['Authorization']).toContain('SignedHeaders=content-type;host;x-amz-date,');
+    expect(headers['Authorization']).toContain('SignedHeaders=content-type;host;x-amz-date;x-amz-target,');
   });
 
   it('falls back to AWS_SESSION_TOKEN alongside the key environment variables', async () => {
@@ -169,5 +169,45 @@ describe('AwsSecretsAdapter', () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       Filters: [{ Key: 'name', Values: ['production/'] }],
     });
+  });
+
+  // #330: the action (X-Amz-Target) is part of the signature, so it cannot be swapped in transit.
+  // The expected signature is derived here from the AWS Signature Version 4 specification, not from the adapter.
+  it('signs the action header and produces the Signature Version 4 value for the request it sends', async () => {
+    const { createHash, createHmac } = await import('node:crypto');
+    const fetchMock = stubListSecretsFetch();
+    const adapter = new AwsSecretsAdapter();
+    await adapter.connect({ region: 'eu-west-1', accessKeyId: 'AKIA_TEST', secretAccessKey: 'secret', sessionToken: 'sts-session-token' });
+    await adapter.verify();
+    const headers = requestHeaders(fetchMock);
+    const [url, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+    const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+    const hmac = (key: Buffer | string, value: string) => createHmac('sha256', key).update(value).digest();
+    const amzDate = headers['X-Amz-Date']!; const date = amzDate.slice(0, 8);
+    const canonical = ['POST', '/', '',
+      `content-type:application/x-amz-json-1.1\nhost:${new URL(url).host}\nx-amz-date:${amzDate}\nx-amz-security-token:sts-session-token\nx-amz-target:${headers['X-Amz-Target']}\n`,
+      'content-type;host;x-amz-date;x-amz-security-token;x-amz-target', sha(init.body)].join('\n');
+    const scope = `${date}/eu-west-1/secretsmanager/aws4_request`;
+    const key = hmac(hmac(hmac(hmac('AWS4secret', date), 'eu-west-1'), 'secretsmanager'), 'aws4_request');
+    const signature = createHmac('sha256', key).update(['AWS4-HMAC-SHA256', amzDate, scope, sha(canonical)].join('\n')).digest('hex');
+    expect(headers['X-Amz-Target']).toMatch(/^secretsmanager\./);
+    expect(headers['Authorization']).toBe(`AWS4-HMAC-SHA256 Credential=AKIA_TEST/${scope}, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=${signature}`);
+  });
+
+  // #368: the region becomes part of the host name that receives the signed request.
+  it.each(['us-east-1.attacker.example/x', 'evil.example#', 'us-east-1@evil.example', 'US-EAST-1'])('refuses the region %j before sending anything', async (region) => {
+    const fetchMock = stubListSecretsFetch();
+    const adapter = new AwsSecretsAdapter();
+    // Refused when connecting, or at the latest when the request is built; never sent.
+    const outcome = await (async () => { await adapter.connect({ region, accessKeyId: 'AKIA_TEST', secretAccessKey: 'secret' }); return adapter.verify(); })().catch(() => ({ success: false }));
+    expect(outcome.success).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it.each(['us-east-1', 'eu-central-2', 'us-gov-west-1', 'ap-southeast-4'])('sends region %s only to its own AWS host', async (region) => {
+    const fetchMock = stubListSecretsFetch();
+    const adapter = new AwsSecretsAdapter();
+    await adapter.connect({ region, accessKeyId: 'AKIA_TEST', secretAccessKey: 'secret' });
+    await adapter.verify();
+    expect(new URL((fetchMock.mock.calls[0] as [string])[0]).host).toBe(`secretsmanager.${region}.amazonaws.com`);
   });
 });

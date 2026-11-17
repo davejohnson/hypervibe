@@ -102,8 +102,10 @@ export const SecretRefSchema = z.string().refine(
 );
 
 // Credentials schemas for each provider
+/** An AWS region name such as us-east-1 or us-gov-west-1. It is used in host names, so nothing else is accepted. */
+export const AWS_REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/;
 export const AwsSecretsCredentialsSchema = z.object({
-  region: z.string().default('us-east-1'),
+  region: z.string().regex(AWS_REGION_PATTERN, 'region must be an AWS region name, for example us-east-1').default('us-east-1'),
   accessKeyId: z.string().optional(),
   secretAccessKey: z.string().optional(),
   /** Required for temporary STS credentials (adds X-Amz-Security-Token). */

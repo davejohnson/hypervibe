@@ -1,3 +1,4 @@
+import { AWS_REGION_PATTERN } from '../../../domain/ports/secretmanager.port.js';
 import {
   type ISecretManagerAdapter,
   type SecretManagerVerifyResult,
@@ -21,7 +22,9 @@ async function signRequest(
   url: URL,
   body: string,
   credentials: AwsSecretsCredentials,
-  service: string
+  service: string,
+  /** The action (X-Amz-Target). Signed, so it cannot be changed without invalidating the request. */
+  target: string
 ): Promise<Record<string, string>> {
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
@@ -40,11 +43,12 @@ async function signRequest(
     `x-amz-date:${amzDate}`,
     // Canonical headers must stay sorted; x-amz-security-token sorts after x-amz-date.
     ...(credentials.sessionToken ? [`x-amz-security-token:${credentials.sessionToken}`] : []),
+    `x-amz-target:${target}`,
   ].join('\n') + '\n';
 
   const signedHeaders = credentials.sessionToken
-    ? 'content-type;host;x-amz-date;x-amz-security-token'
-    : 'content-type;host;x-amz-date';
+    ? 'content-type;host;x-amz-date;x-amz-security-token;x-amz-target'
+    : 'content-type;host;x-amz-date;x-amz-target';
 
   const canonicalRequest = [
     method,
@@ -78,6 +82,7 @@ async function signRequest(
     'Content-Type': 'application/x-amz-json-1.1',
     'X-Amz-Date': amzDate,
     ...(credentials.sessionToken ? { 'X-Amz-Security-Token': credentials.sessionToken } : {}),
+    'X-Amz-Target': target,
     'Authorization': authorizationHeader,
   };
 }
@@ -300,11 +305,12 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
     }
 
     const region = this.credentials.region || 'us-east-1';
+    // The region becomes part of the host name: anything but a real region name could send the signed request elsewhere.
+    if (!AWS_REGION_PATTERN.test(region)) throw new Error('The AWS region is not a valid region name (for example us-east-1). No request was sent.');
     const url = new URL(`https://secretsmanager.${region}.amazonaws.com/`);
     const body = JSON.stringify(params);
 
-    const headers = await signRequest('POST', url, body, this.credentials, 'secretsmanager');
-    headers['X-Amz-Target'] = `secretsmanager.${action}`;
+    const headers = await signRequest('POST', url, body, this.credentials, 'secretsmanager', `secretsmanager.${action}`);
 
     const response = await fetch(url.toString(), {
       method: 'POST',
