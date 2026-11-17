@@ -2,6 +2,7 @@ import { disableSecretVersion, enabledSecretVersions, latestSecretVersion } from
 import crypto from 'crypto';
 import { cloudRunGet } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { retireSupersededSecretVersions, type RetirementWorkload } from './secret-version-retirement.js';
+import { strictHealthCheck } from '../domain/services/release-health.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -246,7 +247,7 @@ export async function rotateSecrets(ctx: CommandContext, params: {
     if (!resource || !service) return [];
     const kind = bound.serviceId ? 'services' as const : bound.jobName ? 'jobs' as const : 'workerPools' as const;
     // A private service refuses an unauthenticated request by design, so only its rollout is checked.
-    return [{ name, kind, resource, ...(kind === 'services' && service.workloadKind !== 'worker' && service.public !== false ? { healthPath: service.healthCheckPath ?? '/' } : {}) }];
+    return [{ name, kind, resource, ...(kind === 'services' && service.workloadKind !== 'worker' && service.public !== false ? { healthPath: service.healthCheckPath ?? '/', strictHealth: strictHealthCheck(service) } : {}) }];
   });
   if (current().releaseJob) workloads.push({ name: 'release command', kind: 'jobs', resource: current().releaseJob! });
   const retired = await retireSupersededSecretVersions({

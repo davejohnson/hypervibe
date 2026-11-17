@@ -1,3 +1,4 @@
+import { healthCheckFailed } from '../../../domain/services/release-health.js';
 import { azureBuildTaskContent } from './azure-build-task.js';
 import type { EngineReleaseResult } from '../../../domain/ports/infrastructure-engine.port.js';
 import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
@@ -103,7 +104,7 @@ export function templateWithImage(template: Record<string, unknown>, image: stri
   return { ...rest, containers: ((template.containers ?? []) as Array<Record<string, unknown>>).map((container) => container.name === 'app' ? { ...container, image } : container) };
 }
 
-export async function releaseAzureApp(tokens: AzureTokenProvider, params: { id: string; name: string; image: string; healthCheckPath?: string; web: boolean; fetchTimeoutMs?: number; waitMs?: number; retryMs?: number; requireExactIdentity?: boolean }): Promise<EngineReleaseResult> {
+export async function releaseAzureApp(tokens: AzureTokenProvider, params: { id: string; name: string; image: string; healthCheckPath?: string; strictHealth?: boolean; web: boolean; fetchTimeoutMs?: number; waitMs?: number; retryMs?: number; requireExactIdentity?: boolean }): Promise<EngineReleaseResult> {
   const current = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${params.id}?${APPS_API}`);
   if (current.status === 404) return { service: params.name, status: 'failed', message: `${params.name} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   if (current.status !== 200) return { service: params.name, status: 'unknown', message: `${params.name} could not be read (${azureError(current)}).` };
@@ -143,7 +144,7 @@ export async function releaseAzureApp(tokens: AzureTokenProvider, params: { id: 
   const revision = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${params.id}/revisions/${latest.latestRevisionName}?${APPS_API}`);
   const health = (revision.body.properties as { healthState?: string } | undefined)?.healthState;
   if (health === 'Unhealthy') return { ...result, status: 'failed', message: `Azure reports revision ${latest.latestRevisionName} unhealthy. Check hv_logs.` };
-  if (status >= 500) return { ...result, status: 'failed', message: `The new release is serving, but ${path} returned HTTP ${status}. Check hv_logs.` };
+  if (healthCheckFailed(status, params.strictHealth === true)) return { ...result, status: 'failed', message: `The new release is serving, but ${path} returned HTTP ${status}. Check hv_logs.` };
   return result;
 }
 

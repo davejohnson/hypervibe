@@ -1,3 +1,4 @@
+import { healthCheckFailed } from '../../../domain/services/release-health.js';
 import { BatchGetBuildsCommand, CodeBuildClient, StartBuildCommand, type CodeBuildClientConfig } from '@aws-sdk/client-codebuild';
 import { DescribeImagesCommand, ECRClient } from '@aws-sdk/client-ecr';
 import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, RegisterTaskDefinitionCommand, UpdateServiceCommand, type RegisterTaskDefinitionCommandInput } from '@aws-sdk/client-ecs';
@@ -110,7 +111,7 @@ async function imageFor(ecr: ECRClient, target: AwsReleaseTarget, tag: string): 
   }
 }
 
-export async function releaseFunction(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string): Promise<EngineReleaseResult> {
+export async function releaseFunction(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false): Promise<EngineReleaseResult> {
   const lambda = new LambdaClient({ region: target.region, credentials: target.credentials, ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}) });
   let current = await lambda.send(new GetFunctionCommand({ FunctionName: resource }));
   if (resource.startsWith('arn:') && current.Configuration?.FunctionArn !== resource) return { service: name, status: 'unknown', message: 'AWS did not confirm the exact function identity before release.' };
@@ -134,7 +135,7 @@ export async function releaseFunction(target: AwsReleaseTarget, name: string, re
     // A function URL answers HTTP 200 with a Lambda error body when the app fails to start.
     const crashed = await lambdaErrorType(response);
     if (crashed) Object.assign(result, { status: 'failed', message: `The new release did not start (${crashed}): the app exited while starting. Check hv_logs for its error.` });
-    else if (response.status >= 500) Object.assign(result, { status: 'failed', message: `The new release is serving, but ${healthCheckPath} returned HTTP ${response.status}. Check hv_logs.` });
+    else if (healthCheckFailed(response.status, strictHealth)) Object.assign(result, { status: 'failed', message: `The new release is serving, but ${healthCheckPath} returned HTTP ${response.status}. Check hv_logs.` });
   } catch {
     Object.assign(result, { health: { status: 0, path: healthCheckPath }, status: 'unknown', message: `The new release is ready, but ${healthCheckPath} could not be reached to verify health.` });
   }

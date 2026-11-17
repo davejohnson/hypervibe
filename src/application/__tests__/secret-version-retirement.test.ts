@@ -10,12 +10,12 @@ const service = (pin: string, overrides: Record<string, unknown> = {}) => ({ sta
   uri: 'https://web.example', latestReadyRevision: 'web-2', latestCreatedRevision: 'web-2',
   template: { containers: [{ env: [{ name: 'STRIPE_SECRET_KEY', valueSource: { secretKeyRef: { secret: secretId, version: pin } } }, { name: 'PLAIN', value: 'x' }] }] }, ...overrides } });
 
-function setup(options: { workload?: ReturnType<typeof service> | { state: 'unknown'; reason: string } | { state: 'absent' }; enabled?: number[] | undefined; health?: number } = {}) {
+function setup(options: { strictHealth?: boolean; workload?: ReturnType<typeof service> | { state: 'unknown'; reason: string } | { state: 'absent' }; enabled?: number[] | undefined; health?: number } = {}) {
   const disabled: string[] = [];
   const enabled = 'enabled' in options ? options.enabled : [1, 2];
   return { disabled, run: () => retireSupersededSecretVersions({
     secretIds: [secretId],
-    workloads: [{ name: 'web', kind: 'services', resource: 'web-abc', healthPath: '/health' }],
+    workloads: [{ name: 'web', kind: 'services', resource: 'web-abc', healthPath: '/health', ...(options.strictHealth ? { strictHealth: true } : {}) }],
     readWorkload: async () => options.workload ?? service('2'),
     listEnabled: async () => enabled?.map(version),
     disable: async (name) => { disabled.push(name); return true; },
@@ -43,6 +43,7 @@ describe('retiring superseded secret versions', () => {
     ['a workload follows "latest" instead of a fixed version', { workload: service('latest') }],
     ['the app answers a server error', { health: 503 }],
     ['the app cannot be reached', { health: 0 }],
+    ['a declared health check answers 401 on the new values', { health: 401, strictHealth: true }],
     ['enabled versions cannot be listed', { enabled: undefined }],
   ])('disables nothing when %s', async (_label, options) => {
     const { run, disabled } = setup(options);

@@ -1,6 +1,7 @@
 import type { CloudRunObservation, WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
+import { healthCheckFailed } from '../domain/services/release-health.js';
 
-export interface RetirementWorkload { name: string; kind: WorkloadKind; resource: string; healthPath?: string }
+export interface RetirementWorkload { name: string; kind: WorkloadKind; resource: string; healthPath?: string; /** The app declared this path, so it must answer below 400. */ strictHealth?: boolean }
 
 export type RetirementResult = { verified: true; disabled: number } | { verified: false; reason: string };
 
@@ -41,7 +42,7 @@ export async function retireSupersededSecretVersions(input: {
     }
     if (workload.kind === 'services' && workload.healthPath && typeof value.uri === 'string') {
       const status = await input.checkHealth(new URL(workload.healthPath, value.uri).toString());
-      if (status === 0 || status >= 500) return { verified: false, reason: `${workload.name} ${status === 0 ? 'could not be reached' : `answered HTTP ${status}`} on the new values` };
+      if (status === 0 || healthCheckFailed(status, workload.strictHealth === true)) return { verified: false, reason: `${workload.name} ${status === 0 ? 'could not be reached' : `answered HTTP ${status}`} on the new values` };
     }
   }
   // Read every list before disabling anything, so a partial read never leaves a half-retired set.

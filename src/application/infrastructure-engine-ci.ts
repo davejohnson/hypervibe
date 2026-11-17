@@ -1,5 +1,6 @@
 import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
+import { assertHealthCheckPath } from '../domain/spec/health-check-path.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -70,7 +71,7 @@ export interface ReleaseWorkflowInput {
   provider: string;
   releaseIdentity: string;
   /** generatedDockerfile is used only when the repository has no Dockerfile of its own; it carries that service's start command. */
-  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
+  services: Array<{ name: string; resource: string; healthPath?: string; strictHealth?: boolean; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
     /** Services and workers: the declared start command, applied with each release. */
     startCommand?: string }>;
   /** Name of the repository's Actions secret holding a private-package token; mounted into builds as npm_token. */
@@ -80,7 +81,20 @@ export interface ReleaseWorkflowInput {
 }
 
 /** A GitHub Actions workflow with no stored cloud credentials; a package token is referenced only by its repository secret name. */
+/** Values written into workflow YAML and shell lines must be plain identifiers, never shell or YAML source. */
+function plain(label: string, value: string): string {
+  if (!/^[A-Za-z0-9._/:@-]+$/.test(value)) throw new Error(`The ${label} ${JSON.stringify(value)} is not supported in a workflow: use only letters, digits and . _ / : @ -`);
+  return value;
+}
+
 export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
+  plain('environment name', input.environmentName); plain('Google Cloud project', input.gcpProjectId); plain('region', input.region);
+  plain('identity provider', input.provider); plain('release identity', input.releaseIdentity);
+  if (input.releaseCommand) plain('release job', input.releaseCommand.job);
+  for (const service of input.services) {
+    plain('service name', service.name); plain('resource', service.resource); plain('image', service.image);
+    if (service.healthPath !== undefined) assertHealthCheckPath(service.healthPath);
+  }
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
   const lines: string[] = [
     `# Managed by Hypervibe. Releases ${input.environmentName} on every push to ${input.branch}.`,
@@ -154,10 +168,11 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     lines.push(
       `      - name: Release ${service.name}`,
       '        env:',
+      ...(service.strictHealth ? ["          HYPERVIBE_HEALTH_STRICT: '1'"] : []),
       '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
       '        run: |',
       ...script,
-      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
+      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ? `'${service.healthPath}'` : '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
     );
   }
   return lines.join('\n') + '\n';

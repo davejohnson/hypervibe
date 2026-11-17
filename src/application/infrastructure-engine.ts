@@ -1,6 +1,7 @@
 import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
 import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
 import { pickRemoteCommit, sourceBuildProblem } from './release-source.js';
+import { healthCheckFailed, strictHealthCheck } from '../domain/services/release-health.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
@@ -1669,7 +1670,7 @@ async function releaseOne(
     try {
       const response = await fetchWithRetry(new URL(path, released.url), { redirect: 'manual', signal: AbortSignal.timeout(30_000) });
       result.health = { status: response.status, path };
-      if (response.status >= 500) {
+      if (healthCheckFailed(response.status, strictHealthCheck(serviceSpec))) {
         result.status = 'failed';
         result.message = `The new release is serving, but ${path} returned HTTP ${response.status}.`;
       }

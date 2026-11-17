@@ -59,7 +59,8 @@ if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
 }
 if (!isJob && healthPath) {
   const response = await fetch(new URL(healthPath, after.uri));
-  if (response.status >= 500) throw new Error(healthPath + ' returned HTTP ' + response.status);
+  // Mirrors healthCheckFailed in release-health.ts: a declared path on a public service must answer below 400.
+  if (response.status >= (process.env.HYPERVIBE_HEALTH_STRICT === '1' ? 400 : 500)) throw new Error(healthPath + ' returned HTTP ' + response.status);
   console.log('Health ' + healthPath + ': HTTP ' + response.status);
 }
 console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled run)' : after.uri ? ' at ' + after.uri : ''));
