@@ -1,3 +1,5 @@
+import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
+import { projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
@@ -614,5 +616,13 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
+  // A teardown owns binding removal separately; never resurrect its identities.
+  if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
+    const recorded = await recordEngineWorkloadBindings(ctx, engine, { environment: context.environment, backend: azureEngineBackend,
+      auth: context.auth, state: context.state, provider: 'azure', projectId: context.connection.subscriptionId, environmentId: context.connection.resourceGroup,
+      project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }) });
+    if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
   return { kind: 'executed', envName: environmentName, result };
 }

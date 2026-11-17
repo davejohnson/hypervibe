@@ -226,7 +226,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         );
       }
 
-      const { logs, deploymentStatus } = await readProviderLogs(
+      const { logs, deploymentStatus, window } = await readProviderLogs(
         provider,
         project,
         () => fetchProviderLogs(
@@ -245,6 +245,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           environment: environment.name,
           service: serviceName,
           deploymentStatus,
+          ...(window ? { window } : {}),
           count: logs.length,
           logs,
         },
@@ -255,7 +256,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
 
   commands.register(
     'hv_health',
-    'HTTP health-check a deployed service or explicit URL. With credential=<role>, read declared application-operation receipts for the accepted credential update and exact deployments; this never runs a business operation or task. Project-backed health checks also surface latest deployment failures; unknown observations never count as healthy.',
+    'Check HTTP for a web service or explicit URL and inspect deployment health. Worker/job-only environments return deployment evidence without an HTTP check. With credential=<role>, read declared application-operation receipts for the accepted credential update and exact deployments; this never runs a business operation or task. Project-backed health checks also surface latest deployment failures; unknown observations never count as healthy.',
     {
       project: projectField,
       env: envField,
@@ -276,7 +277,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       const optionWarnings = url
         ? ignoredOptionWarnings('hv_health', 'with explicit url', { project: projectRef, env, service })
         : undefined;
-      let baseUrl: string;
+      let baseUrl: string | undefined;
       let healthPath = path;
       let resolvedService: string | undefined;
       let resolvedProject: ReturnType<CommandContext['resolveProjectOrThrow']> | undefined;
@@ -314,12 +315,12 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           ? environmentSpec?.domain
           : undefined;
         const resolved = resolveServiceBaseUrl(environment, resolvedName, declaredDomain);
-        if (!resolved) {
+        if (!resolved && (desiredService?.workloadKind ?? storedService?.buildConfig.workloadKind ?? 'web') === 'web') {
           throw new HvError('NOT_FOUND', `Service "${resolvedName}" has no URL binding in ${environment.name}.`, {
             hint: 'Deploy it first with hv_apply or hv_deploy.',
           });
         }
-        baseUrl = resolved;
+        baseUrl = resolved ?? undefined;
         healthPath = healthPath
           ?? storedService?.buildConfig.healthCheckPath
           ?? desiredService?.healthCheckPath
@@ -360,7 +361,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         }
       }
 
-      const check = await runHttpCheck({
+      const check = baseUrl ? await runHttpCheck({
         name: 'health',
         url: joinUrl(baseUrl, healthPath ?? '/'),
         method: 'GET',
@@ -369,7 +370,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         expectedStatusMin: 200,
         expectedStatusMax: 399,
         bodyPreviewBytes: 2048,
-      });
+      }) : undefined;
 
       const projectSpec = resolvedProject
         ? new SpecStore().get(resolvedProject)?.spec
@@ -400,11 +401,11 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         {
           service: resolvedService,
           baseUrl,
-          check,
+          ...(check ? { check } : { httpCheck: 'not-applicable' }),
           ...(deploymentHealth ? { deploymentHealth } : {}),
         },
         {
-          hint: !check.ok
+          hint: check && !check.ok
             ? 'Check hv_logs source="service" errorsOnly=true for the failing service.'
             : deploymentFailure
               ? `Latest deployment failure: ${deploymentFailure.environment}/${deploymentFailure.service} on ${deploymentFailure.provider} (${deploymentFailure.status}). Inspect that environment with hv_logs source="deployments" and source="build" where supported.`

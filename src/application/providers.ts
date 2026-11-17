@@ -9,6 +9,9 @@ import '../adapters/providers/railway/railway.adapter.js';
 import '../adapters/providers/gcp/cloudrun.adapter.js';
 import '../adapters/providers/azure/azure-postgres.adapter.js';
 
+import '../adapters/providers/aws/aws-engine.adapter.js';
+import '../adapters/providers/azure/azure-engine.adapter.js';
+
 // Database providers
 import '../adapters/providers/gcp/cloudsql.adapter.js';
 import '../adapters/providers/aws/rds.adapter.js';

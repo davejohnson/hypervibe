@@ -58,9 +58,19 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
       const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
       ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri } });
     },
-    releaseWorkload: ({ name, kind, resource, image }) => kind === 'web'
-      ? releaseFunction(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/')
-      : releaseTask(target, name, resource, image, kind === 'worker'),
+    releaseWorkload: async ({ name, kind, resource, image }) => {
+      const result = kind === 'web'
+        ? await releaseFunction(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/')
+        : await releaseTask(target, name, resource, image, kind === 'worker');
+      if (result.status === 'released' && result.taskDefinitionArn) {
+        const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        const services = (current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {};
+        const binding = services[name];
+        if (binding) ctx.repos.environments.updatePlatformBindings(current.id, { services: { ...services, [name]: { ...binding,
+          taskDefinitionArn: result.taskDefinitionArn, ...(kind === 'cron' ? { serviceId: result.taskDefinitionArn } : {}) } } });
+      }
+      return result;
+    },
   });
 }
 

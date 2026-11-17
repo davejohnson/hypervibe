@@ -15,6 +15,7 @@ and runs. They do not verify other profiles, workloads or subsequent revisions.
 
 | Piece | State |
 | --- | --- |
+| Runtime logs and deployment health (`hv_logs`, `hv_health`) | Built; offline transport and command tests only, no live validation. See [diagnostics scope](engine-diagnostics.md). |
 | Sign-in without the AWS CLI | Built; verified live |
 | One-time setup (deploy role, boundary, GitHub OIDC, local key) | Built; verified live |
 | OpenTofu runs as the deploy role | Built; read-only probe verified live |

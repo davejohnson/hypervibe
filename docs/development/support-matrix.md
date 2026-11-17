@@ -55,6 +55,16 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Database resilience, seed command, credential aliases | blocked | blocked | blocked |
 | Spend alerts | not built (#629) | not built (#629) | not built (#629) |
 
+## Read-only workload diagnostics
+
+AWS and Azure engine service logs and deployment health are implemented with
+normal-CI transport and public-command checks, but have no live validation yet.
+They use exact state-derived workload identities; worker/job-only health does not
+require an HTTP endpoint. See [engine diagnostics](../engine-diagnostics.md) for
+native coverage, log windows, pagination bounds and execution-history limits.
+Build-log and deployment-history listing remain unavailable on these engines.
+GCP and Railway retain their existing observation paths and evidence status.
+
 ## Rules for changing this page
 
 - A capability moves to `yes` only with its admission check, a boundary

@@ -163,11 +163,11 @@ export async function releaseTask(target: AwsReleaseTarget, name: string, resour
   };
   const registered = (await ecs.send(new RegisterTaskDefinitionCommand(input))).taskDefinition?.taskDefinitionArn;
   if (!registered) return { service: name, status: 'unknown', message: `Registering the new ${resource} revision had an unknown outcome.` };
-  if (!worker) return { service: name, imageUri, status: 'released', message: `Released to scheduled job ${resource}; its next run uses it.` };
+  if (!worker) return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: `Released to scheduled job ${resource}; its next run uses it.` };
   await ecs.send(new UpdateServiceCommand({ cluster: target.prefix, service: resource, taskDefinition: registered }));
   const service = (await ecs.send(new DescribeServicesCommand({ cluster: target.prefix, services: [resource] }))).services?.[0];
   if (service?.taskDefinition !== registered) return { service: name, imageUri, status: 'unknown', message: `${resource} did not report the new revision.` };
-  return { service: name, imageUri, status: 'released', message: service.desiredCount ? `Released to ${resource}; its tasks are being replaced.` : `Released to ${resource}; it starts with the new image when work is queued.` };
+  return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: service.desiredCount ? `Released to ${resource}; its tasks are being replaced.` : `Released to ${resource}; it starts with the new image when work is queued.` };
 }
 
 export async function functionExists(target: AwsReleaseTarget, resource: string): Promise<boolean | 'unknown'> {

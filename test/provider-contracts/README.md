@@ -14,6 +14,10 @@ the real AWS SDK and Azure REST serialization, executes the generated CodeBuild
 command, validates the generated configurations with pinned OpenTofu providers,
 and checks runtime exclusion and the ordered AWS loader upgrade. These are
 reconstructed, offline cases; no live private-package build is asserted.
+AWS/Azure [engine workload diagnostics](../../docs/engine-diagnostics.md) use
+reconstructed official REST/API responses through the real serialized clients
+and shared commands in ordinary CI. They are documentation-based semantic
+checks, not pinned-schema certification or live provider evidence.
 
 The [repository-variable contract](github/repository-variables/README.md) pins
 GitHub's numeric repository identity and Actions variable endpoints. The named

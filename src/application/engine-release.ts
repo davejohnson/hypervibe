@@ -127,7 +127,7 @@ export async function runLocalCommitRelease(params: {
           name: action.resource.name, kind: String(action.metadata?.workloadKind), resource: String(action.metadata?.resource), image: image!,
         });
         results.push(result);
-        const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}) };
+        const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.taskDefinitionArn ? { taskDefinitionArn: result.taskDefinitionArn } : {}), ...(result.url ? { url: result.url } : {}) };
         if (result.status === 'released') return { success: true, message: result.message, data };
         return { success: false, ...(result.status === 'unknown' ? { status: 'pending' as const } : {}), message: result.message, error: result.message, data };
       } catch (error) {

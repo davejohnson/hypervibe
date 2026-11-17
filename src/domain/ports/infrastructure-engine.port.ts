@@ -161,6 +161,8 @@ export interface EngineReleaseResult {
   service: string;
   status: 'released' | 'failed' | 'unknown';
   imageUri?: string;
+  /** Exact registered ECS revision, retained for current-release observations. */
+  taskDefinitionArn?: string;
   url?: string;
   health?: { status: number; path: string };
   message: string;

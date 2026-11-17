@@ -1,3 +1,6 @@
+import { AzureWorkloadDiagnostics } from './azure-diagnostics.client.js';
+import type { Environment } from '../../../domain/entities/environment.entity.js';
+import type { ProviderRuntimeLogsRequest } from '../../../domain/ports/provider-logs.port.js';
 import { z } from 'zod';
 import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -70,6 +73,16 @@ export class AzureEngineAdapter {
     this.credentials = AzureEngineCredentialsSchema.parse(credentials);
   }
 
+  readProviderLogs(request: ProviderRuntimeLogsRequest) {
+    if (!this.credentials) throw new Error('Not connected.');
+    return new AzureWorkloadDiagnostics(this.credentials).readProviderLogs(request);
+  }
+
+  readDeployment(environment: Environment, serviceName: string) {
+    if (!this.credentials) throw new Error('Not connected.');
+    return new AzureWorkloadDiagnostics(this.credentials).readDeployment(environment, serviceName);
+  }
+
   async verify(): Promise<VerifyResult> {
     if (!this.credentials) return { success: false, error: 'Not connected.' };
     const verified = await verifyAzureDeployAccess(this.credentials);
@@ -82,6 +95,7 @@ providerRegistry.register({
     name: 'azure',
     displayName: 'Microsoft Azure',
     category: 'deployment',
+    orchestration: { logs: { runtime: true } },
     credentialsSchema: AzureEngineCredentialsSchema,
     setupHelpUrl: 'https://portal.azure.com/',
     maturity: {

@@ -1,3 +1,6 @@
+import { AwsWorkloadDiagnostics } from './aws-diagnostics.client.js';
+import type { Environment } from '../../../domain/entities/environment.entity.js';
+import type { ProviderRuntimeLogsRequest } from '../../../domain/ports/provider-logs.port.js';
 import { z } from 'zod';
 import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -48,6 +51,16 @@ export class AwsEngineAdapter {
     this.credentials = AwsEngineCredentialsSchema.parse(credentials);
   }
 
+  readProviderLogs(request: ProviderRuntimeLogsRequest) {
+    if (!this.credentials) throw new Error('Not connected.');
+    return new AwsWorkloadDiagnostics(this.credentials).readProviderLogs(request);
+  }
+
+  readDeployment(environment: Environment, serviceName: string) {
+    if (!this.credentials) throw new Error('Not connected.');
+    return new AwsWorkloadDiagnostics(this.credentials).readDeployment(environment, serviceName);
+  }
+
   async verify(): Promise<VerifyResult> {
     if (!this.credentials) return { success: false, error: 'Not connected.' };
     const verified = await verifyAwsDeployAccess(this.credentials);
@@ -60,6 +73,7 @@ providerRegistry.register({
     name: 'aws',
     displayName: 'Amazon Web Services',
     category: 'deployment',
+    orchestration: { logs: { runtime: true } },
     credentialsSchema: AwsEngineCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/',
     maturity: {

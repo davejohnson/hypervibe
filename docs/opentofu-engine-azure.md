@@ -17,6 +17,7 @@ testing environments, production profiles or subsequent revisions.
 
 | Piece | State |
 | --- | --- |
+| Runtime logs and deployment health (`hv_logs`, `hv_health`) | Built; offline transport and command tests only, no live validation. See [diagnostics scope](engine-diagnostics.md). |
 | Sign-in without the Azure CLI | Built; verified live (a personal Microsoft account in a pay-as-you-go directory) |
 | One-time setup (resource group, project Key Vault, deploy identity, roles, GitHub OIDC, client secret) | Built; verified live |
 | OpenTofu authenticates as the deploy identity | Built; verified live |
