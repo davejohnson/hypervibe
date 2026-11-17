@@ -295,6 +295,15 @@ export class AppStoreConnectAdapter {
    * Connect returns absolute next links; only follow links back to its v1 API
    * and fail if the provider repeats a page or returns an unbounded sequence.
    */
+  /** Every item of a paged collection, following validated next links. */
+  private collectAll<T>(initialPath: string, context: string): Promise<T[]> {
+    return this.collectPages<T>(initialPath, context, (raw) => {
+      const page = raw as { data?: unknown; links?: { next?: string | null } } | null;
+      if (!page || !Array.isArray(page.data)) throw malformedResponse(context);
+      return { data: page.data as T[], next: page.links?.next };
+    });
+  }
+
   private async collectPages<T>(
     initialPath: string,
     context: string,
@@ -583,8 +592,10 @@ export class AppStoreConnectAdapter {
     appId?: string;
     groupId?: string;
     limit?: number;
+    /** Read every page. Required whenever a missing tester would lead to an invitation or removal; `limit` is then ignored. */
+    complete?: boolean;
   }): Promise<AppStoreBetaTester[]> {
-    const limit = options?.limit ?? 200;
+    const limit = options?.complete ? 200 : options?.limit ?? 200;
     const params = new URLSearchParams();
     params.set('limit', String(limit));
     params.set('fields[betaTesters]', 'firstName,lastName,email,inviteType,state');
@@ -598,18 +609,10 @@ export class AppStoreConnectAdapter {
     const path = options?.groupId
       ? `/betaGroups/${options.groupId}/betaTesters?${params.toString()}`
       : `/betaTesters?${params.toString()}`;
-    const response = await this.apiRequest<{
-      data: Array<{
-        id: string;
-        attributes: {
-          firstName?: string;
-          lastName?: string;
-          email?: string;
-          inviteType?: string;
-          state?: string;
-        };
-      }>;
-    }>('GET', path);
+    type TesterResource = { id: string; attributes: { firstName?: string; lastName?: string; email?: string; inviteType?: string; state?: string } };
+    const response = options?.complete
+      ? { data: await this.collectAll<TesterResource>(path, 'beta-tester list') }
+      : await this.apiRequest<{ data: TesterResource[] }>('GET', path);
 
     const testers = response.data.map((tester) => ({
       id: tester.id,
@@ -623,7 +626,7 @@ export class AppStoreConnectAdapter {
     const selected = options?.email && options.groupId
       ? testers.filter((tester) => tester.email?.toLowerCase() === options.email!.toLowerCase())
       : testers;
-    return selected.slice(0, limit);
+    return options?.complete ? selected : selected.slice(0, limit);
   }
 
   async findBetaTesterByEmail(email: string): Promise<AppStoreBetaTester | null> {
@@ -782,14 +785,11 @@ export class AppStoreConnectAdapter {
    * Get capabilities enabled on a Bundle ID.
    */
   async getBundleIdCapabilities(bundleIdId: string): Promise<Array<{ id: string; type: string }>> {
-    const response = await this.apiRequest<{
-      data: Array<{
-        id: string;
-        attributes: { capabilityType: string };
-      }>;
-    }>('GET', `/bundleIds/${bundleIdId}/bundleIdCapabilities`);
+    // Every page: a capability on a later page is already enabled.
+    const capabilities = await this.collectAll<{ id: string; attributes: { capabilityType: string } }>(
+      `/bundleIds/${encodeURIComponent(bundleIdId)}/bundleIdCapabilities?limit=200`, 'capability list');
 
-    return response.data.map(c => ({
+    return capabilities.map(c => ({
       id: c.id,
       type: c.attributes.capabilityType,
     }));
@@ -843,14 +843,11 @@ export class AppStoreConnectAdapter {
    * List apps.
    */
   async listApps(): Promise<Array<{ id: string; bundleId: string; name: string }>> {
-    const result = await this.apiRequest<{
-      data: Array<{
-        id: string;
-        attributes: { bundleId: string; name: string };
-      }>;
-    }>('GET', '/apps?limit=200&fields[apps]=bundleId,name');
+    // Every page: an app beyond the first 200 exists and must not look missing.
+    const apps = await this.collectAll<{ id: string; attributes: { bundleId: string; name: string } }>(
+      '/apps?limit=200&fields[apps]=bundleId,name', 'app list');
 
-    return result.data.map(app => ({
+    return apps.map(app => ({
       id: app.id,
       bundleId: app.attributes.bundleId,
       name: app.attributes.name,

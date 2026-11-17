@@ -67,7 +67,7 @@ export async function observeIos(spec: IosSpec, adapter: AppStoreConnectAdapter)
   const declaredGroupNames = new Set(Object.keys(spec.testflight?.groups ?? {}));
   for (const group of groups) {
     if (!declaredGroupNames.has(group.name)) continue;
-    const testers = await adapter.listBetaTesters({ groupId: group.id, limit: 200 });
+    const testers = await adapter.listBetaTesters({ groupId: group.id, complete: true });
     testerEmailsByGroupId[group.id] = testers
       .map((tester) => tester.email?.toLowerCase())
       .filter((email): email is string => Boolean(email));

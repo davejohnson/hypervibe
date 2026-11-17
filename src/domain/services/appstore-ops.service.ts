@@ -67,7 +67,7 @@ export async function addTestersToGroup(
   testers: BetaTesterInput[],
 ): Promise<Array<Record<string, unknown>>> {
   if (testers.length === 0) return [];
-  const existing = await adapter.listBetaTesters({ groupId: group.id, limit: 200 });
+  const existing = await adapter.listBetaTesters({ groupId: group.id, complete: true });
   const existingEmails = new Set(existing.map((t) => t.email?.toLowerCase()).filter(Boolean));
   const results: Array<Record<string, unknown>> = [];
 
