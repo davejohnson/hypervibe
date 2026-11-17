@@ -20,6 +20,8 @@ export const AZURE_SCOPES = {
   postgres: 'https://ossrdbms-aad.database.windows.net/.default',
 } as const;
 
+export interface AzureTokenProvider { get(scope: string): Promise<string>; readonly fetchImpl: typeof fetch }
+
 /** Client-credentials tokens for the deploy identity, one per resource, reused until five minutes before expiry. */
 export class AzureTokens {
   private readonly cache = new Map<string, { token: string; expiresAt: number }>();
@@ -42,7 +44,7 @@ export class AzureTokens {
 
 export interface RestResult { status: number; body: Record<string, unknown> }
 
-export async function azureRest(tokens: AzureTokens, scope: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}): Promise<RestResult> {
+export async function azureRest(tokens: AzureTokenProvider, scope: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}): Promise<RestResult> {
   const response = await tokens.fetchImpl(url, {
     method, headers: { authorization: `Bearer ${await tokens.get(scope)}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000),
@@ -70,7 +72,7 @@ export interface AzureKeyVaultSecretStore {
  * One environment's secrets in the project Key Vault. Values only go in:
  * observe reports presence and discards the value unread.
  */
-export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, nameFor: (key: string) => string = azureSecretName): AzureKeyVaultSecretStore {
+export function azureKeyVaultSecretStore(tokens: AzureTokenProvider, vaultUri: string, nameFor: (key: string) => string = azureSecretName): AzureKeyVaultSecretStore {
   if (!/^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(vaultUri)) throw new Error('Key Vault address is invalid.');
   const call = async (method: string, key: string, body?: unknown) => tokens.fetchImpl(`${vaultUri}secrets/${nameFor(key)}?api-version=7.4`, {
     method, headers: { authorization: `Bearer ${await tokens.get(AZURE_SCOPES.vault)}`, ...(body ? { 'content-type': 'application/json' } : {}) },
@@ -104,7 +106,7 @@ export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, 
 }
 
 /** Deletes and purges every secret whose name starts with the prefix, so a recreated environment can reuse the names. */
-export async function purgeVaultSecrets(tokens: AzureTokens, vaultUri: string, prefix: string): Promise<{ removed: number } | { error: string }> {
+export async function purgeVaultSecrets(tokens: AzureTokenProvider, vaultUri: string, prefix: string): Promise<{ removed: number } | { error: string }> {
   const names: string[] = [];
   let next: string | undefined = `${vaultUri}secrets?api-version=7.4&maxresults=25`;
   while (next) {
@@ -145,7 +147,7 @@ export type SqlRunner = (database: string, statements: (query: (sql: string, val
  * with a short-lived Entra token as the password, over TLS with the certificate
  * verified against the host name. Flexible Server has no SQL-over-HTTPS API.
  */
-export function entraSqlRunner(tokens: AzureTokens, host: string, user: string): SqlRunner {
+export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: string): SqlRunner {
   return async (database, statements) => {
     const client = new pg.Client({
       host, port: 5432, database, user, password: await tokens.get(AZURE_SCOPES.postgres),
@@ -208,7 +210,7 @@ export async function dropEnvironmentDatabase(sql: SqlRunner, environmentName: s
 // ------------------------------------------------------------------ Storage and absence
 
 /** Deletes every blob in a container (shared keys are off, so this uses the deploy identity's data role). */
-export async function emptyContainer(tokens: AzureTokens, account: string, container: string): Promise<{ deleted: number } | { gone: true } | { error: string }> {
+export async function emptyContainer(tokens: AzureTokenProvider, account: string, container: string): Promise<{ deleted: number } | { gone: true } | { error: string }> {
   const base = `https://${account}.blob.core.windows.net/${container}`;
   const headers = { 'x-ms-version': '2023-11-03' };
   let deleted = 0;
@@ -229,7 +231,7 @@ export async function emptyContainer(tokens: AzureTokens, account: string, conta
 }
 
 /** Resources in the group still tagged for this environment; an unreadable answer is never "none". */
-export async function taggedResources(tokens: AzureTokens, subscriptionId: string, resourceGroup: string, tag: string, value: string): Promise<string[] | { unknown: string }> {
+export async function taggedResources(tokens: AzureTokenProvider, subscriptionId: string, resourceGroup: string, tag: string, value: string): Promise<string[] | { unknown: string }> {
   const filter = encodeURIComponent(`tagName eq '${tag}' and tagValue eq '${value}'`);
   let next: string | undefined = `${ARM}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources?api-version=2021-04-01&$filter=${filter}`;
   const found: string[] = [];

@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import type { IDatabaseQueryAdapter } from '../ports/database-query.port.js';
+import { acquireEngineDatabaseAccess, isManagedEngineDatabase } from './engine-database-access.service.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -13,7 +15,7 @@ const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
 const CLEANUP_RETRY_DELAYS_MS = [0, 100, 300] as const;
 const FAILED_CLEANUP_RETRY_MS = 5_000;
 
-export type DatabaseAccessMode = 'existing' | 'private_connector' | 'ephemeral_proxy' | 'temporary_firewall';
+export type DatabaseAccessMode = 'data_api' | 'existing' | 'private_connector' | 'ephemeral_proxy' | 'temporary_firewall';
 export type DatabaseAccessCleanupStatus = 'no_op' | 'deferred' | 'completed' | 'failed';
 
 export interface DatabaseAccessCleanup {
@@ -29,6 +31,7 @@ export interface DatabaseAccessLease {
   createdByInvocation: boolean;
   expiresAt?: string;
   safeResourceId?: string;
+  query?: IDatabaseQueryAdapter['query'];
   withConnection<T>(operation: (connectionUrl: string) => Promise<T>): Promise<T>;
   release(): Promise<DatabaseAccessCleanup>;
 }
@@ -408,6 +411,12 @@ export async function acquireManagedDatabaseAccess(
   environment: Environment,
   serviceName?: string
 ): Promise<DatabaseAccessAcquireResult> {
+  if (isManagedEngineDatabase(environment)) {
+    if (componentRepo.findByEnvironmentId(environment.id).some(component => component.type === 'postgres')) {
+      return { ok: false, code: 'provider_error', error: 'Both engine and legacy database bindings exist; resolve the conflicting targets before database access.', resourceCreated: false, cleanup: 'not_needed' };
+    }
+    return acquireEngineDatabaseAccess(project, environment);
+  }
   const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres') ?? engineDatabaseComponent(environment);
   const bindings = component?.bindings as Record<string, unknown> | undefined;
   const provider = typeof bindings?.provider === 'string'

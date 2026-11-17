@@ -1,7 +1,8 @@
+import { azureBuildTaskContent } from './azure-build-task.js';
 import type { EngineReleaseResult } from '../../../domain/ports/infrastructure-engine.port.js';
 import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
 import type { ProjectRuntime } from '../../../domain/spec/project-runtime.js';
-import { ARM, AZURE_SCOPES, azureError, azureRest, type AzureTokens } from './azure-ops.client.js';
+import { ARM, AZURE_SCOPES, azureError, azureRest, type AzureTokenProvider } from './azure-ops.client.js';
 
 /**
  * Azure calls a release makes: build an image with ACR Tasks, then point a
@@ -20,12 +21,7 @@ export const APPS_API = 'api-version=2024-03-01';
 /** The repository's Dockerfile, or the generated one; Container Apps need nothing added. */
 export function azureReleaseDockerfile(params: { repositoryDockerfile?: string; runtime?: ProjectRuntime; startCommand?: string }): string {
   if (params.repositoryDockerfile) return params.repositoryDockerfile;
-  const generated = generatedContainerDockerfile(params.runtime ?? (() => { throw new Error('No repository Dockerfile and no project runtime: run hv_spec to review the runtime.'); })(), params.startCommand);
-  // ACR Tasks' Docker build has no BuildKit, so the optional private-package token mount
-  // (which Azure builds never pass) becomes a plain install.
-  return generated
-    .replace(/^# syntax=.*\n/m, '')
-    .replace(/^RUN --mount=type=secret,id=npm_token,required=false if \[ -f \/run\/secrets\/npm_token \]; then [^;]+; fi; (.+)$/m, 'RUN $1');
+  return generatedContainerDockerfile(params.runtime ?? (() => { throw new Error('No repository Dockerfile and no project runtime: run hv_spec to review the runtime.'); })(), params.startCommand);
 }
 
 /**
@@ -33,18 +29,24 @@ export function azureReleaseDockerfile(params: { repositoryDockerfile?: string; 
  * registry's build-source blob, schedule a Docker build, wait, and return the
  * digest-pinned image from the run's output.
  */
-export async function buildWithAcrTasks(tokens: AzureTokens, params: { registryId: string; loginServer: string; source: AzureBuildSource; pollMs?: number; timeoutMs?: number }): Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }> {
+export async function buildWithAcrTasks(tokens: AzureTokenProvider, params: { registryId: string; loginServer: string; source: AzureBuildSource; taskId?: string; pollMs?: number; timeoutMs?: number; deadlineMs?: number }): Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }> {
+  if (params.deadlineMs && Date.now() >= params.deadlineMs) return { error: 'The release deadline elapsed before the build started.' };
   const registry = `${ARM}${params.registryId}`;
   const upload = await azureRest(tokens, AZURE_SCOPES.arm, 'POST', `${registry}/listBuildSourceUploadUrl?${TASKS_API}`);
   if (upload.status !== 200 || typeof upload.body.uploadUrl !== 'string') return { error: `ACR did not give an upload address (${azureError(upload)}).` };
-  const put = await tokens.fetchImpl(upload.body.uploadUrl, { method: 'PUT', headers: { 'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/gzip' }, body: new Uint8Array(params.source.archive), signal: AbortSignal.timeout(10 * 60_000) });
+  const put = await tokens.fetchImpl(upload.body.uploadUrl, { method: 'PUT', headers: { 'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/gzip' }, body: new Uint8Array(params.source.archive), signal: AbortSignal.timeout(Math.max(1, Math.min(10 * 60_000, (params.deadlineMs ?? Date.now() + 10 * 60_000) - Date.now()))) });
   await put.body?.cancel();
   if (put.status !== 201) return { error: `Uploading the source to ACR failed (HTTP ${put.status}).` };
-  const tag = `${AZURE_IMAGE_REPOSITORY}:${params.source.commitSha}`;
-  const scheduled = await azureRest(tokens, AZURE_SCOPES.arm, 'POST', `${registry}/scheduleRun?${TASKS_API}`, {
-    type: 'DockerBuildRequest', imageNames: [tag], isPushEnabled: true, noCache: false, dockerFilePath: AZURE_DOCKERFILE,
+  const values = [{ name: 'IMAGE_TAG', value: params.source.commitSha, isSecret: false }];
+  const request = params.taskId ? {
+    type: 'TaskRunRequest', taskId: params.taskId,
+    overrideTaskStepProperties: { contextPath: upload.body.relativePath, values },
+  } : {
+    type: 'EncodedTaskRunRequest', encodedTaskContent: Buffer.from(azureBuildTaskContent()).toString('base64'), values,
     sourceLocation: upload.body.relativePath, platform: { os: 'Linux', architecture: 'amd64' }, agentConfiguration: { cpu: 2 }, timeout: 3600,
-  });
+  };
+  if (params.deadlineMs && Date.now() >= params.deadlineMs) return { error: 'The release deadline elapsed after uploading source; no build was started.' };
+  const scheduled = await azureRest(tokens, AZURE_SCOPES.arm, 'POST', `${registry}/scheduleRun?${TASKS_API}`, request);
   const runId = (scheduled.body.properties as { runId?: string } | undefined)?.runId ?? (scheduled.body.name as string | undefined);
   if (![200, 201, 202].includes(scheduled.status) || !runId) {
     const code = (scheduled.body.error as { code?: string } | undefined)?.code;
@@ -54,14 +56,7 @@ export async function buildWithAcrTasks(tokens: AzureTokens, params: { registryI
   }
   // A portal link, never the signed log URL (anyone holding that can read the log).
   const logsUrl = `https://portal.azure.com/#resource${params.registryId}/runs`;
-  const failureTail = async (): Promise<string> => {
-    const logs = await azureRest(tokens, AZURE_SCOPES.arm, 'POST', `${registry}/runs/${runId}/listLogSasUrl?${TASKS_API}`).catch(() => undefined);
-    if (!logs || typeof logs.body.logLink !== 'string') return '';
-    const text = await tokens.fetchImpl(logs.body.logLink).then((response) => response.text()).catch(() => '');
-    const lines = text.split('\n').map((line) => line.trim()).filter((line) => line && !/^(Run ID:|\d{4}\/\d{2}\/\d{2} )/.test(line));
-    return lines.slice(-3).join(' / ').slice(0, 400);
-  };
-  const deadline = Date.now() + (params.timeoutMs ?? 35 * 60_000);
+  const deadline = params.deadlineMs ?? Date.now() + (params.timeoutMs ?? 35 * 60_000);
   for (;;) {
     const run = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${registry}/runs/${runId}?${TASKS_API}`).catch(() => undefined);
     const properties = (run?.body.properties ?? {}) as { status?: string; outputImages?: Array<{ repository?: string; tag?: string; digest?: string }> };
@@ -71,8 +66,7 @@ export async function buildWithAcrTasks(tokens: AzureTokens, params: { registryI
       return { image: `${params.loginServer}/${AZURE_IMAGE_REPOSITORY}@${digest}`, ...(logsUrl ? { logsUrl } : {}) };
     }
     if (properties.status && ['Failed', 'Canceled', 'Error', 'Timeout'].includes(properties.status)) {
-      const tail = await failureTail();
-      return { error: `The image build (ACR run ${runId}) ${properties.status.toLowerCase()}${tail ? `: ${tail}` : '; see its log'}.`, logsUrl };
+      return { error: `The image build (ACR run ${runId}) ${properties.status.toLowerCase()}; see its log.`, logsUrl };
     }
     if (Date.now() > deadline) return { error: 'The image build is still running.', unknown: true, ...(logsUrl ? { logsUrl } : {}) };
     await new Promise((done) => setTimeout(done, params.pollMs ?? 10_000));
@@ -89,7 +83,7 @@ export function azurePlatformError(status: number, body: string): string | undef
   return undefined;
 }
 
-async function waitForApp(tokens: AzureTokens, id: string, previousRevision: string | undefined, deadline: number): Promise<Record<string, unknown> | undefined> {
+async function waitForApp(tokens: AzureTokenProvider, id: string, previousRevision: string | undefined, deadline: number): Promise<Record<string, unknown> | undefined> {
   for (;;) {
     const app = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${id}?${APPS_API}`);
     const properties = (app.body.properties ?? {}) as { provisioningState?: string; latestRevisionName?: string };
@@ -109,16 +103,18 @@ export function templateWithImage(template: Record<string, unknown>, image: stri
   return { ...rest, containers: ((template.containers ?? []) as Array<Record<string, unknown>>).map((container) => container.name === 'app' ? { ...container, image } : container) };
 }
 
-export async function releaseAzureApp(tokens: AzureTokens, params: { id: string; name: string; image: string; healthCheckPath?: string; web: boolean; fetchTimeoutMs?: number; waitMs?: number; retryMs?: number }): Promise<EngineReleaseResult> {
+export async function releaseAzureApp(tokens: AzureTokenProvider, params: { id: string; name: string; image: string; healthCheckPath?: string; web: boolean; fetchTimeoutMs?: number; waitMs?: number; retryMs?: number; requireExactIdentity?: boolean }): Promise<EngineReleaseResult> {
   const current = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${params.id}?${APPS_API}`);
   if (current.status === 404) return { service: params.name, status: 'failed', message: `${params.name} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   if (current.status !== 200) return { service: params.name, status: 'unknown', message: `${params.name} could not be read (${azureError(current)}).` };
+  if (params.requireExactIdentity && (typeof current.body.id !== 'string' || current.body.id.toLowerCase() !== params.id.toLowerCase())) return { service: params.name, status: 'unknown', message: 'Azure did not confirm the exact current workload identity.' };
   const properties = current.body.properties as { template: Record<string, unknown>; latestRevisionName?: string; provisioningState?: string };
   // Already running this image (for example right after the apply that created it): Azure makes no new revision, so only check it.
   const running = runsImage(properties.template, params.image) && properties.provisioningState === 'Succeeded';
   let app: Record<string, unknown> | undefined = current.body;
   if (!running) {
-    const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${ARM}${params.id}?${APPS_API}`, { properties: { template: templateWithImage(properties.template, params.image) } });
+    if (typeof current.body.location !== 'string' || !current.body.location) return { service: params.name, status: 'unknown', message: 'Azure did not return the existing app location required for an update.' };
+    const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${ARM}${params.id}?${APPS_API}`, { location: current.body.location, properties: { template: templateWithImage(properties.template, params.image) } });
     if (![200, 201, 202].includes(patched.status)) return { service: params.name, imageUri: params.image, status: 'failed', message: `Azure rejected the release (${azureError(patched)}).` };
     app = await waitForApp(tokens, params.id, properties.latestRevisionName, Date.now() + (params.waitMs ?? 10 * 60_000));
   }
@@ -151,10 +147,11 @@ export async function releaseAzureApp(tokens: AzureTokens, params: { id: string;
   return result;
 }
 
-export async function releaseAzureJob(tokens: AzureTokens, params: { id: string; name: string; image: string }): Promise<EngineReleaseResult> {
+export async function releaseAzureJob(tokens: AzureTokenProvider, params: { id: string; name: string; image: string; requireExactIdentity?: boolean }): Promise<EngineReleaseResult> {
   const current = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${params.id}?${APPS_API}`);
   if (current.status === 404) return { service: params.name, status: 'failed', message: `${params.name} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   if (current.status !== 200) return { service: params.name, status: 'unknown', message: `${params.name} could not be read (${azureError(current)}).` };
+  if (params.requireExactIdentity && (typeof current.body.id !== 'string' || current.body.id.toLowerCase() !== params.id.toLowerCase())) return { service: params.name, status: 'unknown', message: 'Azure did not confirm the exact current job identity.' };
   const template = (current.body.properties as { template: Record<string, unknown> }).template;
   if (runsImage(template, params.image)) return { service: params.name, imageUri: params.image, status: 'released', message: `Scheduled job ${params.name} already runs this image.` };
   const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${ARM}${params.id}?${APPS_API}`, { properties: { template: templateWithImage(template, params.image) } });

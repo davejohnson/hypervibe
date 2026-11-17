@@ -1,0 +1,77 @@
+import { BatchGetProjectsCommand, CodeBuildClient } from '@aws-sdk/client-codebuild';
+import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient } from '@aws-sdk/client-ecs';
+import { GetFunctionConfigurationCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import type { EngineCiReleaseTarget, GitHubOidcContext } from '../../../domain/ports/engine-ci.port.js';
+import type { EngineCiBinding } from '../../../domain/spec/engine-ci-binding.js';
+import type { ProjectSpec } from '../../../domain/spec/spec.schema.js';
+import { awsCiAccess } from './aws-ci-auth.js';
+import { AWS_DOCKERFILE, LOADER_IN_SOURCE, awsReleaseDockerfile, buildImage, releaseFunction, releaseTask, type AwsReleaseTarget } from './aws-release.client.js';
+import { LOAD_SECRETS_SOURCE } from './runtime/load-secrets.js';
+import { matchesTaskDefinitionFamily, taskDefinitionIdentity } from './aws-task-identity.js';
+
+export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context: GitHubOidcContext, spec: ProjectSpec): Promise<EngineCiReleaseTarget> {
+  const access = await awsCiAccess(binding, context); const a = binding.aws!;
+  const target: AwsReleaseTarget = { region: binding.region, accountId: a.accountId, prefix: binding.prefix, credentials: access.credentials,
+    deadlineMs: context.deadlineMs ?? Date.now() + 35 * 60_000, requestTimeoutMs: 30_000, buildProjectArn: a.buildProjectArn, sourceBucket: a.sourceBucket, repositoryUrl: a.repositoryUrl, ...(a.packageParameter ? { packageTokenParameter: a.packageParameter } : {}) };
+  const options = { region: binding.region, credentials: access.credentials, maxAttempts: 1, requestHandler: { requestTimeout: 30_000, connectionTimeout: 5000 } };
+  const ecs = new ECSClient(options); const lambda = new LambdaClient(options);
+  const taskDefinitions = new Map<string, string>();
+  const inspect = async (name: string) => {
+    if (Date.now() + 30_000 >= target.deadlineMs!) throw new Error('The release observation deadline has elapsed.');
+    const w = binding.services[name]!;
+    if (w.resourceType === 'lambda') {
+      const found = await lambda.send(new GetFunctionConfigurationCommand({ FunctionName: w.serviceId }));
+      if (found.FunctionArn !== w.serviceId || found.LastUpdateStatus === 'InProgress') throw new Error('AWS did not confirm an available exact Lambda target.');
+      return;
+    }
+    const recorded = taskDefinitionIdentity(w.taskDefinitionArn);
+    if (!recorded) throw new Error('The recorded ECS task definition is not an exact native identity.');
+    let definition = recorded.family;
+    if (w.resourceType === 'ecs-service') {
+      const found = await ecs.send(new DescribeServicesCommand({ cluster: w.clusterArn!, services: [w.serviceId] }));
+      const service = found.services?.[0];
+      if (found.failures?.length || found.services?.length !== 1 || service?.serviceArn !== w.serviceId || service.clusterArn !== w.clusterArn
+        || service.status !== 'ACTIVE' || !matchesTaskDefinitionFamily(service.taskDefinition, w.taskDefinitionArn!)) throw new Error('AWS did not confirm the exact ECS service and current task family.');
+      definition = service.taskDefinition!;
+    }
+    const found = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: definition }));
+    const current = found.taskDefinition;
+    if (!matchesTaskDefinitionFamily(current?.taskDefinitionArn, w.taskDefinitionArn!) || current?.family !== recorded.family
+      || (w.resourceType === 'ecs-service' && current.taskDefinitionArn !== definition) || !current.containerDefinitions?.some((c) => c.name === 'app') || current.status !== 'ACTIVE') throw new Error('AWS did not confirm the bound current task definition.');
+    const role = `arn:aws:iam::${a.accountId}:role/hypervibe/app/${binding.prefix}-runtime`;
+    if (current.taskRoleArn !== role || current.executionRoleArn !== role) throw new Error('The ECS task uses runtime roles outside the applied release scope.');
+    taskDefinitions.set(name, current.taskDefinitionArn!);
+  };
+  return { cloudName: 'AWS', buildPhrase: 'in CodeBuild', format: 'zip', dockerfileName: AWS_DOCKERFILE,
+    addFiles: { [LOADER_IN_SOURCE]: LOAD_SECRETS_SOURCE }, dockerfileFor: awsReleaseDockerfile, redact: access.redact,
+    preflight: async () => {
+      const observed = await new CodeBuildClient(options).send(new BatchGetProjectsCommand({ names: [a.buildProjectArn] }));
+      const project = observed.projects?.[0]; const tags = Object.fromEntries((project?.tags ?? []).map((t) => [t.key, t.value]));
+      if (observed.projectsNotFound?.length || observed.projects?.length !== 1 || project?.arn !== a.buildProjectArn
+        || tags['managed-by'] !== 'hypervibe' || tags['hv-environment'] !== binding.environmentId.toLowerCase()) throw new Error('AWS did not confirm the exact applied build project and environment ownership.');
+      for (const name of Object.keys(binding.services).sort()) await inspect(name);
+    },
+    build: async (source) => { const built = await buildImage(target, source); return 'error' in built ? built : { image: built.imageUri, ...(built.logsUrl ? { logsUrl: built.logsUrl } : {}) }; },
+    releaseWorkload: async ({ name, image }) => {
+      await inspect(name); const w = binding.services[name]!;
+      const result = await (w.resourceType === 'lambda'
+        ? releaseFunction(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/')
+        : releaseTask(target, name, w.serviceId, image, w.resourceType === 'ecs-service', { clusterArn: w.clusterArn!, taskDefinitionArn: taskDefinitions.get(name)!, ...(w.resourceType === 'ecs-service' ? { serviceArn: w.serviceId } : {}) }));
+      if (result.status !== 'released') return result;
+      if (w.resourceType === 'lambda') return result.health && result.health.status >= 200 && result.health.status < 400 ? result
+        : { ...result, status: 'failed', message: 'The released function did not pass its application HTTP check.' };
+      if (w.resourceType !== 'ecs-service') return result;
+      for (let attempt = 0; attempt < 60 && Date.now() < target.deadlineMs!; attempt++) {
+        const observed = await ecs.send(new DescribeServicesCommand({ cluster: w.clusterArn!, services: [w.serviceId] }));
+        const service = observed.services?.[0]; const primary = service?.deployments?.filter((d) => d.status === 'PRIMARY');
+        if (observed.failures?.length || observed.services?.length !== 1 || service?.serviceArn !== w.serviceId || service.clusterArn !== w.clusterArn) return { ...result, status: 'unknown', message: 'AWS did not confirm the exact service after release.' };
+        if (primary?.length === 1 && primary[0]?.taskDefinition === result.taskDefinitionArn) {
+          if (primary[0].rolloutState === 'FAILED') return { ...result, status: 'failed', message: 'The current ECS rollout failed.' };
+          if (primary[0].rolloutState === 'COMPLETED' && service.taskDefinition === result.taskDefinitionArn && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.runningCount === service.desiredCount) return result;
+        }
+        if (attempt < 59) await new Promise((done) => setTimeout(done, 5000));
+      }
+      return { ...result, status: 'unknown', message: 'AWS did not confirm the exact current ECS rollout before the observation deadline.' };
+    },
+  };
+}

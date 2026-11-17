@@ -1,11 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildAzureEnvironmentConfiguration } from '../../adapters/providers/azure/tofu/azure-engine.config.js';
+import * as sharedEngine from '../engine-shared.js';
+import { azureCiRegistry } from '../../adapters/providers/azure/azure-ci-registry.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
 import {
   AZURE_DATABASE_LOGIN_OPERATION, AZURE_IMAGE_BUILD_OPERATION, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureEngineLayout, azureEngineProblems,
   azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext,
 } from '../infrastructure-engine-azure.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 const connection = { tenantId: '11111111-2222-3333-4444-555555555555', subscriptionId: '66666666-7777-8888-9999-000000000000', resourceGroup: 'hv-billforge',
   location: 'eastus2', deployPrincipalId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', clientId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', clientSecret: 'client-secret-value-1',
@@ -55,7 +59,7 @@ describe('Azure engine planning', () => {
     const desired = spec({ test: testing() });
     const layout = azureEngineLayout(project, 'test', 'ENV1', connection);
     const keys = azureEnvironmentSecretKeys(desired, 'test');
-    expect(keys).toEqual({ generated: ['JWT_SECRET'], outside: [], all: ['DATABASE_URL', 'JWT_SECRET'] });
+    expect(keys).toEqual({ generated: ['JWT_SECRET'], outside: [], build: [], all: ['DATABASE_URL', 'JWT_SECRET'] });
     const input = buildAzureEngineInput(desired, 'test', { connection: connection as never, ...layout, environment: { id: 'ENV1' } }, { secretKeys: keys.all, image: 'r.azurecr.io/app@sha256:abc' });
     expect(input.services).toEqual([expect.objectContaining({ resourceName: 'hv-billforge-test-web', targetPort: 3000, healthCheckPath: '/health' })]);
     expect(input.workers).toEqual([expect.objectContaining({ resourceName: 'hv-billforge-test-worker', command: ['sh', '-c', 'npm run worker'], pendingWorkQuery: expect.stringContaining('queued') })]);
@@ -103,7 +107,11 @@ describe('Azure apply actions', () => {
       { sqlRunner: () => async (_database, run) => { await run(async (sql) => { statements.push(sql); return { rows: [] }; }); } });
     expect(result).toMatchObject({ success: true });
     expect(azure.calls.filter((call) => call.method === 'PUT').map((call) => new URL(call.url).pathname)).toEqual(['/secrets/test--database-url', '/secrets/test--hv-waker-url']);
-    expect(azure.bindings().azure).toMatchObject({ databaseLoginAt: expect.any(String), wakerLoginAt: expect.any(String) });
+    expect(azure.bindings().azure).toMatchObject({ databaseLoginAt: expect.any(String), wakerLoginAt: expect.any(String), database: {
+      serverId: `/subscriptions/${connection.subscriptionId}/resourceGroups/${connection.resourceGroup}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${azure.context.shared.serverName}`,
+      subscriptionId: connection.subscriptionId, resourceGroup: connection.resourceGroup, host: 'srv.postgres.database.azure.com',
+      name: 'app_test', owner: 'app_test', secretUrl: `${azure.context.vault.uri}secrets/test--database-url`,
+    } });
     expect(statements).toContain('CREATE DATABASE app_test OWNER app_test');
   });
 
@@ -113,6 +121,22 @@ describe('Azure apply actions', () => {
       { buildImage: async () => ({ image: `r.azurecr.io/app@sha256:${'b'.repeat(64)}` }) });
     expect(result).toMatchObject({ success: true });
     expect(azure.bindings().azure).toMatchObject({ image: `r.azurecr.io/app@sha256:${'b'.repeat(64)}`, imageCommit: 'a'.repeat(40) });
+  });
+
+  it.each([false, true])('requires an exact applied registry before a CI image build (%s)', async (present) => {
+    const azure = setup(() => json(200));
+    const registry = azureCiRegistry({ ...connection, environmentId: 'ENV1' });
+    const state = { values: { root_module: { resources: [{ address: 'azurerm_container_registry.ci_images', values: { id: registry.id, name: registry.name, login_server: registry.loginServer, tags: { 'managed-by': 'hypervibe', 'hv-environment': 'env1' } } }] } } };
+    vi.spyOn(sharedEngine, 'openTofuEngine').mockResolvedValue({ inspectState: async (params: { project: (state: unknown) => unknown }) => present
+      ? { ok: true, present: true, value: params.project(state) } : { ok: true, present: false } } as never);
+    const desired = { ...spec({ test: testing({ deploy: { strategy: 'branch', branch: 'main' } }) }), gitRemoteUrl: 'https://github.com/owner/app.git' };
+    const buildImage = vi.fn(async (context: AzureEngineContext) => {
+      expect(context.environment.platformBindings).toMatchObject({ azure: { buildRegistry: { id: registry.id, loginServer: registry.loginServer } } });
+      return { image: `${registry.loginServer}/app@sha256:${'b'.repeat(64)}` };
+    });
+    const result = await runAzureAction(azure.ctx, azure.context, action(AZURE_IMAGE_BUILD_OPERATION, { directory: '/repo', commitSha: 'a'.repeat(40) }), { project: project as never, spec: desired }, { buildImage });
+    expect(result.success).toBe(present);
+    expect(buildImage).toHaveBeenCalledTimes(present ? 1 : 0);
   });
 
   it('keeps the environment in the spec when anything tagged for it remains after teardown', async () => {

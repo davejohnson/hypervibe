@@ -8,6 +8,17 @@ entrypoints for already-reviewed managed workflows, not upstream drift checks.
 
 ## Sources and coverage
 
+The [private-package build contracts](build-token-native.json) record the exact
+CodeBuild and ACR request versions and primary sources. Ordinary acceptance runs
+the real AWS SDK and Azure REST serialization, executes the generated CodeBuild
+command, validates the generated configurations with pinned OpenTofu providers,
+and checks runtime exclusion and the ordered AWS loader upgrade. These are
+reconstructed, offline cases; no live private-package build is asserted.
+AWS/Azure [engine workload diagnostics](../../docs/engine-diagnostics.md) use
+reconstructed official REST/API responses through the real serialized clients
+and shared commands in ordinary CI. They are documentation-based semantic
+checks, not pinned-schema certification or live provider evidence.
+
 The [repository-variable contract](github/repository-variables/README.md) pins
 GitHub's numeric repository identity and Actions variable endpoints. The named
 CI-provider comparison covers GitHub Actions, the only registered CI provider.

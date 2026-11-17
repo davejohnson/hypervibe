@@ -1,3 +1,4 @@
+import { AzureEngineCredentialsSchema } from './azure-engine.adapter.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
 import { createHash } from 'crypto';
@@ -542,6 +543,7 @@ export class AzurePostgresAdapter implements IDatabaseOperations {
 providerRegistry.register({
   metadata: {
     name: PROVIDER,
+    connectionAliases: ['azure'],
     displayName: 'Azure Database for PostgreSQL',
     category: 'database',
     credentialsSchema: AzurePostgresCredentialsSchema,
@@ -582,7 +584,8 @@ providerRegistry.register({
   },
   databaseRuntime: standardDatabaseRuntimeProjection,
   factory: async (credentials) => {
-    const validated = AzurePostgresCredentialsSchema.parse(credentials);
+    const engine = AzureEngineCredentialsSchema.safeParse(credentials);
+    const validated = AzurePostgresCredentialsSchema.parse(engine.success ? { tenantId: engine.data.tenantId, subscriptionId: engine.data.subscriptionId, clientId: engine.data.clientId, clientSecret: engine.data.clientSecret } : credentials);
     const adapter = new AzurePostgresAdapter();
     await adapter.connect(validated);
     return adapter;
