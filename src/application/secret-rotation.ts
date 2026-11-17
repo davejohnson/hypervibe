@@ -1,5 +1,7 @@
 import { disableSecretVersion, enabledSecretVersions, latestSecretVersion } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import crypto from 'crypto';
+import { cloudRunGet } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
+import { retireSupersededSecretVersions, type RetirementWorkload } from './secret-version-retirement.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -85,6 +87,8 @@ export async function secretAges(ctx: CommandContext, project: Project, spec: Pr
 export type RotationResult =
   | { status: 'blocked'; message: string }
   | { status: 'needs_input'; url?: string; keys: string[]; message: string }
+  /** New values are rolled out, but the workloads could not be confirmed on them; no old version was disabled. */
+  | { status: 'unverified'; rotated: string[]; message: string }
   | { status: 'rotated'; rotated: string[]; disabledVersions: number; revokeAtProvider: Array<{ key: string; service: string; url: string }>; message: string }
   | Exclude<LaunchResult, { status: 'ready' } | { status: 'live' }>;
 
@@ -204,20 +208,41 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   });
   if (rolled.status !== 'ready') return rolled as RotationResult;
 
-  // 3. Disable superseded versions no workload still uses (the database rotation revokes its old login itself).
-  let disabledVersions = 0;
-  for (const secret of selected.filter((entry) => entry.kind !== 'database')) {
-    const secretId = engineSecretId(params.environmentName, secret.key);
-    const listed = await enabledSecretVersions(token, engine.gcpProjectId, secretId);
-    if (!listed.ok) continue;
-    const versions = (((await listed.json()) as { versions?: Array<{ name: string }> }).versions ?? []).map((version) => version.name);
-    const latest = versions.map((name) => Number(name.split('/').pop())).sort((a, b) => b - a)[0];
-    for (const name of versions) {
-      if (Number(name.split('/').pop()) === latest) continue;
-      const disabled = await disableSecretVersion(token, name);
-      if (disabled.ok) disabledVersions++;
-    }
+  // 3. Disable superseded versions only once every workload is seen on a newer one and still answering
+  // (the database rotation revokes its old login itself).
+  const environmentSpec = specResult.spec.environments[params.environmentName]!;
+  const bindings = environment().platformBindings as { services?: Record<string, { serviceId?: string; jobName?: string; workerPoolName?: string }> };
+  const workloads: RetirementWorkload[] = Object.entries(bindings.services ?? {}).flatMap(([name, bound]) => {
+    const resource = bound.serviceId ?? bound.jobName ?? bound.workerPoolName;
+    const service = environmentSpec.services[name];
+    if (!resource || !service) return [];
+    const kind = bound.serviceId ? 'services' as const : bound.jobName ? 'jobs' as const : 'workerPools' as const;
+    // A private service refuses an unauthenticated request by design, so only its rollout is checked.
+    return [{ name, kind, resource, ...(kind === 'services' && service.workloadKind !== 'worker' && service.public !== false ? { healthPath: service.healthCheckPath ?? '/' } : {}) }];
+  });
+  if (current().releaseJob) workloads.push({ name: 'release command', kind: 'jobs', resource: current().releaseJob! });
+  const retired = await retireSupersededSecretVersions({
+    secretIds: selected.filter((entry) => entry.kind !== 'database').map((entry) => engineSecretId(params.environmentName, entry.key)),
+    workloads,
+    readWorkload: async (kind, resource) => cloudRunGet(await engine.adapter.engineAccessToken(), engine.gcpProjectId, engine.region, resource, kind),
+    listEnabled: async (secretId) => {
+      const listed = await enabledSecretVersions(await engine.adapter.engineAccessToken(), engine.gcpProjectId, secretId).catch(() => undefined);
+      if (!listed?.ok) return undefined;
+      const body = await listed.json() as { versions?: Array<{ name: string }>; nextPageToken?: string };
+      // A truncated list is not the whole set; retire nothing from it.
+      return body.nextPageToken ? undefined : (body.versions ?? []).map((version) => version.name);
+    },
+    disable: async (name) => (await disableSecretVersion(await engine.adapter.engineAccessToken(), name).catch(() => undefined))?.ok === true,
+    checkHealth: async (url) => fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000) }).then((response) => response.status, () => 0),
+  });
+  if (!retired.verified) {
+    // The rotation record stays, so the next call resumes here without asking for the keys again.
+    return {
+      status: 'unverified', rotated: selected.map((entry) => entry.key),
+      message: `The new values are rolled out to ${params.environmentName}, but ${retired.reason}. Every old version is still enabled and nothing was retired. Check hv_health, then run the rotation again to finish.`,
+    };
   }
+  const disabledVersions = retired.disabled;
   save(undefined);
   const revokeAtProvider = selected.filter((entry) => KNOWN_SECRETS[entry.key])
     .map((entry) => ({ key: entry.key, service: KNOWN_SECRETS[entry.key]!.service, url: KNOWN_SECRETS[entry.key]!.url }));

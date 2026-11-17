@@ -123,6 +123,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
             agentInstruction: { action: 'ask_user', message: 'Ask the user to create and paste each new key on the page that opened, then continue.' } });
         }
         if (rotated.status === 'rotated') return commandSuccess(rotated, { hint: rotated.message, next: ['hv_status', 'hv_health'] });
+        if (rotated.status === 'unverified') return commandSuccess(rotated, { hint: rotated.message, next: ['hv_health', 'hv_secrets'] });
         return commandSuccess(rotated, { hint: 'The rollout stopped for a decision; show it to the user, then call action="rotate" again with what they approved.', next: ['hv_secrets'] });
       }
       if (action === 'reveal') {
