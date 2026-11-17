@@ -113,6 +113,11 @@ const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
 export const TASK_EXIT_SENTINEL = /__HYPERVIBE_TASK_EXIT:(\d+)__/;
 export const TASK_EXIT_SENTINEL_PREFIX = '__HYPERVIBE_TASK_EXIT:';
 
+/** A Railway task that failed and whose latest logs carry no exit marker is finished: waiting longer cannot produce a result. */
+export function failedTaskIsOver(status: string, latestLogs: Array<{ message: string }>): boolean {
+  return ['FAILED', 'CRASHED', 'REMOVED'].includes(status) && !latestLogs.some((entry) => entry.message.includes(TASK_EXIT_SENTINEL_PREFIX));
+}
+
 type ResourceExistence =
   | { state: 'present' }
   | { state: 'absent' }
@@ -4221,9 +4226,10 @@ export class RailwayAdapter implements
         // A finished task whose result never reaches the logs will not produce it later.
         if (lastStatus === 'SUCCESS') succeededAt ??= Date.now();
         if (succeededAt && Date.now() - succeededAt > 120_000) break;
-        if (['FAILED', 'CRASHED', 'REMOVED'].includes(lastStatus) && !lastLogs.length) {
+        if (['FAILED', 'CRASHED', 'REMOVED'].includes(lastStatus)) {
+          // Read the logs once more, whatever was seen earlier: a failed task with no exit marker will never write one.
           try { lastLogs = await this.getDeploymentLogs(deploymentId, 500); } catch { /* reported below */ }
-          if (!lastLogs.some((entry) => entry.message.includes(TASK_EXIT_SENTINEL_PREFIX))) break;
+          if (failedTaskIsOver(lastStatus, lastLogs)) break;
         }
         let logs: RailwayLogEntry[] = [];
         try { logs = await this.getDeploymentLogs(deploymentId, 500); lastLogs = logs; lastLogError = undefined; }

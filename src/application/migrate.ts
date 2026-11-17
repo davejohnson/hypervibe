@@ -108,7 +108,9 @@ export function scopedToEnvironment(key: string, environmentName: string): boole
 
 /** A target environment equivalent to the source on OpenTofu-managed Google Cloud. */
 export function proposeTargetEnvironment(source: EnvironmentSpec, options: { region?: string; domain?: string }): EnvironmentSpec {
-  const envVars = { ...source.envVars };
+  // Declared settings follow the same rule as settings read from the running source: nothing the
+  // provider manages, and nothing that points back at the source's own data, is carried over.
+  const envVars = Object.fromEntries(Object.entries(source.envVars).filter(([key, value]) => !MANAGED_KEY.test(key) && !pointsAtSourceData(value)));
   if (options.domain) {
     for (const [key, value] of Object.entries(envVars)) {
       // Keep URL settings consistent with the new hostname; anything else is copied as-is.
@@ -143,22 +145,48 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
   return target as EnvironmentSpec;
 }
 
+/**
+ * One environment-wide value per setting name, from settings read service by service.
+ * A name whose value differs between services has no single correct value, and a value the
+ * provider could not resolve is not the real value; neither is copied. Both are reported.
+ */
+export function mergeServiceSettings(reads: Array<{ service: string; variables: Record<string, string>; unresolvedKeys?: string[] }>): { values: Record<string, string>; conflicting: string[]; unresolved: string[] } {
+  const unresolved = new Set(reads.flatMap((read) => read.unresolvedKeys ?? []));
+  const seen = new Map<string, Set<string>>();
+  for (const read of reads) {
+    for (const [key, value] of Object.entries(read.variables)) {
+      if (!value || unresolved.has(key)) continue;
+      seen.set(key, (seen.get(key) ?? new Set()).add(value));
+    }
+  }
+  const conflicting = [...seen].filter(([, values]) => values.size > 1).map(([key]) => key).sort();
+  const values = Object.fromEntries([...seen].filter(([, found]) => found.size === 1).map(([key, found]) => [key, [...found][0]!]));
+  return { values, conflicting, unresolved: [...unresolved].sort() };
+}
+
+/** What the user is told about settings that could not be copied as one value. */
+function notCopiedNote(notCopied: { conflicting: string[]; unresolved: string[] }): string {
+  return (notCopied.conflicting.length ? ` Not copied because services use different values: ${notCopied.conflicting.join(', ')}. Set ${notCopied.conflicting.length === 1 ? 'it' : 'them'} on the target yourself.` : '')
+    + (notCopied.unresolved.length ? ` Not copied because the source could not provide the real value: ${notCopied.unresolved.join(', ')}.` : '');
+}
+
 /** The runtime settings worth copying from a running source: not managed, not named for the source, not pointing at its data. */
 async function sourceSettings(ctx: CommandContext, params: { project: Project; from: string; to: string; spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment }):
-Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[] } | { blocked: string }> {
-  const values: Record<string, string> = {};
+Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[]; notCopied: { conflicting: string[]; unresolved: string[] } } | { blocked: string }> {
+  const reads: Parameters<typeof mergeServiceSettings>[0] = [];
   for (const serviceName of Object.keys(params.sourceSpec.services)) {
     const service = ctx.repos.services.findByProjectAndName(params.project.id, serviceName);
     if (!service) continue;
     const read = await readHostingEnvVars({ project: params.project, environment: params.sourceEnvironment, service });
     if (!read.success) return { blocked: `Could not read ${serviceName}'s settings on ${read.provider}: ${read.error}` };
-    for (const [key, value] of Object.entries(read.variables)) if (value) values[key] ??= value;
+    reads.push({ service: serviceName, variables: read.variables, ...(read.unresolvedKeys ? { unresolvedKeys: read.unresolvedKeys } : {}) });
   }
+  const { values, conflicting, unresolved } = mergeServiceSettings(reads);
   const declared = new Set([...Object.keys(params.spec.environments[params.to]!.envVars), ...Object.entries(params.spec.secrets)
     .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key)]);
   const candidates = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
   const leftOut = candidates.filter((key) => scopedToEnvironment(key, params.from));
-  return { values, keys: candidates.filter((key) => !leftOut.includes(key)), leftOut };
+  return { values, keys: candidates.filter((key) => !leftOut.includes(key)), leftOut, notCopied: { conflicting: conflicting.filter((key) => !declared.has(key) && !MANAGED_KEY.test(key)), unresolved: unresolved.filter((key) => !declared.has(key) && !MANAGED_KEY.test(key)) } };
 }
 
 /**
@@ -179,12 +207,12 @@ async function migrateSettingsOnly(ctx: CommandContext, params: {
   if (!engine().importedSecrets) {
     const settings = await sourceSettings(ctx, params);
     if ('blocked' in settings) return { status: 'blocked', message: settings.blocked };
-    const { values, keys, leftOut } = settings;
+    const { values, keys, leftOut, notCopied } = settings;
     if (!params.importSecrets) {
       return {
         status: 'needs_secret_import', keys, ...(leftOut.length ? { leftOut } : {}),
         message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into ${store.name} for ${params.to}. Values are copied directly and never shown.`
-          + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
+          + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : '') + notCopiedNote(notCopied),
       };
     }
     for (const key of keys) {
@@ -283,24 +311,14 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     });
   }
   if (!(environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets) {
-    const values: Record<string, string> = {};
-    for (const serviceName of Object.keys(sourceSpec.services)) {
-      const service = ctx.repos.services.findByProjectAndName(params.project.id, serviceName);
-      if (!service) continue;
-      const read = await readHostingEnvVars({ project: params.project, environment: sourceEnvironment, service });
-      if (!read.success) return { status: 'blocked', message: `Could not read ${serviceName}'s settings on ${read.provider}: ${read.error}` };
-      for (const [key, value] of Object.entries(read.variables)) if (value) values[key] ??= value;
-    }
-    const declared = new Set([...Object.keys(spec.environments[params.to]!.envVars), ...Object.entries(spec.secrets)
-      .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key)]);
-    const candidates = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
-    const leftOut = candidates.filter((key) => scopedToEnvironment(key, params.from));
-    const keys = candidates.filter((key) => !leftOut.includes(key));
+    const settings = await sourceSettings(ctx, { project: params.project, from: params.from, to: params.to, spec, sourceSpec, sourceEnvironment });
+    if ('blocked' in settings) return { status: 'blocked', message: settings.blocked };
+    const { values, keys, leftOut, notCopied } = settings;
     if (!params.importSecrets) {
       return {
         status: 'needs_secret_import', keys, ...(leftOut.length ? { leftOut } : {}),
         message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into Google Secret Manager for ${params.to}. Values are copied directly and never shown.`
-          + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
+          + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : '') + notCopiedNote(notCopied),
       };
     }
     pendingSecretValues = Object.fromEntries(keys.map((key) => [key, values[key]!]));
