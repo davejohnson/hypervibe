@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DnsObservedRecord } from '../../src/domain/ports/dns.port.js';
-import { assertDnsFixtureActions, assertDnsFixtureTarget, assertDnsFixtureValues, assertDnsPreservedRecords, dnsFixtureInventory,
+import { applyDnsFixturePlan, assertDnsFixtureActions, assertDnsFixtureTarget, assertDnsFixtureValues, assertDnsPreservedRecords, dnsFixtureInventory,
   assertDnsProofPreserved, dnsFixtureCleanupState, dnsFixtureProofBaseline,
   dnsFixtureMarkerSchema, readDnsFixtureRecords, readDnsPreservedRecords, type DnsFixtureMarker, type SafeDnsOwnedRecord } from './dns-lifecycle-harness.js';
 import { runDisposableFixture, type FixtureJournal } from './lifecycle-live-harness.js';
@@ -54,6 +54,45 @@ describe('disposable DNS fixture authorization and evidence', () => {
       { ...action, metadata: { ...action.metadata, operation: 'gcpDomainDns' } }]) expect(() => assertDnsFixtureActions([invalid], marker, 'create')).toThrow();
     expect(() => assertDnsFixtureActions([action], marker, 'update')).toThrow('TTL update');
     expect(() => assertDnsFixtureActions([{ ...action, type: 'update' }], marker, 'update')).not.toThrow();
+  });
+  it.each(['create', 'update', 'absent'] as const)('limits DNS engine actions during %s', stage => {
+    // Cleanup may update an adopted TXT RRset to restore its original values.
+    const permitted = { create: ['create', 'update', 'adopt', 'noop'], update: ['update', 'noop'], absent: ['update', 'delete', 'noop'] };
+    for (const type of ['create', 'update', 'delete', 'replace', 'adopt', 'noop', 'unknown']) {
+      const check = () => assertDnsFixtureActions([{ ...action, type }], marker, stage);
+      if (permitted[stage].includes(type)) expect(check).not.toThrow();
+      else expect(check).toThrow();
+    }
+  });
+  it('rejects recreation of the Cloud Run domain mapping during cleanup', () => {
+    const mapping = { id: `domain:${marker.hostname}`, type: 'create', resource: { kind: 'domain', name: marker.hostname, provider: 'gcp' },
+      metadata: { engineSegment: { addresses: ['google_cloud_run_domain_mapping.fixture'] } } };
+    expect(() => assertDnsFixtureActions([mapping], marker, 'absent')).toThrow();
+    expect(() => assertDnsFixtureActions([{ ...mapping, type: 'delete' }], marker, 'absent')).not.toThrow();
+  });
+  it('stops the cleanup driver before apply when any action would recreate DNS', async () => {
+    const apply = vi.fn(async () => ({ data: { receipts: [{ status: 'succeeded' }] } }));
+    const journal: FixtureJournal = { version: 1, profile: marker.profile, project: marker.project, environment: marker.environment,
+      phase: 'cleanup-required', resources: dnsFixtureInventory([owned], marker), checks: { created: true, noop: true, updated: true, absent: false } };
+    await expect(runDisposableFixture({ journal, cleanupOnly: true, save: () => {}, driver: {
+      inventory: async () => dnsFixtureInventory([owned], marker), assertNoop: async () => {}, verifyRunning: async () => {}, observe: async () => 'present',
+      converge: async stage => { await applyDnsFixturePlan({ data: { planId: 'cleanup', actions: [{ ...action, type: 'delete' }, action] } }, marker, stage, apply); },
+    } })).rejects.toThrow();
+    expect(apply).not.toHaveBeenCalled();
+    expect(journal.phase).toBe('cleanup-required');
+    expect(journal.checks.absent).toBe(false);
+    expect(journal.resources).toEqual(dnsFixtureInventory([owned], marker));
+  });
+  it('applies an allowed cleanup with exact confirmation and stops on incomplete outcomes', async () => {
+    const result = { data: { planId: 'cleanup', actions: [{ ...action, type: 'delete', requiresConfirm: true }] } };
+    const apply = vi.fn(async () => ({ data: { receipts: [{ status: 'succeeded' }] } }));
+    await expect(applyDnsFixturePlan(result, marker, 'absent', apply)).resolves.toBe(true);
+    expect(apply).toHaveBeenCalledExactlyOnceWith({ planId: 'cleanup', confirmActions: ['dns1'] });
+    apply.mockResolvedValueOnce({ data: { receipts: [{ status: 'pending' }] } });
+    await expect(applyDnsFixturePlan(result, marker, 'absent', apply)).rejects.toThrow('incomplete');
+    apply.mockClear();
+    await expect(applyDnsFixturePlan({ data: { planId: 'noop', actions: [{ ...action, type: 'noop' }] } }, marker, 'absent', apply)).resolves.toBe(false);
+    expect(apply).not.toHaveBeenCalled();
   });
   it('rejects extra domain-engine addresses that could mutate the retained app', () => {
     const mapping = { id: 'domain:fixture.example.com', type: 'create', resource: { kind: 'domain', name: 'fixture.example.com', provider: 'gcp' }, metadata: { engineSegment: { addresses: ['google_cloud_run_domain_mapping.fixture'] } } };

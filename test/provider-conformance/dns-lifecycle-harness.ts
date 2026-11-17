@@ -52,6 +52,11 @@ export function assertDnsFixtureTarget(marker: DnsFixtureMarker, actual: {
 export function assertDnsFixtureActions(actions: Array<Record<string, any>>, marker: DnsFixtureMarker, stage: 'create' | 'update' | 'absent'): void {
   for (const action of actions) {
     if (action.type === 'noop') continue;
+    // Cleanup can restore original shared TXT values, but must never create or adopt resources.
+    const allowedTypes = stage === 'create' ? ['create', 'update', 'adopt'] : stage === 'update' ? ['update'] : ['update', 'delete'];
+    if (!allowedTypes.includes(action.type)) throw new Error(stage === 'update'
+      ? 'The TTL update cannot create, replace, adopt or delete another DNS record.'
+      : `The DNS ${stage} stage cannot apply a ${action.type} action.`);
     if (action.resource?.kind !== 'domain' || !action.metadata) throw new Error('The DNS fixture cannot change app, project, service, secret or shared infrastructure.');
     const metadata = action.metadata;
     if (metadata.operation === 'dnsOwnershipReconcile' || metadata.operation === 'gcpDomainForget') {
@@ -70,7 +75,6 @@ export function assertDnsFixtureActions(actions: Array<Record<string, any>>, mar
         || !Array.isArray(metadata.engineSegment.addresses) || !metadata.engineSegment.addresses.length
         || metadata.engineSegment.addresses.some((address: unknown) => typeof address !== 'string' || !allowed.test(address)))
         throw new Error('The DNS engine action is outside this exact fixture target.');
-      if (stage === 'update' && !['update', 'noop'].includes(action.type)) throw new Error('The TTL update cannot create, replace, adopt or delete another DNS record.');
       continue;
     }
     if (['gcpDomainVerify', 'gcpDomainReady'].includes(metadata.operation)) {
@@ -83,6 +87,20 @@ export function assertDnsFixtureActions(actions: Array<Record<string, any>>, mar
       && /^google_cloud_run_domain_mapping\.[a-zA-Z0-9_]+$/.test(segment.addresses[0])) continue;
     throw new Error('The DNS fixture contains an unreviewed domain operation.');
   }
+}
+
+/** The live driver and offline regressions share the guard immediately before apply. */
+export async function applyDnsFixturePlan(result: Record<string, any>, marker: DnsFixtureMarker, stage: 'create' | 'update' | 'absent',
+  apply: (input: { planId: string; confirmActions: string[] }) => Promise<Record<string, any>>): Promise<boolean> {
+  assertDnsFixtureActions(result.data.actions, marker, stage);
+  const changes = result.data.actions.filter((action: Record<string, any>) => action.type !== 'noop');
+  if (!changes.length) return false;
+  const applied = await apply({ planId: result.data.planId,
+    confirmActions: changes.filter((action: Record<string, any>) => action.billable || action.dataBearing || action.requiresConfirm)
+      .map((action: Record<string, any>) => action.id) });
+  if (!Array.isArray(applied.data?.receipts) || applied.data.receipts.some((receipt: Record<string, any>) => !['succeeded', 'skipped_noop'].includes(receipt.status)))
+    throw new Error('DNS apply is incomplete; dependent fixture work is stopped.');
+  return true;
 }
 
 export interface SafeDnsOwnedRecord { nativeId: string; name: string; type: DnsRecordType; address: string; owner: string; retainedOnly?: true }
