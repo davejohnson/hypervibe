@@ -190,3 +190,26 @@ describe('database major-version changes', () => {
     expect(actions[0]).toMatchObject({ type: 'update', requiresConfirm: true, metadata: { engineMajorUpgrade: true } });
   });
 });
+
+describe('explicit CI identity approval survives native plan translation', () => {
+  const ciConfig = { files: {}, resources: {
+    'aws_iam_role.ci': { actionId: 'identity:ci-release', kind: 'service' as const, name: 'ci-release', requiresConfirm: true },
+    'aws_iam_role_policy.ci': { actionId: 'identity:ci-release', kind: 'service' as const, name: 'ci-release', requiresConfirm: true },
+  } };
+  it.each(['create', 'update'])('requires confirmation for %s even when it is neither billable nor destructive', (action) => {
+    const mapped = translateEnginePlan({ provider: 'aws', configuration: ciConfig, segment, parsed: parseEnginePlan(plan([
+      { address: 'aws_iam_role.ci', type: 'aws_iam_role', actions: ['no-op'], after: { name: 'existing-ci' } },
+      { address: 'aws_iam_role_policy.ci', type: 'aws_iam_role_policy', actions: [action], after: { policy: '{}' } },
+    ])) });
+    expect(mapped.blockers).toEqual([]);
+    expect(mapped.actions).toEqual([expect.objectContaining({ id: 'identity:ci-release', type: action, requiresConfirm: true })]);
+  });
+  it('does not request approval or expose a mutation segment for an unchanged identity', () => {
+    const mapped = translateEnginePlan({ provider: 'aws', configuration: ciConfig, segment, parsed: parseEnginePlan(plan([
+      { address: 'aws_iam_role.ci', type: 'aws_iam_role', actions: ['no-op'], after: { name: 'existing-ci' } },
+    ])) });
+    expect(mapped.actions[0]).toMatchObject({ type: 'noop' });
+    expect(mapped.actions[0]).not.toHaveProperty('requiresConfirm');
+    expect(mapped.actions[0]).not.toHaveProperty('metadata');
+  });
+});

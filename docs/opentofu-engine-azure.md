@@ -17,6 +17,7 @@ testing environments, production profiles or subsequent revisions.
 
 | Piece | State |
 | --- | --- |
+| Runtime logs and deployment health (`hv_logs`, `hv_health`) | Built; offline transport and command tests only, no live validation. See [diagnostics scope](engine-diagnostics.md). |
 | Sign-in without the Azure CLI | Built; verified live (a personal Microsoft account in a pay-as-you-go directory) |
 | One-time setup (resource group, project Key Vault, deploy identity, roles, GitHub OIDC, client secret) | Built; verified live |
 | OpenTofu authenticates as the deploy identity | Built; verified live |
@@ -26,7 +27,8 @@ testing environments, production profiles or subsequent revisions.
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
-| Production profile (staging, production), `hv_migrate`, CI releases, custom domains | Not built |
+| CI releases | Implemented with a dedicated environment registry; offline verification, live unverified; see [branch releases](engine-ci-releases.md) |
+| Production profile (staging, production), `hv_migrate`, custom domains | Not built |
 
 Current planner limits (code reviewed 2026-11-13):
 [`azureEngineProblems`](../src/application/infrastructure-engine-azure.ts) blocks
@@ -38,11 +40,11 @@ custom hosting domains. Testing environments must share a PostgreSQL version.
 - **Personal Microsoft accounts** in a directory carry no object id in their tokens; sign-in now needs only the tenant.
 - **Saved plans** were refused by `hv_apply` until the Azure operations were on the engine allowlist.
 - **Burstable B1ms was refused in eastus2** for a new pay-as-you-go subscription (`SkuNotAvailable`) although the capability API lists it. The demo moved to westus2, and environments now honor their spec `hosting.region` (the shared server and registry follow the testing environments, which must agree).
-- **ACR Tasks has no BuildKit**, so the generated Dockerfile installs without the optional npm-token mount. A repository Dockerfile that needs BuildKit does not build yet.
+- **The original quick Docker build did not enable BuildKit.** Builds now use the documented ACR multi-step task format with `DOCKER_BUILDKIT=1`; generated and repository Dockerfile secret mounts are preserved. This change has offline evidence only.
 - **Azure assigns a Consumption workload profile** to the environment and to each app and job; it is ignored so plans stay empty.
 - **Dropped connections** (three in one session) left role assignments created but unrecorded; planning now adopts them, as a separately confirmed step.
 - **Slow deletes:** a Container Apps environment drained for over 20 minutes before its Log Analytics workspace went, past the 30-minute engine limit; Azure engine runs now get 60 minutes. Re-planning finished each interrupted teardown.
-- **Build failures** report the run id and the log's last lines; results link the registry's portal page, never the signed log URL.
+- **Build failures** report the run id and link the registry's portal page. Raw log tails and signed log URLs are excluded from results because build output can contain secrets.
 
 ## Access
 
@@ -291,8 +293,28 @@ The testing demo's sign-in, setup, plan/apply, deployment and teardown are recor
 above. That run does not prove the complete
 [common user journey](development/user-journey.md).
 
-The production profile, `hv_migrate`, CI releases and custom
+The production profile, `hv_migrate` and custom
 hosting domains remain unavailable as recorded above. Live evidence is still
 missing here for outside-key collection and more than one testing environment
-sharing resources. BuildKit-dependent repository Dockerfiles also remain blocked.
+sharing resources. BuildKit-dependent repository Dockerfiles now have an implemented
+multi-step task path; live execution remains unverified.
 These are implementation and evidence gaps, not a separate roadmap.
+
+
+## Private package builds
+
+A declared, populated outside `NODE_AUTH_TOKEN` or `NPM_TOKEN` creates a separate
+managed build state for the environment. A reviewed apply creates its ACR task
+and system-assigned identity, grants Key Vault Secrets User at that exact secret,
+and waits for the grant before the first image build. Task runs carry source and
+image-tag overrides only; the task resolves the Key Vault reference into a secret
+volume and passes its file to BuildKit as `npm_token`. No token value is placed in
+build arguments, engine configuration or image layers by Hypervibe. Repository
+Dockerfiles consume the same `npm_token` mount as the generated Dockerfile.
+
+Package-token keys are excluded from web, worker and cron settings and their
+runtime identities. Optional absent tokens use an unprivileged task without a
+secret reference; required missing or unknown tokens stop the build. Teardown
+removes the environment's task before the shared registry or token is removed.
+Native request and generated-configuration checks do not prove live ACR execution,
+role propagation or package-registry access. Those remain unverified.

@@ -60,7 +60,7 @@ function fixture() {
     if (state === 'unknown') return new Response('', { status: 403 });
     if (state === 'absent') return new Response('', { status: 404 });
     if (url.endsWith('/versions/latest')) return state === 'ready'
-      ? Response.json({ state: 'ENABLED', name: 'projects/demo-project/secrets/hv-staging-api-key/versions/7' })
+      ? Response.json({ state: 'ENABLED', name: `projects/demo-project/secrets/${/secrets\/([^/]+)\//.exec(url)![1]}/versions/7` })
       : new Response('', { status: 404 });
     return Response.json({ labels: state === 'foreign' ? { ...labels, 'hv-environment': 'other-environment' } : labels });
   });
@@ -85,6 +85,15 @@ describe('outside keys under the engine container boundary', () => {
     expect(await planInfrastructureEngine(f.ctx, params)).not.toHaveProperty('blocked');
     expect(JSON.stringify(f.configurations.at(-1)!.files['cloudrun.tf.json'])).toContain('"version":"7"');
     expect(f.fetch.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+  });
+
+  it('never gives a private package token to running services', async () => {
+    const f = fixture();
+    const spec = projectSpecSchema.parse({ ...f.spec, secrets: { NODE_AUTH_TOKEN: f.spec.secrets!.API_KEY } });
+    f.setState('ready');
+    const planned = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' });
+    if ('blocked' in planned) throw new Error(planned.blocked.join('; '));
+    expect(JSON.stringify(f.configurations.at(-1)!.files['cloudrun.tf.json'])).not.toContain('secret_key_ref');
   });
 
   it('plans without a value for a key declared required: false, and leaves it out of the services', async () => {

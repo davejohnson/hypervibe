@@ -203,7 +203,7 @@ describe('server tool surface', () => {
     const { client, server } = await makeClient();
     try {
       const tool = (await client.listTools()).tools.find(({ name }) => name === 'hv_secrets')!;
-      expect(tool.inputSchema.properties?.action).toMatchObject({ enum: ['collect', 'rotate', 'ages'] });
+      expect(tool.inputSchema.properties?.action).toMatchObject({ enum: ['collect', 'rotate', 'ages', 'reveal'] });
       expect(tool.inputSchema.properties?.view).toMatchObject({ const: 'inventory' });
       expect(tool.annotations?.readOnlyHint).toBe(false);
     } finally {

@@ -132,6 +132,16 @@ Declarative `principal` attribution does not grant provider roles or establish a
 authenticated ACL. Repository review and actual provider authorization remain
 separate boundaries.
 
+One exception to DG-083 is deliberate: the owner may copy a secret Hypervibe
+generated for their own app, for example to give another app access to it.
+`hv_secrets action="reveal"` opens a page on this computer (127.0.0.1) and the
+value reaches the browser only after a click on that page. It is never in the
+page's HTML, the command result, a log or chat, and an agent that asked for the
+page cannot read it. Only secrets declared with `ownership: "hypervibe"` for
+that environment qualify; a key an outside service issued is read from that
+service. Do not widen this to other secrets, to command output or to injecting
+values into commands an agent runs.
+
 Keep inventory read-only and distinguish value acceptance, deployment activation,
 old-instance retirement, credential authentication and application operation.
 The [credential lifecycle](../credential-lifecycle.md) and
@@ -152,3 +162,18 @@ owner-only regular file inside the linked repository. Ambiguous configurations,
 symlinks, wrong environments and unknown output block. It must not pull, refresh,
 switch environments, mutate services or rotate credentials; the operator performs
 those actions explicitly and then renews the verified Hypervibe connection.
+
+
+## Package tokens in managed builds
+
+Outside `NODE_AUTH_TOKEN` and `NPM_TOKEN` secrets are build credentials, excluded
+from web, worker, cron and release-task runtime settings. AWS and Azure choose the first declared
+populated key; absent optional keys do not block public builds, while unknown
+observations and required missing keys stop them. GCP uses Secret Manager build
+references, AWS uses CodeBuild Parameter Store references, and Azure uses a managed
+ACR task identity with an exact Key Vault secret reference and file mount. All
+expose the BuildKit secret id `npm_token`; the running app does not receive it.
+New build identities and grants remain part of reviewed engine plans. Existing
+AWS Lambda images must be verified with the new secret loader before runtime
+permissions are narrowed. Offline provider and generated-program checks are not
+live private-package build evidence.

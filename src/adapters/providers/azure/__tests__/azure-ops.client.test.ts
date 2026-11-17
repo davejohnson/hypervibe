@@ -18,16 +18,16 @@ function fake(route: (method: string, url: string, body?: string) => Response) {
 
 describe('Azure Key Vault secret store', () => {
   it('writes under the environment\'s names, observes presence without returning the value, and never counts errors as absent', async () => {
+    let metadataStatus = 200;
     const azure = fake((method, url) => {
-      if (url.includes('/secrets/test--jwt-secret') && method === 'GET') return json(200, { value: 'the-value' });
-      if (url.includes('/secrets/test--missing-key')) return json(404, { error: { code: 'SecretNotFound' } });
-      if (url.includes('/secrets/test--flaky')) return json(503);
+      if (url.includes('/secrets?') && method === 'GET') return json(metadataStatus, { value: [{ id: 'https://hv-app-abc123.vault.azure.net/secrets/test--jwt-secret', attributes: { enabled: true } }] });
       if (method === 'PUT' && url.includes('/secrets/test--gone')) return json(409, { error: { code: 'ObjectIsDeletedButRecoverable' } });
       return json(200, {});
     });
     const store = azureKeyVaultSecretStore(azure.tokens, 'https://hv-app-abc123.vault.azure.net/', (key) => `test--${key.toLowerCase().replace(/_/g, '-')}`);
     expect(await store.observe('JWT_SECRET')).toBe('present');
     expect(await store.observe('MISSING_KEY')).toBe('absent');
+    metadataStatus = 503;
     expect(await store.observe('FLAKY')).toEqual({ unknown: 'Key Vault could not be read (HTTP 503).' });
     expect(await store.write('STRIPE_KEY', 'sk_live')).toBeUndefined();
     expect(await store.write('GONE', 'x')).toMatch(/deleted from Key Vault recently/);

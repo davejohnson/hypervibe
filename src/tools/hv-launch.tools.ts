@@ -65,7 +65,8 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
           });
         case 'needs_secrets':
           return commandSuccess(result, {
-            hint: 'A local page is open in the user\'s browser to add the keys the app needs from outside services. Share the link in case it did not open, then call hv_launch again once they have saved every key.',
+            hint: !result.url ? 'The keys page was not finished and has closed. Call hv_launch again to reopen it; the user then adds the listed keys there.'
+              : 'A local page is open in the user\'s browser to add the keys the app needs from outside services. Share the link in case it did not open, then call hv_launch again once they have saved every key.',
             agentInstruction: { action: 'ask_user', message: 'Ask the user to add each listed key on the local page (each has a link to where it is created). Never ask for key values in chat.' },
             next: ['hv_launch'],
           });

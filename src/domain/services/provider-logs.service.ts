@@ -9,6 +9,7 @@ import {
   isProviderRuntimeLogsAdapter,
   type ProviderDeployment,
   type ProviderLogEntry,
+  type ProviderRuntimeLogsResult,
 } from '../ports/provider-logs.port.js';
 
 export type { ProviderDeployment };
@@ -176,7 +177,7 @@ export async function fetchProviderLogs(
   serviceName: string,
   lines: number,
   options: { errorsOnly?: boolean } = {}
-): Promise<{ deploymentStatus?: string; deploymentId?: string; logs: ProviderLogEntry[] }> {
+): Promise<ProviderRuntimeLogsResult> {
   const result = await adapterFactory.getProviderAdapter(provider, project);
   if (!result.success || !result.adapter) {
     throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);

@@ -20,6 +20,8 @@ export const AZURE_SCOPES = {
   postgres: 'https://ossrdbms-aad.database.windows.net/.default',
 } as const;
 
+export interface AzureTokenProvider { get(scope: string): Promise<string>; readonly fetchImpl: typeof fetch }
+
 /** Client-credentials tokens for the deploy identity, one per resource, reused until five minutes before expiry. */
 export class AzureTokens {
   private readonly cache = new Map<string, { token: string; expiresAt: number }>();
@@ -42,7 +44,7 @@ export class AzureTokens {
 
 export interface RestResult { status: number; body: Record<string, unknown> }
 
-export async function azureRest(tokens: AzureTokens, scope: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}): Promise<RestResult> {
+export async function azureRest(tokens: AzureTokenProvider, scope: string, method: string, url: string, body?: unknown, headers: Record<string, string> = {}): Promise<RestResult> {
   const response = await tokens.fetchImpl(url, {
     method, headers: { authorization: `Bearer ${await tokens.get(scope)}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000),
@@ -64,15 +66,20 @@ export interface AzureKeyVaultSecretStore {
   name: string;
   observe(key: string): Promise<'present' | 'absent' | { unknown: string }>;
   write(key: string, value: string): Promise<string | undefined>;
+  /** Only the owner's local reveal page may receive this value. */
+  read(key: string): Promise<{ value: string } | { error: string }>;
 }
 
 /**
- * One environment's secrets in the project Key Vault. Values only go in:
- * observe reports presence and discards the value unread.
+ * One environment's secrets in the project Key Vault. Observation reads metadata
+ * only; a secret value is fetched separately when the owner clicks the local page.
  */
-export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, nameFor: (key: string) => string = azureSecretName): AzureKeyVaultSecretStore {
+export function azureKeyVaultSecretStore(tokens: AzureTokenProvider, vaultUri: string, nameFor: (key: string) => string = azureSecretName): AzureKeyVaultSecretStore {
   if (!/^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(vaultUri)) throw new Error('Key Vault address is invalid.');
-  const call = async (method: string, key: string, body?: unknown) => tokens.fetchImpl(`${vaultUri}secrets/${nameFor(key)}?api-version=7.4`, {
+  const secretUrl = (key: string) => `${vaultUri}secrets/${encodeURIComponent(nameFor(key))}`;
+  const hasVersion = (id: unknown, key: string): boolean => typeof id === 'string'
+    && id.startsWith(`${secretUrl(key)}/`) && /^[^/?#]+$/.test(id.slice(secretUrl(key).length + 1));
+  const call = async (method: string, key: string, body?: unknown) => tokens.fetchImpl(`${secretUrl(key)}?api-version=7.4`, {
     method, headers: { authorization: `Bearer ${await tokens.get(AZURE_SCOPES.vault)}`, ...(body ? { 'content-type': 'application/json' } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(20_000),
   });
@@ -80,13 +87,49 @@ export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, 
     name: 'Azure Key Vault',
     async observe(key) {
       try {
+        // List Secrets gives current/base metadata without values. Listing versions
+        // cannot prove the current value is enabled because their order is undefined.
+        let next = `${vaultUri}secrets?api-version=7.4&maxresults=25`;
+        const visited = new Set<string>();
+        while (visited.size < 100 && !visited.has(next)) {
+          const url = new URL(next);
+          if (url.origin !== new URL(vaultUri).origin || url.pathname !== '/secrets' || url.username || url.password || url.hash) break;
+          visited.add(next);
+          const response = await tokens.fetchImpl(next, {
+            method: 'GET', headers: { authorization: `Bearer ${await tokens.get(AZURE_SCOPES.vault)}` }, signal: AbortSignal.timeout(20_000),
+          });
+          if (response.status !== 200) {
+            await response.body?.cancel();
+            return { unknown: `Key Vault could not be read (HTTP ${response.status}).` };
+          }
+          const body = await response.json() as { value?: Array<{ id?: unknown; attributes?: { enabled?: unknown } }>; nextLink?: unknown };
+          if (!Array.isArray(body?.value) || body.value.some((item) => typeof item?.id !== 'string'
+            || !item.id.startsWith(`${vaultUri}secrets/`) || !/^[A-Za-z0-9-]+$/.test(item.id.slice(`${vaultUri}secrets/`.length)))) break;
+          const current = body.value.find((item) => item.id === secretUrl(key));
+          if (current) return current.attributes?.enabled === true ? 'present' : { unknown: 'The current Key Vault secret is disabled or its enabled state is unknown.' };
+          if (body.nextLink == null) return 'absent';
+          if (typeof body.nextLink !== 'string' || !body.nextLink) break;
+          next = body.nextLink;
+        }
+        return { unknown: 'Key Vault did not return complete secret metadata.' };
+      } catch {
+        return { unknown: 'Key Vault could not be read.' };
+      }
+    },
+    async read(key) {
+      try {
         const response = await call('GET', key);
-        await response.body?.cancel();
-        if (response.status === 200) return 'present';
-        if (response.status === 404) return 'absent';
-        return { unknown: `Key Vault could not be read (HTTP ${response.status}).` };
-      } catch (error) {
-        return { unknown: `Key Vault could not be read (${error instanceof Error ? error.name : 'error'}).` };
+        if (response.status !== 200) {
+          await response.body?.cancel();
+          return { error: `Key Vault could not read the secret value (HTTP ${response.status}).` };
+        }
+        const body = await response.json() as { id?: unknown; value?: unknown };
+        if (!hasVersion(body?.id, key) || typeof body.value !== 'string' || !body.value) {
+          return { error: 'Key Vault did not return the requested secret value.' };
+        }
+        return { value: body.value };
+      } catch {
+        return { error: 'Key Vault could not read the secret value.' };
       }
     },
     async write(key, value) {
@@ -104,7 +147,7 @@ export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, 
 }
 
 /** Deletes and purges every secret whose name starts with the prefix, so a recreated environment can reuse the names. */
-export async function purgeVaultSecrets(tokens: AzureTokens, vaultUri: string, prefix: string): Promise<{ removed: number } | { error: string }> {
+export async function purgeVaultSecrets(tokens: AzureTokenProvider, vaultUri: string, prefix: string): Promise<{ removed: number } | { error: string }> {
   const names: string[] = [];
   let next: string | undefined = `${vaultUri}secrets?api-version=7.4&maxresults=25`;
   while (next) {
@@ -145,7 +188,7 @@ export type SqlRunner = (database: string, statements: (query: (sql: string, val
  * with a short-lived Entra token as the password, over TLS with the certificate
  * verified against the host name. Flexible Server has no SQL-over-HTTPS API.
  */
-export function entraSqlRunner(tokens: AzureTokens, host: string, user: string): SqlRunner {
+export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: string): SqlRunner {
   return async (database, statements) => {
     const client = new pg.Client({
       host, port: 5432, database, user, password: await tokens.get(AZURE_SCOPES.postgres),
@@ -208,7 +251,7 @@ export async function dropEnvironmentDatabase(sql: SqlRunner, environmentName: s
 // ------------------------------------------------------------------ Storage and absence
 
 /** Deletes every blob in a container (shared keys are off, so this uses the deploy identity's data role). */
-export async function emptyContainer(tokens: AzureTokens, account: string, container: string): Promise<{ deleted: number } | { gone: true } | { error: string }> {
+export async function emptyContainer(tokens: AzureTokenProvider, account: string, container: string): Promise<{ deleted: number } | { gone: true } | { error: string }> {
   const base = `https://${account}.blob.core.windows.net/${container}`;
   const headers = { 'x-ms-version': '2023-11-03' };
   let deleted = 0;
@@ -229,7 +272,7 @@ export async function emptyContainer(tokens: AzureTokens, account: string, conta
 }
 
 /** Resources in the group still tagged for this environment; an unreadable answer is never "none". */
-export async function taggedResources(tokens: AzureTokens, subscriptionId: string, resourceGroup: string, tag: string, value: string): Promise<string[] | { unknown: string }> {
+export async function taggedResources(tokens: AzureTokenProvider, subscriptionId: string, resourceGroup: string, tag: string, value: string): Promise<string[] | { unknown: string }> {
   const filter = encodeURIComponent(`tagName eq '${tag}' and tagValue eq '${value}'`);
   let next: string | undefined = `${ARM}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/resources?api-version=2021-04-01&$filter=${filter}`;
   const found: string[] = [];

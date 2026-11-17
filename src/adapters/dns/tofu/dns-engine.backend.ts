@@ -116,7 +116,8 @@ function validateRecord(zone: DnsZoneIdentity, record: DnsRecordIntent): void {
     const expected = dnsRecordNativeId(zone, record.name, record.type, zone.provider === 'cloudflare' ? authority.nativeId.split('/')[1] : undefined);
     if (authority.nativeId !== expected) throw new Error('DNS record native identity does not match the selected scope.');
     if (zone.provider === 'cloudflare' && authority.preserveValues.length) throw new Error('Cloudflare record authority cannot adopt sibling records.');
-    if (authority.kind === 'adopt' && authority.existingValues.some(value => !values.includes(value))) throw new Error('DNS adoption must preserve every existing value. Plan later removal separately.');
+    // A CNAME has a single target, so adopting one to point elsewhere necessarily replaces it; every other type keeps what it found.
+    if (authority.kind === 'adopt' && record.type !== 'CNAME' && authority.existingValues.some(value => !values.includes(value))) throw new Error('DNS adoption must preserve every existing value. Plan later removal separately.');
   }
   if (record.type === 'CNAME' && unique(values).length !== 1) throw new Error('CNAME RRsets must contain exactly one target.');
 }

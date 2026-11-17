@@ -10,7 +10,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
-import { acquireManagedDatabaseAccess } from '../domain/services/database-access.service.js';
+import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
 import { migrationDatabaseBindingConflict } from './migration-database-binding.js';
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
@@ -408,7 +408,8 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
-    const summary = sourceAccess ? await sourceAccess.lease.withConnection(summarizeDatabase) : undefined;
+    const summary = sourceAccess ? await summarizeDatabaseAccess(sourceAccess.lease) : undefined;
+    if (params.copyData && sourceAccess?.lease.mode === 'data_api') return { status: 'blocked', message: 'Aurora Data API supports source inspection, but this migration requires a managed PostgreSQL private connector for data transfer. Hypervibe does not yet provide that connector.' };
     if (!params.copyData) {
       const what = summary ? `the ${params.from} database (${summary.tables} tables, about ${summary.rows} rows)`
         : privateRailwaySource ? `the whole ${params.from} database (exported privately inside Railway by a temporary task that is deleted afterwards)` : 'no database';
@@ -780,11 +781,19 @@ async function sourceDatabaseMajor(ctx: CommandContext, project: Project, source
   const access = await acquireManagedDatabaseAccess(project, sourceEnvironment);
   if (!access.ok) return { blocked: `Could not open the source database: ${access.error}` };
   try {
-    const summary = await access.lease.withConnection(summarizeDatabase);
+    const summary = await summarizeDatabaseAccess(access.lease);
     return { major: Math.floor(Number(summary.version) / 10000) };
   } finally {
     await access.lease.release().catch(() => undefined);
   }
+}
+
+async function summarizeDatabaseAccess(lease: DatabaseAccessLease): Promise<{ tables: number; rows: string; version: string }> {
+  if (!lease.query) return lease.withConnection(summarizeDatabase);
+  const result = await lease.query("SELECT current_setting('server_version_num') AS version, count(*)::text AS tables, COALESCE(sum(n_live_tup), 0)::text AS rows FROM pg_stat_user_tables", [], { readOnly: true });
+  const row = result.rows?.[0];
+  if (!result.success || !row || !/^\d+$/.test(String(row.version)) || !/^\d+$/.test(String(row.tables)) || !/^\d+$/.test(String(row.rows))) throw new Error('The source database summary could not be verified.');
+  return { tables: Number(row.tables), rows: String(row.rows), version: String(row.version) };
 }
 
 async function summarizeDatabase(url: string): Promise<{ tables: number; rows: string; version: string }> {

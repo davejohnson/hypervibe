@@ -1,3 +1,4 @@
+import { observeManagedEngineDatabase } from '../domain/services/engine-database-access.service.js';
 import type { CommandContext } from './context.js';
 import { HvError } from './results.js';
 import {
@@ -77,7 +78,7 @@ function advertisedResources(providerName: string): string[] {
   const resources = new Set<string>(['connection']);
   for (const resource of registered.inspection?.resources ?? []) resources.add(resource);
   if (providerRegistry.supports(providerName, 'hosting')) resources.add('environment');
-  if (providerRegistry.supports(providerName, 'database')) resources.add('database');
+  if (providerRegistry.supports(providerName, 'database') || ['aws', 'azure'].includes(providerName)) resources.add('database');
   if (providerRegistry.supports(providerName, 'cache')) resources.add('cache');
   if (providerRegistry.supports(providerName, 'storage')) resources.add('storage');
   return [...resources];
@@ -492,6 +493,14 @@ export async function inspectProvider(
     throw new HvError('NOT_FOUND', `Environment "${input.env}" not found.`, {
       hint: 'Pass both project and an existing environment name.',
     });
+  }
+  if (input.resource === 'database' && (['aws', 'azure'].includes(providerName) || environment?.platformBindings.aws && providerName === 'rds' || environment?.platformBindings.azure && providerName === 'azure-postgres')) {
+    if (!project || !environment) throw new HvError('VALIDATION', 'Engine database inspection requires project and env.');
+    if (input.id || input.name || input.scope || input.region || input.limit !== undefined) throw new HvError('VALIDATION', 'Engine database inspection uses the exact accepted project/environment binding; remove additional selectors.');
+    const engineProvider = providerName === 'rds' ? 'aws' : providerName === 'azure-postgres' ? 'azure' : providerName;
+    const bound = environment.platformBindings.provider;
+    if (bound && bound !== engineProvider || !environment.platformBindings[engineProvider]) throw new HvError('VALIDATION', 'The selected environment has no matching engine database binding.');
+    return { provider: providerName, resource: 'database', environment: environment.name, ...await observeManagedEngineDatabase(project, environment) };
   }
   const hostingForensics = Boolean(
     environment

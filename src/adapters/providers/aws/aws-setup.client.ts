@@ -59,6 +59,14 @@ export function appBoundaryDocument(): Record<string, unknown> {
         // ...and checks whether the database is paused before counting, so counting never wakes it.
         'cloudwatch:GetMetricData',
       ] },
+      // A separate, environment-scoped CI role uses these operations. A boundary
+      // is a ceiling only: runtime/build roles do not gain these permissions.
+      { Sid: 'CiReleaseCeiling', Effect: 'Allow', Resource: '*', Action: [
+        'lambda:GetFunction', 'lambda:GetFunctionConfiguration', 'lambda:GetFunctionUrlConfig', 'lambda:ListTags', 'lambda:UpdateFunctionCode',
+        'codebuild:BatchGetProjects', 'codebuild:StartBuild', 'codebuild:BatchGetBuilds', 'ecr:DescribeImages', 'ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition',
+      ] },
+      { Sid: 'CiTaskRevisionTags', Effect: 'Allow', Action: ['ecs:TagResource'], Resource: 'arn:aws:ecs:*:*:task-definition/hv-*:*',
+        Condition: { StringEquals: { 'ecs:CreateAction': 'RegisterTaskDefinition' } } },
       // The worker waker reads pending work with its own read-only database login.
       { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: 'arn:aws:secretsmanager:*:*:secret:hypervibe/*' },
       { Sid: 'AppSecrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath', 'kms:Decrypt'], Resource: '*' },

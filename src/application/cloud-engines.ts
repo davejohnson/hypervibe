@@ -1,3 +1,5 @@
+import type { EngineCiBinding } from '../domain/spec/engine-ci-binding.js';
+import type { EngineCiReleaseTarget, GitHubOidcContext } from '../domain/ports/engine-ci.port.js';
 import type { ConvergeResult } from '../domain/plan/converge.executor.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
@@ -50,6 +52,8 @@ export interface CloudEngine {
    * data; 'settings' copies runtime settings only. Absent: not built yet.
    */
   migration?: 'full' | 'settings';
+  /** OIDC-authenticated, exact-bound image-only release; never provisions infrastructure. */
+  ciRelease?(binding: EngineCiBinding, context: GitHubOidcContext, spec: ProjectSpec): Promise<EngineCiReleaseTarget>;
   /**
    * Guided one-time access setup: sign in, preview the exact access Hypervibe will
    * create, and create it once approved. `input` carries the person's answers.
@@ -60,6 +64,8 @@ export interface CloudEngine {
   planTeardown?(ctx: CommandContext, params: EnginePlanParams & { deleteFinalSnapshot?: boolean }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
   apply(ctx: CommandContext, params: EngineApplyParams): Promise<EngineApplyOutcome>;
   release(ctx: CommandContext, params: EngineReleaseParams): Promise<EngineReleaseOutcome>;
+  /** Generates a repository workflow only after the exact applied CI binding exists. */
+  ciWorkflow?(repositoryRoot: string, binding: unknown): Promise<{ path: string; changed: boolean; branch: string }>;
   secretStore(ctx: CommandContext, project: Project, spec: ProjectSpec, environmentName: string): Promise<EngineSecretStore | { blocked: string }>;
   /** True when a saved plan document was produced by this engine. */
   ownsPlan(document: { engine?: Record<string, unknown> }): boolean;
@@ -78,6 +84,8 @@ const gcp: CloudEngine = {
 
 const aws: CloudEngine = {
   id: 'aws', hostingProvider: 'aws', migration: 'settings',
+  ciWorkflow: async (root, binding) => (await import('./engine-ci-workflow.js')).writeEngineCiWorkflow(root, binding),
+  ciRelease: async (binding, context, spec) => (await import('../adapters/providers/aws/aws-ci-release.js')).createAwsCiReleaseTarget(binding, context, spec),
   plan: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsTeardown(ctx, params),
   apply: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).applyAwsInfrastructureEngine(ctx, params),
@@ -89,6 +97,8 @@ const aws: CloudEngine = {
 
 const azure: CloudEngine = {
   id: 'azure', hostingProvider: 'azure',
+  ciWorkflow: async (root, binding) => (await import('./engine-ci-workflow.js')).writeEngineCiWorkflow(root, binding),
+  ciRelease: async (binding, context, spec) => (await import('../adapters/providers/azure/azure-ci-release.js')).createAzureCiReleaseTarget(binding, context, spec),
   plan: async (ctx, params) => (await import('./infrastructure-engine-azure.js')).planAzureInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine-azure.js')).planAzureTeardown(ctx, params),
   apply: async (ctx, params) => (await import('./infrastructure-engine-azure.js')).applyAzureInfrastructureEngine(ctx, params),

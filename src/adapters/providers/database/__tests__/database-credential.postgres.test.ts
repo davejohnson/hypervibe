@@ -1,11 +1,21 @@
+import '../../aws/aws-engine.adapter.js';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { SqliteAdapter } from '../../../db/sqlite.adapter.js';
+import { ProjectRepository } from '../../../db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../../db/repositories/environment.repository.js';
+import { ConnectionRepository } from '../../../db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../secrets/secret-store.js';
+import { acquireEngineDatabaseAccess } from '../../../../domain/services/engine-database-access.service.js';
+import { analyzeSqlQuery } from '../../../../domain/services/sql-query-analysis.js';
 import { createPostgresCredentialLifecycle } from '../database-credential.js';
 import type { IDatabaseAdapter } from '../../../../domain/ports/database.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
@@ -51,6 +61,99 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
     if (started) await execute('pg_ctl', ['-D', join(directory, 'data'), '-m', 'immediate', '-w', 'stop'], { env });
     if (directory) await rm(directory, { recursive: true, force: true });
   });
+
+  it('authenticates Aurora diagnostics as the environment login so one readonly SELECT cannot restore control-plane authority', async () => {
+    // PostgreSQL checks SET ROLE against session_user, not current_user:
+    // https://www.postgresql.org/docs/17/sql-set-role.html
+    // The HTTP peer below only translates real SDK Data API messages to real SQL.
+    // It selects the SQL login from secretArn, exactly the provider auth boundary.
+    const app = 'native_query_owner', control = 'native_query_control', database = 'native_query_database';
+    const password = 'synthetic-query-password';
+    await admin.query(`CREATE ROLE ${app} LOGIN PASSWORD '${password}'`);
+    await admin.query(`CREATE ROLE ${control} LOGIN NOINHERIT PASSWORD '${password}'`);
+    await admin.query(`GRANT ${app} TO ${control}`);
+    await admin.query(`CREATE DATABASE ${database} OWNER ${app}`);
+    const open = async (user: string) => {
+      const client = new pg.Client({ host: join(directory, 'socket'), database, user, password });
+      await client.connect(); return client;
+    };
+    const setup = await open('auth_admin');
+    try {
+      await setup.query('CREATE TABLE admin_only(secret text)');
+      await setup.query("INSERT INTO admin_only VALUES ('synthetic-outside-environment')");
+      await setup.query(`ALTER TABLE admin_only OWNER TO ${control}`);
+    } finally { await setup.end(); }
+    const exploit = "WITH elevate AS MATERIALIZED (SELECT set_config('role','none',true)) SELECT current_user, query_to_xml('SELECT secret FROM admin_only',false,true,'') FROM elevate";
+    expect(analyzeSqlQuery(exploit)).toMatchObject({ isMutation: false, multiStatement: false });
+    const counterexample = await open(control);
+    try {
+      await counterexample.query('BEGIN READ ONLY');
+      await counterexample.query(`SET LOCAL ROLE "${app}"`);
+      const escaped = await counterexample.query(exploit);
+      expect(escaped.rows[0]).toMatchObject({ current_user: control });
+      expect(escaped.rows[0].query_to_xml).toContain('synthetic-outside-environment');
+      await counterexample.query('ROLLBACK');
+    } finally { await counterexample.end(); }
+
+    SqliteAdapter.resetInstance();
+    SqliteAdapter.getInstance(join(directory, 'query.sqlite')).migrate();
+    const project = new ProjectRepository().create({ name: 'native-query-project', defaultPlatform: 'aws' });
+    const environments = new EnvironmentRepository();
+    const environment = environments.create({ projectId: project.id, name: 'test', platformBindings: {} });
+    const clusterArn = 'arn:aws:rds:us-west-2:111122223333:cluster:native-query';
+    const masterSecretArn = 'arn:aws:secretsmanager:us-west-2:111122223333:secret:master-AbCd12';
+    const querySecretName = `hypervibe/${environment.id.toLowerCase()}/database-query`;
+    const querySecretArn = `arn:aws:secretsmanager:us-west-2:111122223333:secret:${querySecretName}-AbCd12`;
+    environment.platformBindings = { provider: 'aws', aws: { kind: 'opentofu', databaseLoginAt: '2026-01-01T00:00:00Z', sharedDatabase: true,
+      database: { clusterArn, accountId: '111122223333', region: 'us-west-2', name: database, owner: app, querySecretArn } } };
+    const connections = new ConnectionRepository();
+    const connection = connections.create({ provider: 'aws', credentialsEncrypted: getSecretStore().encryptObject({ accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'synthetic-local-secret-value-32-characters', roleArn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-deploy', accountId: '111122223333', region: 'us-west-2' }) });
+    connections.updateStatus(connection.id, 'verified');
+    const transactions = new Map<string, pg.Client>();
+    const requests: Array<{ path: string; body: Record<string, any> }> = [];
+    const transport = vi.spyOn(NodeHttpHandler.prototype, 'handle').mockImplementation(async (request: any) => {
+      const raw = String(request.body);
+      const body = raw.startsWith('{') ? JSON.parse(raw) : Object.fromEntries(new URLSearchParams(raw));
+      requests.push({ path: request.path, body });
+      let statusCode = 200, payload: string;
+      try {
+        if (request.hostname.startsWith('sts.')) payload = '<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>ASSUMEDACCESSKEY123</AccessKeyId><SecretAccessKey>synthetic-assumed-secret</SecretAccessKey><SessionToken>synthetic-session-token</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>';
+        else if (request.hostname.startsWith('rds.')) payload = `<DescribeDBClustersResponse xmlns="http://rds.amazonaws.com/doc/2014-10-31/"><DescribeDBClustersResult><DBClusters><DBCluster><DBClusterArn>${clusterArn}</DBClusterArn><Engine>aurora-postgresql</Engine><Status>available</Status><HttpEndpointEnabled>true</HttpEndpointEnabled><MasterUserSecret><SecretArn>${masterSecretArn}</SecretArn></MasterUserSecret></DBCluster></DBClusters></DescribeDBClustersResult></DescribeDBClustersResponse>`;
+        else if (request.hostname.startsWith('secretsmanager.') && request.headers['x-amz-target']?.endsWith('.DescribeSecret')) payload = JSON.stringify({ ARN: querySecretArn, Name: querySecretName, Tags: [{ Key: 'managed-by', Value: 'hypervibe' }, { Key: 'hv-environment', Value: environment.id.toLowerCase() }], VersionIdsToStages: { current: ['AWSCURRENT'] } });
+        else if (request.path === '/BeginTransaction') {
+          if (![querySecretArn, masterSecretArn].includes(body.secretArn)) throw new Error('Unknown synthetic secret.');
+          const client = await open(body.secretArn === querySecretArn ? app : control);
+          const transactionId = `transaction-${transactions.size}`;
+          transactions.set(transactionId, client); await client.query('BEGIN'); payload = JSON.stringify({ transactionId });
+        } else if (request.path === '/Execute') {
+          const client = transactions.get(body.transactionId); if (!client) throw new Error('Unknown transaction.');
+          const result = await client.query(body.sql);
+          payload = JSON.stringify({ formattedRecords: JSON.stringify(result.rows), numberOfRecordsUpdated: result.rowCount ?? 0 });
+        } else if (request.path === '/RollbackTransaction' || request.path === '/CommitTransaction') {
+          const client = transactions.get(body.transactionId); if (!client) throw new Error('Unknown transaction.');
+          const commit = request.path === '/CommitTransaction'; await client.query(commit ? 'COMMIT' : 'ROLLBACK');
+          await client.end(); transactions.delete(body.transactionId);
+          payload = JSON.stringify({ transactionStatus: commit ? 'Transaction Committed' : 'Rollback Complete' });
+        } else throw new Error('Unexpected synthetic provider operation.');
+      } catch {
+        statusCode = 400; payload = JSON.stringify({ __type: 'DatabaseErrorException', message: 'Synthetic PostgreSQL rejected the operation.' });
+      }
+      return { response: { statusCode, headers: { 'content-type': request.hostname.startsWith('sts.') || request.hostname.startsWith('rds.') ? 'text/xml' : 'application/json' }, body: Readable.from([payload]) } };
+    });
+    let access: Awaited<ReturnType<typeof acquireEngineDatabaseAccess>> | undefined;
+    try {
+      access = await acquireEngineDatabaseAccess(project, environment);
+      expect(access.ok).toBe(true); if (!access.ok) return;
+      const result = await access.lease.query!(exploit, [], { readOnly: true });
+      expect(result.success).toBe(false);
+      expect(requests.find(request => request.path === '/BeginTransaction')?.body.secretArn).toBe(querySecretArn);
+      expect(JSON.stringify(result)).not.toContain('synthetic-outside-environment');
+    } finally {
+      if (access?.ok) await access.lease.release();
+      for (const client of transactions.values()) await client.end();
+      transport.mockRestore(); SqliteAdapter.resetInstance();
+    }
+  }, 60_000);
 
   it('changes real PostgreSQL authentication while keeping old sessions distinct from fresh credential proof', async () => {
     await admin.query("CREATE ROLE native_rotate_user LOGIN PASSWORD 'previous-native-password'");

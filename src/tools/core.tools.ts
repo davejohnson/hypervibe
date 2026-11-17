@@ -1,3 +1,4 @@
+import { observeManagedEngineDatabase } from '../domain/services/engine-database-access.service.js';
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { secretAges } from '../application/secret-rotation.js';
 import { engineWorkerStatus, isEngineManaged } from '../application/infrastructure-engine.js';
@@ -1112,7 +1113,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (envSpec && isEngineManaged(envSpec)) {
         const cloud = envSpec.hosting.provider === 'aws' ? 'AWS' : envSpec.hosting.provider === 'azure' ? 'Azure' : undefined;
         if (cloud) {
-          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: 'not read' }, {
+          const databaseEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+          const database = envSpec.database && databaseEnvironment ? await observeManagedEngineDatabase(project, databaseEnvironment) : undefined;
+          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: 'not read', ...(database ? { database } : {}) }, {
             warnings: [`hv_status does not read live worker state on ${cloud} yet.`],
             hint: 'Run hv_health for the web service and hv_plan scope="infrastructure" for drift.',
             next: ['hv_health', 'hv_plan'],
