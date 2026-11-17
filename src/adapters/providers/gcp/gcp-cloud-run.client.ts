@@ -243,6 +243,7 @@ export async function runCloudRunJobOnce(
   if (operation.error || (operation.response?.failedCount ?? 0) > 0) {
     return { status: 'failed', message: `The release command failed: ${operation.error?.message ?? 'see hv_logs for the job output'}. No service was switched.` };
   }
+  if (!((operation.response?.succeededCount ?? 0) > 0)) return { status: 'failed', message: 'The release command did not report a successful run: see hv_logs for the job output. No service was switched.' };
   return { status: 'released', message: 'The release command finished successfully.' };
 }
 

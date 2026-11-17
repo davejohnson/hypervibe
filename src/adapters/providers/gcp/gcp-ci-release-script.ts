@@ -53,6 +53,7 @@ if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
   for (let i = 0; i < 360 && !run.done; i++) { await new Promise((r) => setTimeout(r, 5000)); const polled = await call('https://run.googleapis.com/v2/' + run.name); if (polled.ok) run = await polled.json(); }
   if (!run.done) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
   if (run.error || (run.response?.failedCount ?? 0) > 0) throw new Error('The release command failed: ' + (run.error?.message ?? 'see the job logs in Cloud Run') + '. No service was switched.');
+  if (!((run.response?.succeededCount ?? 0) > 0)) throw new Error('The release command did not report a successful run. No service was switched.');
   console.log('Release command finished on ' + image);
   process.exit(0);
 }

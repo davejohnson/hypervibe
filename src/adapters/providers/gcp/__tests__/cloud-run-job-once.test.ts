@@ -88,6 +88,13 @@ describe('release command runs once', () => {
     expect(calls).toEqual(['list']);
   });
 
+  // #546: "done" alone is not proof the command ran.
+  it('fails when the finished run reports no successful task', async () => {
+    const store = memory();
+    cloud({ run: () => Response.json({ name: 'projects/demo/locations/us-central1/operations/op9', done: true, response: {} }) });
+    expect(await run(store)).toMatchObject({ status: 'failed', message: expect.stringMatching(/did not report a successful run/) });
+  });
+
   it('ignores a record for a different image', async () => {
     const store = memory({ image: 'other@sha256:' + 'b'.repeat(64), startedAt: '2026-11-17T09:00:00.000Z', execution: executionName });
     const calls = cloud({ run: () => Response.json({ name: 'projects/demo/locations/us-central1/operations/op3', done: true, response: { succeededCount: 1 } }) });

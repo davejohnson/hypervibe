@@ -7,13 +7,13 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
 const image = 'registry/web@sha256:1';
 const executionName = 'projects/p/locations/r/jobs/release/executions/e1';
 
-async function runJob(options: { executions: unknown[] | 503; final?: Record<string, unknown> }) {
+async function runJob(options: { executions: unknown[] | 503; final?: Record<string, unknown>; started?: Record<string, unknown> }) {
   const calls: string[] = [];
   const job = { template: { template: { containers: [{ image: 'old' }] } } };
   class Exit extends Error {}
   const fetchStub = async (raw: string | URL, init: { method?: string; body?: string } = {}) => {
     const url = String(raw);
-    if (url.endsWith(':run')) { calls.push('run'); return Response.json({ name: 'operations/op', done: true, response: { succeededCount: 1 } }); }
+    if (url.endsWith(':run')) { calls.push('run'); return Response.json(options.started ?? { name: 'operations/op', done: true, response: { succeededCount: 1 } }); }
     if (url.includes('/executions?')) { calls.push('list'); return options.executions === 503 ? new Response('no', { status: 503 }) : Response.json({ executions: options.executions }); }
     if (url.endsWith(executionName)) { calls.push('get-execution'); return Response.json({ name: executionName, ...options.final }); }
     if (init.method === 'PATCH') { job.template.template.containers[0]!.image = JSON.parse(init.body!).template.template.containers[0].image; return Response.json({ done: true }); }
@@ -34,6 +34,11 @@ describe('generated Google release program: release command', () => {
     expect(await runJob({ executions: [going], final: { completionTime: '2026-11-17T10:00:00Z', succeededCount: 1 } })).toEqual({ calls: ['list', 'get-execution'], outcome: 'ok' });
     const failed = await runJob({ executions: [going], final: { completionTime: '2026-11-17T10:00:00Z', failedCount: 1 } });
     expect(failed.calls).not.toContain('run'); expect(failed.outcome).toMatch(/release command failed/);
+  });
+  // #546: "done" alone is not proof the command ran; a finished run must report a successful task.
+  it('fails when the finished run reports no successful task', async () => {
+    const result = await runJob({ executions: [], started: { name: 'operations/op', done: true, response: {} } });
+    expect(result.outcome).toMatch(/did not report a successful run/);
   });
   it('starts nothing when earlier runs cannot be read', async () => {
     const result = await runJob({ executions: 503 });
