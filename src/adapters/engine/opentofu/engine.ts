@@ -68,8 +68,12 @@ function failure(stage: string, run: TofuRunResult): EngineStepFailure {
   return { ok: false, stage, error: `OpenTofu ${stage} ${reason}.${detail ? `\n${detail}` : ''}` };
 }
 
-/** Managed resource addresses recorded in `tofu show -json` state, with taint markers. */
-export function stateAddresses(json: string): Map<string, { tainted: boolean }> {
+/**
+ * Managed resource addresses recorded in `tofu show -json` state, with taint markers.
+ * Undefined when the document cannot be parsed: unreadable state is no evidence, and
+ * must never be read as "nothing exists".
+ */
+export function stateAddresses(json: string): Map<string, { tainted: boolean }> | undefined {
   const result = new Map<string, { tainted: boolean }>();
   const visit = (module: { resources?: Array<{ address?: string; mode?: string; tainted?: boolean }>; child_modules?: unknown[] } | undefined) => {
     for (const resource of module?.resources ?? []) {
@@ -79,7 +83,7 @@ export function stateAddresses(json: string): Map<string, { tainted: boolean }> 
   };
   try {
     visit((JSON.parse(json) as { values?: { root_module?: never } }).values?.root_module);
-  } catch { /* unreadable state yields no evidence */ }
+  } catch { return undefined; }
   return result;
 }
 
@@ -314,7 +318,7 @@ export class OpenTofuEngine {
       }
       backupState(paths, params.planId);
       const before = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
-      const inStateBefore = before.exitCode === 0 ? stateAddresses(before.stdout) : undefined;
+      const inStateBefore = before.exitCode === 0 && !before.truncated ? stateAddresses(before.stdout) : undefined;
       const applied = await this.run({ kind: 'apply', planFile: 'saved.tfplan' }, prepared.directory, prepared.env, prepared.redact);
       const outcomes = interpretApplyEvents(applied.stdout, params.approvedAddresses);
       const diagnostics: string[] = [];
@@ -323,8 +327,8 @@ export class OpenTofuEngine {
       // State is the engine's own record of what exists. Use it to settle addresses the event
       // stream left open (imports emit no completion event; interruptions lose events).
       const settled = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
-      if (settled.exitCode === 0) {
-        const inState = stateAddresses(settled.stdout);
+      const inState = settled.exitCode === 0 && !settled.truncated ? stateAddresses(settled.stdout) : undefined;
+      if (inState) {
         const planned = new Map(parsed.changes.map((change) => [change.address, change.action]));
         for (const address of params.approvedAddresses) {
           if (outcomes[address] === 'succeeded' || outcomes[address] === 'failed') continue;
@@ -343,7 +347,7 @@ export class OpenTofuEngine {
           }
         }
       } else {
-        diagnostics.push('The engine state could not be read after apply; outcomes without explicit evidence remain unknown.');
+        diagnostics.push('The engine state could not be read completely after apply; outcomes without explicit evidence remain unknown.');
       }
       // A dropped connection while the provider waits on Google says nothing about the
       // resource itself; Google usually finishes. Report it as unknown so the next plan

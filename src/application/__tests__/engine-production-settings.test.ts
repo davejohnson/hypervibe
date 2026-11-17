@@ -74,6 +74,18 @@ describe('production settings on Google Cloud', () => {
     expect(RELEASE_SCRIPT).toContain("containers[0].args = ['-lc', command]");
   });
 
+  // #548: Cloud Run must not re-run a one-off migration by itself; a scheduled job keeps its single retry.
+  it('never lets Cloud Run retry the release command on its own', () => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'studio', environments: { staging: {
+      hosting: { provider: 'cloudrun' }, migrations: { mode: 'releaseCommand', command: 'npm run migrate' },
+      services: { web: {}, nightly: { workloadKind: 'cron', cronSchedule: '0 3 * * *', startCommand: 'npm run nightly' } },
+    } } });
+    const input = buildEngineInput(spec, 'staging', { gcpProjectId: 'demo-project', region: 'us-west1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', resourceNameFor: (service) => `${service}-staging` });
+    const jobs = (buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' }).files as Record<string, any>)['jobs.tf.json'].resource.google_cloud_run_v2_job;
+    expect(jobs.release_command.template[0].template[0].max_retries).toBe(0);
+    expect(jobs.nightly.template[0].template[0].max_retries).toBe(1);
+  });
+
   it('keeps replaced and deleted files for 30 days only in a versioned bucket', () => {
     expect(buckets.storage_media.versioning).toEqual([{ enabled: true }]);
     expect(buckets.storage_media.lifecycle_rule).toEqual([{ action: [{ type: 'Delete' }], condition: [{ days_since_noncurrent_time: 30, with_state: 'ARCHIVED' }] }]);

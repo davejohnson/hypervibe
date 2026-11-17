@@ -288,6 +288,10 @@ interface CloudBuildStatus {
     resolvedRepoSource?: {
       commitSha?: string;
     };
+    /** A gitSource build reports its resolved commit here. */
+    resolvedGitSource?: {
+      revision?: string;
+    };
   };
   results?: {
     images?: Array<{
@@ -2561,7 +2565,7 @@ export class CloudRunAdapter implements
       const status = (current.status ?? '').toUpperCase();
       if (status === 'SUCCESS') {
         const imageUri = this.cloudBuildDigestImageUri(current, submittedImageUri);
-        const resolvedCommitSha = current.sourceProvenance?.resolvedRepoSource?.commitSha;
+        const resolvedCommitSha = current.sourceProvenance?.resolvedGitSource?.revision ?? current.sourceProvenance?.resolvedRepoSource?.commitSha;
         return {
           id: current.id,
           logsUrl: current.logsUrl ?? current.logUrl,

@@ -33,6 +33,8 @@ export interface TofuRunResult {
   exitCode: number | null;
   /** True when the process was stopped by timeout or cancellation. */
   interrupted: 'timeout' | 'cancelled' | undefined;
+  /** Set when stdout was cut off at the capture limit: it is incomplete and must not be read as the whole answer. */
+  truncated?: true;
   stdout: string;
   stderr: string;
 }
@@ -116,9 +118,10 @@ export async function runTofu(command: TofuCommand, options: TofuRunOptions): Pr
   });
   let stdout = '';
   let stderr = '';
+  let truncated = false;
   const append = (current: string, chunk: Buffer) =>
     current.length >= MAX_CAPTURE_BYTES ? current : current + chunk.toString('utf8');
-  child.stdout.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
+  child.stdout.on('data', (chunk: Buffer) => { if (stdout.length >= MAX_CAPTURE_BYTES) truncated = true; stdout = append(stdout, chunk); });
   child.stderr.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
 
   let interrupted: TofuRunResult['interrupted'];
@@ -144,6 +147,7 @@ export async function runTofu(command: TofuCommand, options: TofuRunOptions): Pr
   return {
     exitCode,
     interrupted,
+    ...(truncated ? { truncated: true as const } : {}),
     stdout: MACHINE_READABLE.has(command.kind) ? redactExactEngineValues(stdout, options.redact) : redactEngineOutput(stdout, options.redact),
     stderr: redactEngineOutput(stderr, options.redact),
   };

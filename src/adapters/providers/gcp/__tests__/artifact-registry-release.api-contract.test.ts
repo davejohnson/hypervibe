@@ -89,7 +89,7 @@ describe('Artifact Registry release prerequisite', () => {
       }
       if (location === 'https://cloudbuild.googleapis.com/v1/projects/gcp-project/builds' && method === 'POST') {
         expect(JSON.parse(String(init?.body)).images).toEqual([imageUri]);
-        return Response.json({ id: 'build-1', status: 'SUCCESS', results: { images: [{ name: imageUri, digest: `sha256:${'b'.repeat(64)}` }] }, sourceProvenance: { resolvedRepoSource: { commitSha } } });
+        return Response.json({ id: 'build-1', status: 'SUCCESS', results: { images: [{ name: imageUri, digest: `sha256:${'b'.repeat(64)}` }] }, sourceProvenance: source === 'git' ? { resolvedGitSource: { url: 'https://github.com/example/app.git', revision: commitSha } } : {} });
       }
       throw new Error(`Unexpected ${method} ${location}`);
     }));

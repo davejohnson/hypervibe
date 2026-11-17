@@ -144,6 +144,9 @@ export function translateEnginePlan(params: {
     const destructive = changes.some((change) => change.action === 'delete' || change.action === 'replace');
     const adopting = changes.some((change) => change.action === 'import');
     // A database major-version change is irreversible and needs its own explicit approval.
+    // Resizing in place changes the bill without creating anything.
+    const costChange = changes.some((change) => change.action === 'update'
+      && change.changedAttributes.some((attribute) => params.configuration.resources[change.address]?.costAttributes?.includes(attribute)));
     const majorUpgrade = changes.some((change) => change.action === 'update' && change.changedAttributes.includes('database_version'));
     // Field lists help review changes to existing resources; for creates and deletes they are noise.
     const diff: PlanFieldDiff[] = changes
@@ -161,9 +164,9 @@ export function translateEnginePlan(params: {
           ? `adopt the explicitly selected existing ${c.address}` : `${c.action} ${c.address}`).join(', ')}.`,
       ...(diff.length ? { diff } : {}),
       ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
-      ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace') ? { billable: true } : {}),
+      ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace' || costChange) ? { billable: true } : {}),
       // Replacing, deleting or adopting anything is never implied by approving the plan as a whole.
-      ...(destructive || adopting || majorUpgrade || (type !== 'noop' && mapping.requiresConfirm) ? { requiresConfirm: true } : {}),
+      ...(destructive || adopting || majorUpgrade || costChange || (type !== 'noop' && mapping.requiresConfirm) ? { requiresConfirm: true } : {}),
       ...(type === 'noop' ? {} : {
         metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}), ...(majorUpgrade ? { engineMajorUpgrade: true } : {}) },
       }),

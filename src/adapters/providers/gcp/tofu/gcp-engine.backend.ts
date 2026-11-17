@@ -438,7 +438,8 @@ function addScheduledJob(
     template: [{
       template: [{
         service_account: service.runtimeServiceAccountEmail,
-        max_retries: 1,
+        // A one-off release command (migrations) is never re-run by Cloud Run itself; a scheduled job keeps one retry.
+        max_retries: key === RELEASE_JOB_KEY ? 0 : 1,
         timeout: '3600s',
         containers: [container],
         ...(template.volumes ? { volumes: template.volumes } : {}),
@@ -612,7 +613,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     resources[`google_cloud_run_v2_job.${RELEASE_JOB_KEY}`] = { actionId: 'release-job:migrations', kind: 'service', name: 'release command' };
   }
   const redis: Record<string, unknown> = {};
-  const cacheMapping: EngineResourceMapping = { actionId: 'cache:redis', kind: 'cache', name: 'redis', billable: true, dataBearing: true };
+  const cacheMapping: EngineResourceMapping = { actionId: 'cache:redis', kind: 'cache', name: 'redis', billable: true, dataBearing: true, costAttributes: ['memory_size_gb', 'tier'] };
   if (input.cache) {
     if (!/^[a-z][a-z0-9-]{0,38}[a-z0-9]$/.test(input.cache.instanceName)) throw new Error('Memorystore instance name is invalid.');
     if (!/^[a-z][a-z0-9-]{0,62}$/.test(input.cache.network) || !/^[a-z][a-z0-9-]{0,62}$/.test(input.cache.subnetwork)) throw new Error('Cache network names are invalid.');

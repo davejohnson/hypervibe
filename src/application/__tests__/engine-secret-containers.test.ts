@@ -28,6 +28,7 @@ function owned() {
   const environment = ctx.repos.environments.create({ projectId: project.id, name: 'staging' });
   return { ctx, project, environment, labels: { 'managed-by': 'hypervibe', 'hv-environment': environment.id } };
 }
+const ownedLabels = () => ({ labels: owned().labels });
 const secret = 'hv-staging-jwt-secret';
 const base = `https://secretmanager.googleapis.com/v1/projects/demo-project/secrets/${secret}`;
 
@@ -198,6 +199,69 @@ describe('engine-owned Secret Manager containers', () => {
     expect(await writeSecretVersion('test-token', 'demo-project', secret, { ...labels, 'hv-db-generation': '2', 'hv-db-login': 'app_b' }, 'private-value')).toMatchObject({ success: false, status: 'pending' });
     expect(await observeSecret('test-token', 'demo-project', secret)).toMatchObject({ state: 'unknown', reason: expect.stringContaining('unrecognized version') });
     expect(JSON.stringify(ctx.repos.environments.findById(environment.id)!.platformBindings)).not.toContain('private-value');
+  });
+
+  // #573: a save whose response was lost may have been stored. Read what is stored before ever adding another version.
+  describe('a value write whose response was lost', () => {
+    function cloud(options: { committed: boolean; readable?: boolean }) {
+      let version = '1'; let stored = 'old-value'; const posts: string[] = []; let failNext = true;
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          posts.push(url);
+          if (failNext) { failNext = false; if (options.committed) { version = '2'; stored = 'private-value'; } throw new Error('Acknowledgement lost'); }
+          version = String(Number(version) + 1); stored = JSON.parse(String(init.body)).payload ? Buffer.from(JSON.parse(String(init.body)).payload.data, 'base64').toString('utf8') : stored;
+          return Response.json({ name: `projects/demo-project/secrets/${secret}/versions/${version}` });
+        }
+        if (url.endsWith('/versions/latest:access')) return options.readable === false ? new Response('no', { status: 503 })
+          : Response.json({ name: `projects/demo-project/secrets/${secret}/versions/${version}`, payload: { data: Buffer.from(stored).toString('base64') } });
+        if (url.endsWith('/versions/latest')) return Response.json({ state: 'ENABLED', name: `projects/demo-project/secrets/${secret}/versions/${version}` });
+        return Response.json({ name: `projects/demo-project/secrets/${secret}`, labels: current.labels });
+      }));
+      return { posts };
+    }
+    let current: { labels: Record<string, string> };
+
+    it('counts as saved when the stored value is the one being written, with no second version', async () => {
+      const fixture = ownedLabels(); current = fixture;
+      const { posts } = cloud({ committed: true });
+      expect(await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'private-value')).toBeUndefined();
+      expect(posts).toHaveLength(1);
+      expect(await observeSecret('test-token', 'demo-project', secret)).toMatchObject({ state: 'present', value: { latestVersion: '2' } });
+    });
+
+    it('stays unknown, not saved and not failed, when the stored value cannot be read', async () => {
+      const fixture = ownedLabels(); current = fixture;
+      const { posts } = cloud({ committed: true, readable: false });
+      expect(await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'private-value')).toMatchObject({ success: false, status: 'pending' });
+      expect(posts).toHaveLength(1);
+      expect((await observeSecret('test-token', 'demo-project', secret)).state).toBe('unknown');
+    });
+
+    it('reports a save that did not go through as safe to repeat', async () => {
+      const fixture = ownedLabels(); current = fixture;
+      cloud({ committed: false });
+      expect(await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'private-value')).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(/was not stored/) });
+      // Nothing changed remotely, so the next attempt is an ordinary write.
+      expect(await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'private-value')).toBeUndefined();
+    });
+
+    it('a retry with the value that is already stored adopts it; a different value stays blocked; neither adds a version', async () => {
+      const fixture = ownedLabels(); current = fixture;
+      cloud({ committed: true, readable: false });
+      await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'private-value');
+      // Same cloud state, now readable: version 2 holds private-value and Hypervibe has not recorded it.
+      const posts: string[] = [];
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') { posts.push(url); return Response.json({ name: `projects/demo-project/secrets/${secret}/versions/3` }); }
+        if (url.endsWith('/versions/latest:access')) return Response.json({ payload: { data: Buffer.from('private-value').toString('base64') } });
+        if (url.endsWith('/versions/latest')) return Response.json({ state: 'ENABLED', name: `projects/demo-project/secrets/${secret}/versions/2` });
+        return Response.json({ name: `projects/demo-project/secrets/${secret}`, labels: fixture.labels });
+      }));
+      expect(await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'a-different-value')).toMatchObject({ success: false, status: 'blocked' });
+      expect(await writeSecretVersion('test-token', 'demo-project', secret, fixture.labels, 'private-value')).toBeUndefined();
+      expect(posts).toEqual([]);
+      expect(await observeSecret('test-token', 'demo-project', secret)).toMatchObject({ state: 'present', value: { latestVersion: '2' } });
+    });
   });
 
   it('preserves adopted labels while exact-version metadata clears a completed retirement', async () => {

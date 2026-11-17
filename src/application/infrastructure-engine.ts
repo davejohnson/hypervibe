@@ -1,3 +1,6 @@
+import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
+import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
+import { pickRemoteCommit, sourceBuildProblem } from './release-source.js';
 import { healthCheckFailed, strictHealthCheck } from '../domain/services/release-health.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
@@ -7,7 +10,7 @@ import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
 import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
-  cloudRunGet, googleErrorMessage, latestWakerExecution, readCloudRunOperation, releaseImage, releaseJobImage, startCloudRunJob, workloadContainers, type WorkloadKind,
+  cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -140,6 +143,10 @@ export interface EngineBinding {
   queues?: string[];
   /** Cloud Run job that runs the release command. */
   releaseJob?: string;
+  /** Access IDs of storage HMAC keys that were created but not fully stored; each is deleted before another is created. Not secret. */
+  unpublishedHmacKeys?: string[];
+  /** A release command run that was started and not yet seen to finish; reconciled before another start. */
+  releaseRun?: PendingJobRun;
   /** IAM database user that was granted read access for on-demand worker wakers. */
   workerWakeGrant?: string;
   /** When that grant was made; a later data copy replaces the tables and drops it. */
@@ -412,10 +419,37 @@ export async function gcpSecretStore(ctx: CommandContext, project: Project, spec
   };
 }
 
+/**
+ * Whether the latest stored version of an owned secret already holds this exact value.
+ * Used to settle a write whose response was lost without ever adding a second version.
+ * The value is compared in memory only.
+ */
+async function storedVersionHolding(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<{ state: 'stored'; version: string } | { state: 'different'; version?: string } | { state: 'unknown' }> {
+  try {
+    const container = await readSecretContainer(token, gcpProjectId, secretId);
+    if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== labels['hv-environment']) return { state: 'unknown' };
+    const version = container.value.latestVersionName;
+    if (!container.value.hasVersion || !version) return { state: 'different' };
+    const response = await accessLatestSecretVersion(token, gcpProjectId, secretId);
+    if (!response.ok) return { state: 'unknown' };
+    const data = (await response.json() as { payload?: { data?: string } }).payload?.data;
+    if (data === undefined) return { state: 'unknown' };
+    return Buffer.from(data, 'base64').toString('utf8') === value ? { state: 'stored', version } : { state: 'different', version };
+  } catch {
+    return { state: 'unknown' };
+  }
+}
+
 /** Writes a version only after the approved engine has created the owned container. */
 export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
   const observed = await observeSecret(token, gcpProjectId, secretId);
-  if (observed.state === 'unknown') return { success: false, status: 'blocked', message: observed.reason };
+  if (observed.state === 'unknown') {
+    // An earlier write may have been stored without Hypervibe hearing back. If the stored value is
+    // the one being written now, record that version instead of adding another.
+    const held = await storedVersionHolding(token, gcpProjectId, secretId, labels, value);
+    if (held.state === 'stored' && recordSecretVersionMetadata(gcpProjectId, secretId, held.version, labels)) return undefined;
+    return { success: false, status: 'blocked', message: observed.reason };
+  }
   if (observed.state === 'absent') return { success: false, status: 'blocked', message: `Secret container ${secretId} is absent. Run hv_plan and apply its OpenTofu container action first.` };
   if (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labels['hv-environment']) {
     return { success: false, status: 'blocked', message: `Secret ${secretId} is not owned by this Hypervibe environment.` };
@@ -431,7 +465,13 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   try {
     added = await addSecretVersion(token, gcpProjectId, secretId, value);
   } catch {
-    return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Run hv_plan again to observe it before retrying.` };
+    // The response was lost. Read what is stored to settle it now.
+    const held = await storedVersionHolding(token, gcpProjectId, secretId, labels, value);
+    if (held.state === 'stored' && held.version !== observed.value.latestVersion && recordSecretVersionMetadata(gcpProjectId, secretId, held.version, labels)) return undefined;
+    if (held.state === 'different' && held.version === observed.value.latestVersion) {
+      return { success: false, status: 'pending', message: `The value for ${secretId} was not stored (the connection dropped first). It is safe to save it again.` };
+    }
+    return { success: false, status: 'pending', message: `The value write for ${secretId} has an unknown outcome. Save the same value again: Hypervibe checks what is stored first and does not add a duplicate.` };
   }
   if (!added.ok) return { success: false, message: `Writing ${secretId} failed (HTTP ${added.status}).`, error: `HTTP ${added.status}` };
   const result = await added.json() as { name?: string };
@@ -474,19 +514,27 @@ async function ensureStorageS3Key(token: string, action: PlanAction): Promise<Ac
       return { success: false, status: 'blocked', message: 'Create the owned S3 credential containers with hv_plan/hv_apply before generating an access key.' };
     }
   }
-  let created: Response;
-  try {
-    created = await createStorageHmacKey(token, gcpProjectId, runtimeServiceAccountEmail);
-  } catch {
-    return { success: false, status: 'pending', message: `Creating the S3 access key for ${storageName} has an unknown outcome. Run the same command again.` };
-  }
-  if (!created.ok) return { success: false, message: `Cloud Storage could not create an S3 access key (HTTP ${created.status}): ${await googleErrorMessage(created)}` };
-  const key = await created.json() as { secret?: string; metadata?: { accessId?: string } };
-  if (!key.secret || !key.metadata?.accessId) return { success: false, message: 'Cloud Storage returned an incomplete S3 access key.' };
-  for (const [name, value] of [['AWS_ACCESS_KEY_ID', key.metadata.accessId], ['AWS_SECRET_ACCESS_KEY', key.secret]] as const) {
-    const failure = await writeSecretVersion(token, gcpProjectId, secretIds[name]!, labels, value);
-    if (failure) return failure;
-  }
+  const environments = new EnvironmentRepository();
+  const environment = environments.findById(labels['hv-environment']!);
+  const binding = (): EngineBinding => ((environment && environments.findById(environment.id)?.platformBindings as { engine?: EngineBinding } | undefined)?.engine) ?? {};
+  const savePending = (ids: string[]) => { if (environment) environments.updatePlatformBindings(environment.id, { engine: { ...binding(), unpublishedHmacKeys: ids } }); };
+  const published = await publishNewHmacKey({
+    create: () => createStorageHmacKey(token, gcpProjectId, runtimeServiceAccountEmail),
+    publish: async (accessId, secret) => {
+      for (const [name, value] of [['AWS_ACCESS_KEY_ID', accessId], ['AWS_SECRET_ACCESS_KEY', secret]] as const) {
+        const failure = await writeSecretVersion(token, gcpProjectId, secretIds[name]!, labels, value);
+        if (failure) return failure.message ?? 'The S3 access key could not be stored in Secret Manager.';
+      }
+      return undefined;
+    },
+    retire: (accessId) => retireStorageHmacKey(token, gcpProjectId, accessId),
+    pending: {
+      list: () => binding().unpublishedHmacKeys ?? [],
+      add: (accessId) => savePending([...(binding().unpublishedHmacKeys ?? []), accessId]),
+      remove: (accessId) => savePending((binding().unpublishedHmacKeys ?? []).filter((id) => id !== accessId)),
+    },
+  });
+  if (!published.ok) return { success: false, ...(published.pending ? { status: 'pending' as const } : {}), message: published.message };
   return { success: true, message: `An S3-compatible access key for ${storageName} is stored in Secret Manager.` };
 }
 
@@ -1520,7 +1568,20 @@ async function resolveReleaseSource(params: { project: Project; spec: ProjectSpe
   }
   const repoUrl = normalizeGitRemoteForBuild(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
   if (!repoUrl) return { blocked: 'Hypervibe needs either this project\'s local git repository or a git remote to build from.' };
-  return { repoUrl, summary: { kind: 'git-remote', revision: params.revision ?? 'main' } };
+  // Freeze the branch to one exact commit now: every service builds that commit, and a branch that moves later changes nothing.
+  const revision = params.revision ?? 'main';
+  let commitSha: string | undefined = /^[0-9a-f]{40}$/i.test(revision) ? revision.toLowerCase() : undefined;
+  if (!commitSha) {
+    try {
+      const listed = await execFileAsync('git', ['ls-remote', repoUrl, revision, `${revision}^{}`, `refs/heads/${revision}`, `refs/tags/${revision}`, `refs/tags/${revision}^{}`],
+        { timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+      commitSha = pickRemoteCommit(String(listed.stdout), revision);
+    } catch {
+      return { blocked: `Hypervibe could not read ${revision} from the git remote to pin the exact commit. Run this from the project's local git repository, or check the remote is reachable. Nothing was built.` };
+    }
+  }
+  if (!commitSha) return { blocked: `The git remote has no branch or tag named ${revision}. Nothing was built.` };
+  return { repoUrl, summary: { kind: 'git-remote', revision, commitSha } };
 }
 
 /** Builds (or reuses) the digest-pinned image for one service from the release source. */
@@ -1553,10 +1614,13 @@ async function buildServiceImage(
   const build = source.archive
     ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId),
       ...(packageTokenVersion ? { packageTokenVersion } : {}) })
-    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.revision, ...(packageTokenVersion ? { packageTokenVersion } : {}) });
+    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.commitSha!, ...(packageTokenVersion ? { packageTokenVersion } : {}) });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { success: false, error: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   }
+  // A remote build fetched the source itself: it must report the exact frozen commit before anything is released.
+  const mismatch = source.archive ? undefined : sourceBuildProblem(source.summary.commitSha!, build.resolvedCommitSha);
+  if (mismatch) return { success: false, error: mismatch, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   const built = { imageUri: build.imageUri, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   builtImages.set(name, built);
   return { success: true, ...built };
@@ -1575,25 +1639,12 @@ async function runReleaseCommand(
   const token = await context.adapter.engineAccessToken();
   const updated = await releaseJobImage(token, context, job, build.imageUri);
   if (updated.status !== 'released') return updated;
-  let started: Response;
-  try {
-    started = await startCloudRunJob(token, context, job);
-  } catch {
-    return { status: 'unknown', message: 'Starting the release command had an unknown outcome. Check hv_logs before retrying.' };
-  }
-  if (!started.ok) return { status: 'failed', message: `The release command could not start (HTTP ${started.status}): ${await googleErrorMessage(started)}` };
-  let operation = await started.json() as { name?: string; done?: boolean; error?: { message?: string }; response?: { succeededCount?: number; failedCount?: number } };
-  const deadline = Date.now() + 30 * 60 * 1000;
-  while (!operation.done && operation.name && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    const polled = await readCloudRunOperation(await context.adapter.engineAccessToken(), operation.name);
-    if (polled.ok) operation = await polled.json() as typeof operation;
-  }
-  if (!operation.done) return { status: 'unknown', message: 'The release command is still running. Check hv_logs, then run hv_deploy again.' };
-  if (operation.error || (operation.response?.failedCount ?? 0) > 0) {
-    return { status: 'failed', message: `The release command failed: ${operation.error?.message ?? 'see hv_logs for the job output'}. No service was switched.` };
-  }
-  return { status: 'released', message: 'The release command finished successfully.' };
+  const environments = new EnvironmentRepository();
+  const binding = (): EngineBinding => ((environments.findById(context.environment.id) ?? context.environment).platformBindings as { engine?: EngineBinding }).engine ?? {};
+  return runCloudRunJobOnce(() => context.adapter.engineAccessToken(), context, job, build.imageUri, binding().releaseRun, (next) => {
+    const { releaseRun: _previous, ...rest } = binding();
+    environments.updatePlatformBindings(context.environment.id, { engine: { ...rest, ...(next ? { releaseRun: next } : {}) } });
+  });
 }
 
 async function releaseOne(
@@ -1638,7 +1689,7 @@ export interface EngineWorkerStatus {
   service: string;
   mode: 'on-demand' | 'always-on';
   instances?: number;
-  waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: string };
+  waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: WakerReadFailure };
 }
 
 /**
@@ -1669,10 +1720,12 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
           let parsed: { pendingWork?: number | string; readError?: string } = {};
           try { const value = JSON.parse(latest.result ?? 'null'); if (value && typeof value === 'object') parsed = value; } catch { /* an older waker returns only a count */ }
           const pendingWork = parsed.pendingWork === undefined ? undefined : Number(parsed.pendingWork);
+          // The waker reports the provider's raw message; only a fixed local category leaves this function.
+          const readFailure = parsed.readError || pendingWork === -1 ? classifyWakerReadError(parsed.readError) : undefined;
           status.waker = { ...(latest.startTime ? { lastRunAt: latest.startTime } : {}), ...(latest.state ? { state: latest.state } : {}),
-            ...(pendingWork !== undefined && pendingWork >= 0 ? { pendingWork } : {}), ...(parsed.readError ? { readError: parsed.readError } : {}) };
-          if (parsed.readError || pendingWork === -1) {
-            warnings.push(`Worker ${name} is running all the time: its waker cannot read pending work (${parsed.readError || 'query failed'}). Run hv_plan scope="infrastructure" to repair its access.`);
+            ...(pendingWork !== undefined && pendingWork >= 0 ? { pendingWork } : {}), ...(readFailure ? { readError: readFailure } : {}) };
+          if (readFailure) {
+            warnings.push(`Worker ${name} is running all the time: its waker cannot read pending work (${readFailure}). Run hv_plan scope="infrastructure" to repair its access.`);
           } else if (latest.state === 'FAILED') {
             warnings.push(`Worker ${name}'s waker failed its last run, so it cannot start or stop the worker. Check hv_logs.`);
           }
