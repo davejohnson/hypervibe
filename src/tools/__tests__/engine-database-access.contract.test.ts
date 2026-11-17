@@ -47,11 +47,15 @@ let wrongLogin = false;
 let queryArn = '';
 let queryEnvironmentId = '';
 let resuming = 0;
+let resumeUntil = 0;
+let beginFailure: { name: string; status: number } | 'transport' | 'missing-id' | undefined;
+let beginDelayMs = 0;
 let failRollback = false;
 let rows: unknown[] = [{ answer: 42 }];
 beforeEach(() => {
   SqliteAdapter.resetInstance(); temp = mkdtempSync(path.join(tmpdir(), 'hv-engine-db-'));
   SqliteAdapter.getInstance(path.join(temp, 'db.sqlite')).migrate(); calls = []; wire.sql = []; wire.password = undefined; wire.startup = undefined; wire.ended = false; wire.configuredUrl = ''; failQuery = false; wrongCluster = false; wrongSecret = false; wrongLogin = false; queryArn = ''; queryEnvironmentId = ''; resuming = 0; failRollback = false; rows = [{ answer: 42 }];
+  resumeUntil = 0; beginFailure = undefined; beginDelayMs = 0;
   vi.spyOn(NodeHttpHandler.prototype, 'handle').mockImplementation(async (req: any) => {
     const wireBody = Buffer.isBuffer(req.body) || req.body instanceof Uint8Array ? Buffer.from(req.body).toString('utf8') : String(req.body);
     const body = wireBody.startsWith('{') ? JSON.parse(wireBody) : Object.fromEntries(new URLSearchParams(wireBody));
@@ -63,7 +67,11 @@ beforeEach(() => {
     else if (req.hostname.startsWith('secretsmanager.')) payload = JSON.stringify({ ARN: wrongSecret ? secretArn : queryArn, Name: `hypervibe/${queryEnvironmentId}/database-query`,
       Tags: [{ Key: 'managed-by', Value: 'hypervibe' }, { Key: 'hv-environment', Value: queryEnvironmentId }], VersionIdsToStages: { current: ['AWSCURRENT'] } });
     else if (req.path === '/BeginTransaction') {
-      if (resuming-- > 0) { statusCode = 400; payload = JSON.stringify({ __type: 'DatabaseResumingException', message: 'Resuming' }); }
+      if (beginDelayMs) await new Promise(resolve => setTimeout(resolve, beginDelayMs));
+      if (beginFailure === 'transport') throw new Error('private connection reset after sending BeginTransaction');
+      if (beginFailure === 'missing-id') payload = '{}';
+      else if (beginFailure) { statusCode = beginFailure.status; payload = JSON.stringify({ __type: beginFailure.name, message: 'private denied access' }); }
+      else if (resuming-- > 0 || Date.now() < resumeUntil) { statusCode = 400; payload = JSON.stringify({ __type: 'DatabaseResumingException', message: 'Resuming' }); }
       else payload = JSON.stringify({ transactionId: 'private-transaction' });
     }
     else if (req.path === '/RollbackTransaction') {
@@ -73,12 +81,12 @@ beforeEach(() => {
     else if (req.path === '/Execute') {
       if (body.sql.startsWith('SELECT session_user')) payload = JSON.stringify({ formattedRecords: JSON.stringify([{ session_user: wrongLogin ? 'hvadmin' : 'app_accepted_owner', current_user: wrongLogin ? 'hvadmin' : 'app_accepted_owner', database: 'app_accepted' }]) });
       else if (failQuery && body.sql.startsWith('SELECT')) { statusCode = 400; payload = JSON.stringify({ message: 'private SQL/private-assumed-secret/private-session-token' }); }
-      else payload = JSON.stringify(body.sql.startsWith('SELECT') ? { formattedRecords: JSON.stringify(rows), numberOfRecordsUpdated: 0 } : {});
+      else payload = JSON.stringify(body.sql.startsWith('SELECT') || body.sql.includes(' RETURNING ') ? { formattedRecords: JSON.stringify(rows), numberOfRecordsUpdated: 0 } : {});
     } else throw new Error(`Unexpected synthetic request ${req.hostname}${req.path}`);
     return { response: { statusCode, headers: { 'content-type': req.hostname.startsWith('rds-data.') || req.hostname.startsWith('secretsmanager.') ? 'application/json' : 'text/xml' }, body: Readable.from([payload]) } };
   });
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(temp, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(temp, { recursive: true, force: true }); });
 function seed() {
   const project = new ProjectRepository().create({ name: 'renamed-app', defaultPlatform: 'aws' });
   const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'renamed-preview', platformBindings: { provider: 'aws', aws: { kind: 'opentofu', databaseLoginAt: '2026-01-01T00:00:00Z', sharedDatabase: true,
@@ -198,6 +206,66 @@ it('waits for AWS-confirmed cluster resume and starts only one successful transa
   expect(result.ok, JSON.stringify(result)).toBe(true);
   expect(calls.filter(call => call.path === '/BeginTransaction')).toHaveLength(2);
   expect(calls.filter(call => call.path === '/Execute' && call.body.sql === 'SELECT 42')).toHaveLength(1);
+});
+// AWS documents ~15 seconds for a normal resume and 30+ seconds after a long pause.
+// Exercise the SDK's real serialized rejection responses through the public command.
+it.each([16_000, 32_000])('queries once after an Aurora resume lasting %i ms', async wakeMs => {
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+  const { project, environment } = seed(); resumeUntil = Date.now() + wakeMs;
+  const pending = query({ project: project.name, env: environment.name, sql: 'SELECT 42' });
+  await vi.advanceTimersByTimeAsync(40_000);
+  const result = await pending;
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  expect(calls.filter(call => call.path === '/Execute' && call.body.sql === 'SELECT 42')).toHaveLength(1);
+  expect(calls.filter(call => call.path === '/RollbackTransaction')).toHaveLength(1);
+});
+it.each([0, 12_000])('bounds the total resume wait, including %i ms native responses, with actionable guidance', async delayMs => {
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+  const { project, environment } = seed(); resumeUntil = Infinity; beginDelayMs = delayMs;
+  let result: any;
+  const pending = query({ project: project.name, env: environment.name, sql: 'SELECT 42' }).then(value => { result = value; });
+  await vi.advanceTimersByTimeAsync(40_000);
+  expect(result, 'The wake-up budget includes provider response time').toBeDefined();
+  await pending;
+  expect(result.ok).toBe(false);
+  expect(JSON.stringify(result)).toMatch(/still waking up/i);
+  expect(JSON.stringify(result)).not.toMatch(/Check access and SQL|cleanup could not be verified|private-/);
+  expect(calls.some(call => call.path === '/Execute' || call.path === '/RollbackTransaction')).toBe(false);
+});
+it.each(['AccessDeniedException', 'ForbiddenException'])('does not retry or claim uncertain cleanup after a confirmed %s rejection', async name => {
+  const { project, environment } = seed(); beginFailure = { name, status: 403 };
+  const result = await query({ project: project.name, env: environment.name, sql: 'SELECT 42' });
+  expect(result.ok).toBe(false);
+  expect(calls.filter(call => call.host.startsWith('rds-data.')).map(call => call.path)).toEqual(['/BeginTransaction']);
+  expect(JSON.stringify(result)).not.toMatch(/cleanup could not be verified|private-/);
+  expect(result.error.details.access.cleanup).toBe('completed');
+});
+it.each(['transport', 'missing-id'] as const)('preserves unknown cleanup without retrying an ambiguous transaction start: %s', async failure => {
+  const { project, environment } = seed(); beginFailure = failure;
+  const result = await query({ project: project.name, env: environment.name, sql: 'SELECT 42' });
+  expect(result.ok).toBe(false);
+  expect(calls.filter(call => call.host.startsWith('rds-data.')).map(call => call.path)).toEqual(['/BeginTransaction']);
+  expect(result.error.details.access.cleanup).toBe('failed');
+  expect(JSON.stringify(result)).toMatch(/cleanup could not be verified/);
+  expect(JSON.stringify(result)).not.toMatch(/private-/);
+});
+it.each(['rows', 'bytes'] as const)('reports confirmed rollback when mutation results exceed the %s limit', async limit => {
+  const { project, environment } = seed();
+  rows = limit === 'rows' ? Array.from({ length: 501 }, () => ({ answer: 42 })) : [{ answer: 'x'.repeat(512 * 1024) }];
+  const result = await query({ project: project.name, env: environment.name, sql: 'UPDATE notes SET label = $1 RETURNING label', params: ['changed'], allowMutations: true });
+  expect(result.ok).toBe(false);
+  expect(JSON.stringify(result)).toMatch(/mutation was rolled back/i);
+  expect(calls.some(call => call.path === '/CommitTransaction')).toBe(false);
+  expect(calls.filter(call => call.path === '/RollbackTransaction')).toHaveLength(1);
+});
+it('does not promise rollback when the oversized mutation cleanup cannot be confirmed', async () => {
+  const { project, environment } = seed(); rows = Array.from({ length: 501 }, () => ({ answer: 42 })); failRollback = true;
+  const result = await query({ project: project.name, env: environment.name, sql: 'UPDATE notes SET label = $1 RETURNING label', params: ['changed'], allowMutations: true });
+  expect(result.ok).toBe(false);
+  expect(JSON.stringify(result)).not.toMatch(/mutation was rolled back/i);
+  expect(JSON.stringify(result)).toMatch(/rollback could not be verified/i);
+  expect(calls.some(call => call.path === '/CommitTransaction')).toBe(false);
+  expect(calls.filter(call => call.path === '/RollbackTransaction')).toHaveLength(2);
 });
 it('preserves failed transaction cleanup in the public command without leaking provider errors', async () => {
   const { project, environment } = seed(); failRollback = true;

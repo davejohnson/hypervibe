@@ -2,8 +2,8 @@
  * Loaded through NODE_OPTIONS=--require in Lambda, before the app starts.
  * Lambda cannot reference Parameter Store values the way Fargate does, so this
  * reads the declared runtime keys under HYPERVIBE_PARAMETER_PATH (SigV4, no dependencies)
- * and sets each as an environment variable. It fails closed: a missing secret
- * stops the function visibly instead of starting the app without it. Fargate
+ * and sets each as an environment variable. It fails closed: an invalid declaration
+ * or missing secret stops the function visibly instead of starting the app without it. Fargate
  * tasks receive secrets from ECS and skip this.
  */
 export const LOAD_SECRETS_PATH = '/opt/hypervibe/load-secrets.cjs';
@@ -38,7 +38,9 @@ async function fetchAll() {
     } while (token);
     return values;
   }
-  const keys = (process.env.HYPERVIBE_SECRET_KEYS || '').split(',').filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key));
+  const declaredKeys = process.env.HYPERVIBE_SECRET_KEYS === '' ? [] : process.env.HYPERVIBE_SECRET_KEYS.split(',');
+  if (declaredKeys.some((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))) throw new Error('A declared runtime secret name is invalid');
+  const keys = declaredKeys.filter((key) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key));
   for (let offset = 0; offset < keys.length; offset += 10) {
     const names = keys.slice(offset, offset + 10).map((key) => path + key);
     const page = await call({ Names: names, WithDecryption: true });

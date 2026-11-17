@@ -39,8 +39,13 @@ not use `SET ROLE` to substitute for authentication. Parameters stay bound, resu
 are bounded to 500 rows and 512 KiB, and reads roll back. Integer and decimal values
 use Data API's string format to avoid silent precision loss. Confirmed mutation
 statements commit; uncertain writes are not retried. A definite database-resuming
-rejection receives bounded retries. Failed rollback remains visible in the command
-result. No secret values enter engine state or command output.
+rejection receives retries within a total 40-second connection window, including
+provider response time. If Aurora is still resuming, the error asks the user to
+wait and retry without suggesting a SQL or access problem. Explicit rejected
+connections do not claim an unknown transaction; transport failures and missing
+transaction identities still do. Oversized mutation results report whether
+rollback was confirmed when the query ended. Failed rollback remains visible in
+the command result. No secret values enter engine state or command output.
 
 Azure reads the environment-owned Key Vault connection URL privately, checks its
 host, database and login against the accepted binding, and uses the bundled
