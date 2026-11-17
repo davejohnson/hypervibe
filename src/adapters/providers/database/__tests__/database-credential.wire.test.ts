@@ -1,3 +1,4 @@
+import { createHash, createHmac, pbkdf2Sync } from 'node:crypto';
 import { Duplex } from 'node:stream';
 import pg from 'pg';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -15,6 +16,15 @@ const i16 = (n: number) => { const b = Buffer.alloc(2); b.writeInt16BE(n); retur
 const i32 = (n: number) => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
 const cstring = (s: string) => Buffer.from(`${s}\0`);
 const packet = (code: string, ...body: Buffer[]) => { const b = Buffer.concat(body); return Buffer.concat([Buffer.from(code), i32(b.length + 4), b]); };
+// What a PostgreSQL server does with a stored SCRAM verifier (RFC 5802, PostgreSQL "SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>"):
+// derive the keys from a candidate password and compare StoredKey. Written from the specification, not from the adapter.
+function matchesStored(stored: string, candidate: string): boolean {
+  const scram = stored.match(/^SCRAM-SHA-256\$(\d+):([^$]+)\$([^:]+):(.+)$/);
+  if (!scram) return stored === candidate;
+  const salted = pbkdf2Sync(Buffer.from(candidate, 'utf8'), Buffer.from(scram[2]!, 'base64'), Number(scram[1]), 32, 'sha256');
+  const storedKey = createHash('sha256').update(createHmac('sha256', salted).update('Client Key').digest()).digest('base64');
+  return storedKey === scram[3];
+}
 type ServerState = { password: string; changes: number; sql: string[]; bindings: string[]; loseCommit: boolean };
 class PgPeer extends Duplex {
   private startup = true;
@@ -45,7 +55,7 @@ class PgPeer extends Duplex {
   }
   private message(code: string, body: Buffer) {
     if (code === 'p') {
-      if (body.toString('utf8').replace(/\0$/, '') !== this.state.password) {
+      if (!matchesStored(this.state.password, body.toString('utf8').replace(/\0$/, ''))) {
         this.response(packet('E', cstring('SFATAL'), cstring('C28P01'), cstring('Minvalid password'), Buffer.from([0])));
       } else this.response(packet('R', i32(0)), packet('K', i32(123), i32(456)), this.ready());
     } else if (code === 'Q') {
@@ -95,16 +105,28 @@ function setup(loseCommit = false) {
   return { state, environment, component, port: createPostgresCredentialLifecycle(() => adapter) };
 }
 
-it('serializes the actual password change and independently authenticates a fresh connection', async () => {
+// #484: the server may log statements and bound values, so the password itself is never sent in SQL.
+// What is bound is a one-way SCRAM verifier, and the new password still authenticates afterwards.
+it('sends a SCRAM verifier, never the password, and the new password then authenticates', async () => {
   const f = setup();
   const target = await f.port.inspect(f.environment, f.component, { environment: 'production', component: 'component', username: 'app', database: 'appdb' });
-  const replacement = "frozen ' @ / password";
+  const replacement = 'frozen-next_password.1~';
   expect(await f.port.probe(f.environment, f.component, target, replacement)).toMatchObject({ state: 'rejected' });
   expect(await f.port.rotate(f.environment, f.component, target, replacement)).toEqual({ state: 'acknowledged' });
-  expect(f.state.password).toBe(replacement); expect(f.state.changes).toBe(1);
-  expect(f.state.sql.join('\n')).not.toContain(replacement); expect(f.state.bindings).toEqual([replacement]);
+  expect(f.state.changes).toBe(1);
+  expect(f.state.bindings).toHaveLength(1);
+  expect(f.state.bindings[0]).toMatch(/^SCRAM-SHA-256\$4096:[A-Za-z0-9+/]+=*\$[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/);
+  expect([...f.state.sql, ...f.state.bindings].join('\n')).not.toContain(replacement);
   expect(await f.port.probe(f.environment, f.component, target, replacement)).toMatchObject({ state: 'authenticated' });
   expect(await f.port.probe(f.environment, f.component, target, 'previous-password')).toMatchObject({ state: 'rejected' });
+});
+
+it('refuses a password it cannot turn into a verifier instead of sending it as text', async () => {
+  const f = setup();
+  const target = await f.port.inspect(f.environment, f.component, { environment: 'production', component: 'component', username: 'app', database: 'appdb' });
+  expect(await f.port.rotate(f.environment, f.component, target, "frozen ' @ / password")).toEqual({ state: 'blocked' });
+  expect(f.state.bindings).toEqual([]); expect(f.state.changes).toBe(0);
+  expect(await f.port.probe(f.environment, f.component, target, 'previous-password')).toMatchObject({ state: 'authenticated' });
 });
 
 it('reports a lost COMMIT as unknown and recovers through fresh authentication without resetting again', async () => {
