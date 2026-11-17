@@ -1,4 +1,4 @@
-import { BatchGetBuildsCommand, CodeBuildClient, StartBuildCommand } from '@aws-sdk/client-codebuild';
+import { BatchGetBuildsCommand, CodeBuildClient, StartBuildCommand, type CodeBuildClientConfig } from '@aws-sdk/client-codebuild';
 import { DescribeImagesCommand, ECRClient } from '@aws-sdk/client-ecr';
 import { DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, RegisterTaskDefinitionCommand, UpdateServiceCommand, type RegisterTaskDefinitionCommandInput } from '@aws-sdk/client-ecs';
 import { GetFunctionCommand, GetFunctionUrlConfigCommand, LambdaClient, ResourceNotFoundException, UpdateFunctionCodeCommand, waitUntilFunctionUpdatedV2 } from '@aws-sdk/client-lambda';
@@ -19,6 +19,8 @@ export interface AwsReleaseTarget {
   accountId: string;
   /** Resource-name prefix of the environment; also its ECS cluster, ECR repository and build project stem. */
   prefix: string;
+  /** Parameter Store reference, never the token value. */
+  packageTokenParameter?: string;
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
 }
 
@@ -27,6 +29,8 @@ export const LAMBDA_WEB_ADAPTER_IMAGE = 'public.ecr.aws/awsguru/aws-lambda-adapt
 /** Amazon RDS's certificate authorities, so database clients that verify TLS (node-postgres does) trust Aurora. */
 export const RDS_CA_BUNDLE_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem';
 const RDS_CA_PATH = '/opt/hypervibe/rds-ca.pem';
+/** The packaged loader is part of the image identity, even when the repository commit is unchanged. */
+export const awsImageTag = (commitSha: string): string => `${commitSha}-hv-secrets-v2`;
 export const AWS_DOCKERFILE = '.hypervibe-aws.Dockerfile';
 export const LOADER_IN_SOURCE = '.hypervibe-aws/load-secrets.cjs';
 
@@ -56,22 +60,23 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
 export interface AwsBuildSource { commitSha: string; archive: Buffer }
 
 /** Uploads the commit, builds it in CodeBuild and returns the digest-pinned image. */
-export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSource): Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
+export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSource, transport: Pick<CodeBuildClientConfig, 'requestHandler'> = {}): Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
   const { region, credentials } = target;
   const bucket = `${target.prefix}-build-${target.accountId}`;
   const key = `sources/${source.commitSha}.zip`;
   // Tags are immutable: a commit that was already built is released from its existing image.
-  const ecr = new ECRClient({ region, credentials });
-  const existing = await imageFor(ecr, target, source.commitSha);
+  const ecr = new ECRClient({ ...transport, region, credentials });
+  const existing = await imageFor(ecr, target, awsImageTag(source.commitSha));
   if (existing) return { imageUri: existing };
-  await new S3Client({ region, credentials }).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: source.archive, ContentType: 'application/zip' }));
-  const codebuild = new CodeBuildClient({ region, credentials });
+  await new S3Client({ ...transport, region, credentials }).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: source.archive, ContentType: 'application/zip' }));
+  const codebuild = new CodeBuildClient({ ...transport, region, credentials });
   const started = await codebuild.send(new StartBuildCommand({
     projectName: `${target.prefix}-images`, sourceTypeOverride: 'S3', sourceLocationOverride: `${bucket}/${key}`,
     environmentVariablesOverride: [
-      { name: 'IMAGE_TAG', value: source.commitSha, type: 'PLAINTEXT' },
+      { name: 'IMAGE_TAG', value: awsImageTag(source.commitSha), type: 'PLAINTEXT' },
       { name: 'DOCKERFILE', value: AWS_DOCKERFILE, type: 'PLAINTEXT' },
       { name: 'DOCKER_BUILDKIT', value: '1', type: 'PLAINTEXT' },
+      ...(target.packageTokenParameter ? [{ name: 'NPM_TOKEN', value: target.packageTokenParameter, type: 'PARAMETER_STORE' as const }] : []),
     ],
   }));
   const id = started.build?.id;
@@ -85,7 +90,7 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
   }
   if (status === 'IN_PROGRESS') return { error: 'The image build is still running.', logsUrl, unknown: true };
   if (status !== 'SUCCEEDED') return { error: `The image build ${String(status ?? 'failed').toLowerCase()}; see its log.`, logsUrl };
-  const imageUri = await imageFor(ecr, target, source.commitSha);
+  const imageUri = await imageFor(ecr, target, awsImageTag(source.commitSha));
   if (!imageUri) return { error: 'The build finished without an image digest; refusing to release a mutable tag.', logsUrl };
   return { imageUri, logsUrl };
 }

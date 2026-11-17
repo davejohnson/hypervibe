@@ -20,11 +20,11 @@ describe('AWS engine configuration', () => {
   });
 
   it('caps the runtime role with the setup boundary and scopes secrets to the environment', () => {
-    const config = buildAwsConfiguration({ ...base, storage: [{ name: 'documents', bucket: 'hv-app-aws-documents' }] });
+    const config = buildAwsConfiguration({ ...base, secretKeys: ['API_KEY'], storage: [{ name: 'documents', bucket: 'hv-app-aws-documents' }] });
     const role = (config.files['base.tf.json'] as { resource: { aws_iam_role: { runtime: Record<string, string> }; aws_iam_role_policy: { runtime: { policy: string } } } }).resource;
     expect(role.aws_iam_role.runtime.path).toBe('/hypervibe/app/');
     expect(role.aws_iam_role.runtime.permissions_boundary).toBe('arn:aws:iam::111122223333:policy/hypervibe/hypervibe-app-boundary');
-    expect(role.aws_iam_role_policy.runtime.policy).toContain('parameter/hypervibe/env1/*');
+    expect(role.aws_iam_role_policy.runtime.policy).toContain('parameter/hypervibe/env1/API_KEY');
     expect(config.resources['aws_s3_bucket.documents']).toMatchObject({ dataBearing: true });
   });
 });
@@ -103,4 +103,32 @@ describe('AWS tasks', () => {
     const runtime = (config.files['base.tf.json'] as { resource: { aws_iam_role_policy: { runtime: { policy: string } } } }).resource.aws_iam_role_policy.runtime.policy;
     for (const sid of ['WakerCount', 'WakerScale', 'WakerTimer', 'WakerWebRequests', 'StartWakers', 'PassSelf', 'RunTasks']) expect(runtime).toContain(sid);
   });
+});
+
+
+describe('private package build token boundary', () => {
+  it('mounts only the package token in CodeBuild and scopes its read permission', () => {
+    const config = buildAwsBuildConfiguration({ ...base, packageTokenKey: 'NODE_AUTH_TOKEN' } as never);
+    const file = config.files['builds.tf.json'] as any;
+    const policy = JSON.parse(file.resource.aws_iam_role_policy.build.policy);
+    expect(policy.Statement).toContainEqual({ Sid: 'PackageToken', Effect: 'Allow', Action: 'ssm:GetParameters', Resource: 'arn:aws:ssm:us-west-2:111122223333:parameter/hypervibe/env1/NODE_AUTH_TOKEN' });
+    const buildspec = file.resource.aws_codebuild_project.images.source[0].buildspec;
+    expect(buildspec).toContain('--secret id=npm_token,env=NPM_TOKEN');
+    expect(buildspec).not.toContain('--build-arg');
+  });
+});
+
+it('excludes package token keys from Lambda, worker, cron and runtime permissions', () => {
+  const image = `${awsRegistryUrl(base)}:commit`;
+  const env = { API_MODE: 'live', NPM_TOKEN: 'must-not-render', NODE_AUTH_TOKEN: 'also-private' };
+  const config = buildAwsConfiguration({ ...base, secretKeys: ['API_KEY', 'NPM_TOKEN', 'NODE_AUTH_TOKEN'],
+    services: [{ logicalName: 'web', resourceName: 'hv-app-aws-web', initialImageUri: image, public: true, env }],
+    workers: [{ logicalName: 'worker', resourceName: 'hv-app-aws-worker', initialImageUri: image, env }],
+    jobs: [{ logicalName: 'cron', resourceName: 'hv-app-aws-cron', initialImageUri: image, schedule: '0 1 * * *', env }],
+  });
+  const rendered = JSON.stringify(config.files);
+  expect(rendered).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|must-not-render|also-private|GetParametersByPath/);
+  expect(rendered).toContain('API_KEY');
+  expect(rendered).toContain('API_MODE');
+  expect(rendered).toContain('HYPERVIBE_SECRET_KEYS');
 });

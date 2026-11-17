@@ -47,6 +47,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
 | Buying a domain | blocked (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
+| Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
 | Migrations as a release step | yes (`releaseCommand` mode) | blocked at release | blocked at release |
 | Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
 | Promotion and promotion tests | blocked (#252) | blocked (#252) | blocked (#252) |

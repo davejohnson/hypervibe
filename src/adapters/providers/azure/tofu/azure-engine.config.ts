@@ -1,3 +1,4 @@
+import { azureBuildTaskContent, azureBuildTaskName } from '../azure-build-task.js';
 import crypto from 'crypto';
 import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
 import { addAzureCiConfiguration } from './azure-engine-ci.config.js';
@@ -57,6 +58,8 @@ export interface AzureEngineInput extends AzurePlacement {
   jobs?: AzureJobInput[];
   /** Runtime secrets every workload reads, by environment variable name; each must exist in Key Vault before apply. */
   secretKeys?: string[];
+  /** Declared, present package token; only the build task can read it. */
+  packageTokenKey?: string;
   /** Role assignments an interrupted apply created but the engine never recorded: address → Azure id, imported instead of recreated. */
   adoptRoleAssignments?: Record<string, string>;
 }
@@ -235,7 +238,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
 
   const workers = input.workers ?? [];
   const onDemand = workers.some((worker) => worker.pendingWorkQuery);
-  const secretKeys = [...new Set([...(input.secretKeys ?? []), ...(onDemand ? [WAKER_SECRET_KEY] : [])])];
+  const secretKeys = [...new Set([...(input.secretKeys ?? []).filter((key) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key)), ...(onDemand ? [WAKER_SECRET_KEY] : [])])];
   const secrets = secretKeys.map((key) => ({ key, name: azureSecretName(key), vaultName: azureVaultSecretName(input.environmentName, key) }));
   const seen = new Map<string, string>();
   for (const { key, name } of secrets) {
@@ -319,7 +322,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
       ...(workload.command ? { command: workload.command } : {}),
       env: [
         // Literal values: OpenTofu would otherwise read ${...} and %{...} in them as templates.
-        ...Object.entries(workload.env ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => ({ name, value: value.replace(/([$%])\{/g, '$1$1{') })),
+        ...Object.entries(workload.env ?? {}).filter(([key]) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key)).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => ({ name, value: value.replace(/([$%])\{/g, '$1$1{') })),
         // DefaultAzureCredential picks the runtime identity with this; it is an id, not a secret.
         { name: 'AZURE_CLIENT_ID', value: '${azurerm_user_assigned_identity.runtime.client_id}' },
         ...secrets.filter(({ key }) => key !== WAKER_SECRET_KEY).map(({ key, name }) => ({ name: key, secret_name: name })),
@@ -404,4 +407,30 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     apps_environment_id: { value: '${azurerm_container_app_environment.main.id}' },
   } };
   return { files, resources };
+}
+
+/** The environment's private-package build identity, applied before its first image. */
+export function buildAzureBuildConfiguration(input: AzureEngineInput): EngineConfiguration {
+  checkPlacement(input);
+  const files: Record<string, unknown> = { 'provider.tf.json': providerFile(input) };
+  if (!input.packageTokenKey) return { files, resources: {} };
+  if (!['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(input.packageTokenKey)) throw new Error('Invalid package token key.');
+  const secretName = azureVaultSecretName(input.environmentName, input.packageTokenKey);
+  const mapping: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'image builds' };
+  files['builds.tf.json'] = { resource: {
+    azurerm_container_registry_task: { images: {
+      name: azureBuildTaskName(input.prefix), container_registry_id: input.shared.registryId,
+      identity: [{ type: 'SystemAssigned' }], platform: [{ os: 'Linux', architecture: 'amd64' }],
+      encoded_step: [{ task_content: Buffer.from(azureBuildTaskContent(`${input.vault.uri}secrets/${secretName}`)).toString('base64'), values: { IMAGE_TAG: 'unrequested' } }],
+      tags: { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() },
+    } },
+    azurerm_role_assignment: { build_token: {
+      scope: `${input.vault.id}/secrets/${secretName}`,
+      role_definition_id: `/subscriptions/${input.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${ROLE.keyVaultSecretsUser}`,
+      principal_id: '${azurerm_container_registry_task.images.identity[0].principal_id}', principal_type: 'ServicePrincipal',
+      description: 'Hypervibe: image builds read the private package token',
+    } },
+    time_sleep: { build_roles: { create_duration: '90s', depends_on: ['azurerm_role_assignment.build_token'] } },
+  } };
+  return { files, resources: Object.fromEntries(['azurerm_container_registry_task.images', 'azurerm_role_assignment.build_token', 'time_sleep.build_roles'].map((address) => [address, mapping])) };
 }

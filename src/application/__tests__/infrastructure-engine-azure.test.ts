@@ -55,7 +55,7 @@ describe('Azure engine planning', () => {
     const desired = spec({ test: testing() });
     const layout = azureEngineLayout(project, 'test', 'ENV1', connection);
     const keys = azureEnvironmentSecretKeys(desired, 'test');
-    expect(keys).toEqual({ generated: ['JWT_SECRET'], outside: [], all: ['DATABASE_URL', 'JWT_SECRET'] });
+    expect(keys).toEqual({ generated: ['JWT_SECRET'], outside: [], build: [], all: ['DATABASE_URL', 'JWT_SECRET'] });
     const input = buildAzureEngineInput(desired, 'test', { connection: connection as never, ...layout, environment: { id: 'ENV1' } }, { secretKeys: keys.all, image: 'r.azurecr.io/app@sha256:abc' });
     expect(input.services).toEqual([expect.objectContaining({ resourceName: 'hv-billforge-test-web', targetPort: 3000, healthCheckPath: '/health' })]);
     expect(input.workers).toEqual([expect.objectContaining({ resourceName: 'hv-billforge-test-worker', command: ['sh', '-c', 'npm run worker'], pendingWorkQuery: expect.stringContaining('queued') })]);

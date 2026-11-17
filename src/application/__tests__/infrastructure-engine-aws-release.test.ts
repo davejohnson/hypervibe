@@ -29,12 +29,12 @@ describe('AWS release health', () => {
 
 describe('Lambda secrets loader', () => {
   it('signs Parameter Store reads exactly as the AWS SDK does and maps names to variables', async () => {
-    const env = { HV_SECRETS_FETCH: '1', HYPERVIBE_PARAMETER_PATH: '/hypervibe/env1/', AWS_REGION: 'us-west-2',
+    const env = { HV_SECRETS_FETCH: '1', HYPERVIBE_PARAMETER_PATH: '/hypervibe/env1/', HYPERVIBE_SECRET_KEYS: 'DATABASE_URL,API_KEY,NPM_TOKEN,NODE_AUTH_TOKEN', AWS_REGION: 'us-west-2',
       AWS_ACCESS_KEY_ID: 'AKIDEXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY', AWS_SESSION_TOKEN: 'session' };
     const requests: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
     let output = '';
     const fixed = new Date('2026-11-11T12:00:00.000Z');
-    const pages = [{ Parameters: [{ Name: '/hypervibe/env1/DATABASE_URL', Value: 'postgres://x' }], NextToken: 'n' }, { Parameters: [{ Name: '/hypervibe/env1/API_KEY', Value: 'k' }] }];
+    const pages = [{ Parameters: [{ Name: '/hypervibe/env1/DATABASE_URL', Value: 'postgres://x' }, { Name: '/hypervibe/env1/API_KEY', Value: 'k' }, { Name: '/hypervibe/env1/NPM_TOKEN', Value: 'do-not-expose' }] }];
     const done = new Promise<void>((resolve) => {
       vm.runInNewContext(LOAD_SECRETS_SOURCE, {
         require: createRequire(import.meta.url), __filename: '/opt/hypervibe/load-secrets.cjs', JSON, Object,
@@ -48,14 +48,15 @@ describe('Lambda secrets loader', () => {
     });
     await done;
     expect(JSON.parse(output)).toEqual({ DATABASE_URL: 'postgres://x', API_KEY: 'k' });
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]!.body)).toEqual({ Names: ['/hypervibe/env1/DATABASE_URL', '/hypervibe/env1/API_KEY'], WithDecryption: true });
 
     const signer = new SignatureV4({ service: 'ssm', region: 'us-west-2', sha256: NodeSha256 as never,
       credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY, sessionToken: env.AWS_SESSION_TOKEN } });
     const first = requests[0]!;
     const signed = await signer.sign({
       method: 'POST', protocol: 'https:', hostname: 'ssm.us-west-2.amazonaws.com', path: '/', body: first.body,
-      headers: { host: 'ssm.us-west-2.amazonaws.com', 'content-type': first.headers['content-type']!, 'x-amz-target': 'AmazonSSM.GetParametersByPath' },
+      headers: { host: 'ssm.us-west-2.amazonaws.com', 'content-type': first.headers['content-type']!, 'x-amz-target': 'AmazonSSM.GetParameters' },
     }, { signingDate: fixed });
     const signature = (value: string) => /Signature=([0-9a-f]{64})/.exec(value)?.[1];
     expect(signature(first.headers.authorization!)).toBe(signature(String(signed.headers.authorization)));
@@ -75,4 +76,25 @@ describe('AWS teardown spec cleanup', () => {
     const spec = { secrets: { ONLY: { ownership: 'hypervibe', environments: ['demo'] }, SHARED: { ownership: 'hypervibe', environments: ['demo', 'prod'] }, OTHER: { environments: ['prod'] } } } as never;
     expect(specWithoutEnvironment(spec, 'demo')).toEqual({ environments: { demo: null }, secrets: { ONLY: null, SHARED: { environments: ['prod'] } } });
   });
+});
+
+it('supports the reviewed old-settings transition without installing package tokens', async () => {
+  let output = '';
+  const requestBodies: unknown[] = [];
+  await new Promise<void>((done) => {
+    vm.runInNewContext(LOAD_SECRETS_SOURCE, {
+      require: createRequire(import.meta.url), __filename: 'loader',
+      process: { env: { HV_SECRETS_FETCH: '1', HYPERVIBE_PARAMETER_PATH: '/hypervibe/env1/', AWS_REGION: 'us-west-2', AWS_ACCESS_KEY_ID: 'test', AWS_SECRET_ACCESS_KEY: 'test' },
+        stdout: { write: (text: string) => { output = text; done(); } }, stderr: { write: (text: string) => { output = text; done(); } }, exit: () => undefined },
+      fetch: async (_url: string, init: { body: string }) => {
+        requestBodies.push(JSON.parse(init.body));
+        return { ok: true, text: async () => JSON.stringify({ Parameters: [
+          { Name: '/hypervibe/env1/API_KEY', Value: 'ordinary' }, { Name: '/hypervibe/env1/NPM_TOKEN', Value: 'private' },
+          { Name: '/hypervibe/env1/NODE_AUTH_TOKEN', Value: 'private' }, { Name: '/hypervibe/other/KEY', Value: 'other' },
+        ] }) };
+      },
+    });
+  });
+  expect(JSON.parse(output)).toEqual({ API_KEY: 'ordinary' });
+  expect(requestBodies).toEqual([{ Path: '/hypervibe/env1/', Recursive: false, WithDecryption: true, MaxResults: 10 }]);
 });

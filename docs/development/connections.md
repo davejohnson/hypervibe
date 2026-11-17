@@ -162,3 +162,18 @@ owner-only regular file inside the linked repository. Ambiguous configurations,
 symlinks, wrong environments and unknown output block. It must not pull, refresh,
 switch environments, mutate services or rotate credentials; the operator performs
 those actions explicitly and then renews the verified Hypervibe connection.
+
+
+## Package tokens in managed builds
+
+Outside `NODE_AUTH_TOKEN` and `NPM_TOKEN` secrets are build credentials, excluded
+from web, worker, cron and release-task runtime settings. AWS and Azure choose the first declared
+populated key; absent optional keys do not block public builds, while unknown
+observations and required missing keys stop them. GCP uses Secret Manager build
+references, AWS uses CodeBuild Parameter Store references, and Azure uses a managed
+ACR task identity with an exact Key Vault secret reference and file mount. All
+expose the BuildKit secret id `npm_token`; the running app does not receive it.
+New build identities and grants remain part of reviewed engine plans. Existing
+AWS Lambda images must be verified with the new secret loader before runtime
+permissions are narrowed. Offline provider and generated-program checks are not
+live private-package build evidence.

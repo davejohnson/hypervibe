@@ -20,6 +20,7 @@ and runs. They do not verify other profiles, workloads or subsequent revisions.
 | OpenTofu runs as the deploy role | Built; read-only probe verified live |
 | Registry, runtime role, storage, database, app login | Built; applied live (billforge `aws`) |
 | Image builds and releases (`hv_deploy`) | Built; verified live (demo app) |
+| Private package tokens in CodeBuild / BuildKit | Built; offline request, generated command and runtime-isolation regressions; not live verified |
 | Web (Lambda), on-demand worker and cron (Fargate) | Built; verified live (demo app): database over verified TLS, generated secret, storage with the runtime role, worker woken by requests and by the next-due timer while Aurora was paused, no drift after releases |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
 | `hv_launch` for testing environments (one reviewed plan: registry and build project in their own state, the first image built inside the apply, then everything else) | Built; verified live (demo app, 2026-11-14): one round, no sign-in (account access reused), web health-checked, database, secret, storage and cron working, worker jobs done 87 s (cold start) and 0.7 s after due, empty plan after |
@@ -188,3 +189,22 @@ the app goes quiet. An uptime monitor that calls the app keeps it awake.
 
 `hashicorp/aws` 6.70.0 (released 2026-10-22), with `h1:` lock hashes from
 `tofu providers lock` for darwin and linux (amd64 and arm64) and windows amd64.
+
+
+## Private package builds
+
+Declared outside `NODE_AUTH_TOKEN` or `NPM_TOKEN` secrets are resolved by
+CodeBuild from this environment's Parameter Store path and supplied as the
+BuildKit secret `npm_token`. The build role can read only the selected token.
+Neither token key is wired into Lambda, worker or scheduled-job settings; ordinary
+runtime secrets use an explicit name list and exact parameter permissions.
+Optional absent tokens are omitted, and an unknown observation blocks the build.
+Repository Dockerfiles can use `RUN --mount=type=secret,id=npm_token`.
+
+Existing Lambda environments transition through a reviewed image rebuild and
+verified release before runtime secret permissions change. The packaged loader
+revision is part of the immutable image tag, so the same source commit does not
+reuse the old loader. The new image supports the previous settings during that
+transition while filtering token keys. Failure or an uncertain release stops the
+permission update. Without the local repository, planning blocks this transition.
+These changes have offline evidence; no new live deployment is claimed.

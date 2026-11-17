@@ -8,6 +8,8 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { CommandContext } from './context.js';
 import { packageLocalCommit, runLocalCommitRelease, selectReleaseWorkloads } from './engine-release.js';
 import { awsBinding, awsResourceName, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
+import { presentBuildTokenKey } from './engine-secrets.js';
+import { parameterExists } from '../adapters/providers/aws/aws-engine.client.js';
 import { releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
 
 /**
@@ -24,7 +26,9 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   if (!params.sourceDirectory) return { blocked: 'AWS releases build from this project\'s local git repository; run Hypervibe from the repository.' };
   const context = await resolveAwsEngineContext(ctx, params.project, params.environmentName);
   if ('blocked' in context) return context;
-  const target: AwsReleaseTarget = { region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
+  const token = await presentBuildTokenKey(params.spec, params.environmentName, (key) => parameterExists({ region: context.connection.region, credentials: context.credentials }, `${context.parameterPath}${key}`));
+  if ('error' in token) return { blocked: token.error };
+  const target: AwsReleaseTarget = { ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}), region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
   const workloads = selectReleaseWorkloads(environmentSpec, params.services);
   if ('blocked' in workloads) return workloads;
   const { selected, web, startCommand } = workloads;
@@ -76,4 +80,18 @@ export async function buildAwsCommitImage(target: AwsReleaseTarget, spec: Projec
   });
   if ('blocked' in source) return { error: source.blocked };
   return buildImage(target, source);
+}
+
+/** Upgrade existing Lambda images before the engine narrows their secret permissions. */
+export async function upgradeAwsRuntimeImage(target: AwsReleaseTarget, spec: ProjectSpec, environmentName: string, image: string): Promise<string | undefined> {
+  for (const [name, service] of Object.entries(spec.environments[environmentName]!.services)) {
+    if ((service.workloadKind ?? 'web') !== 'web') continue;
+    const resource = awsResourceName(target.prefix, name);
+    const exists = await functionExists(target, resource);
+    if (exists === 'unknown') return `Could not verify ${name} before updating its secrets loader; runtime permissions were not changed.`;
+    if (!exists) continue;
+    const released = await releaseFunction(target, name, resource, image, service.healthCheckPath ?? '/');
+    if (released.status !== 'released') return `The secrets loader update for ${name} did not finish: ${released.message}`;
+  }
+  return undefined;
 }
