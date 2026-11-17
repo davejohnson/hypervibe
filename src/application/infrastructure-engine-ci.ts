@@ -1,6 +1,6 @@
 import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
-import { HEALTH_CHECK_PATH_PATTERN } from '../domain/spec/spec.schema.js';
+import { assertHealthCheckPath } from '../domain/spec/health-check-path.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -93,9 +93,7 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
   if (input.releaseCommand) plain('release job', input.releaseCommand.job);
   for (const service of input.services) {
     plain('service name', service.name); plain('resource', service.resource); plain('image', service.image);
-    if (service.healthPath !== undefined && !HEALTH_CHECK_PATH_PATTERN.test(service.healthPath)) {
-      throw new Error(`The health check path ${JSON.stringify(service.healthPath)} of ${service.name} must be a path on the service itself, for example /health.`);
-    }
+    if (service.healthPath !== undefined) assertHealthCheckPath(service.healthPath);
   }
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
   const lines: string[] = [

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HEALTH_CHECK_PATH_PATTERN } from '../spec.schema.js';
+import { HEALTH_CHECK_PATH_PATTERN } from '../health-check-path.js';
 
 // #543: the path is joined to the service's own URL and passed to release tooling on every cloud.
 describe('healthCheckPath', () => {
@@ -7,7 +7,7 @@ describe('healthCheckPath', () => {
     expect(HEALTH_CHECK_PATH_PATTERN.test(path)).toBe(true);
   });
 
-  it.each(['health', '//other.example/x', '/\\other.example', 'https://other.example/x', '/$(env)', '/a b', '/a\nb', '/a;b', "/a'b", '/a`b`', '/a|b', '/a#b'])(
+  it.each(['health', '//other.example/x', '/\\other.example', 'https://other.example/x', '/$(env)', '/a b', '/a\nb', '/a;b', "/a'b", '/a`b`', '/a|b', '/a#b', '/${{ secrets.X }}'])(
     'refuses %j', (path) => {
       expect(HEALTH_CHECK_PATH_PATTERN.test(path)).toBe(false);
       // What the refusal prevents: a different host, or anything a URL parser or shell would reinterpret.
