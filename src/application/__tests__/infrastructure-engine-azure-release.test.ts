@@ -33,8 +33,33 @@ describe('ACR Tasks builds', () => {
     expect(built).toEqual({ image: `hvappshared123456.azurecr.io/app@${digest}`, logsUrl: `https://portal.azure.com/#resource${registryId}/runs` });
     expect(JSON.stringify(built)).not.toContain('logs.example');
     const run = JSON.parse(azure.calls.find((call) => call.url.includes('scheduleRun'))!.body!);
-    expect(run).toMatchObject({ type: 'DockerBuildRequest', imageNames: [`app:${source.commitSha}`], isPushEnabled: true, sourceLocation: 'source/123/src.tar.gz',
+    expect(run).toMatchObject({ type: 'EncodedTaskRunRequest', sourceLocation: 'source/123/src.tar.gz',
       platform: { os: 'Linux', architecture: 'amd64' } });
+  });
+
+  it('runs the applied private-token task with only source and tag overrides', async () => {
+    const azure = fake((_method, url) => {
+      if (url.includes('listBuildSourceUploadUrl')) return json(200, { uploadUrl: 'https://blob.example/u', relativePath: 'source/123/src.tar.gz' });
+      if (url.startsWith('https://blob.example/')) return new Response(null, { status: 201 });
+      if (url.includes('scheduleRun')) return json(202, { properties: { runId: 'build1' } });
+      return json(200, { properties: { status: 'Succeeded', outputImages: [{ repository: 'app', tag: source.commitSha, digest }] } });
+    });
+    const taskId = `${registryId}/tasks/hv-app-demo-images`;
+    await buildWithAcrTasks(azure.tokens, { registryId, loginServer: 'registry.azurecr.io', source, taskId });
+    const request = JSON.parse(azure.calls.find((call) => call.url.includes('scheduleRun'))!.body!);
+    expect(request).toEqual({ type: 'TaskRunRequest', taskId, overrideTaskStepProperties: { contextPath: 'source/123/src.tar.gz', values: [{ name: 'IMAGE_TAG', value: source.commitSha, isSecret: false }] } });
+    expect(azure.calls.some((call) => call.method === 'PUT' && call.url.includes('/tasks/'))).toBe(false);
+  });
+
+  it('keeps build failure logs outside command results', async () => {
+    const azure = fake((_method, url) => {
+      if (url.includes('listBuildSourceUploadUrl')) return json(200, { uploadUrl: 'https://blob.example/u', relativePath: 'source' });
+      if (url.startsWith('https://blob.example/')) return new Response(null, { status: 201 });
+      if (url.includes('scheduleRun')) return json(202, { name: 'build1' });
+      if (url.includes('listLogSasUrl')) throw new Error('Do not read possibly secret-bearing logs');
+      return json(200, { properties: { status: 'Failed' } });
+    });
+    expect(await buildWithAcrTasks(azure.tokens, { registryId, loginServer: 'registry.azurecr.io', source, taskId: `${registryId}/tasks/images` })).toMatchObject({ error: expect.stringContaining('failed; see its log') });
   });
 
   it('explains the free-credit pause and refuses a build without a digest', async () => {
@@ -71,7 +96,7 @@ describe('Container Apps releases', () => {
     if (url.startsWith('https://hv-app-test-web.example.azurecontainerapps.io/')) return health();
     if (url.includes('/revisions/')) return json(200, { properties: { healthState: revisionHealth } });
     if (method === 'PATCH') return json(202);
-    return json(200, { properties: { provisioningState: 'Succeeded', template, latestRevisionName: method === 'GET' && releaseCalls++ ? 'rev-2' : 'rev-1',
+    return json(200, { location: 'northeurope', properties: { provisioningState: 'Succeeded', template, latestRevisionName: method === 'GET' && releaseCalls++ ? 'rev-2' : 'rev-1',
       configuration: { ingress: { fqdn: 'hv-app-test-web.example.azurecontainerapps.io' } } } });
   });
   let releaseCalls = 0;
@@ -82,6 +107,7 @@ describe('Container Apps releases', () => {
     const result = await releaseAzureApp(azure.tokens, { id: appId, name: 'web', image: 'img@sha256:1', healthCheckPath: '/health', web: true, waitMs: 1000, fetchTimeoutMs: 1, retryMs: 1 });
     expect(result).toMatchObject({ status: 'released', url: 'https://hv-app-test-web.example.azurecontainerapps.io', health: { status: 200, path: '/health' } });
     const patch = azure.calls.find((call) => call.method === 'PATCH')!;
+    expect(JSON.parse(patch.body!).location).toBe('northeurope');
     expect(JSON.parse(patch.body!).properties.template.containers[0].image).toBe('img@sha256:1');
   });
 
@@ -108,11 +134,11 @@ describe('Container Apps releases', () => {
 });
 
 describe('Azure image builds', () => {
-  it('generates a Dockerfile ACR Tasks can build without BuildKit', async () => {
+  it('preserves generated optional package-token mounts for ACR BuildKit', async () => {
     const { azureReleaseDockerfile } = await import('../../adapters/providers/azure/azure-release.client.js');
     const dockerfile = azureReleaseDockerfile({ runtime: { kind: 'node', version: '24', installCommand: 'npm ci' } as never, startCommand: 'npm start' });
-    expect(dockerfile).not.toMatch(/--mount|# syntax/);
-    expect(dockerfile).toContain('RUN npm ci');
+    expect(dockerfile).toContain('--mount=type=secret,id=npm_token,required=false');
+    expect(dockerfile).toContain('npm ci');
     expect(dockerfile).toContain('FROM node:24-slim');
   });
 });

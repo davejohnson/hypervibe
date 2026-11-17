@@ -1,3 +1,5 @@
+import { azureCiRoleDefinitions } from './azure-ci-roles.js';
+import { azureDeployToken, type AzureEngineCredentials } from './azure-engine.adapter.js';
 import crypto from 'crypto';
 import os from 'os';
 import { azureProjectVaultName } from './tofu/azure-engine.config.js';
@@ -20,7 +22,7 @@ import { ARM_SCOPE, GRAPH_SCOPE, azureTokenFor, type AzureSignInSession } from '
  *   Azure equivalent of the AWS permissions boundary: the deploy identity
  *   cannot grant itself or anyone else Owner, Contributor or role administration.
  */
-export const AZURE_SETUP_VERSION = 'azure-v1';
+export const AZURE_SETUP_VERSION = 'azure-v2';
 const ARM = 'https://management.azure.com';
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
@@ -49,8 +51,8 @@ export const azureDeployAppName = (project: string) => `hypervibe-deploy-${slug(
  * add or remove only the app roles, and only for service principals (managed
  * identities are service principals).
  */
-export function appRoleAssignmentCondition(): string {
-  const roles = AZURE_APP_ROLES.join(', ');
+export function appRoleAssignmentCondition(ciRoleIds: string[] = []): string {
+  const roles = [...AZURE_APP_ROLES, ...ciRoleIds].join(', ');
   const constrain = (source: 'Request' | 'Resource') =>
     `@${source}[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${roles}} AND @${source}[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal'}`;
   return `((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (${constrain('Request')})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (${constrain('Resource')}))`;
@@ -59,13 +61,13 @@ export function appRoleAssignmentCondition(): string {
 export interface AzureRoleGrant { role: string; label: string; condition?: string }
 
 /** Every role the deploy identity holds, all on the project's resource group. */
-export function deployRoleGrants(): AzureRoleGrant[] {
+export function deployRoleGrants(ciRoleIds: string[] = []): AzureRoleGrant[] {
   return [
     { role: AZURE_ROLES.contributor, label: 'Contributor' },
     { role: AZURE_ROLES.keyVaultSecretsOfficer, label: 'Key Vault Secrets Officer' },
     // Teardown empties storage before deleting it; accounts have no shared keys.
     { role: AZURE_ROLES.storageBlobDataContributor, label: 'Storage Blob Data Contributor' },
-    { role: AZURE_ROLES.roleBasedAccessControlAdministrator, label: 'Role Based Access Control Administrator (only AcrPull, Key Vault Secrets User and Storage Blob Data Contributor, only for service principals)', condition: appRoleAssignmentCondition() },
+    { role: AZURE_ROLES.roleBasedAccessControlAdministrator, label: `Role Based Access Control Administrator (only app data roles${ciRoleIds.length ? ' and the two fixed CI roles' : ''}, only for service principals)`, condition: appRoleAssignmentCondition(ciRoleIds) },
   ];
 }
 
@@ -168,6 +170,33 @@ const appUrl = (name: string) => `${GRAPH}/applications(uniqueName='${encodeURIC
 const groupScope = (subscriptionId: string, group: string) => `/subscriptions/${subscriptionId}/resourceGroups/${group}`;
 const roleDefinition = (subscriptionId: string, role: string) => `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${role}`;
 
+function sameCiRole(observed: unknown, expected: ReturnType<typeof azureCiRoleDefinitions>['build']['properties']): boolean {
+  const value = observed as typeof expected | undefined;
+  const normalized = (properties: typeof expected) => JSON.stringify({ ...properties,
+    assignableScopes: [...properties.assignableScopes].map((scope) => scope.toLowerCase()).sort(),
+    permissions: properties.permissions.map((p) => ({ actions: [...p.actions].sort(), notActions: [...(p.notActions ?? [])].sort(), dataActions: [...(p.dataActions ?? [])].sort(), notDataActions: [...(p.notDataActions ?? [])].sort() })) });
+  try { return !!value && normalized({ roleName: value.roleName, description: value.description, type: value.type, permissions: value.permissions, assignableScopes: value.assignableScopes }) === normalized(expected); } catch { return false; }
+}
+
+/** Read-only upgrade detection; a missing or unverifiable grant cannot authorize branch releases. */
+export async function azureCiSetupReady(connection: AzureEngineCredentials, fetchImpl: Fetch = fetch): Promise<boolean> {
+  const token = await azureDeployToken(connection, fetchImpl);
+  const roles = Object.values(azureCiRoleDefinitions(connection.subscriptionId, connection.resourceGroup));
+  for (const role of roles) {
+    const response = await rest(fetchImpl, token, 'GET', `${ARM}${role.id}?api-version=2022-04-01`);
+    if (response.status !== 200 || !sameCiRole(response.body.properties, role.properties)) return false;
+  }
+  const scope = groupScope(connection.subscriptionId, connection.resourceGroup);
+  const response = await rest(fetchImpl, token, 'GET', `${ARM}${scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${connection.deployPrincipalId}'`)}`);
+  if (response.status !== 200 || !Array.isArray(response.body.value) || response.body.nextLink) return false;
+  return response.body.value.some((entry: { properties?: { principalId?: string; scope?: string; roleDefinitionId?: string; condition?: string; conditionVersion?: string } }) => {
+    const p = entry.properties;
+    return p?.principalId?.toLowerCase() === connection.deployPrincipalId.toLowerCase() && p.scope?.toLowerCase() === scope.toLowerCase()
+      && p.roleDefinitionId?.toLowerCase().endsWith(AZURE_ROLES.roleBasedAccessControlAdministrator)
+      && p.condition === appRoleAssignmentCondition(roles.map((role) => role.guid)) && p.conditionVersion === '2.0';
+  });
+}
+
 /** Read-only: what setup would create or update in this subscription. */
 export async function planAzureSetup(session: AzureSignInSession, target: AzureSetupTarget, fetchImpl: Fetch = fetch): Promise<AzureSetupPlan> {
   const { subscriptionId, tenantId } = target.subscription;
@@ -216,17 +245,27 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
   }
 
   const scope = groupScope(subscriptionId, group);
+  const ciRoles = target.repository ? Object.values(azureCiRoleDefinitions(subscriptionId, group)) : [];
+  let ciRolesState: AzureSetupChange['state'] = 'ok';
+  for (const role of ciRoles) {
+    const observed = existingGroup.status === 200 ? ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}${role.id}?api-version=2022-04-01`), 'Reading fixed CI role', [200, 404]) : undefined;
+    if (!observed || observed.status === 404) ciRolesState = 'create';
+    else if (!sameCiRole(observed.body.properties, role.properties)) throw new Error('A fixed CI role has unexpected permissions or ownership. Preserve it and review Azure setup before continuing.');
+  }
+  if (ciRoles.length) changes.push({ id: 'ci-roles', state: ciRolesState,
+    change: 'Two fixed CI roles: read and update existing apps/jobs; upload and run builds in the assigned registry. The deploy identity may assign these roles but cannot change their permissions.' });
+  const grants = deployRoleGrants(ciRoles.map((role) => role.guid));
   let rolesState: AzureSetupChange['state'] = 'create';
   if (principal?.status === 200 && existingGroup.status === 200) {
     const listed = ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}${scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${String(principal.body.id)}'`)}`), 'Reading role assignments', [200]);
     const held = ((listed.body.value ?? []) as Array<{ properties?: { roleDefinitionId?: string; scope?: string; condition?: string } }>)
       .filter((entry) => entry.properties?.scope?.toLowerCase() === scope.toLowerCase());
-    const matches = deployRoleGrants().every((grant) => held.some((entry) => entry.properties?.roleDefinitionId?.toLowerCase().endsWith(grant.role)
+    const matches = grants.every((grant) => held.some((entry) => entry.properties?.roleDefinitionId?.toLowerCase().endsWith(grant.role)
       && (entry.properties.condition ?? undefined) === grant.condition));
     rolesState = matches ? 'ok' : 'update';
   }
   changes.push({ id: 'roles', state: rolesState,
-    change: `Roles on ${group} only (none on the subscription): ${deployRoleGrants().map((grant) => grant.label).join('; ')}` });
+    change: `Roles on ${group} only (none on the subscription): ${grants.map((grant) => grant.label).join('; ')}` });
   changes.push({ id: 'local-secret', state: 'create',
     change: `A client secret for ${appName}, valid one year: lets this computer deploy; stored encrypted here and never shown` });
   return {
@@ -288,7 +327,18 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
     }
   }
 
-  for (const grant of deployRoleGrants()) {
+  const ciRoles = plan.repository ? Object.values(azureCiRoleDefinitions(subscriptionId, plan.resourceGroup)) : [];
+  for (const role of ciRoles) {
+    const observed = ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}${role.id}?api-version=2022-04-01`), 'Reading fixed CI role', [200, 404]);
+    if (observed.status === 200) {
+      if (!sameCiRole(observed.body.properties, role.properties)) throw new Error('The reviewed fixed CI role changed; no role assignment was granted. Review Azure setup again.');
+    } else {
+      ensure(await rest(fetchImpl, tokens.arm, 'PUT', `${ARM}${scope}/providers/Microsoft.Authorization/roleDefinitions/${role.guid}?api-version=2022-04-01`, { properties: role.properties }), 'Creating the reviewed fixed CI role', [200, 201]);
+      const verified = ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}${role.id}?api-version=2022-04-01`), 'Verifying the fixed CI role', [200]);
+      if (!sameCiRole(verified.body.properties, role.properties)) throw new Error('The new CI role permissions could not be verified; no dependent assignment was granted.');
+    }
+  }
+  for (const grant of deployRoleGrants(ciRoles.map((role) => role.guid))) {
     const url = `${ARM}${scope}/providers/Microsoft.Authorization/roleAssignments/${roleAssignmentName(scope, servicePrincipalId, grant.role)}?api-version=2022-04-01`;
     const body = { properties: {
       roleDefinitionId: roleDefinition(subscriptionId, grant.role), principalId: servicePrincipalId, principalType: 'ServicePrincipal',
@@ -300,6 +350,17 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
       if ([200, 201].includes(result.status) || (result.body.error as { code?: string } | undefined)?.code === 'RoleAssignmentExists') break;
       if (attempt < 11 && (result.body.error as { code?: string } | undefined)?.code === 'PrincipalNotFound') { await new Promise((done) => setTimeout(done, delay)); continue; }
       ensure(result, `Granting ${grant.label.split(' (')[0]}`, [200, 201]);
+    }
+    // A successful PUT or conflict does not prove the exact requested grant.
+    const verified = ensure(await rest(fetchImpl, tokens.arm, 'GET', url), 'Verifying the exact role assignment', [200]);
+    const properties = verified.body.properties as { principalId?: string; principalType?: string; scope?: string; roleDefinitionId?: string; condition?: string | null; conditionVersion?: string | null } | undefined;
+    if (String(verified.body.id).toLowerCase() !== url.slice(ARM.length).split('?')[0]!.toLowerCase()
+      || properties?.principalId?.toLowerCase() !== servicePrincipalId.toLowerCase() || properties.principalType !== 'ServicePrincipal'
+      || properties.scope?.toLowerCase() !== scope.toLowerCase()
+      || properties.roleDefinitionId?.toLowerCase() !== roleDefinition(subscriptionId, grant.role).toLowerCase()
+      || (properties.condition ?? undefined) !== grant.condition
+      || (grant.condition && properties.conditionVersion !== '2.0')) {
+      throw new Error('Azure did not confirm the exact role assignment and access condition. No local credential was created; review the conflicting grant through setup before continuing.');
     }
   }
 

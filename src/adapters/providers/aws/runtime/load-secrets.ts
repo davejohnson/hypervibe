@@ -1,9 +1,9 @@
 /**
  * Loaded through NODE_OPTIONS=--require in Lambda, before the app starts.
  * Lambda cannot reference Parameter Store values the way Fargate does, so this
- * reads every parameter under HYPERVIBE_PARAMETER_PATH (SigV4, no dependencies)
- * and sets each as an environment variable. It fails closed: a missing secret
- * stops the function visibly instead of starting the app without it. Fargate
+ * reads the declared runtime keys under HYPERVIBE_PARAMETER_PATH (SigV4, no dependencies)
+ * and sets each as an environment variable. It fails closed: an invalid declaration
+ * or missing secret stops the function visibly instead of starting the app without it. Fargate
  * tasks receive secrets from ECS and skip this.
  */
 export const LOAD_SECRETS_PATH = '/opt/hypervibe/load-secrets.cjs';
@@ -24,16 +24,33 @@ if (process.env.HV_SECRETS_FETCH === '1') {
 
 async function fetchAll() {
   const values = {};
-  let token;
-  do {
-    const page = await call({ Path: path, Recursive: false, WithDecryption: true, MaxResults: 10, ...(token ? { NextToken: token } : {}) });
-    for (const p of page.Parameters || []) values[p.Name.slice(path.length)] = p.Value;
-    token = page.NextToken;
-  } while (token);
+  // Old environments have not applied the allow-list setting yet. This branch
+  // keeps the new image usable while the reviewed apply updates its runtime role.
+  if (process.env.HYPERVIBE_SECRET_KEYS === undefined) {
+    let token;
+    do {
+      const page = await call({ Path: path, Recursive: false, WithDecryption: true, MaxResults: 10, ...(token ? { NextToken: token } : {}) }, 'GetParametersByPath');
+      for (const p of page.Parameters || []) {
+        const key = typeof p.Name === 'string' && p.Name.startsWith(path) ? p.Name.slice(path.length) : '';
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key) && typeof p.Value === 'string') values[key] = p.Value;
+      }
+      token = page.NextToken;
+    } while (token);
+    return values;
+  }
+  const declaredKeys = process.env.HYPERVIBE_SECRET_KEYS === '' ? [] : process.env.HYPERVIBE_SECRET_KEYS.split(',');
+  if (declaredKeys.some((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))) throw new Error('A declared runtime secret name is invalid');
+  const keys = declaredKeys.filter((key) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key));
+  for (let offset = 0; offset < keys.length; offset += 10) {
+    const names = keys.slice(offset, offset + 10).map((key) => path + key);
+    const page = await call({ Names: names, WithDecryption: true });
+    for (const p of page.Parameters || []) if (names.includes(p.Name) && typeof p.Value === 'string') values[p.Name.slice(path.length)] = p.Value;
+    if (names.some((name) => !(name.slice(path.length) in values))) throw new Error('A declared runtime secret is missing');
+  }
   return values;
 }
 
-async function call(body) {
+async function call(body, operation = 'GetParameters') {
   const crypto = require('crypto');
   const region = process.env.AWS_REGION;
   const host = 'ssm.' + region + '.amazonaws.com';
@@ -42,7 +59,7 @@ async function call(body) {
   const day = amzDate.slice(0, 8);
   const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
   const hmac = (k, v) => crypto.createHmac('sha256', k).update(v).digest();
-  const headers = { 'content-type': 'application/x-amz-json-1.1', host, 'x-amz-content-sha256': hash(payload), 'x-amz-date': amzDate, 'x-amz-target': 'AmazonSSM.GetParametersByPath' };
+  const headers = { 'content-type': 'application/x-amz-json-1.1', host, 'x-amz-content-sha256': hash(payload), 'x-amz-date': amzDate, 'x-amz-target': 'AmazonSSM.' + operation };
   if (process.env.AWS_SESSION_TOKEN) headers['x-amz-security-token'] = process.env.AWS_SESSION_TOKEN;
   const names = Object.keys(headers).sort();
   const canonical = ['POST', '/', '', ...names.map((n) => n + ':' + headers[n]), '', names.join(';'), hash(payload)].join('\n');

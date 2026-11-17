@@ -5,6 +5,7 @@ export interface ProviderLogEntry {
   timestamp: string;
   severity: string;
   message: string;
+  truncated?: true;
 }
 
 export interface ProviderDeployment {
@@ -28,6 +29,8 @@ export interface ProviderRuntimeLogsRequest {
 }
 
 export interface ProviderRuntimeLogsResult {
+  /** Bounded provider query interval, when the adapter uses one. */
+  window?: { since: string; until: string };
   deploymentStatus?: string;
   deploymentId?: string;
   logs: ProviderLogEntry[];

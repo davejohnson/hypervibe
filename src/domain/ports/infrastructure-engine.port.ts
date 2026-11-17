@@ -63,6 +63,8 @@ export interface EngineResourceMapping {
   dataBearing?: boolean;
   /** Creating or replacing this resource can charge the provider account. */
   billable?: boolean;
+  /** Permission/trust changes require review even when they have no usage charge. */
+  requiresConfirm?: boolean;
 }
 
 /** Private generated configuration. Provider verification values may be sensitive; never export the raw document. */
@@ -159,6 +161,8 @@ export interface EngineReleaseResult {
   service: string;
   status: 'released' | 'failed' | 'unknown';
   imageUri?: string;
+  /** Exact registered ECS revision, retained for current-release observations. */
+  taskDefinitionArn?: string;
   url?: string;
   health?: { status: number; path: string };
   message: string;

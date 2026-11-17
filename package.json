@@ -35,7 +35,11 @@
       "types": "./dist/ci/environment-task.d.ts",
       "import": "./dist/ci/environment-task.js"
     },
-    "./*": "./*"
+    "./*": "./*",
+    "./ci/engine-release": {
+      "types": "./dist/ci/engine-release.d.ts",
+      "import": "./dist/ci/engine-release.js"
+    }
   },
   "bin": {
     "hypervibe": "dist/index.js",

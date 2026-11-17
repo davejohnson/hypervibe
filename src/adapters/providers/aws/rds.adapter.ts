@@ -1,3 +1,5 @@
+import { AwsEngineCredentialsSchema } from './aws-engine.adapter.js';
+import { awsEngineAuthentication } from './tofu/aws-engine.backend.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
 import { AwsSecretsAdapter } from '../secretmanagers/aws-secrets.adapter.js';
 import { environmentResourceName } from '../../../domain/services/resource-names.js';
@@ -809,6 +811,7 @@ export class RdsAdapter implements IDatabaseOperations, IObservableDatabase {
 providerRegistry.register({
   metadata: {
     name: 'rds',
+    connectionAliases: ['aws'],
     displayName: 'Amazon RDS',
     category: 'database',
     credentialsSchema: RdsCredentialsSchema,
@@ -838,7 +841,15 @@ providerRegistry.register({
   databaseRuntime: standardDatabaseRuntimeProjection,
   factory: async (credentials) => {
     const adapter = new RdsAdapter();
-    await adapter.connect(credentials);
+    const engine = AwsEngineCredentialsSchema.safeParse(credentials);
+    if (engine.success) {
+      if (engine.data.roleArn.split(':')[4] !== engine.data.accountId) throw new Error('AWS engine role and account disagree.');
+      const auth = await awsEngineAuthentication(engine.data);
+      await adapter.connect({ region: engine.data.region, accessKeyId: auth.env.AWS_ACCESS_KEY_ID, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY, sessionToken: auth.env.AWS_SESSION_TOKEN });
+    } else {
+      if (credentials && typeof credentials === 'object' && 'roleArn' in credentials) throw new Error('The AWS engine connection is invalid. Reconnect AWS access.');
+      await adapter.connect(credentials);
+    }
     return adapter;
   },
 });

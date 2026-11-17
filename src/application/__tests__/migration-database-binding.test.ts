@@ -136,3 +136,13 @@ describe('persisted migration database identity veto', () => {
     expect(f.check()).toBeUndefined();
   });
 });
+
+it('compares engine databases within their shared server, preserving distinct per-environment databases', () => {
+  const f = fixture('rds', {}, 'unused'); f.components.splice(0);
+  const database = { clusterArn: 'arn:aws:rds:us-west-2:123456789012:cluster:accepted', accountId: '123456789012', region: 'us-west-2', name: 'accepted', owner: 'accepted_owner' };
+  f.source.platformBindings = { provider: 'aws', aws: { kind: 'opentofu', databaseLoginAt: 'accepted', database } };
+  f.target.platformBindings = { provider: 'aws', aws: { kind: 'opentofu', databaseLoginAt: 'accepted', database: { ...database } } };
+  expect(f.check()).toMatch(/same database instance/);
+  (f.target.platformBindings.aws as any).database.name = 'different_environment';
+  expect(f.check()).toBeUndefined();
+});

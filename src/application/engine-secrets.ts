@@ -63,6 +63,17 @@ export function buildTokenKey(spec: ProjectSpec, environmentName: string): strin
   return engineOutsideKeys(spec, environmentName).find(isBuildTokenKey);
 }
 
+/** Resolves only a declared, present build token. Unknown access and required absence stop the build. */
+export async function presentBuildTokenKey(spec: ProjectSpec, environmentName: string, observe: EngineSecretStore['observe']): Promise<{ key?: string } | { error: string }> {
+  for (const key of engineOutsideKeys(spec, environmentName).filter(isBuildTokenKey)) {
+    const state = await observe(key);
+    if (typeof state === 'object') return { error: state.unknown };
+    if (state === 'present') return { key };
+    if (!optionalOutsideKeys(spec, environmentName).includes(key)) return { error: `Build token ${key} is not stored. Run hv_secrets to supply it before building.` };
+  }
+  return {};
+}
+
 /** The outside keys with no value yet; unknown stops everything rather than guessing absence. */
 export async function missingOutsideKeys(store: EngineSecretStore, keys: string[]): Promise<{ missing: string[] } | { blocked: string }> {
   const missing: string[] = [];

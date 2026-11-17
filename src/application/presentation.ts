@@ -399,21 +399,23 @@ function healthPresentation(data: DataRecord): CommandPresentation {
   const maintenanceActive = data.state === 'maintenance' || maintenance?.observed === 'active';
   const checkOk = check?.ok === true;
   const deploymentState = stringValue(deploymentHealth?.state);
-  const healthy = checkOk && deploymentState !== 'failed';
-  const title = maintenanceActive ? 'MAINTENANCE ACTIVE' : healthy ? 'HEALTHY' : 'HEALTH CHECK FAILED';
+  const noHttp = data.httpCheck === 'not-applicable';
+  const healthy = (checkOk || noHttp) && (deploymentState === undefined || deploymentState === 'healthy');
+  const unknown = (checkOk || noHttp) && deploymentState === 'unknown';
+  const title = maintenanceActive ? 'MAINTENANCE ACTIVE' : healthy ? 'HEALTHY' : unknown ? 'HEALTH UNKNOWN' : 'HEALTH CHECK FAILED';
   const status = numberValue(check?.status);
   const latency = numberValue(check?.latencyMs);
   const summary = maintenanceActive
     ? 'HTTP health is intentionally suppressed.'
     : [
-      status !== undefined ? `HTTP ${status}` : stringValue(check?.error) ?? 'No HTTP result',
+      noHttp ? 'HTTP check not applicable' : status !== undefined ? `HTTP ${status}` : stringValue(check?.error) ?? 'No HTTP result',
       latency !== undefined ? `${latency} ms` : undefined,
       deploymentState ? `deployments ${deploymentState}` : undefined,
     ].filter(Boolean).join(' · ');
   const details = genericLines(data, new Set(['service', 'baseUrl', 'state', 'check']));
   return {
-    tone: maintenanceActive ? 'info' : healthy ? 'success' : 'danger',
-    icon: maintenanceActive ? '🛠️' : healthy ? '✅' : '❌',
+    tone: maintenanceActive ? 'info' : healthy ? 'success' : unknown ? 'warning' : 'danger',
+    icon: maintenanceActive ? '🛠️' : healthy ? '✅' : unknown ? '⚠️' : '❌',
     title,
     context: [stringValue(data.service), stringValue(data.baseUrl)].filter(Boolean).join(' · '),
     summary,

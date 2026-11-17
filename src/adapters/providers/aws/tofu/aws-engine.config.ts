@@ -1,6 +1,9 @@
+import { awsDatabaseQuerySecretName } from '../aws-database-query-secret.js';
 import { LOAD_SECRETS_PATH } from '../runtime/load-secrets.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
+import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
+import { addAwsCiConfiguration } from './aws-engine-ci.config.js';
 
 /**
  * Pure OpenTofu configuration for one AWS environment. Values are non-secret:
@@ -9,6 +12,7 @@ import { addTasks } from './aws-engine.tasks.js';
  * RDS itself, so no secret ever enters engine state.
  */
 export interface AwsEngineInput {
+  ci?: EngineCiIntent;
   accountId: string;
   region: string;
   /** Short stable prefix for physical names, e.g. `hv-billforge-aws`. */
@@ -28,6 +32,8 @@ export interface AwsEngineInput {
   jobs?: AwsJobInput[];
   /** Names of the runtime secrets under parameterPath, wired into Fargate tasks by reference. */
   secretKeys?: string[];
+  /** Declared, present package token: CodeBuild alone can read it. */
+  packageTokenKey?: string;
 }
 
 export interface AwsTaskInput {
@@ -167,6 +173,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   const resources: Record<string, EngineResourceMapping> = {};
   const files: Record<string, unknown> = checkedProvider(input);
 
+  const runtimeSecretKeys = (input.secretKeys ?? []).filter((key) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key));
   // The app's runtime role (capped by the setup boundary).
   const runtime = { actionId: 'identity:runtime', kind: 'service' as const, name: 'runtime' };
   resources['aws_iam_role.runtime'] = runtime;
@@ -174,8 +181,8 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   const buckets = input.storage ?? [];
   const runtimeStatements: unknown[] = [
     { Sid: 'Logs', Effect: 'Allow', Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'], Resource: '*' },
-    { Sid: 'Secrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-      Resource: `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath.replace(/\/$/, '')}/*` },
+    ...(runtimeSecretKeys.length ? [{ Sid: 'Secrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters'],
+      Resource: runtimeSecretKeys.map((key) => `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath}${key}`) }] : []),
     { Sid: 'DecryptSecrets', Effect: 'Allow', Action: 'kms:Decrypt', Resource: '*', Condition: { StringEquals: { 'kms:ViaService': `ssm.${input.region}.amazonaws.com` } } },
     { Sid: 'PullImages', Effect: 'Allow', Action: ['ecr:GetAuthorizationToken', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchCheckLayerAvailability'], Resource: '*' },
     ...(buckets.length ? [{ Sid: 'Storage', Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket'],
@@ -246,7 +253,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
         memory_size: service.memory ?? 1024, timeout: service.timeout ?? 60, architectures: ['x86_64'],
         environment: [{ variables: {
           // Lambda sets its reserved variables itself (the region among them) and rejects them here.
-          ...Object.fromEntries(Object.entries(service.env ?? {}).filter(([key]) => !LAMBDA_RESERVED_ENV.has(key))), HYPERVIBE_PARAMETER_PATH: input.parameterPath,
+          ...Object.fromEntries(Object.entries(service.env ?? {}).filter(([key]) => !LAMBDA_RESERVED_ENV.has(key) && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key))), HYPERVIBE_PARAMETER_PATH: input.parameterPath, HYPERVIBE_SECRET_KEYS: runtimeSecretKeys.join(','),
           // The image's loader reads secrets from Parameter Store before the app starts; npm writes only to /tmp.
           NODE_OPTIONS: `--require ${LOAD_SECRETS_PATH}`, NPM_CONFIG_CACHE: '/tmp/.npm',
           // The function URL streams responses, so the adapter must stream too (otherwise clients receive Lambda's envelope).
@@ -276,7 +283,16 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     };
   }
 
-  addTasks(input, files, resources);
+  addTasks({ ...input, secretKeys: runtimeSecretKeys }, files, resources);
+  if (input.database) {
+    files['database-access.tf.json'] = { resource: { aws_secretsmanager_secret: { database_query: {
+      name: awsDatabaseQuerySecretName(input.environmentId), recovery_window_in_days: 0,
+      description: 'Hypervibe environment application login for database diagnostics; value managed by the approved login operation.',
+      tags: { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() },
+    } } } };
+    resources['aws_secretsmanager_secret.database_query'] = { actionId: 'database-query:credential', kind: 'secret', name: 'database query access', billable: true, requiresConfirm: true };
+  }
+  addAwsCiConfiguration(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },
@@ -343,6 +359,7 @@ export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfig
 }
 
 function addBuilds(input: AwsEngineInput, files: Record<string, unknown>, resources: Record<string, EngineResourceMapping>): void {
+  if (input.packageTokenKey && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(input.packageTokenKey)) throw new Error('Invalid package token key.');
   // Image builds: CodeBuild reads a source archive Hypervibe uploads and pushes to the registry.
   const builds: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'builds' };
   for (const address of ['aws_s3_bucket.build_source', 'aws_s3_bucket_public_access_block.build_source', 'aws_s3_bucket_lifecycle_configuration.build_source',
@@ -358,6 +375,10 @@ function addBuilds(input: AwsEngineInput, files: Record<string, unknown>, resour
     aws_iam_role_policy: { build: { name: 'build', role: '${aws_iam_role.build.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: [
       { Sid: 'Logs', Effect: 'Allow', Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'], Resource: '*' },
       { Sid: 'Source', Effect: 'Allow', Action: ['s3:GetObject', 's3:GetObjectVersion'], Resource: `arn:aws:s3:::${input.prefix}-build-${input.accountId}/*` },
+      ...(input.packageTokenKey ? [
+        { Sid: 'PackageToken', Effect: 'Allow', Action: 'ssm:GetParameters', Resource: `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath}${input.packageTokenKey}` },
+        { Sid: 'DecryptPackageToken', Effect: 'Allow', Action: 'kms:Decrypt', Resource: '*', Condition: { StringEquals: { 'kms:ViaService': `ssm.${input.region}.amazonaws.com`, 'kms:EncryptionContext:PARAMETER_ARN': `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath}${input.packageTokenKey}` } } },
+      ] : []),
       { Sid: 'Login', Effect: 'Allow', Action: 'ecr:GetAuthorizationToken', Resource: '*' },
       { Sid: 'Push', Effect: 'Allow', Resource: `arn:aws:ecr:${input.region}:${input.accountId}:repository/${input.prefix}`, Action: [
         'ecr:BatchCheckLayerAvailability', 'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload', 'ecr:PutImage', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'] },
@@ -372,7 +393,7 @@ function addBuilds(input: AwsEngineInput, files: Record<string, unknown>, resour
         version: '0.2',
         phases: {
           pre_build: { commands: ['aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY%%/*}"'] },
-          build: { commands: ['docker build --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
+          build: { commands: ['if [ -n "${NPM_TOKEN:-}" ]; then set -- --secret id=npm_token,env=NPM_TOKEN; else set --; fi; docker build "$@" --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
         },
       }).replace(/\$\{/g, () => '$${') }],
       logs_config: [{ cloudwatch_logs: [{ status: 'ENABLED', group_name: `/hypervibe/${input.prefix}/builds` }] }],

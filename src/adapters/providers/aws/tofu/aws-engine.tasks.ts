@@ -26,7 +26,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     runtime_platform: [{ operating_system_family: 'LINUX', cpu_architecture: 'X86_64' }],
     container_definitions: JSON.stringify([{
       name: 'app', image: task.initialImageUri, essential: true, ...(task.command ? { command: task.command } : {}),
-      environment: Object.entries({ ...task.env, HYPERVIBE_PARAMETER_PATH: input.parameterPath }).map(([name, value]) => ({ name, value })),
+      environment: Object.entries({ ...task.env, HYPERVIBE_PARAMETER_PATH: input.parameterPath }).filter(([key]) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key)).map(([name, value]) => ({ name, value })),
       // Fargate reads each secret from Parameter Store at start; values never enter engine state.
       secrets: (input.secretKeys ?? []).map((key) => ({ name: key, valueFrom: parameterArn(key) })),
       logConfiguration: { logDriver: 'awslogs', options: { 'awslogs-group': `/hypervibe/${input.prefix}/tasks`, 'awslogs-region': input.region, 'awslogs-stream-prefix': task.resourceName } },

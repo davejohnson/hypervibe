@@ -502,3 +502,10 @@ describe('command presentation', () => {
     expect(envelope.error?.details).toHaveLength(4);
   });
 });
+
+it('renders unknown deployment evidence as unknown even when HTTP succeeds, and omits HTTP for background workloads', () => {
+  const unknown = formatCommandResult('hv_health', commandSuccess({ check: { ok: true, status: 200 }, deploymentHealth: { state: 'unknown' } }));
+  expect(unknown).toContain('HEALTH UNKNOWN'); expect(unknown).not.toContain('· HEALTHY');
+  const worker = formatCommandResult('hv_health', commandSuccess({ service: 'worker', httpCheck: 'not-applicable', deploymentHealth: { state: 'healthy' } }));
+  expect(worker).toContain('HTTP check not applicable'); expect(worker).toContain('· HEALTHY');
+});

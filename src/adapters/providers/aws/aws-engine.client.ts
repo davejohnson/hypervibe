@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { verifyAwsDatabaseQuerySecret } from './aws-database-query-secret.js';
 import { CloudWatchLogsClient, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { DeleteTaskDefinitionsCommand, DeregisterTaskDefinitionCommand, ECSClient, ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
 import { IAMClient, ListRolesCommand } from '@aws-sdk/client-iam';
@@ -212,39 +213,68 @@ async function masterSql(access: AwsAccess, params: { clusterArn: string; master
 export async function ensureDatabaseLogin(access: AwsAccess, params: {
   parameter: string; wakerSecrets: string[]; appLogin?: boolean; clusterArn: string; masterSecretArn: string; endpoint: string; databaseUrlKey: string;
   database: AwsEnvironmentDatabase;
+  queryCredential?: { arn: string; environmentId: string; accountId: string };
 }): Promise<ActionResult> {
   const { name, owner, waker } = checkedDatabase(params.database);
-  const sql = await masterSql(access, params);
-  const role = async (login: string, password: string) => {
-    const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${login}'`);
-    await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${login} LOGIN PASSWORD '${scramVerifier(password)}'`);
-  };
-  if (params.appLogin !== false) {
-    const password = crypto.randomBytes(24).toString('base64url');
-    await role(owner, password);
-    // Membership lets the master hand the database over now and drop it at teardown.
-    await sql(`GRANT ${owner} TO CURRENT_USER`);
-    if (!(await sql(`SELECT 1 FROM pg_database WHERE datname = '${name}'`)).records?.length) await sql(`CREATE DATABASE ${name} OWNER ${owner}`);
-    await sql(`ALTER DATABASE ${name} OWNER TO ${owner}`);
-    await sql(`REVOKE ALL ON DATABASE ${name} FROM PUBLIC`);
-    await sql(`ALTER SCHEMA public OWNER TO ${owner}`, name);
-    await putParameter(access, params.parameter, `postgresql://${owner}:${password}@${params.endpoint}:5432/${name}?sslmode=require`);
-  }
-  // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy,
-  // and CONNECT on this database alone keeps it out of the other environments'.
-  if (params.wakerSecrets.length) {
-    const wakerPassword = crypto.randomBytes(24).toString('base64url');
-    await role(waker, wakerPassword);
-    await sql(`GRANT pg_read_all_data TO ${waker}`);
-    await sql(`GRANT CONNECT ON DATABASE ${name} TO ${waker}`);
-    const secrets = new SecretsManagerClient(access);
-    for (const secretId of params.wakerSecrets) {
-      await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: waker, password: wakerPassword }) }));
+  try {
+    if (params.queryCredential) await verifyAwsDatabaseQuerySecret(access, params.queryCredential.arn, { ...params.queryCredential, region: access.region }, false);
+    const sql = params.appLogin !== false || params.wakerSecrets.length ? await masterSql(access, params) : async () => { throw new Error('This upgrade does not authorize database administration.'); };
+    const role = async (login: string, password: string) => {
+      const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${login}'`);
+      await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${login} LOGIN PASSWORD '${scramVerifier(password)}'`);
+    };
+    let appPassword: string | undefined;
+    if (params.appLogin !== false) {
+      const password = crypto.randomBytes(24).toString('base64url');
+      appPassword = password;
+      await role(owner, password);
+      // Membership lets the master hand the database over now and drop it at teardown.
+      await sql(`GRANT ${owner} TO CURRENT_USER`);
+      if (!(await sql(`SELECT 1 FROM pg_database WHERE datname = '${name}'`)).records?.length) await sql(`CREATE DATABASE ${name} OWNER ${owner}`);
+      await sql(`ALTER DATABASE ${name} OWNER TO ${owner}`);
+      await sql(`REVOKE ALL ON DATABASE ${name} FROM PUBLIC`);
+      await sql(`ALTER SCHEMA public OWNER TO ${owner}`, name);
+      await putParameter(access, params.parameter, `postgresql://${owner}:${password}@${params.endpoint}:5432/${name}?sslmode=require`);
     }
+    if (params.queryCredential) {
+      const credential = params.queryCredential;
+      if (!appPassword) {
+        const client = new SSMClient({ ...access, maxAttempts: 1 });
+        try {
+          const stored = await client.send(new GetParameterCommand({ Name: params.parameter, WithDecryption: true }));
+          if (stored.Parameter?.Name !== params.parameter || !stored.Parameter.Value) throw new Error('The accepted app credential could not be read.');
+          const url = new URL(stored.Parameter.Value);
+          if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.hostname !== params.endpoint || decodeURIComponent(url.username) !== owner
+            || decodeURIComponent(url.pathname.slice(1)) !== name || !url.password || url.port && url.port !== '5432') throw new Error('The existing app credential differs from the accepted environment database.');
+          appPassword = decodeURIComponent(url.password);
+        } finally { client.destroy(); }
+      }
+      const client = new SecretsManagerClient({ ...access, maxAttempts: 1 });
+      try {
+        const written = await client.send(new PutSecretValueCommand({ SecretId: credential.arn, SecretString: JSON.stringify({ username: owner, password: appPassword }) }));
+        if (written.ARN !== credential.arn || !written.VersionId) throw new Error('The environment query credential write could not be verified.');
+        await verifyAwsDatabaseQuerySecret(access, credential.arn, { ...credential, region: access.region });
+      } finally { client.destroy(); appPassword = undefined; }
+    }
+    // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy,
+    // and CONNECT on this database alone keeps it out of the other environments'.
+    if (params.wakerSecrets.length) {
+      const wakerPassword = crypto.randomBytes(24).toString('base64url');
+      await role(waker, wakerPassword);
+      await sql(`GRANT pg_read_all_data TO ${waker}`);
+      await sql(`GRANT CONNECT ON DATABASE ${name} TO ${waker}`);
+      const secrets = new SecretsManagerClient(access);
+      for (const secretId of params.wakerSecrets) {
+        await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: waker, password: wakerPassword }) }));
+      }
+    }
+    return { success: true, message: params.appLogin !== false
+      ? `Created database ${name} and its login, and stored ${params.databaseUrlKey} in Parameter Store.`
+      : params.queryCredential ? 'Stored the existing application login for scoped database access.' : 'Created the worker waker\'s read-only database login.' };
+  } catch {
+    // Provider/SQL errors can contain submitted passwords or verifiers. Keep them private.
+    return { success: false, status: 'blocked', message: 'The database login operation could not be verified. Run hv_plan and hv_apply to retry the scoped operation.' };
   }
-  return { success: true, message: params.appLogin !== false
-    ? `Created database ${name} and its login, and stored ${params.databaseUrlKey} in Parameter Store.`
-    : 'Created the worker waker\'s read-only database login.' };
 }
 
 /** Drops an environment's database and logins from the shared cluster; the other environments' databases stay. */

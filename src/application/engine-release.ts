@@ -6,12 +6,11 @@ import type { Project } from '../domain/entities/project.entity.js';
 import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
+import type { LocalCommitSource } from '../domain/ports/commit-release.port.js';
+export type { LocalCommitSource } from '../domain/ports/commit-release.port.js';
 import { ENGINE_PLAN_SCOPE as RELEASE_PLAN_SCOPE, ENGINE_RELEASE_OPERATION as RELEASE_OPERATION, type EngineReleaseResult } from './infrastructure-engine.js';
 
 const execFileAsync = promisify(execFile);
-
-/** One exact commit, packaged for a cloud's managed build service. */
-export interface LocalCommitSource { commitSha: string; archive: Buffer; uncommittedChangesExcluded: boolean }
 
 /**
  * Packages a local commit without git credentials or Docker: the tracked files
@@ -127,7 +126,7 @@ export async function runLocalCommitRelease(params: {
           name: action.resource.name, kind: String(action.metadata?.workloadKind), resource: String(action.metadata?.resource), image: image!,
         });
         results.push(result);
-        const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.url ? { url: result.url } : {}) };
+        const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.taskDefinitionArn ? { taskDefinitionArn: result.taskDefinitionArn } : {}), ...(result.url ? { url: result.url } : {}) };
         if (result.status === 'released') return { success: true, message: result.message, data };
         return { success: false, ...(result.status === 'unknown' ? { status: 'pending' as const } : {}), message: result.message, error: result.message, data };
       } catch (error) {
