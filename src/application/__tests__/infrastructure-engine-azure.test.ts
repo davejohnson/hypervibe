@@ -93,11 +93,18 @@ describe('Azure apply actions', () => {
     metadata: { operation, subscriptionId: connection.subscriptionId, ...metadata } }) as never;
 
   it('generates a secret only when it is absent', async () => {
-    const azure = setup((method) => method === 'GET' ? json(404) : json(200));
+    const azure = setup((method) => method === 'GET' ? json(200, { value: [] }) : json(200));
     await expect(runAzureAction(azure.ctx, azure.context, action(AZURE_SECRET_OPERATION, { key: 'JWT_SECRET' }), { project: project as never, spec: spec({ test: testing() }) })).resolves.toMatchObject({ success: true });
     const put = azure.calls.find((call) => call.method === 'PUT')!;
     expect(put.url).toContain('/secrets/test--jwt-secret?');
     expect(JSON.parse(put.body!).value).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('blocks generated secret writes when the current Key Vault secret is disabled', async () => {
+    const azure = setup((method, url) => method === 'GET' ? json(200, { value: [{ id: `${new URL(url).origin}/secrets/test--jwt-secret`, attributes: { enabled: false } }] }) : json(200));
+    await expect(runAzureAction(azure.ctx, azure.context, action(AZURE_SECRET_OPERATION, { key: 'JWT_SECRET' }), { project: project as never, spec: spec({ test: testing() }) }))
+      .resolves.toMatchObject({ success: false, status: 'blocked' });
+    expect(azure.calls.filter((call) => call.method === 'PUT')).toEqual([]);
   });
 
   it('creates the database login, stores DATABASE_URL and the worker\'s counting login, and records both', async () => {

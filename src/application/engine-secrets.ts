@@ -13,8 +13,8 @@ import { requestingAgent } from './requesting-agent.js';
 
 /**
  * Where an OpenTofu-managed environment keeps its runtime settings: Google
- * Secret Manager on GCP, Parameter Store on AWS, Key Vault on Azure. Values only ever go in; the
- * store reports presence, never contents.
+ * Secret Manager on GCP, Parameter Store on AWS, Key Vault on Azure. Observation
+ * reports presence; only the owner's local reveal page may read a value.
  */
 export interface EngineSecretStore {
   /** "Google Secret Manager", "AWS Parameter Store", "Azure Key Vault" */
@@ -25,7 +25,7 @@ export interface EngineSecretStore {
   /**
    * Reads one value for the owner's local page (revealGeneratedSecret) and for
    * nothing else. Callers must never log it or put it in a command result.
-   * Absent on clouds where this is not implemented yet.
+   * Optional for stores that do not support owner reveal.
    */
   read?(key: string): Promise<{ value: string } | { error: string }>;
 }
