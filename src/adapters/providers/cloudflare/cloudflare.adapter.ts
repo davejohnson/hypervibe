@@ -530,6 +530,21 @@ export class CloudflareAdapter implements IDnsProvider, IEdgeMaintenanceAdapter,
       if (!binding && matching.length > 0) {
         throw new Error('A matching maintenance route exists without a durable Hypervibe binding.');
       }
+      if (!binding) {
+        // Workers are account-wide and this name is predictable. With no binding on record, a script
+        // of this name is someone else's unless it is byte-for-byte the maintenance script.
+        let existing: string | undefined;
+        try {
+          existing = await (await this.rawRequest('GET', `/accounts/${scope.accountId}/workers/scripts/${encodeURIComponent(expected.name)}`)).text();
+        } catch (error) {
+          if (!(error instanceof CloudflareApiError) || error.status !== 404) {
+            throw new Error(`Whether a Cloudflare Worker named ${expected.name} already exists could not be read. Nothing was written.`);
+          }
+        }
+        if (existing !== undefined && !existing.includes(expected.source)) {
+          throw new Error(`A Cloudflare Worker named ${expected.name} already exists in this account and is not Hypervibe's maintenance page. Nothing was written.`);
+        }
+      }
       await this.rawRequest(
         'PUT',
         `/accounts/${scope.accountId}/workers/scripts/${encodeURIComponent(expected.name)}`,
