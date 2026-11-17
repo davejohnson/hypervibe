@@ -533,8 +533,22 @@ export class StripeAdapter {
   // Webhook Management
 
   async listWebhookEndpoints(mode: StripeMode): Promise<StripeWebhookEndpoint[]> {
-    const response = await this.request<{ data: StripeWebhookEndpoint[] }>(mode, 'GET', '/webhook_endpoints?limit=100');
-    return response.data;
+    // Stripe pages this list; an endpoint beyond the first page exists and must not look missing.
+    const endpoints: StripeWebhookEndpoint[] = [];
+    const seen = new Set<string>();
+    let startingAfter: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const response = await this.request<{ data?: StripeWebhookEndpoint[]; has_more?: boolean }>(mode, 'GET',
+        `/webhook_endpoints?limit=100${startingAfter ? `&starting_after=${encodeURIComponent(startingAfter)}` : ''}`);
+      if (!Array.isArray(response.data)) throw new Error('Stripe returned an invalid webhook-endpoint list; the list is incomplete.');
+      endpoints.push(...response.data);
+      if (!response.has_more) return endpoints;
+      const next = response.data.at(-1)?.id;
+      if (!next || seen.has(next)) throw new Error('Stripe webhook-endpoint paging repeated itself; the list is incomplete.');
+      seen.add(next);
+      startingAfter = next;
+    }
+    throw new Error('Stripe webhook-endpoint list is incomplete: it exceeded the read limit.');
   }
 
   async getWebhookEndpoint(mode: StripeMode, endpointId: string): Promise<StripeWebhookEndpoint | null> {
@@ -570,7 +584,7 @@ export class StripeAdapter {
     mode: StripeMode,
     url: string,
     events: string[],
-    options?: { description?: string; metadata?: Record<string, string> }
+    options?: { description?: string; metadata?: Record<string, string>; /** Stripe replays the first response for a repeated key, so a create whose response was lost is recovered, not doubled. */ idempotencyKey?: string }
   ): Promise<StripeWebhookEndpoint> {
     const body: Record<string, unknown> = {
       url,
@@ -584,7 +598,7 @@ export class StripeAdapter {
       body.metadata = options.metadata;
     }
 
-    return this.request<StripeWebhookEndpoint>(mode, 'POST', '/webhook_endpoints', body);
+    return this.request<StripeWebhookEndpoint>(mode, 'POST', '/webhook_endpoints', body, options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {});
   }
 
   async updateWebhookEndpoint(

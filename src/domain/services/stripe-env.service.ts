@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   StripeAdapter,
   StripePrice,
@@ -21,6 +22,19 @@ import type {
 import { removeHostingEnvVars, syncHostingEnvVars } from './hosting-env.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getStripeAdapter } from './stripe-ops.service.js';
+
+/** Planning reads the whole catalog: a product past the first page exists and must not be planned as missing. */
+const CATALOG_READ_LIMIT = 10_000;
+
+/**
+ * Names one intended webhook creation. A retry of the same creation sends the same key, and
+ * Stripe returns the endpoint it already made (with its signing secret) instead of a second one.
+ * Replacing a different endpoint, or any change to the target, is a different creation.
+ */
+export function stripeWebhookCreationKey(intent: { environmentId: string; name: string; url: string; events: string[]; replaces?: string }): string {
+  const material = JSON.stringify([intent.environmentId, intent.name, intent.url, [...intent.events].sort(), intent.replaces ?? null]);
+  return `hv-webhook-${createHash('sha256').update(material).digest('hex').slice(0, 32)}`;
+}
 
 export const STRIPE_HOSTING_ENV_SYNC_OPERATION = 'stripeHostingEnvSync';
 export const STRIPE_CATALOG_OPERATIONS = {
@@ -448,10 +462,10 @@ export async function resolveStripeIntegrationState(params: {
       || Object.keys(bindings.catalog.products).length > 0;
     const [products, prices, webhookEndpoints] = await Promise.all([
       needsCatalogObservation
-        ? stripe.adapter.listProducts(stripe.mode, 100, true)
+        ? stripe.adapter.listProducts(stripe.mode, CATALOG_READ_LIMIT, true)
         : Promise.resolve([]),
       needsCatalogObservation
-        ? stripe.adapter.listPrices(stripe.mode, 100, true)
+        ? stripe.adapter.listPrices(stripe.mode, CATALOG_READ_LIMIT, true)
         : Promise.resolve([]),
       needsWebhookObservation
         ? stripe.adapter.listWebhookEndpoints(stripe.mode)
@@ -2394,6 +2408,7 @@ export async function applyStripeWebhookAction(params: {
           hypervibe_environment: params.environment.name,
           hypervibe_webhook: name,
         },
+        idempotencyKey: stripeWebhookCreationKey({ environmentId: params.environment.id, name, url: currentSpec.url, events: normalizedEvents(currentSpec.events), replaces: binding?.endpointId }),
       }
     );
   } catch (error) {
