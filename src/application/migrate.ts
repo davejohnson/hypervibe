@@ -556,6 +556,8 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   if (exported.exitCode !== 0 || !exportResult?.ok || !exportResult.source) {
     return { blocked: `The private export inside Railway did not complete (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
   }
+  // The temporary task can read the source database. Nothing is restored while it may still exist.
+  if (!cleanedUp) return { blocked: 'The private export finished, but its temporary task could not be removed from Railway, and that task can read the source database. Remove the temporary Hypervibe task service in Railway (hv_status lists it), then run the migration again. The target was not changed.' };
   const sourceIdentity = parsePostgresDatabaseIdentity(exportResult.sourceIdentity);
   if (!sourceIdentity) return { blocked: 'The private export did not verify the source database identity; the target was not changed.' };
   const restored = await runTransferJob<{ ok: boolean; error?: string; target?: DatabaseManifest; restoreWarnings?: number }>(transfer, {

@@ -255,6 +255,8 @@ interface TransferJob {
 export async function runTransferJob<T extends { ok: boolean; error?: string }>(context: TransferContext, job: TransferJob): Promise<T> {
   const id = `hv-migrate-${job.purpose}-${crypto.randomBytes(3).toString('hex')}`;
   const temporarySecrets: string[] = [];
+  let outcome: T | undefined;
+  let thrown: unknown;
   try {
     const secretEnv: Array<Record<string, unknown>> = [];
     for (const [name, value] of Object.entries(job.sourceSecrets)) {
@@ -296,14 +298,42 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
     const operation = await waitOperation(context, await started.json() as { name?: string; done?: boolean }, job.timeoutSeconds + 300);
     const executionName = (operation.response as { name?: string } | undefined)?.name ?? (operation.metadata as { name?: string } | undefined)?.name;
     const result = await readResultLine(context, id, executionName);
-    if (result) return result as T;
-    return { ok: false, error: `The ${job.purpose} copy finished without a result. Check hv_logs for job ${id}.` } as T;
-  } finally {
-    await cloudRunJobRequest(await context.token(), context, `/${id}`, { method: 'DELETE' }).catch(() => undefined);
-    for (const secretId of temporarySecrets) {
-      await deleteSecret(await context.token(), context.gcpProjectId, secretId).catch(() => undefined);
-    }
+    outcome = result ? result as T : { ok: false, error: `The ${job.purpose} copy finished without a result. Check hv_logs for job ${id}.` } as T;
+  } catch (error) {
+    thrown = error ?? new Error('The copy failed.');
   }
+  const leftovers = await removeTransferLeftovers({
+    jobId: id, secretIds: temporarySecrets,
+    deleteJob: async () => cloudRunJobRequest(await context.token(), context, `/${id}`, { method: 'DELETE' }),
+    deleteSecret: async (secretId) => deleteSecret(await context.token(), context.gcpProjectId, secretId),
+  });
+  if (leftovers.some((item) => item.startsWith('secret '))) {
+    // A leftover secret holds source credentials: the copy does not count, so nothing builds on it.
+    return { ok: false, error: `The ${job.purpose} copy's temporary source credentials could not be removed from Google Cloud (${leftovers.join(', ')}). Delete them in the Google Cloud console, then run the migration again.` } as T;
+  }
+  if (thrown) throw thrown;
+  return outcome!;
+}
+
+/**
+ * Deletes a copy job and its temporary secrets, retrying, and returns what could not be
+ * confirmed deleted ("secret <id>", "job <id>"). Already gone (404) counts as deleted.
+ */
+export async function removeTransferLeftovers(deps: {
+  deleteJob(): Promise<Response>; deleteSecret(secretId: string): Promise<Response>; secretIds: string[]; jobId?: string; attempts?: number; retryMs?: number;
+}): Promise<string[]> {
+  const removed = async (attempt: () => Promise<Response>): Promise<boolean> => {
+    for (let tries = 0; tries < (deps.attempts ?? 3); tries++) {
+      if (tries > 0) await new Promise((resolve) => setTimeout(resolve, deps.retryMs ?? 2000));
+      const response = await attempt().catch(() => undefined);
+      if (response && (response.ok || response.status === 404)) return true;
+    }
+    return false;
+  };
+  const left: string[] = [];
+  for (const secretId of deps.secretIds) if (!await removed(() => deps.deleteSecret(secretId))) left.push(`secret ${secretId}`);
+  if (!await removed(deps.deleteJob)) left.push(`job ${deps.jobId ?? ''}`.trim());
+  return left;
 }
 
 async function waitOperation(context: TransferContext, operation: { name?: string; done?: boolean; response?: unknown; metadata?: unknown; error?: { message?: string } }, timeoutSeconds = 300): Promise<{ response?: unknown; metadata?: unknown }> {
