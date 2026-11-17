@@ -92,13 +92,17 @@ describe('engine-owned Secret Manager containers', () => {
       configurations.push(configuration);
       const segment = { id: 'engine-segment', engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
       return { ok: true, segmentId: segment.id, segment, planFile: '/not-executed', blockers: [], unmanagedDeletes: [],
-        actions: Object.entries(configuration.resources).filter(([address]) => address.startsWith('google_secret_manager_secret.') || address.startsWith('google_cloud_run_v2_service.'))
+        actions: Object.entries(configuration.resources).filter(([address]) => address.startsWith('google_secret_manager_secret.') || address.startsWith('google_cloud_run_v2_service.') || address.startsWith('google_artifact_registry_repository.'))
           .map(([address, resource]) => ({ id: resource.actionId, type: 'create' as const, resource: { kind: resource.kind, name: resource.name, provider: 'gcp' }, verified: true, reason: 'engine preview', metadata: { engineSegment: { ...segment, addresses: [address] } } })),
       };
     });
     let ready = false;
+    let repository: 'present' | 'absent' | 'unreadable' = 'present';
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method) throw new Error('Planning cannot write to Google.');
+      if (url.includes('artifactregistry.googleapis.com')) return repository === 'present'
+        ? Response.json({ name: 'projects/demo-project/locations/us-central1/repositories/hypervibe', format: 'DOCKER' })
+        : new Response('', { status: repository === 'absent' ? 404 : 403 });
       if (url.includes('/secrets?')) return Response.json({ secrets: ready ? [{ name: `projects/demo-project/secrets/${secret}` }] : [] });
       if (!ready) return new Response('', { status: 404 });
       return Response.json(url.endsWith('/versions/latest') ? { state: 'ENABLED', name: `projects/demo-project/secrets/${secret}/versions/2` } : { labels });
@@ -116,6 +120,17 @@ describe('engine-owned Secret Manager containers', () => {
     expect(JSON.stringify(configurations.at(-1)!.files['cloudrun.tf.json'])).toContain('secret_key_ref');
     expect(JSON.stringify(configurations.at(-1)!.files['cloudrun.tf.json'])).toContain('"version":"2"');
     expect(enginePlan).toHaveBeenCalledTimes(2);
+
+    // A release needs the image repository in this environment's region; project setup may have made it elsewhere.
+    repository = 'absent';
+    const third = await planInfrastructureEngine(ctx, { project, spec, specRevision: 1, environmentName: environment.name });
+    if ('blocked' in third) throw new Error(third.blocked.join('; '));
+    expect(third.actions[0]).toMatchObject({ id: 'artifact-repository:us-central1', type: 'create' });
+    expect(enginePlan.mock.calls.at(-1)![0].state).toEqual({ provider: 'gcp', projectId: project.id, environmentId: 'image-repository-us-central1', partition: 'project-shared' });
+    repository = 'unreadable';
+    const calls = enginePlan.mock.calls.length;
+    expect(await planInfrastructureEngine(ctx, { project, spec, specRevision: 1, environmentName: environment.name })).toMatchObject({ blocked: [expect.stringContaining('did not confirm')] });
+    expect(enginePlan.mock.calls.length).toBe(calls + 1);
   });
 
   it('blocks unknown or foreign containers without writing versions', async () => {

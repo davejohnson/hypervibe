@@ -34,6 +34,12 @@ export interface PlanAction {
   requiresConfirm?: boolean;
   /** Ids of actions that must complete first. */
   dependsOn?: string[];
+  /**
+   * Starts without waiting for it to finish, so later independent actions run alongside
+   * (a database cluster that takes minutes while images build). Actions that depend on it
+   * wait for it, and apply finishes only when it does. Once it fails, nothing new starts.
+   */
+  background?: boolean;
   /** Provider/action-specific non-secret context shown in plans and persisted with the plan. */
   metadata?: Record<string, unknown>;
 }

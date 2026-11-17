@@ -100,4 +100,28 @@ describe('Artifact Registry release prerequisite', () => {
     expect(calls[0]).toBe(`GET https://artifactregistry.googleapis.com/v1/${repositoryName}`);
     expect(calls.filter((call) => call.includes('artifactregistry.googleapis.com'))).toHaveLength(1);
   });
+  it.each(['archive', 'git'] as const)('gives a %s build a private package token only as a mounted build secret, never in the request', async (source) => {
+    const subject = await adapter();
+    const version = 'projects/gcp-project/secrets/hv-staging-node-auth-token/versions/3';
+    let submitted: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const location = String(url);
+      if (location.includes('cloudbuild.googleapis.com')) {
+        submitted = JSON.parse(String(init?.body));
+        const imageUri = (submitted.images as string[])[0]!;
+        return Response.json({ id: 'build-2', status: 'SUCCESS', results: { images: [{ name: imageUri, digest: `sha256:${'c'.repeat(64)}` }] } });
+      }
+      return Response.json(location.includes('artifactregistry') ? { name: repositoryName, format: 'DOCKER' } : {});
+    }));
+    const result = source === 'archive'
+      ? await subject.buildReleaseImageFromArchive(service, environment, { archive: Buffer.from('archive'), commitSha, bucket: 'gcp-project-build-source', packageTokenVersion: version })
+      : await subject.buildReleaseImage(service, environment, { repoUrl: 'https://github.com/example/app.git', revision: commitSha, packageTokenVersion: version });
+    expect(result.success, result.error).toBe(true);
+    expect(submitted.availableSecrets).toEqual({ secretManager: [{ versionName: version, env: 'NPM_TOKEN' }] });
+    const step = (submitted.steps as Array<{ secretEnv?: string[]; args: string[] }>)[0]!;
+    expect(step.secretEnv).toEqual(['NPM_TOKEN']);
+    expect(step.args[1]).toContain('--secret id=npm_token,env=NPM_TOKEN');
+    // Reading the secret needs an identity Hypervibe controls, not the project default.
+    expect(submitted.serviceAccount).toMatch(/serviceAccounts\/.+@/);
+  });
 });

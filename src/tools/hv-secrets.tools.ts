@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { rotateSecrets, secretAges } from '../application/secret-rotation.js';
-import { collectOutsideKeys } from '../application/engine-secrets.js';
+import { collectOutsideKeys, revealGeneratedSecret } from '../application/engine-secrets.js';
 import { localRepositoryFor } from '../application/local-repository.js';
 import { isEngineManaged } from '../application/infrastructure-engine.js';
 import type { CommandContext } from '../application/context.js';
@@ -88,7 +88,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
     'Secret read modes: {project?,env,view:"inventory"} reports credential sources, exact consumers, configuration, rollout and evidence gaps without writes; {} or {project} lists sources; {provider,pathPrefix?} lists one manager; {provider,path,key?,version?} checks one manager value; {include:["github"],project?,repo?} lists GitHub Actions names; {project?,env,service?,key?} inspects masked hosting variables. Hosting mode requires explicit env; inventory also requires env. Values and private fingerprints are never returned. {project?,env,action:"collect",key?|keys?,purpose?} opens one Hypervibe local page where the user pastes keys an outside service issues for an OpenTofu-managed environment (GCP or AWS), each with a link to the issuing service\'s key page and a live check where known; values go straight to the environment\'s secret store, never through chat. Without key/keys it asks for every declared or imported key that has no value yet. Then run hv_launch to roll services onto them.',
     {
       project: projectField.describe('Optional Hypervibe project name/id for validated context. Project-only still lists sources. Omit to use no project context for source/manager lists or auto-detect only in GitHub/hosting modes.'),
-      action: z.enum(['collect', 'rotate', 'ages']).optional().describe('OpenTofu-managed environments. collect: one local page to add the missing outside keys (or the given key/keys). rotate: replace every secret in env (or keys) now: new generated values, a no-downtime database login change, one local page for all third-party keys, services moved onto them, old versions disabled. Call again after any stop; it resumes. ages: read-only list of each secret, its kind and age.'),
+      action: z.enum(['collect', 'rotate', 'ages', 'reveal']).optional().describe('OpenTofu-managed environments. reveal: with env and key, opens a local page where the user copies one secret Hypervibe generated for their app (for example to give another app access); the value goes to their browser only and is never returned here. collect: one local page to add the missing outside keys (or the given key/keys). rotate: replace every secret in env (or keys) now: new generated values, a no-downtime database login change, one local page for all third-party keys, services moved onto them, old versions disabled. Call again after any stop; it resumes. ages: read-only list of each secret, its kind and age.'),
       keys: z.array(z.string().min(1)).optional().describe('action="rotate": only these settings (default: all rotatable). action="collect": these keys (default: every missing one).'),
       generateInternal: z.boolean().optional().describe('Compatibility option for action="rotate". Only secrets explicitly declared with ownership="hypervibe" for this environment are generated; that happens automatically. Keys without that ownership require a replacement from their issuer.'),
       confirmActions: z.array(z.string().min(1)).optional().describe('action="rotate": exact confirmActions from a needs_confirmation result, after the user approved them.'),
@@ -124,6 +124,22 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         }
         if (rotated.status === 'rotated') return commandSuccess(rotated, { hint: rotated.message, next: ['hv_status', 'hv_health'] });
         return commandSuccess(rotated, { hint: 'The rollout stopped for a decision; show it to the user, then call action="rotate" again with what they approved.', next: ['hv_secrets'] });
+      }
+      if (action === 'reveal') {
+        if (!env) throw new HvError('VALIDATION', 'action="reveal" requires env.');
+        const requested = [...(key ? [key] : []), ...(keys ?? [])];
+        if (requested.length !== 1) throw new HvError('VALIDATION', 'action="reveal" shows one secret at a time: pass exactly one key.');
+        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const specResult = new SpecStore().get(project);
+        if (!specResult) throw new HvError('NOT_FOUND', `Project "${project.name}" has no spec.`);
+        if (!isEngineManaged(specResult.spec.environments[env])) throw new HvError('VALIDATION', `${env} is not an OpenTofu-managed environment.`);
+        const revealed = await revealGeneratedSecret(ctx, { project, spec: specResult.spec, environmentName: env, key: requested[0]! });
+        if (revealed.status === 'blocked') return commandError('VALIDATION', revealed.message);
+        return commandSuccess(revealed, {
+          hint: revealed.status === 'viewed'
+            ? `The user copied ${revealed.key} on the local page. The value was not returned to you; do not ask for it.`
+            : 'Tell the user the page is open in their browser and give them the link. The value is shown only there; never ask them to paste it into chat.',
+        });
       }
       if (action === 'collect') {
         if (!env) throw new HvError('VALIDATION', 'action="collect" requires env.');

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   azureCron, azureProjectVaultName, azureSecretName, azureSharedNames, azureStorageAccountName, azureVaultSecretName, buildAzureConfiguration,
-  buildAzureEnvironmentConfiguration, buildAzureSharedConfiguration,
+  buildAzureBuildConfiguration, buildAzureEnvironmentConfiguration, buildAzureSharedConfiguration,
 } from '../azure-engine.config.js';
 import { azureEngineAuthentication, azureEngineBackend, azureResourceGroupId } from '../azure-engine.backend.js';
 import { fullEnvironmentInput, fullSharedInput } from './azure-fixtures.js';
@@ -117,5 +117,26 @@ describe('Azure engine backend', () => {
     expect(probe.resources).toEqual({});
     expect(probe.files['probe.tf.json']).not.toHaveProperty('resource');
     expect(() => azureEngineBackend.buildAuthenticationProbe({ projectId: fullEnvironmentInput.subscriptionId })).toThrow(/resource group id/);
+  });
+});
+
+
+describe('Azure private package build task', () => {
+  it('applies a separate identity with secret-scoped read access and keeps tokens out of runtime', () => {
+    const input = { ...fullEnvironmentInput, packageTokenKey: 'NODE_AUTH_TOKEN', secretKeys: ['NODE_AUTH_TOKEN', 'NPM_TOKEN', 'API_KEY'] };
+    const config = buildAzureBuildConfiguration(input);
+    const resources = resourcesOf(config, 'builds.tf.json');
+    const task = resources.azurerm_container_registry_task!.images! as any;
+    expect(task.identity).toEqual([{ type: 'SystemAssigned' }]);
+    const program = JSON.parse(Buffer.from(task.encoded_step[0].task_content, 'base64').toString());
+    expect(program.secrets).toEqual([{ id: 'npmToken', keyvault: `${input.vault.uri}secrets/test--node-auth-token` }]);
+    expect(program.env).toEqual(['DOCKER_BUILDKIT=1']);
+    expect(program.steps[0].build).toContain('--secret id=npm_token,src=/run/hypervibe-build/npm_token');
+    expect(program.steps[0].volumeMounts).toEqual([{ name: 'package-token', mountPath: '/run/hypervibe-build' }]);
+    expect(resources.azurerm_role_assignment!.build_token).toMatchObject({ scope: `${input.vault.id}/secrets/test--node-auth-token`, principal_id: '${azurerm_container_registry_task.images.identity[0].principal_id}' });
+    const runtime = JSON.stringify(buildAzureEnvironmentConfiguration(input).files);
+    expect(runtime).not.toMatch(/NODE_AUTH_TOKEN|NPM_TOKEN|node-auth-token|npm-token/);
+    expect(runtime).toContain('API_KEY');
+    expect(buildAzureBuildConfiguration(fullEnvironmentInput).resources).toEqual({});
   });
 });

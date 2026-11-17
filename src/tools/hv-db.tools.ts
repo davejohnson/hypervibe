@@ -202,7 +202,7 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
       let queryError: unknown;
       let cleanup: DatabaseAccessCleanup = { status: 'no_op' };
       try {
-        result = await lease.withConnection(async (resolvedUrl) => {
+        result = lease.query ? await lease.query(sql, params, { readOnly: !analysis.isMutation }) : await lease.withConnection(async (resolvedUrl) => {
           const adapter = await providerRegistry.createAdapter('database', {
             connectionUrl: resolvedUrl,
           });
@@ -300,9 +300,13 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
             ? {
               agentInstruction: {
                 action: 'stop_and_report' as const,
-                message: 'The query result is valid, but temporary database access cleanup failed. Report the safe resource id and inspect it with hv_inspect before another query.',
+                message: lease.mode === 'data_api'
+                  ? 'The query result is valid, but its Aurora transaction cleanup remains unverified. Report the cleanup warning before another operation.'
+                  : 'The query result is valid, but temporary database access cleanup failed. Report the safe resource id and inspect it with hv_inspect before another query.',
               },
-              hint: 'The query succeeded, but public access may remain until the registered cleanup retry succeeds. Inspect with hv_inspect.',
+              hint: lease.mode === 'data_api'
+                ? 'The query succeeded, but transaction rollback could not be verified after bounded retries; the Data API transaction expires after inactivity. Inspect the database before another operation.'
+                : 'The query succeeded, but public access may remain until the registered cleanup retry succeeds. Inspect with hv_inspect.',
             }
             : {}),
         }

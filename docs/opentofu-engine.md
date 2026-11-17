@@ -1,7 +1,7 @@
 # GCP engine implementation notes
 
 Google Cloud uses OpenTofu as its only infrastructure engine. Cloud Run selects
-it automatically; `hosting.engine` is not a user choice. Default planning routes
+it automatically; there is no engine setting. Default planning routes
 to the engine and unsupported work blocks without a legacy fallback.
 
 This page records engine ownership, implementation decisions and dated evidence.
@@ -20,11 +20,10 @@ DNS records now use the same saved-plan boundary with pinned Cloudflare, Google
 Cloud DNS, Route 53 and Azure DNS backends. `environment.dns` selects the provider
 and exact existing zone independently of hosting. Hypervibe retains read-only
 scope/ownership checks, explicit adoption, consumer ordering and certificate
-readiness; OpenTofu owns record changes and encrypted native state. Domain,
-Pages and email workflows do not invoke the historical direct record writers.
+readiness; OpenTofu owns record changes and encrypted native state. Domain
+and email workflows do not invoke the historical direct record writers.
 
-The [DNS setup examples](domain-security-readiness.md#explicit-dns-intent) include
-a Pages-only canonical environment without a hosting domain. Zone creation,
+See the [DNS setup examples](domain-security-readiness.md#explicit-dns-intent). Zone creation,
 DNSSEC/registrar changes and automatic CAA security policy mutations remain
 unavailable. All four pinned provider configurations and local boundaries are
 checked in ordinary CI, but their installed live lifecycle is unverified. The

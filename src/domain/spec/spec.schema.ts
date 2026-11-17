@@ -4,8 +4,9 @@ import { z } from 'zod';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
-import { withDefaultDatabaseProvider } from './database-defaults.js';
+import { withDefaultDatabaseProvider, withoutEngineFlag } from './database-defaults.js';
 import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
+import { HEALTH_CHECK_PATH_ERROR, HEALTH_CHECK_PATH_PATTERN } from './health-check-path.js';
 export { dnsSpecSchema, dnsSecurityPolicySchema } from './dns.schema.js';
 export type { DnsSpec, DnsSecurityPolicy } from './dns.schema.js';
 
@@ -73,7 +74,7 @@ export const serviceSpecSchema = z.object({
   }).default('web'),
   startCommand: z.string().min(1).optional(),
   releaseCommand: z.string().min(1).optional(),
-  healthCheckPath: z.string().min(1).optional(),
+  healthCheckPath: z.string().regex(HEALTH_CHECK_PATH_PATTERN, HEALTH_CHECK_PATH_ERROR).optional(),
   cronSchedule: z.string().min(1).optional(),
   timeZone: z.string().min(1).optional(),
   public: z.boolean().optional(),
@@ -81,6 +82,13 @@ export const serviceSpecSchema = z.object({
   cpu: z.string().regex(/^(0\.\d{1,2}|[1-8])$/, 'Use a vCPU count such as "0.5", "1" or "2".').optional(),
   /** Memory per instance, for example "512Mi" or "1Gi". */
   memory: z.string().regex(/^[1-9]\d*(Mi|Gi)$/, 'Use a memory size such as "512Mi" or "1Gi".').optional(),
+  /**
+   * Web services: keep one instance running with its CPU available between
+   * requests, for apps that work in the background of the web process or must
+   * never start cold. Costs a full instance around the clock. Background
+   * workers are already always on unless onDemand is set.
+   */
+  alwaysOn: z.boolean().optional(),
   /**
    * Run a background worker only while it has work: it scales to zero when
    * idle and starts within about a minute of new work. pendingWorkQuery is one
@@ -111,6 +119,13 @@ export const serviceSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'cron services require cronSchedule',
       path: ['cronSchedule'],
+    });
+  }
+  if (service.alwaysOn && service.workloadKind !== 'web') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'alwaysOn applies only to web services; background workers are always on unless onDemand is set',
+      path: ['alwaysOn'],
     });
   }
   if (service.onDemand && service.workloadKind !== 'worker') {
@@ -262,6 +277,16 @@ export const databaseSpecSchema = z.object({
   passwordGeneration: z.number().int().positive().optional(),
   /** OpenTofu-managed databases: PostgreSQL major version (default 16). Never lower than a migration source. */
   version: z.number().int().min(13).max(18).optional(),
+  /**
+   * Dedicated capacity: small (1 vCPU), medium (2) or large (4). Omitted, production
+   * and staging get small and other environments the cheapest shared instance.
+   */
+  size: z.enum(['small', 'medium', 'large']).optional(),
+  /**
+   * Refuse to delete the database until this is turned off in its own reviewed
+   * change. On by default for production and staging.
+   */
+  deletionProtection: z.boolean().optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({
@@ -1143,6 +1168,14 @@ export const storageSpecSchema = z.object({
   purpose: z.literal('backup').optional(),
   /** "s3": also give services S3-compatible variables (AWS_*), for apps written against S3 APIs. */
   access: z.enum(['native', 's3']).optional(),
+  /** Keep replaced and deleted files recoverable for 30 days. */
+  versioning: z.boolean().optional(),
+  /**
+   * Let browsers send files straight to the bucket with a one-time upload address
+   * the app hands out, instead of through the app (which caps request size).
+   * The bucket stays private: every request still needs that address.
+   */
+  browserUploads: z.boolean().optional(),
 }).strict().superRefine((storage, ctx) => {
   if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
     path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });
@@ -1552,14 +1585,12 @@ export const environmentWebhookSchema = z.object({
   signingSecretEnvVar: environmentVariableNameSchema.optional(),
 }).strict();
 
-export const environmentSpecSchema = z.preprocess(withDefaultDatabaseProvider, z.object({
+export const environmentSpecSchema = z.preprocess((environment) => withDefaultDatabaseProvider(withoutEngineFlag(environment)), z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
-    /** Compatibility field for saved specs; Cloud Run always uses OpenTofu. */
-    engine: z.literal('opentofu').optional().describe('Optional compatibility field. Cloud Run always uses OpenTofu; other hosting providers cannot select it.'),
   }).strict(),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

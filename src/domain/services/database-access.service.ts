@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import type { IDatabaseQueryAdapter } from '../ports/database-query.port.js';
+import { acquireEngineDatabaseAccess, isManagedEngineDatabase } from './engine-database-access.service.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -6,13 +8,14 @@ import type { Project } from '../entities/project.entity.js';
 import type { TemporaryDatabaseAccess } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { isExternallyUsableDatabaseUrl, resolveExternalDatabaseUrl } from './database-ops.service.js';
+import { ENGINE_DATABASE_URL_KEY, engineSecretId } from './engine-secret-id.js';
 
 const componentRepo = new ComponentRepository();
 const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
 const CLEANUP_RETRY_DELAYS_MS = [0, 100, 300] as const;
 const FAILED_CLEANUP_RETRY_MS = 5_000;
 
-export type DatabaseAccessMode = 'existing' | 'private_connector' | 'ephemeral_proxy' | 'temporary_firewall';
+export type DatabaseAccessMode = 'data_api' | 'existing' | 'private_connector' | 'ephemeral_proxy' | 'temporary_firewall';
 export type DatabaseAccessCleanupStatus = 'no_op' | 'deferred' | 'completed' | 'failed';
 
 export interface DatabaseAccessCleanup {
@@ -28,6 +31,7 @@ export interface DatabaseAccessLease {
   createdByInvocation: boolean;
   expiresAt?: string;
   safeResourceId?: string;
+  query?: IDatabaseQueryAdapter['query'];
   withConnection<T>(operation: (connectionUrl: string) => Promise<T>): Promise<T>;
   release(): Promise<DatabaseAccessCleanup>;
 }
@@ -376,12 +380,44 @@ export async function acquireDatabaseComponentAccess(
   };
 }
 
+/**
+ * The Google engine's database has no component row: its identity is the
+ * environment's engine binding, and its login stays in Secret Manager.
+ */
+export function engineDatabaseComponent(environment: Environment): Component | undefined {
+  const bindings = environment.platformBindings as {
+    provider?: unknown; projectId?: unknown; region?: unknown; engine?: { database?: { instanceName?: unknown } };
+  };
+  const instanceName = bindings.engine?.database?.instanceName;
+  if (bindings.provider !== 'cloudrun' || typeof instanceName !== 'string' || !instanceName
+    || typeof bindings.projectId !== 'string' || typeof bindings.region !== 'string') return undefined;
+  return {
+    id: `engine:${environment.id}:postgres`,
+    environmentId: environment.id,
+    type: 'postgres',
+    externalId: instanceName,
+    bindings: {
+      provider: 'cloudsql',
+      providerScope: { projectId: bindings.projectId, region: bindings.region },
+      connectionSecretId: engineSecretId(environment.name, ENGINE_DATABASE_URL_KEY),
+    },
+    createdAt: environment.createdAt,
+    updatedAt: environment.updatedAt,
+  };
+}
+
 export async function acquireManagedDatabaseAccess(
   project: Project,
   environment: Environment,
   serviceName?: string
 ): Promise<DatabaseAccessAcquireResult> {
-  const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+  if (isManagedEngineDatabase(environment)) {
+    if (componentRepo.findByEnvironmentId(environment.id).some(component => component.type === 'postgres')) {
+      return { ok: false, code: 'provider_error', error: 'Both engine and legacy database bindings exist; resolve the conflicting targets before database access.', resourceCreated: false, cleanup: 'not_needed' };
+    }
+    return acquireEngineDatabaseAccess(project, environment);
+  }
+  const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres') ?? engineDatabaseComponent(environment);
   const bindings = component?.bindings as Record<string, unknown> | undefined;
   const provider = typeof bindings?.provider === 'string'
     ? bindings.provider

@@ -1,3 +1,5 @@
+import { AwsEngineAdapter } from '../aws/aws-engine.adapter.js';
+import { AzureEngineAdapter } from '../azure/azure-engine.adapter.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../application/providers.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -7,17 +9,15 @@ import {
   isProviderRuntimeLogsAdapter,
 } from '../../../domain/ports/provider-logs.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
-import { EcsExpressAdapter } from '../aws/ecs-express.adapter.js';
-import { AzureContainerAppsAdapter } from '../azure/azure-container-apps.adapter.js';
 import { CloudRunAdapter } from '../gcp/cloudrun.adapter.js';
 import { GitHubAdapter } from '../github/github.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 
 const deploymentAdapterPrototypes = new Map<string, unknown>([
+  ['aws', AwsEngineAdapter.prototype],
+  ['azure', AzureEngineAdapter.prototype],
   ['railway', RailwayAdapter.prototype],
   ['cloudrun', CloudRunAdapter.prototype],
-  ['ecs', EcsExpressAdapter.prototype],
-  ['azure-container-apps', AzureContainerAppsAdapter.prototype],
   ['github', GitHubAdapter.prototype],
 ]);
 

@@ -12,8 +12,8 @@ describe('host-native database default', () => {
   it.each([
     ['railway', 'railway'],
     ['cloudrun', 'cloudsql'],
-    ['ecs', 'rds'],
-    ['azure-container-apps', 'azure-postgres'],
+    ['aws', 'rds'],
+    ['azure', 'azure-postgres'],
   ])('uses the %s platform database when database.provider is omitted', (hosting, expected) => {
     const parsed = projectSpecSchema.parse(spec(hosting));
     expect(parsed.environments.production.database?.provider).toBe(expected);

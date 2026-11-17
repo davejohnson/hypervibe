@@ -1,3 +1,8 @@
+import type { Project } from '../../../domain/entities/project.entity.js';
+import type { IEngineDatabaseAccess } from '../../../domain/ports/engine-database-access.port.js';
+import { AwsWorkloadDiagnostics } from './aws-diagnostics.client.js';
+import type { Environment } from '../../../domain/entities/environment.entity.js';
+import type { ProviderRuntimeLogsRequest } from '../../../domain/ports/provider-logs.port.js';
 import { z } from 'zod';
 import type { VerifyResult } from '../../../domain/ports/provider.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -39,13 +44,41 @@ export async function verifyAwsDeployAccess(access: AwsDeployAccess): Promise<{ 
   return { ok: false, message: `The deploy role was not usable yet (${lastError}).` };
 }
 
-export class AwsEngineAdapter {
+export class AwsEngineAdapter implements IEngineDatabaseAccess {
   readonly name = 'aws';
   readonly capabilities = { supportedBuilders: ['dockerfile'], supportedComponents: [], supportsAutoWiring: false, supportsHealthChecks: true };
   private credentials: AwsEngineCredentials | null = null;
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = AwsEngineCredentialsSchema.parse(credentials);
+  }
+
+  readProviderLogs(request: ProviderRuntimeLogsRequest) {
+    if (!this.credentials) throw new Error('Not connected.');
+    return new AwsWorkloadDiagnostics(this.credentials).readProviderLogs(request);
+  }
+
+  readDeployment(environment: Environment, serviceName: string) {
+    if (!this.credentials) throw new Error('Not connected.');
+    return new AwsWorkloadDiagnostics(this.credentials).readDeployment(environment, serviceName);
+  }
+
+  async acquireManagedDatabaseAccess(project: Project, environment: Environment) {
+    if (!this.credentials) throw new Error('Not connected.');
+    const { acquireNativeEngineDatabaseAccess } = await import('../database/engine-database-access.js');
+    return acquireNativeEngineDatabaseAccess(project, environment, { provider: 'aws', credentials: this.credentials });
+  }
+
+  async observeManagedDatabase(project: Project, environment: Environment) {
+    if (!this.credentials) throw new Error('Not connected.');
+    const { observeNativeEngineDatabase } = await import('../database/engine-database-access.js');
+    return observeNativeEngineDatabase(project, environment, { provider: 'aws', credentials: this.credentials });
+  }
+
+  async recoverManagedDatabaseBinding(project: Project, environment: Environment) {
+    if (!this.credentials) throw new Error('Not connected.');
+    const { recoverNativeEngineDatabaseBinding } = await import('../database/engine-database-state.js');
+    return recoverNativeEngineDatabaseBinding(project, environment, 'aws', this.credentials);
   }
 
   async verify(): Promise<VerifyResult> {
@@ -60,11 +93,12 @@ providerRegistry.register({
     name: 'aws',
     displayName: 'Amazon Web Services',
     category: 'deployment',
+    orchestration: { logs: { runtime: true } },
     credentialsSchema: AwsEngineCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/',
     maturity: {
       lifecycle: {
-        hosting: { status: 'planned', reason: 'The OpenTofu AWS engine is being built; setup creates Hypervibe\'s access only.' },
+        hosting: { status: 'planned', reason: 'The OpenTofu engine manages AWS infrastructure; this connection provides Hypervibe\'s access only.' },
       },
     },
   },

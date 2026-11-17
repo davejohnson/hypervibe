@@ -1,3 +1,4 @@
+import { observeManagedEngineDatabase } from '../domain/services/engine-database-access.service.js';
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { secretAges } from '../application/secret-rotation.js';
 import { engineWorkerStatus, isEngineManaged } from '../application/infrastructure-engine.js';
@@ -42,8 +43,7 @@ import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../ap
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
 import { planHostedDns } from '../application/dns-hosting.js';
 import { planEmailDns } from '../application/dns-integrations.js';
-import { isAwsEngineEnvironment, planAwsTeardown } from '../application/infrastructure-engine-aws.js';
-import { isAzureEngineEnvironment, planAzureTeardown } from '../application/infrastructure-engine-azure.js';
+import { awsEngine, cloudEngineFor } from '../application/cloud-engines.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
@@ -762,13 +762,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. A Pages-only canonical environment with explicit DNS and no hosting workloads uses the ordinary repository plan. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Cloud Run always plans infrastructure with OpenTofu; infrastructure is an explicit alias. For AWS, infrastructure plans an OpenTofu-managed environment (hosting.engine="opentofu"). Both include Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; neither releases code (use hv_deploy). teardown plans removing an entire OpenTofu-managed AWS environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire AWS or Azure environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -794,7 +794,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'credentials') {
         return commandError('VALIDATION', `scope="${scope}" is not supported for Cloud Run environments. Run hv_plan without scope to review OpenTofu infrastructure.`, { next: ['hv_plan'] });
       }
-      if (scope === 'infrastructure' || scope === 'teardown' || (cloudRunEnvironment && scope !== 'credentials' && !retainedExecutionRecovery)) {
+      // AWS and Azure plan through the engine by default too; their other scopes keep their own planners.
+      const otherEngineDefault = !cloudRunEnvironment && isEngineManaged(routingSpec?.spec.environments[routingEnvironment])
+        && (scope === undefined || scope === 'full') && !retainedExecutionRecovery;
+      if (scope === 'infrastructure' || scope === 'teardown' || otherEngineDefault || (cloudRunEnvironment && scope !== 'credentials' && !retainedExecutionRecovery)) {
         const supplied = [services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some((value) => value !== undefined);
         if (supplied) return commandError('VALIDATION', scope === 'teardown'
           ? 'OpenTofu teardown planning takes only project, env, scope and deleteFinalSnapshot.'
@@ -802,14 +805,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const specResult = routingSpec;
         if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
         const environmentName = routingEnvironment;
-        const azureTarget = isAzureEngineEnvironment(specResult.spec, environmentName);
-        if (scope === 'teardown' && specResult.spec.environments[environmentName] && !isAwsEngineEnvironment(specResult.spec, environmentName) && !azureTarget) {
+        // AWS keeps final-snapshot cleanup reachable after its environment has left the spec.
+        const teardown = (cloudEngineFor(specResult.spec, environmentName) ?? (specResult.spec.environments[environmentName] ? undefined : awsEngine))?.planTeardown;
+        if (scope === 'teardown' && !teardown) {
           return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS and Azure environments only.', { next: ['hv_spec'] });
         }
         if (scope !== 'teardown') validateInstalledProviders(specResult.spec, environmentName);
         const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
         const planned = scope === 'teardown'
-          ? await (azureTarget ? planAzureTeardown : planAwsTeardown)(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
+          ? await teardown!(ctx, { ...plannerParams, ...(deleteFinalSnapshot ? { deleteFinalSnapshot } : {}) })
           : await planInfrastructureEngine(ctx, plannerParams);
         if ('blocked' in planned) {
           return commandError('VALIDATION', 'The infrastructure plan is blocked.', {
@@ -1107,6 +1111,16 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
       // status reports what only live observation shows, starting with background workers.
       if (envSpec && isEngineManaged(envSpec)) {
+        const cloud = envSpec.hosting.provider === 'aws' ? 'AWS' : envSpec.hosting.provider === 'azure' ? 'Azure' : undefined;
+        if (cloud) {
+          const databaseEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+          const database = envSpec.database && databaseEnvironment ? await observeManagedEngineDatabase(project, databaseEnvironment) : undefined;
+          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: 'not read', ...(database ? { database } : {}) }, {
+            warnings: [`hv_status does not read live worker state on ${cloud} yet.`],
+            hint: 'Run hv_health for the web service and hv_plan scope="infrastructure" for drift.',
+            next: ['hv_health', 'hv_plan'],
+          });
+        }
         const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
         if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
         const ages = await secretAges(ctx, project, specResult.spec, envName);

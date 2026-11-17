@@ -1,3 +1,4 @@
+import { hasWorkloadDiagnostics } from '../ports/workload-diagnostics.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { serviceWorkloadKind } from '../entities/service.entity.js';
@@ -42,6 +43,7 @@ export type ProjectDeploymentHealth = {
       service: string;
       state: DeploymentHealthState;
       status: string;
+      presence?: 'present' | 'absent' | 'unknown';
       url?: string;
       reason?: string;
     }>;
@@ -92,6 +94,7 @@ export async function collectProjectDeploymentHealth(params: {
   environments: Environment[];
   desiredServiceNamesByEnvironment: Record<string, readonly string[]>;
 }): Promise<ProjectDeploymentHealth> {
+  let remainingReads = 100;
   const environmentResults: ProjectDeploymentHealth['environments'] = [];
 
   for (const environment of [...params.environments].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -122,7 +125,7 @@ export async function collectProjectDeploymentHealth(params: {
       continue;
     }
     const resolved = await adapterFactory.getProviderAdapter(provider, params.project);
-    if (!resolved.success || !resolved.adapter || typeof resolved.adapter.getDeployStatus !== 'function') {
+    if (!resolved.success || !resolved.adapter || !hasWorkloadDiagnostics(resolved.adapter) && typeof resolved.adapter.getDeployStatus !== 'function') {
       const reason = resolved.success
         ? `${provider} does not support deployment-status observation.`
         : `No verified ${provider} hosting connection is available for deployment-status observation.${resolved.error ? ` ${resolved.error}` : ''}`;
@@ -143,7 +146,8 @@ export async function collectProjectDeploymentHealth(params: {
 
     const services = [] as ProjectDeploymentHealth['environments'][number]['services'];
     for (const service of desiredServiceNames) {
-      const serviceId = bindings.services?.[service]?.serviceId;
+      const binding = bindings.services?.[service] as { serviceId?: string; workerPoolName?: string } | undefined;
+      const serviceId = binding?.serviceId ?? binding?.workerPoolName;
       if (!serviceId) {
         services.push({
           service,
@@ -153,13 +157,20 @@ export async function collectProjectDeploymentHealth(params: {
         });
         continue;
       }
+      if (remainingReads-- <= 0) {
+        services.push({ service, state: 'unknown', status: 'unknown', reason: 'Deployment observation exceeded its bound of 100 workloads.' });
+        continue;
+      }
       try {
-        const observed = await resolved.adapter.getDeployStatus(environment, serviceId);
+        const observed = hasWorkloadDiagnostics(resolved.adapter)
+          ? await resolved.adapter.readDeployment(environment, service)
+          : await resolved.adapter.getDeployStatus!(environment, serviceId);
         const state = classifyDeploymentStatus(observed.status);
         services.push({
           service,
           state,
           status: observed.status,
+          ...('presence' in observed && (observed.presence === 'present' || observed.presence === 'absent' || observed.presence === 'unknown') ? { presence: observed.presence } : {}),
           ...(observed.url ? { url: observed.url } : {}),
           ...(observed.reason
             ? { reason: observed.reason }

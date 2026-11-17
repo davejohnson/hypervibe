@@ -1,6 +1,6 @@
 {
   "name": "@hypervibe/hypervibe",
-  "version": "0.1.50",
+  "version": "0.1.52",
   "packageManager": "npm@11.19.0",
   "description": "Cloud operations for app builders through CLI and MCP",
   "license": "Apache-2.0",
@@ -35,7 +35,11 @@
       "types": "./dist/ci/environment-task.d.ts",
       "import": "./dist/ci/environment-task.js"
     },
-    "./*": "./*"
+    "./*": "./*",
+    "./ci/engine-release": {
+      "types": "./dist/ci/engine-release.d.ts",
+      "import": "./dist/ci/engine-release.js"
+    }
   },
   "bin": {
     "hypervibe": "dist/index.js",
@@ -51,6 +55,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
+    "check:duplication": "jscpd",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -107,6 +112,7 @@
     "@types/pg": "^8.16.0",
     "@vitest/coverage-v8": "^4.1.12",
     "ajv": "8.20.0",
+    "jscpd": "4.3.0",
     "typescript": "^5.6.0",
     "vitest": "^4.1.12"
   },

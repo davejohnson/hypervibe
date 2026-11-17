@@ -19,8 +19,8 @@ const databases = [
 const hosts = [
   { provider: 'railway', immutableRollback: true },
   { provider: 'cloudrun', immutableRollback: false },
-  { provider: 'ecs', immutableRollback: true },
-  { provider: 'azure-container-apps', immutableRollback: true },
+  { provider: 'aws', immutableRollback: false },
+  { provider: 'azure', immutableRollback: false },
 ] as const;
 
 describe('named provider recovery contract coverage', () => {
@@ -70,5 +70,11 @@ describe('named provider recovery contract coverage', () => {
     }
     const recipe = renderer.buildGitHubActionsSteps(target);
     expect(Boolean(recipe.releaseImageUri)).toBe(immutableRollback);
+  });
+
+  it.each(['aws', 'azure'])('%s engine access does not advertise legacy rollback or private recovery executors', provider => {
+    const metadata = providerRegistry.getMetadata(provider)!;
+    expect(metadata.orchestration?.ci).toBeUndefined();
+    expect(metadata.lifecycle?.hosting?.recoveryTasks).toBeUndefined();
   });
 });

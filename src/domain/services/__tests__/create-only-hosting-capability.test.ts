@@ -6,8 +6,6 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
 import { CloudRunAdapter } from '../../../adapters/providers/gcp/cloudrun.adapter.js';
-import { EcsExpressAdapter } from '../../../adapters/providers/aws/ecs-express.adapter.js';
-import { AzureContainerAppsAdapter } from '../../../adapters/providers/azure/azure-container-apps.adapter.js';
 import type { IProviderAdapter, IProviderLifecycleAdapter, ProviderCapabilities } from '../../ports/provider.port.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { adapterFactory } from '../adapter.factory.js';
@@ -18,9 +16,8 @@ import { DeployOrchestrator } from '../deploy.orchestrator.js';
 // allows reconfiguration of an existing workload and is not create-only proof.
 const adapters: Record<string, IProviderAdapter> = {
   railway: new RailwayAdapter(), cloudrun: new CloudRunAdapter(),
-  ecs: new EcsExpressAdapter(), 'azure-container-apps': new AzureContainerAppsAdapter(),
 };
-const unsupported = ['cloudrun', 'ecs', 'azure-container-apps'];
+const unsupported = ['cloudrun'];
 
 beforeEach(() => {
   vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', 'true');

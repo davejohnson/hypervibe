@@ -194,34 +194,6 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     maintenance: 'unsupported',
     credentials: gcpHostingCredentials,
   },
-  {
-    kind: 'hosting',
-    provider: 'ecs',
-    vendor: 'AWS',
-    service: 'ECS Express Mode',
-    status: 'planned',
-    workloadKinds: [],
-    customDomains: 'unsupported',
-    domainTrafficProxy: 'dns-only',
-    maintenance: 'unsupported',
-    credentials: awsHostingCredentials,
-    implementationNote:
-      'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'azure-container-apps',
-    vendor: 'Microsoft Azure',
-    service: 'Container Apps',
-    status: 'planned',
-    workloadKinds: [],
-    customDomains: 'unsupported',
-    domainTrafficProxy: 'dns-only',
-    maintenance: 'unsupported',
-    credentials: azureHostingCredentials,
-    implementationNote:
-      'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
-  },
 ];
 
 export const databaseProviderContracts: DatabaseProviderContract[] = [
@@ -243,9 +215,9 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     engine: 'postgres',
     status: 'planned',
     credentials: awsHostingCredentials,
-    fixtureHostingProvider: 'ecs',
+    fixtureHostingProvider: 'aws',
     implementationNote:
-      'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+      'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'database',
@@ -265,9 +237,9 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     engine: 'postgres',
     status: 'planned',
     credentials: azureCredentials,
-    fixtureHostingProvider: 'azure-container-apps',
+    fixtureHostingProvider: 'azure',
     implementationNote:
-      'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+      'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
 ];
 
@@ -292,8 +264,7 @@ export const storageProviderContracts: StorageProviderContract[] = [
     service: 'Amazon S3',
     status: 'planned',
     credentials: awsHostingCredentials,
-    connectionAlias: 'ecs',
-    implementationNote: 'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+    implementationNote: 'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'storage',
@@ -303,7 +274,7 @@ export const storageProviderContracts: StorageProviderContract[] = [
     status: 'planned',
     credentials: gcpHostingCredentials,
     connectionAlias: 'cloudrun',
-    implementationNote: 'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+    implementationNote: 'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'storage',
@@ -312,8 +283,7 @@ export const storageProviderContracts: StorageProviderContract[] = [
     service: 'Blob Storage',
     status: 'planned',
     credentials: azureHostingCredentials,
-    connectionAlias: 'azure-container-apps',
-    implementationNote: 'OpenTofu resource lifecycle is planned. Existing connections and operations remain available.',
+    implementationNote: 'The OpenTofu engine manages the resource lifecycle. Existing connections and operations remain available.',
   },
   {
     kind: 'storage',

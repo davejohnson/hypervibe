@@ -18,7 +18,7 @@ describe('proposed migration target', () => {
       email: { enabled: true },
     } as unknown as EnvironmentSpec;
     const target = proposeTargetEnvironment(source, { domain: 'gcp.example.com' }) as unknown as Record<string, any>;
-    expect(target.hosting).toEqual({ provider: 'cloudrun', region: 'us-central1', engine: 'opentofu' });
+    expect(target.hosting).toEqual({ provider: 'cloudrun', region: 'us-central1' });
     expect(target.database).toEqual({ provider: 'cloudsql' });
     expect(target.storage.documents).toEqual({ provider: 'gcs', type: 'bucket', region: 'us-central1', injectInto: ['staging-web', 'staging-worker'], access: 's3' });
     expect(target.envVars.APP_URL).toBe('https://gcp.example.com');
@@ -27,6 +27,27 @@ describe('proposed migration target', () => {
     // Features the engine cannot manage yet are not silently carried over.
     expect(target.email).toBeUndefined();
     expect(Object.keys(target.services)).toEqual(['staging-web', 'staging-worker']);
+  });
+});
+
+// Contract: a migration must not silently drop how the app's schema is migrated.
+// The engine runs migrations as a release step, so a source that ran them through
+// the migration tool keeps its command in that form.
+describe('proposed migration target keeps schema migrations', () => {
+  const propose = (migrations: unknown) => proposeTargetEnvironment({
+    hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web', startCommand: 'sh scripts/start.sh' } },
+    database: { provider: 'railway', engine: 'postgres' }, envVars: {}, email: { enabled: false }, migrations,
+  } as unknown as EnvironmentSpec, {}) as unknown as Record<string, any>;
+
+  it('carries a tool-mode migration command over as a release command', () => {
+    expect(propose({ mode: 'tool', command: 'alembic upgrade head' }).migrations).toEqual({ mode: 'releaseCommand', command: 'alembic upgrade head' });
+  });
+
+  it('keeps a release command as it is and invents nothing when there is no command', () => {
+    expect(propose({ mode: 'releaseCommand', command: 'npm run migrate', runInDeploy: true }).migrations).toEqual({ mode: 'releaseCommand', command: 'npm run migrate', runInDeploy: true });
+    expect(propose({ mode: 'tool' }).migrations).toBeUndefined();
+    expect(propose({ mode: 'none' }).migrations).toBeUndefined();
+    expect(propose(undefined).migrations).toBeUndefined();
   });
 });
 

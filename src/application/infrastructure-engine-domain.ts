@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
+import { readDomainMapping, siteVerificationRequest } from '../adapters/providers/gcp/gcp-domain.client.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { CloudRunAdapter } from '../adapters/providers/gcp/cloudrun.adapter.js';
 import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
@@ -22,21 +23,16 @@ export type DomainMappingObservation = { state: 'absent' } | { state: 'unknown';
 const normalized = (value: string) => value.toLowerCase().replace(/\.$/, '');
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-async function siteVerificationFetch(token: string, path: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(`https://www.googleapis.com/siteVerification/v1/${path}`, {
-    ...init, signal: AbortSignal.timeout(15_000),
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 1);
-}
+// Google omits `items` from a successful response when the identity owns no verified sites.
 const ownedList = z.object({ items: z.array(z.object({ id: z.string().min(1),
   site: z.object({ type: z.string(), identifier: z.string().min(1) }), owners: z.array(z.string()).min(1),
-})).max(10000) });
+})).max(10000).default([]) });
 
 /** A permission error is unknown. Only a complete successful owned-site list proves nonownership. */
 async function observeOwnership(context: DomainContext, verificationDomain: string): Promise<Ownership> {
   try {
     const token = await context.adapter.siteVerificationAccessToken();
-    const response = await siteVerificationFetch(token, 'webResource');
+    const response = await siteVerificationRequest(token, 'webResource');
     if (!response.ok) {
       if (response.status === 403 && /SERVICE_DISABLED|has not been used|is disabled/i.test(await response.text())) return 'api-disabled';
       return { unknown: `Google Site Verification ownership is unknown (HTTP ${response.status}).` };
@@ -67,8 +63,7 @@ const mappingSchema = z.object({
 export async function observeDomainMapping(context: DomainContext, domain: string): Promise<DomainMappingObservation> {
   try {
     const token = await context.adapter.engineAccessToken();
-    const response = await fetchWithRetry(`https://${context.region}-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/${encodeURIComponent(context.gcpProjectId)}/domainmappings/${encodeURIComponent(domain)}`,
-      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) }, 1);
+    const response = await readDomainMapping(token, context, domain);
     if (response.status === 404) return { state: 'absent' };
     if (!response.ok) return { state: 'unknown', reason: `Cloud Run mapping observation failed (HTTP ${response.status}).` };
     const parsed = mappingSchema.safeParse(await response.json());
@@ -146,7 +141,7 @@ export async function planDomain(context: DomainContext, requestedDomain: string
   if (ownership === 'absent') {
     try {
       const token = await context.adapter.siteVerificationAccessToken();
-      const response = await siteVerificationFetch(token, 'token', { method: 'POST', body: JSON.stringify({
+      const response = await siteVerificationRequest(token, 'token', { method: 'POST', body: JSON.stringify({
         site: { type: 'INET_DOMAIN', identifier: verificationDomain }, verificationMethod: 'DNS_TXT',
       }) });
       if (!response.ok) return block(`Google did not provide the ownership proof (HTTP ${response.status}).`);
@@ -198,7 +193,7 @@ export async function executeDomainAction(context: DomainContext, action: PlanAc
     if (metadata.verificationDomain !== verificationDomain) return { success: false, status: 'blocked', message: 'This historical plan did not review base-domain verification. Run hv_plan again.' };
     try {
       const token = await context.adapter.siteVerificationAccessToken();
-      const response = await siteVerificationFetch(token, 'webResource?verificationMethod=DNS_TXT', {
+      const response = await siteVerificationRequest(token, 'webResource?verificationMethod=DNS_TXT', {
         method: 'POST', body: JSON.stringify({ site: { type: 'INET_DOMAIN', identifier: verificationDomain } }),
       });
       if (response.status === 400) return { success: false, status: 'pending', message: 'Google has not validated the staged DNS proof yet. Run hv_plan again after propagation.' };

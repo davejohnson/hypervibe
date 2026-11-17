@@ -42,7 +42,7 @@ afterEach(() => {
 
 describe('cloud lifecycle retirement boundary', () => {
   it('blocks cloud provisioning before credentials or provider factories can produce effects, even with saved verified connections', async () => {
-    const hosts = ['cloudrun', 'ecs', 'azure-container-apps'];
+    const hosts = ['cloudrun'];
     const databases = ['cloudsql', 'rds', 'azure-postgres'];
     const storage = ['gcs', 's3', 'azureblob'];
     for (const provider of [...hosts, ...databases, ...storage]) saveConnection(provider);
@@ -64,8 +64,8 @@ describe('cloud lifecycle retirement boundary', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('uses the same saved cloud connection for scoped database reads and object transfers without provisioning', async () => {
-    saveConnection('ecs'); // The real registry reuses this connection for RDS and S3.
+  it('uses saved connections for scoped database reads and object transfers without provisioning', async () => {
+    saveConnection('rds'); saveConnection('s3');
     const sts = vi.spyOn(STSClient.prototype, 'send').mockResolvedValue({ Account: '123456789012' } as never);
     const rds = vi.spyOn(RDSClient.prototype, 'send').mockResolvedValue({ DBInstances: [{
       DBInstanceIdentifier: 'bound-db', DBInstanceArn: 'arn:aws:rds:us-west-2:123456789012:db:bound-db',
@@ -75,8 +75,8 @@ describe('cloud lifecycle retirement boundary', () => {
     const factory = new AdapterFactory();
     const database = await factory.getDatabaseOperations('rds');
     const storage = await factory.getStorageOperations('s3');
-    expect(database).toMatchObject({ success: true, connectionProvider: 'ecs' });
-    expect(storage).toMatchObject({ success: true, connectionProvider: 'ecs' });
+    expect(database).toMatchObject({ success: true, connectionProvider: 'rds' });
+    expect(storage).toMatchObject({ success: true, connectionProvider: 's3' });
     if (!database.adapter || !storage.adapter) throw new Error('Existing-resource operations did not resolve');
     const now = new Date();
     const environment: Environment = { id: 'environment-1', projectId: 'project-1', name: 'production', platformBindings: {}, createdAt: now, updatedAt: now };

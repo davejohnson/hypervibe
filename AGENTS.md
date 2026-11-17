@@ -57,6 +57,8 @@ changing customer-facing pages, emails, prompts or errors.
   plans or verified connections; redact supplied values from every output and
   diagnostic. Treat engine plans and state as potentially secret-bearing.
   Control-plane access does not authorize copying credentials into runtime.
+  The one exception is the owner copying a generated secret on a local page
+  ([connections](docs/development/connections.md#managed-runtime-secrets)).
   Preserve repository/environment scope and supported workload identities.
 - MCP and CLI are thin adapters over `src/application`, with shared commands,
   validation, redaction and results. Keep both reachable unless architecture
@@ -106,8 +108,11 @@ decision in the pull request. Git history preserves earlier policy.
 Match verification to the affected behavior. Documentation changes need content
 and link review; runtime changes need focused behavioral checks and required CI.
 For bugs, follow the [evidence method](docs/development/workflow.md#dg-135), including
-a failing boundary regression before the fix. Preserve required independent reviews
-without inventing new gates or repeating settled checks.
+a failing boundary regression before the fix. When a bug is fixed in one provider,
+check whether GCP, AWS and Azure share it: fix the others in the same change or
+file an issue, and say in the pull request what was checked and how (read or run).
+Preserve required independent reviews without inventing new gates or repeating
+settled checks.
 
 Before recommending chat closure, commit and push task changes, include them in a
 PR, and verify every task worktree is clean. Preserve unrelated edits; report any

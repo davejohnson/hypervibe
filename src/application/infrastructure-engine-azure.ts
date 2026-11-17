@@ -1,17 +1,20 @@
-import { specWithoutEnvironment } from './engine-shared.js';
-import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
+import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
+import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
+import { projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
+import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
+import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
-import { AZURE_SCOPES, azureRest } from './azure-ops.js';
+import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
+import { azureSelectedBuildRegistry, projectAzureCiRegistry, type AzureBuildRegistry } from '../adapters/providers/azure/azure-ci-registry.js';
+import { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
+export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-release.client.js';
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { azureEngineAuthentication, azureEngineBackend } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 import {
   WAKER_SECRET_KEY, azureProjectVaultName, azureSharedNames, azureStorageAccountName, azureVaultSecretName, buildAzureEnvironmentConfiguration,
-  buildAzureSharedConfiguration, type AzureEngineInput, type AzureSharedInput,
+  buildAzureSharedConfiguration, buildAzureBuildConfiguration, type AzureEngineInput, type AzureSharedInput,
 } from '../adapters/providers/azure/tofu/azure-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { RunRepository } from '../adapters/db/repositories/run.repository.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
-import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -23,14 +26,15 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
-  AzureTokens, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
+  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
   type AzureKeyVaultSecretStore, type SqlRunner,
-} from './azure-ops.js';
-import { azureDeployAppName } from './azure-setup.js';
+} from '../adapters/providers/azure/azure-ops.client.js';
+import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
+import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import type { EngineSecretStore } from './engine-secrets.js';
-import { engineOutsideKeys } from './engine-secrets.js';
-import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, missingOutsideKeysMessage, type InfrastructurePlanResult } from './infrastructure-engine.js';
+import { engineOutsideKeys, isBuildTokenKey, optionalOutsideKeys } from './engine-secrets.js';
+import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
 import { localRepositoryFor } from './local-repository.js';
 
 /**
@@ -46,26 +50,23 @@ export const AZURE_IMAGE_BUILD_OPERATION = 'azureImageBuild';
 export const AZURE_STORAGE_EMPTY_OPERATION = 'azureStorageEmpty';
 export const AZURE_DATABASE_DROP_OPERATION = 'azureDatabaseDrop';
 export const AZURE_TEARDOWN_CLEANUP_OPERATION = 'azureTeardownCleanup';
-/** The one image repository in the registry; tags are commit SHAs. */
-export const AZURE_IMAGE_REPOSITORY = 'app';
 
-export type AzureProfile = 'production' | 'testing';
-
-/** production and staging share one shape; everything else is a cheap testing environment. */
-export function azureProfileFor(environmentName: string): AzureProfile {
-  return /prod|stag/i.test(environmentName) ? 'production' : 'testing';
-}
+export type AzureProfile = EnvironmentProfile;
+export const azureProfileFor = environmentProfile;
 
 export function isAzureEngineEnvironment(spec: ProjectSpec, environmentName: string): boolean {
   const environment = spec.environments[environmentName];
-  return environment?.hosting.engine === 'opentofu' && environment.hosting.provider === 'azure';
+  return environment?.hosting.provider === 'azure';
 }
 
 export interface AzureEngineBinding {
+  database?: import('../domain/services/engine-database-access.service.js').AzureDatabaseBinding;
   kind?: 'opentofu';
   /** Digest-pinned image of the last build; new workloads are created from it. */
   image?: string;
   imageCommit?: string;
+  /** Persisted from exact build state; retained on switch back to manual deploys. */
+  buildRegistry?: AzureBuildRegistry;
   /** The app's database login exists and DATABASE_URL is in Key Vault. */
   databaseLoginAt?: string;
   /** The read-only login on-demand workers count pending work with exists. */
@@ -142,6 +143,7 @@ export interface AzureEngineContext {
   environment: Environment;
   prefix: string;
   state: EngineStateIdentity;
+  buildState: EngineStateIdentity;
   shared: { label: string; prefix: string; state: EngineStateIdentity; registryId: string; registryLoginServer: string; serverName: string; databaseHost: string };
   vault: { name: string; id: string; uri: string };
 }
@@ -156,13 +158,14 @@ export function azureEngineLayout(project: Pick<Project, 'id' | 'name'>, environ
   return {
     prefix: azurePrefix(project.name, environmentName),
     state: { provider: 'azure', projectId: project.id, environmentId, partition: 'environment' } as EngineStateIdentity,
+    buildState: { provider: 'azure', projectId: project.id, environmentId: `${environmentId}-build`, partition: 'environment' } as EngineStateIdentity,
     shared: {
       label, prefix: sharedPrefix,
       state: { provider: 'azure', projectId: project.id, environmentId: `shared-${label}`.slice(0, 120), partition: 'project-shared' } as EngineStateIdentity,
       registryId: `${group}/providers/Microsoft.ContainerRegistry/registries/${names.registry}`, registryLoginServer: `${names.registry}.azurecr.io`,
       serverName: names.server, databaseHost: `${names.server}.postgres.database.azure.com`,
     },
-    vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: `https://${vaultName}.vault.azure.net/` },
+    vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: azureVaultUri(vaultName) },
   };
 }
 
@@ -214,7 +217,7 @@ export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngi
 }
 
 /** One environment's configuration input. Workloads are created from `image` (the last build, or the commit this apply builds). */
-export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & { environment: Pick<Environment, 'id'> },
+export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
   extra: { secretKeys: string[]; image?: string }): AzureEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const storageAccount = azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix });
@@ -228,13 +231,15 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
       AZURE_STORAGE_CONTAINER_NAME: azureContainerName(buckets[0]), AZURE_STORAGE_BLOB_ENDPOINT: `https://${storageAccount}.blob.core.windows.net/`,
     } : {};
     for (const key of Object.keys(storage)) if (key in environmentSpec.envVars) throw new Error(`Environment variable ${key} conflicts with storage ${buckets[0]}.`);
-    return { PORT: '8080', ...environmentSpec.envVars, ...storage };
+    return { PORT: '8080', ...Object.fromEntries(Object.entries(environmentSpec.envVars).filter(([key]) => !isBuildTokenKey(key))), ...storage };
   };
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
+    ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer },
+    ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
     vault: { id: context.vault.id, uri: context.vault.uri },
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((name) => ({ name, container: azureContainerName(name) })),
     services: services.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => {
@@ -252,40 +257,27 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
       logicalName, resourceName: azureResourceName(context.prefix, logicalName), initialImage: extra.image!, env: envFor(logicalName),
       schedule: service.cronSchedule!, ...command(service.startCommand),
     })),
-    secretKeys: extra.secretKeys,
+    secretKeys: extra.secretKeys.filter((key) => !isBuildTokenKey(key)),
+    ...(extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key)) ? { packageTokenKey: extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key))! } : {}),
   };
 }
 
 /** Secrets an environment's workloads reference: Hypervibe-generated, outside keys, and the database URL. */
-export function azureEnvironmentSecretKeys(spec: ProjectSpec, environmentName: string, importedSecrets: string[] = []): { generated: string[]; outside: string[]; all: string[] } {
+export function azureEnvironmentSecretKeys(spec: ProjectSpec, environmentName: string, importedSecrets: string[] = []): { generated: string[]; outside: string[]; all: string[]; build: string[] } {
   const generated = engineSecretKeys(spec, environmentName);
   const outside = engineOutsideKeys(spec, environmentName, importedSecrets);
   const all = [...new Set([...generated, ...outside, ...(spec.environments[environmentName]?.database ? [ENGINE_DATABASE_URL_KEY] : [])])].sort();
-  return { generated, outside, all };
+  return { generated, outside, all: all.filter((key) => !isBuildTokenKey(key)), build: outside.filter(isBuildTokenKey) };
 }
 
 const importedOf = (environment: Environment) => (environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets;
 
-function engineFor(): Promise<OpenTofuEngine | { blocked: string }> {
-  return ensureEngineBinary().then((binary) => binary.ok
-    // Azure deletes can take over 20 minutes (a Container Apps environment drains before its workspace goes).
-    ? new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), timeoutMs: 60 * 60 * 1000 })
-    : { blocked: binary.error });
-}
+// Azure deletes can take over 20 minutes (a Container Apps environment drains before its workspace goes).
+const engineFor = () => openTofuEngine({ timeoutMs: 60 * 60 * 1000 });
 
 function recordPlan(project: Project, context: AzureEngineContext, params: { environmentName: string; specRevision: number }, actions: PlanAction[], warnings: string[], engine: Record<string, unknown>): InfrastructurePlanResult {
-  const document = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName: params.environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
-    engine: { state: context.state, azure: { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, prefix: context.prefix }, ...engine },
-  } as unknown as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return {
-    planRunId: run.id, environmentName: params.environmentName, specRevision: params.specRevision, actions, warnings,
-    confirmActions: actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
-  };
+  return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName: params.environmentName, specRevision: params.specRevision, actions, warnings,
+    engine: { state: context.state, azure: { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, prefix: context.prefix }, ...engine } });
 }
 
 const withDependencies = (actions: PlanAction[], dependencies: string[]) => dependencies.length
@@ -303,12 +295,12 @@ async function leftoverRoleAssignments(context: AzureEngineContext, input: Azure
   if (!creating.length) return { adopt: {} };
   const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
   const tokens = context.tokens;
-  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
+  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
   if (!identity) return { unknown: 'Hypervibe could not read the runtime identity from Azure; try again.' };
   if (identity.status === 404) return { adopt: {} };
   const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
   if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read the runtime identity from Azure (HTTP ${identity.status}).` };
-  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `https://management.azure.com${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
+  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
   if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the runtime identity's roles in Azure (HTTP ${listed?.status ?? 'none'}).` };
   const existing = ((listed.body.value ?? []) as Array<{ id?: string; properties?: { scope?: string; roleDefinitionId?: string } }>);
   const configuration = buildAzureEnvironmentConfiguration(input);
@@ -349,27 +341,25 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const context = await resolveAzureEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
 
+  if (engineCiIntent(spec, environmentName)) {
+    const ready = await azureCiSetupReady(context.connection).catch(() => false);
+    if (!ready) return { blocked: ['Azure CI access needs reviewed setup. Run hv_launch (or hv_connections provider="azure" action="connect") to update access.'] };
+  }
+
   // Outside keys must already have a value; Hypervibe never invents them.
   const store = azureEnvironmentSecretStore(context);
   const keys = azureEnvironmentSecretKeys(spec, environmentName, importedOf(context.environment));
-  const missing: string[] = [];
-  for (const key of keys.outside) {
-    const observed = await store.observe(key);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    if (observed === 'absent') missing.push(key);
-  }
-  if (missing.length) return { blocked: [missingOutsideKeysMessage(environmentName, missing)], missingOutsideKeys: missing };
-  const secretActions: PlanAction[] = [];
-  for (const key of keys.generated) {
-    const observed = await store.observe(key);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    const name = azureVaultSecretName(environmentName, key);
-    secretActions.push({
-      id: `secret:${key}`, type: observed === 'present' ? 'noop' : 'create', verified: true, resource: { kind: 'secret', name: key, provider: 'azure' },
-      reason: observed === 'present' ? `Secret ${key} is stored in Key Vault.` : `Hypervibe will generate ${key} and store it in Key Vault (${context.vault.name}/${name}).`,
+  const secrets = await planEngineSecrets({
+    environmentName, generated: keys.generated, outside: keys.outside, optional: optionalOutsideKeys(spec, environmentName),
+    observe: (key) => store.observe(key),
+    action: (key, stored) => ({
+      id: `secret:${key}`, type: stored ? 'noop' : 'create', verified: true, resource: { kind: 'secret', name: key, provider: 'azure' },
+      reason: stored ? `Secret ${key} is stored in Key Vault.` : `Hypervibe will generate ${key} and store it in Key Vault (${context.vault.name}/${azureVaultSecretName(environmentName, key)}).`,
       metadata: { operation: AZURE_SECRET_OPERATION, subscriptionId: context.connection.subscriptionId, key },
-    });
-  }
+    }),
+  });
+  if ('blocked' in secrets) return secrets;
+  const secretActions = secrets.actions;
 
   const engine = await engineFor();
   if ('blocked' in engine) return { blocked: [engine.blocked] };
@@ -384,16 +374,24 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const sharedActions = sharedPlanned.actions;
   const sharedChanging = changing(sharedActions);
 
+  const buildInput = buildAzureEngineInput(spec, environmentName, context, { secretKeys: [...keys.all, ...keys.build].filter((key) => !secrets.unset?.includes(key)) });
+  const buildPlanId = crypto.randomUUID();
+  const buildPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureBuildConfiguration(buildInput), auth: context.auth, state: context.buildState, planId: buildPlanId });
+  if (!buildPlanned.ok) return { blocked: [redactEngineOutput(buildPlanned.error, context.auth.redact)] };
+  if (buildPlanned.blockers.length) return { blocked: buildPlanned.blockers };
+  const buildInfrastructureActions = withDependencies(buildPlanned.actions, [...sharedChanging, ...changing(secretActions)]);
+
   // 2. The image. Built in this apply from the local commit when the environment has none, so the
   //    workloads are created in this same apply (no second plan round).
   const binding = azureBinding(context.environment);
   const workloads = Object.keys(environmentSpec.services).length;
   const commit = !binding.image && workloads ? await localCommit(project) : undefined;
-  const image = binding.image ?? (commit ? `${context.shared.registryLoginServer}/${AZURE_IMAGE_REPOSITORY}:${commit.commitSha}` : undefined);
+  const buildRegistry = azureSelectedBuildRegistry(buildInput);
+  const image = binding.image ?? (commit ? `${buildRegistry.loginServer}/${AZURE_IMAGE_REPOSITORY}:${commit.commitSha}` : undefined);
   const buildActions: PlanAction[] = commit ? [{
     id: 'build:image', type: 'create', verified: true, resource: { kind: 'service', name: 'image', provider: 'azure' },
     reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} with ACR Tasks (about 2 cents) so the workloads start from it.`,
-    ...(sharedChanging.includes('shared:registry') ? { dependsOn: ['shared:registry'] } : {}),
+    dependsOn: [...sharedChanging, ...changing(buildInfrastructureActions), ...changing(secretActions)],
     metadata: { operation: AZURE_IMAGE_BUILD_OPERATION, subscriptionId: context.connection.subscriptionId, commitSha: commit.commitSha, directory: commit.directory },
   }] : [];
 
@@ -407,7 +405,8 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   }] : [];
 
   // 4. Everything else, in the environment's own state.
-  let input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all, ...(image ? { image } : {}) });
+  // An optional key without a value is left out, so no workload references a Key Vault secret that does not exist.
+  let input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all.filter((key) => !secrets.unset?.includes(key)), ...(image ? { image } : {}) });
   let planId = crypto.randomUUID();
   let planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
@@ -422,13 +421,13 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
     if (planned.blockers.length) return { blocked: planned.blockers };
   }
-  const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildActions), ...changing(loginActions)];
-  const actions = [...sharedActions, ...secretActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
+  const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildInfrastructureActions), ...changing(buildActions), ...changing(loginActions)];
+  const actions = [...sharedActions, ...secretActions, ...buildInfrastructureActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [
     `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero; the shared database server is about $16/month for all testing environments.`,
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
-  return recordPlan(project, context, params, actions, warnings, { planId, shared: { planId: sharedPlanId, state: context.shared.state } });
+  return recordPlan(project, context, params, actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });
 }
 
 /**
@@ -469,6 +468,12 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   }));
   const environmentActions = withDependencies(destroying, changing(emptyActions));
 
+  const buildPlanId = crypto.randomUUID();
+  const buildPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureBuildConfiguration({ ...input, ...(keys.build[0] ? { packageTokenKey: keys.build[0] } : {}) }), auth: context.auth, state: context.buildState, planId: buildPlanId, destroy: true });
+  if (!buildPlanned.ok) return { blocked: [redactEngineOutput(buildPlanned.error, context.auth.redact)] };
+  if (buildPlanned.blockers.length) return { blocked: buildPlanned.blockers };
+  const buildActions = withDependencies(buildPlanned.actions.filter((action) => action.type !== 'noop'), changing(environmentActions));
+
   // The shared server and registry stay while another testing environment uses them.
   const remaining = azureTestingEnvironments(spec).filter((name) => name !== environmentName);
   let sharedActions: PlanAction[] = [];
@@ -479,7 +484,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
       auth: context.auth, state: context.shared.state, planId: sharedPlanId, destroy: true });
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
-    sharedActions = withDependencies(sharedPlanned.actions.filter((action) => action.type !== 'noop'), changing(environmentActions));
+    sharedActions = withDependencies(sharedPlanned.actions.filter((action) => action.type !== 'noop'), [...changing(environmentActions), ...changing(buildActions)]);
     shared = { shared: { planId: sharedPlanId, state: context.shared.state } };
   }
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
@@ -493,18 +498,18 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'azure' },
     reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${sharedActions.length ? ' (nor the shared server and registry)' : ''}, and remove it from the spec.`,
-    dependsOn: [...changing(environmentActions), ...changing(sharedActions), ...changing(dropActions)],
+    dependsOn: [...changing(environmentActions), ...changing(buildActions), ...changing(sharedActions), ...changing(dropActions)],
     metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: sharedActions.length > 0 },
   };
   if (!cleanup.dependsOn!.length) delete cleanup.dependsOn;
-  const actions = [...emptyActions, ...environmentActions, ...dropActions, ...sharedActions, cleanup];
+  const actions = [...emptyActions, ...environmentActions, ...buildActions, ...dropActions, ...sharedActions, cleanup];
   const warnings = [
     `Removes Azure environment ${environmentName} (${azureLocationFor(spec, environmentName, context.connection)}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
     ...(environmentSpec.database ? ['Azure keeps no final snapshot of a deleted database; export it first if you need the data.'] : []),
     sharedActions.length ? 'No other testing environment uses the shared server and registry, so they are removed too.' : `The shared server and registry stay for ${remaining.join(', ')}.`,
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,
   ];
-  return recordPlan(project, context, params, actions, warnings, { planId, teardown: true, ...shared });
+  return recordPlan(project, context, params, actions, warnings, { planId, teardown: true, build: { planId: buildPlanId, state: context.buildState }, ...shared });
 }
 
 export interface AzureApplyDependencies {
@@ -532,6 +537,18 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       return failed ? { success: false, message: failed } : { success: true, message: `Stored a generated ${key} in Key Vault.` };
     }
     case AZURE_IMAGE_BUILD_OPERATION: {
+      if (engineCiIntent(params.spec, context.environmentName) && !azureBinding(context.environment).buildRegistry) {
+        const engine = await engineFor();
+        if ('blocked' in engine) return { success: false, status: 'blocked', message: engine.blocked };
+        const observed = await engine.inspectState({ backend: azureEngineBackend,
+          configuration: buildAzureBuildConfiguration(buildAzureEngineInput(params.spec, context.environmentName, context, { secretKeys: [] })),
+          auth: context.auth, state: context.buildState,
+          project: (state) => projectAzureCiRegistry(state, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, environmentId: context.environment.id }),
+        });
+        if (!observed.ok || !observed.present) return { success: false, status: 'blocked', message: 'The applied environment build registry could not be verified; image builds stopped.' };
+        updateBinding(ctx, context, { buildRegistry: observed.value });
+        context.environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+      }
       const build = deps.buildImage ?? (await import('./infrastructure-engine-azure-release.js')).buildAzureImage;
       const built = await build(context, { directory: String(metadata.directory), commitSha: String(metadata.commitSha) });
       if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error, ...(built.logsUrl ? { data: { buildLogsUrl: built.logsUrl } } : {}) };
@@ -552,7 +569,12 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
         if (failed) return { success: false, message: failed };
       }
       const now = new Date().toISOString();
-      updateBinding(ctx, context, { databaseLoginAt: now, ...(urls.wakerUrl ? { wakerLoginAt: now } : {}) });
+      updateBinding(ctx, context, { database: {
+        serverId: `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${context.shared.serverName}`,
+        subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, host: String(metadata.host),
+        name: azureDatabaseNames(context.environmentName).database, owner: azureDatabaseNames(context.environmentName).login,
+        secretUrl: `${context.vault.uri}secrets/${azureVaultSecretName(context.environmentName, ENGINE_DATABASE_URL_KEY)}`,
+      }, databaseLoginAt: now, ...(urls.wakerUrl ? { wakerLoginAt: now } : {}) });
       return { success: true, message: `Created ${context.environmentName}'s database login and stored ${ENGINE_DATABASE_URL_KEY} in Key Vault.` };
     }
     case AZURE_STORAGE_EMPTY_OPERATION: {
@@ -590,17 +612,18 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  type Reviewed = { planId: string; state: EngineStateIdentity; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
+  type Reviewed = { teardown?: boolean; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
   const document = loaded.document as PlanRunDocument & { engine?: Reviewed };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
   if (!reviewed?.azure || !isAzureEngineEnvironment(params.spec, environmentName)) return { kind: 'blocked', reason: 'This plan is not an Azure engine plan. Re-run hv_plan.' };
   const context = await resolveAzureEngineContext(ctx, params.project, environmentName);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
-  if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || (reviewed.shared && JSON.stringify(reviewed.shared.state) !== JSON.stringify(context.shared.state))
+  if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || (reviewed.build && JSON.stringify(reviewed.build.state) !== JSON.stringify(context.buildState)) || (reviewed.shared && JSON.stringify(reviewed.shared.state) !== JSON.stringify(context.shared.state))
     || reviewed.azure.subscriptionId !== context.connection.subscriptionId || reviewed.azure.resourceGroup !== context.connection.resourceGroup || reviewed.azure.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different Azure subscription, resource group or environment. Re-run hv_plan.' };
   }
+  clearEngineCiBinding(ctx, context.environment);
   const engine = await engineFor();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const result = await executor.execute({
@@ -617,11 +640,35 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     },
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
-      const target = reviewed.shared && segment.id === `opentofu:${reviewed.shared.planId}` ? reviewed.shared : { planId: reviewed.planId, state: context.state };
+      const target = reviewed.shared && segment.id === `opentofu:${reviewed.shared.planId}` ? reviewed.shared : reviewed.build && segment.id === `opentofu:${reviewed.build.planId}` ? reviewed.build : { planId: reviewed.planId, state: context.state };
       const outcome = await engine.apply({ backend: azureEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
+      if (!reviewed.teardown && reviewed.build?.planId === target.planId && (engineCiIntent(params.spec, environmentName) || azureBinding(context.environment).buildRegistry)) {
+        const inspected = await engine.inspectState({ backend: azureEngineBackend, configuration: buildAzureBuildConfiguration(buildAzureEngineInput(params.spec, environmentName, context, { secretKeys: [] })),
+          auth: context.auth, state: context.buildState,
+          project: (state) => projectAzureCiRegistry(state, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, environmentId: context.environment.id }),
+        });
+        if (inspected.ok && inspected.present) {
+          updateBinding(ctx, context, { buildRegistry: inspected.value });
+          context.environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+        } else if (addresses.includes('azurerm_container_registry.ci_images') && outcome.outcomes['azurerm_container_registry.ci_images'] === 'succeeded') {
+          outcome.outcomes['azurerm_container_registry.ci_images'] = 'unknown';
+          outcome.diagnostics.push('The build registry was applied but its exact state identity could not be verified; image builds stopped.');
+        }
+      }
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
+  // A teardown owns binding removal separately; never resurrect its identities.
+  if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
+    const recorded = await recordEngineWorkloadBindings(ctx, engine, { environment: context.environment, backend: azureEngineBackend,
+      auth: context.auth, state: context.state, provider: 'azure', projectId: context.connection.subscriptionId, environmentId: context.connection.resourceGroup,
+      project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }) });
+    if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
+  await recordEngineCiBindings(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName,
+    location: azureLocationFor(params.spec, environmentName, context.connection),
+    succeeded: Boolean(result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) });
   return { kind: 'executed', envName: environmentName, result };
 }

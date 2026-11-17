@@ -7,23 +7,29 @@ records AWS implementation decisions and dated evidence. Product scope and futur
 priorities belong to the [common user journey](development/user-journey.md). This
 page does not establish a complete supported AWS journey.
 
-## Recorded evidence (2026-11-12)
+## Recorded evidence
 
-The live results below describe the named apps and runs at that date. They do not
-verify other profiles, workloads or subsequent revisions.
+The earlier deployment and teardown results were recorded on 2026-11-12; the
+guided launch was recorded on 2026-11-14. These results describe the named apps
+and runs. They do not verify other profiles, workloads or subsequent revisions.
 
 | Piece | State |
 | --- | --- |
+| Runtime logs and deployment health (`hv_logs`, `hv_health`) | Built; offline transport and command tests only, no live validation. See [diagnostics scope](engine-diagnostics.md). |
 | Sign-in without the AWS CLI | Built; verified live |
 | One-time setup (deploy role, boundary, GitHub OIDC, local key) | Built; verified live |
 | OpenTofu runs as the deploy role | Built; read-only probe verified live |
 | Registry, runtime role, storage, database, app login | Built; applied live (billforge `aws`) |
 | Image builds and releases (`hv_deploy`) | Built; verified live (demo app) |
+| Private package tokens in CodeBuild / BuildKit | Built; offline request, generated command and runtime-isolation regressions; not live verified |
 | Web (Lambda), on-demand worker and cron (Fargate) | Built; verified live (demo app): database over verified TLS, generated secret, storage with the runtime role, worker woken by requests and by the next-due timer while Aurora was paused, no drift after releases |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
+| `hv_launch` for testing environments (one reviewed plan: registry and build project in their own state, the first image built inside the apply, then everything else) | Built; verified live (demo app, 2026-11-14): one round, no sign-in (account access reused), web health-checked, database, secret, storage and cron working, worker jobs done 87 s (cold start) and 0.7 s after due, empty plan after |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
 | Production-profile database (RDS `db.t4g.micro`) | Not built; planning blocks it |
-| CI releases, data copy | Not built |
+| CI releases | Implemented; offline verification, live unverified; see [branch releases](engine-ci-releases.md) |
+| Data copy, `hv_launch` for staging and production | Not built |
+| Live worker state in `hv_status` | Not built; use `hv_health` and `hv_plan` |
 
 Current planner limits (code reviewed 2026-11-13):
 [`awsEngineProblems`](../src/application/infrastructure-engine-aws.ts) blocks a
@@ -89,6 +95,22 @@ not current quotes.
   Aurora kept awake (minimum 0.5 ACU, estimated about $44/mo at the time) was
   rejected as the default. This is an AWS implementation decision, not a
   cross-cloud support guarantee.
+- **Testing environments share one cluster (decided 2026-11-14).** Creating an
+  Aurora cluster and its instance takes about 10 minutes, most of a first
+  launch. So a project's testing environments share one cluster
+  (`hv-<project>-shared-postgres`, in its own OpenTofu state), as they share one
+  Postgres server on Azure. Each environment gets its own database
+  (`app_<env>`), owner login and worker-waker login. `CONNECT` is revoked from
+  `PUBLIC`, so no environment's logins can reach another's database. A new testing
+  environment adds only a database and logins, which takes seconds. Testing
+  environments must use the same Postgres major. Staging and production will
+  get their own databases. An environment created with its own cluster before
+  this change is blocked from planning until it is torn down and launched again.
+  Verified live 2026-11-15 in us-west-2: the first launch created the cluster;
+  a second testing environment launched in 3m12s with no cluster change. Its
+  waker login was refused on the other environment's database
+  (`permission denied for database`). Tearing it down dropped only its database,
+  and tearing down the last environment removed the cluster.
 - **Database network: public endpoint, TLS required (decided 2026-11-10).**
   Lambda runs outside a VPC, so it needs no NAT gateway, which costs about
   $32/mo and would be more than the rest of a staging environment. The database
@@ -139,7 +161,11 @@ plan; every action needs its own confirmation:
 4. The environment's bindings are cleared and it is removed from the spec, so the
    next plan does not recreate it.
 
-The database keeps a final snapshot (`<prefix>-postgres-final`) unless the plan
+While other testing environments use the shared cluster, teardown drops only
+the environment's database and logins (no snapshot; the cluster's one-day
+backups can restore the whole cluster). The last testing environment's teardown
+removes the cluster too, which keeps a final snapshot
+(`hv-<project>-shared-postgres-final`) unless the plan
 uses `deleteFinalSnapshot=true`, which adds its deletion as its own confirmed
 action; for an environment already torn down, it plans just that deletion.
 Cleanup confirms the environment's roles are gone (`iam:ListRoles` on
@@ -165,3 +191,22 @@ the app goes quiet. An uptime monitor that calls the app keeps it awake.
 
 `hashicorp/aws` 6.70.0 (released 2026-10-22), with `h1:` lock hashes from
 `tofu providers lock` for darwin and linux (amd64 and arm64) and windows amd64.
+
+
+## Private package builds
+
+Declared outside `NODE_AUTH_TOKEN` or `NPM_TOKEN` secrets are resolved by
+CodeBuild from this environment's Parameter Store path and supplied as the
+BuildKit secret `npm_token`. The build role can read only the selected token.
+Neither token key is wired into Lambda, worker or scheduled-job settings; ordinary
+runtime secrets use an explicit name list and exact parameter permissions.
+Optional absent tokens are omitted, and an unknown observation blocks the build.
+Repository Dockerfiles can use `RUN --mount=type=secret,id=npm_token`.
+
+Existing Lambda environments transition through a reviewed image rebuild and
+verified release before runtime secret permissions change. The packaged loader
+revision is part of the immutable image tag, so the same source commit does not
+reuse the old loader. The new image supports the previous settings during that
+transition while filtering token keys. Failure or an uncertain release stops the
+permission update. Without the local repository, planning blocks this transition.
+These changes have offline evidence; no new live deployment is claimed.

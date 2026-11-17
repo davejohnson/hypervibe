@@ -14,6 +14,7 @@ import type {
   DatabaseCapabilities,
 } from '../../../domain/ports/database.port.js';
 import type { IObservableDatabase, ObservedDatabase } from '../../../domain/ports/observe.port.js';
+import { accessLatestSecretVersion } from './gcp-secret-manager.client.js';
 import {
   providerRegistry,
   type DatabaseRuntimeProjection,
@@ -383,11 +384,14 @@ export class CloudSqlAdapter implements IDatabaseOperations, IObservableDatabase
     } catch {
       parsedUrl = undefined;
     }
-    const username = typeof bindings.username === 'string' ? bindings.username : parsedUrl?.username;
-    const password = typeof bindings.password === 'string' ? bindings.password : parsedUrl?.password;
-    const database = typeof bindings.database === 'string'
+    const kept = typeof bindings.connectionSecretId === 'string'
+      ? await this.loginKeptInSecretManager(bindings.connectionSecretId)
+      : undefined;
+    const username = kept?.username ?? (typeof bindings.username === 'string' ? bindings.username : parsedUrl?.username);
+    const password = kept?.password ?? (typeof bindings.password === 'string' ? bindings.password : parsedUrl?.password);
+    const database = kept?.database ?? (typeof bindings.database === 'string'
       ? bindings.database
-      : parsedUrl?.pathname.replace(/^\//, '');
+      : parsedUrl?.pathname.replace(/^\//, ''));
     if (!username || !password || !database) {
       throw new Error('Cloud SQL bindings are missing the database username, password, or database name.');
     }
@@ -419,6 +423,16 @@ export class CloudSqlAdapter implements IDatabaseOperations, IObservableDatabase
       await rm(directory, { recursive: true, force: true }).catch(() => {});
       throw error;
     }
+  }
+
+  /** Reads an engine database's login from its connection secret. The value is never logged or returned. */
+  private async loginKeptInSecretManager(secretId: string): Promise<{ username: string; password: string; database: string }> {
+    const response = await accessLatestSecretVersion(await this.getAccessToken(), this.credentials!.projectId, secretId);
+    if (!response.ok) throw new Error(`Reading the database connection secret ${secretId} returned HTTP ${response.status}.`);
+    const url = Buffer.from((await response.json() as { payload?: { data?: string } }).payload?.data ?? '', 'base64').toString('utf8');
+    const parsed = /^postgres(?:ql)?:\/\/([^:@/]+):([^@]+)@[^/]*\/([^?]+)/.exec(url);
+    if (!parsed) throw new Error(`The database connection secret ${secretId} does not hold a PostgreSQL login.`);
+    return { username: decodeURIComponent(parsed[1]!), password: decodeURIComponent(parsed[2]!), database: decodeURIComponent(parsed[3]!) };
   }
 
   async releaseTemporaryDatabaseAccess(
@@ -997,7 +1011,7 @@ providerRegistry.register({
       lifecycle: {
         database: {
           status: 'planned',
-          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+          reason: 'The OpenTofu engine manages infrastructure. Authentication and operational tools remain available.',
         },
       },
     },

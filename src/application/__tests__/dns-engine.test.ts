@@ -205,6 +205,29 @@ describe('DNS shared application authority', () => {
     f.spec.dns!.adoptRecords = [{ id: `${cfZoneId}/023e105f4ecef8ad9ca31a8372d0c356`, name, type: 'TXT', values: ['private-verification-token'] }];
     expect((await f.prepare()).blocked?.join(' ')).toContain('not owned'); expect(f.plan).not.toHaveBeenCalled();
   });
+  // A hostname can hold only one CNAME, so an existing one pointing elsewhere is a conflict, not a sibling.
+  const cname: DesiredDnsRecord = { key: 'target', name, type: 'CNAME', values: ['new-host.example.net'], ttl: 300 };
+  it.each(['cloudflare', 'gcp'] as const)('blocks a %s CNAME that already points somewhere else instead of planning a create', async (provider) => {
+    const f = fixture(provider);
+    f.observe(['old-host.example.org'], provider === 'gcp' ? gcpNativeId.replace('/TXT', '/CNAME') : undefined, 'CNAME');
+    const result = await f.prepare([cname]);
+    expect(result.blocked?.join(' ')).toMatch(/already has a CNAME.*dns\.adoptRecords/); expect(f.plan).not.toHaveBeenCalled();
+  });
+  it.each([`${cfZoneId}/${cfRecordId}`, cfRecordId])('takes over the exact selected CNAME (%s) and changes its target in place', async (id) => {
+    const f = fixture('cloudflare'); f.actionType('update'); f.observe(['old-host.example.org'], undefined, 'CNAME');
+    f.spec.dns!.adoptRecords = [{ id, name, type: 'CNAME', values: ['old-host.example.org'] }];
+    const result = await f.prepare([cname]);
+    expect(result.blocked).toBeUndefined(); expect(result.actions[0].requiresConfirm).toBe(true);
+    const configuration = f.plan.mock.calls[0][0].configuration;
+    expect(Object.values(configuration.imports!)).toEqual([`${cfZoneId}/${cfRecordId}`]);
+    const serialized = JSON.stringify(configuration.files);
+    expect(serialized).toContain('new-host.example.net'); expect(serialized).not.toContain('old-host.example.org');
+  });
+  it('does not take over a CNAME whose target changed since it was reviewed', async () => {
+    const f = fixture('cloudflare'); f.observe(['someone-elses-host.example.org'], undefined, 'CNAME');
+    f.spec.dns!.adoptRecords = [{ id: cfRecordId, name, type: 'CNAME', values: ['old-host.example.org'] }];
+    expect((await f.prepare([cname])).blocked?.join(' ')).toContain('changed'); expect(f.plan).not.toHaveBeenCalled();
+  });
   it('blocks an unknown record read instead of planning creation', async () => {
     const f = fixture(); f.observations.set(`${name}|TXT`, { status: 'unknown', reason: 'DNS provider access is unknown.' });
     expect((await f.prepare()).blocked).toBeDefined(); expect(f.plan).not.toHaveBeenCalled();

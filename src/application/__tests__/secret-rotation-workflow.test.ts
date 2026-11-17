@@ -7,6 +7,7 @@ import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repos
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { createCommandContext } from '../context.js';
+import * as secretManager from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
 import * as infrastructure from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
 import * as pastePage from '../local-paste-page.js';
@@ -80,20 +81,20 @@ function fixture(importedSecrets: string[], generatedSecrets: string[] = [], gen
     createdAt.set(id, new Date().toISOString());
     return undefined;
   });
-  const reads = vi.spyOn(infrastructure, 'secretManagerFetch').mockImplementation(async (_token, url) => {
-    const id = /\/secrets\/([^/]+)/.exec(url)?.[1];
-    if (!id || !createdAt.has(id)) throw new Error('Unexpected Secret Manager read');
-    if (url.endsWith('/versions/latest')) return Response.json({ createTime: createdAt.get(id) });
-    if (url.endsWith('/versions?filter=state:ENABLED')) return Response.json({ versions: [
-      { name: `projects/rotation-fixture/secrets/${id}/versions/1` },
-    ] });
-    throw new Error('Unexpected Secret Manager operation');
+  const latest = vi.spyOn(secretManager, 'latestSecretVersion').mockImplementation(async (_token, _projectId, id) => {
+    if (!createdAt.has(id)) throw new Error('Unexpected Secret Manager read');
+    return Response.json({ createTime: createdAt.get(id) });
   });
+  const enabledVersions = vi.spyOn(secretManager, 'enabledSecretVersions').mockImplementation(async (_token, _projectId, id) => {
+    if (!createdAt.has(id)) throw new Error('Unexpected Secret Manager read');
+    return Response.json({ versions: [{ name: `projects/rotation-fixture/secrets/${id}/versions/1` }] });
+  });
+  vi.spyOn(secretManager, 'disableSecretVersion').mockRejectedValue(new Error('Unexpected Secret Manager operation'));
   const launchSpy = vi.spyOn(launch, 'launchEnvironment').mockResolvedValue({ status: 'ready', phase: 'infrastructure', infrastructureRounds: 1 });
   const page = vi.spyOn(pastePage, 'serveMultiPastePage').mockResolvedValue({ status: 'waiting', provider: 'secret', scope: 'staging', message: 'Waiting for private input' });
   const rotate = (params: Omit<Parameters<typeof rotateSecrets>[1], 'project' | 'environmentName'> = {}) => rotateSecrets(ctx, { project, environmentName: 'staging', ...params });
   const rotation = () => (ctx.repos.environments.findById(environment.id)!.platformBindings as { engine: infrastructure.EngineBinding }).engine.rotation;
-  return { rotate, rotation, page, write, reads, accepted, failedWrites, launchSpy };
+  return { rotate, rotation, page, write, latest, enabledVersions, accepted, failedWrites, launchSpy };
 }
 
 const waiting = { status: 'waiting' as const, provider: 'secret', scope: 'staging', message: 'Waiting for private input' };
@@ -188,7 +189,7 @@ describe('rotation resumes every unfinished member of a selected credential grou
     expect(f.accepted.map(({ key }) => key)).toEqual([savedFirst]);
     expect(f.launchSpy).not.toHaveBeenCalled();
     expect(f.rotation()?.keys).toEqual([parentKey]);
-    expect(f.reads.mock.calls.some(([, url]) => url.includes('?filter=state:ENABLED'))).toBe(false);
+    expect(f.enabledVersions).not.toHaveBeenCalled();
   });
 
   it('retries a failed companion save and launches only after that replacement succeeds', async () => {

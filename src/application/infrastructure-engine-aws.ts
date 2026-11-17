@@ -1,35 +1,39 @@
-import { scramVerifier, specWithoutEnvironment } from './engine-shared.js';
-import { commonEngineProblems } from '../domain/services/infrastructure-engine-selection.js';
+import { projectAwsDatabaseQuerySecret } from '../adapters/providers/aws/aws-database-query-secret.js';
+import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
+import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
+import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
+import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
+import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
-import { RDSClient, DeleteDBClusterSnapshotCommand, DescribeDBClustersCommand, DescribeDBEngineVersionsCommand, DescribeEngineDefaultClusterParametersCommand } from '@aws-sdk/client-rds';
-import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
-import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { DeleteParametersCommand, GetParameterCommand, GetParametersByPathCommand, ParameterNotFound, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
-import { DeleteTaskDefinitionsCommand, DeregisterTaskDefinitionCommand, ECSClient, ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
-import { CloudWatchLogsClient, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { IAMClient, ListRolesCommand } from '@aws-sdk/client-iam';
+import { execFileSync } from 'child_process';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
-import { awsAccessCurrent } from './aws-setup.js';
+import {
+  deleteFinalSnapshot, describeDatabaseCluster, dropAuroraEnvironmentDatabase, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
+  putParameter, readParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess, type AwsEnvironmentDatabase,
+  clusterSnapshotState,
+} from '../adapters/providers/aws/aws-engine.client.js';
+import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
 import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
-import { LAMBDA_RESERVED_ENV, type AwsEngineInput } from '../adapters/providers/aws/tofu/aws-engine.config.js';
+import {
+  awsKey, awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsSharedConfiguration, LAMBDA_RESERVED_ENV, type AwsEngineInput, type AwsSharedInput,
+} from '../adapters/providers/aws/tofu/aws-engine.config.js';
+import { awsImageTag } from '../adapters/providers/aws/aws-release.client.js';
+import { localRepositoryFor } from './local-repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { RunRepository } from '../adapters/db/repositories/run.repository.js';
-import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
-import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Project } from '../domain/entities/project.entity.js';
-import { ConvergeExecutor, type ActionResult, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
+import { ConvergeExecutor, type ConvergeResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { engineSegmentOf, type EngineAuthentication, type EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
-import { ENGINE_DATABASE_URL_KEY, ENGINE_PLAN_SCOPE, engineSecretKeys, missingOutsideKeysMessage, type InfrastructurePlanResult } from './infrastructure-engine.js';
-import { engineOutsideKeys, type EngineSecretStore } from './engine-secrets.js';
+import { ENGINE_DATABASE_URL_KEY, engineSecretKeys, type InfrastructurePlanResult } from './infrastructure-engine.js';
+import { engineOutsideKeys, isBuildTokenKey, optionalOutsideKeys, presentBuildTokenKey, type EngineSecretStore } from './engine-secrets.js';
+import { engineCiIntent } from '../domain/spec/engine-ci.js';
 
 /**
  * The OpenTofu lifecycle for AWS environments: spec → configuration, Hypervibe-owned
@@ -41,23 +45,23 @@ export const AWS_DATABASE_LOGIN_OPERATION = 'awsDatabaseLoginEnsure';
 export const AWS_BUCKET_EMPTY_OPERATION = 'awsBucketEmpty';
 export const AWS_TEARDOWN_CLEANUP_OPERATION = 'awsTeardownCleanup';
 export const AWS_SNAPSHOT_DELETE_OPERATION = 'awsSnapshotDelete';
-const APP_DATABASE = 'app';
-const APP_LOGIN = 'app_owner';
-const WAKER_LOGIN = 'hv_waker';
+export const AWS_IMAGE_BUILD_OPERATION = 'awsImageBuild';
+export const AWS_DATABASE_DROP_OPERATION = 'awsDatabaseDrop';
 
-export type AwsProfile = 'production' | 'testing';
-
-/** production and staging share one shape; everything else is a cheap testing environment. */
-export function awsProfileFor(environmentName: string): AwsProfile {
-  return /prod|stag/i.test(environmentName) ? 'production' : 'testing';
-}
+export type AwsProfile = EnvironmentProfile;
+export const awsProfileFor = environmentProfile;
 
 export interface AwsEngineBinding {
+  database?: import('../domain/services/engine-database-access.service.js').AwsDatabaseBinding;
   kind?: 'opentofu';
   /** Image built by the release path; services are created once it exists. */
   imageUri?: string;
+  /** Version 2 images are ready for explicit runtime secret names. */
+  runtimeSecretsVersion?: 2;
   /** The app's database login exists and DATABASE_URL is in Parameter Store. */
   databaseLoginAt?: string;
+  /** The environment's database is on the project's shared testing cluster (earlier versions gave each environment its own). */
+  sharedDatabase?: boolean;
   /** Waker login secrets Hypervibe has written (workers can be added after the app login exists). */
   wakerLogins?: string[];
   services?: Record<string, { url?: string; resource: string }>;
@@ -71,6 +75,12 @@ export interface AwsEngineContext {
   auth: EngineAuthentication;
   environment: Environment;
   state: EngineStateIdentity;
+  /** The registry and build project, applied before the environment so its first image is built in the same apply. */
+  buildState: EngineStateIdentity;
+  /** The project's shared testing cluster: its own state, kept while any testing environment uses it. */
+  shared: { prefix: string; state: EngineStateIdentity; clusterIdentifier: string; clusterArn: string };
+  /** This environment's database and logins on the shared cluster. */
+  database: AwsEnvironmentDatabase;
   prefix: string;
   parameterPath: string;
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
@@ -78,12 +88,14 @@ export interface AwsEngineContext {
 
 export function isAwsEngineEnvironment(spec: ProjectSpec, environmentName: string): boolean {
   const environment = spec.environments[environmentName];
-  return environment?.hosting.engine === 'opentofu' && environment.hosting.provider === 'aws';
+  return environment?.hosting.provider === 'aws';
 }
 
 export function awsBinding(environment: Environment): AwsEngineBinding {
   return ((environment.platformBindings as { aws?: AwsEngineBinding }).aws) ?? {};
 }
+
+const awsAccess = (context: Pick<AwsEngineContext, 'connection' | 'credentials'>): AwsAccess => ({ region: context.connection.region, credentials: context.credentials });
 
 export async function resolveAwsEngineContext(ctx: CommandContext, project: Project, environmentName: string): Promise<AwsEngineContext | { blocked: string }> {
   const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl ?? undefined) ?? project.name;
@@ -98,10 +110,19 @@ export async function resolveAwsEngineContext(ctx: CommandContext, project: Proj
   const environment = ctx.repos.environments.findByProjectAndName(project.id, environmentName)
     ?? ctx.repos.environments.create({ projectId: project.id, name: environmentName });
   const prefix = `hv-${project.name}-${environmentName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 28).replace(/-+$/, '');
+  const sharedPrefix = `hv-${project.name}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 21).replace(/-+$/, '') + '-shared';
+  const databaseName = `app_${awsKey(environmentName)}`.slice(0, 40).replace(/_+$/, '');
   return {
     connection: parsed.data, auth, environment, prefix,
+    shared: {
+      prefix: sharedPrefix, clusterIdentifier: `${sharedPrefix}-postgres`,
+      clusterArn: awsSharedClusterArn({ accountId: parsed.data.accountId, region: parsed.data.region, prefix: sharedPrefix }),
+      state: { provider: 'aws', projectId: project.id, environmentId: 'shared-testing', partition: 'project-shared' },
+    },
+    database: { name: databaseName, owner: `${databaseName}_owner`, waker: `${databaseName}_waker` },
     parameterPath: `/hypervibe/${environment.id.toLowerCase()}/`,
     state: { provider: 'aws', projectId: project.id, environmentId: environment.id, partition: 'environment' },
+    buildState: { provider: 'aws', projectId: project.id, environmentId: `${environment.id}-build`, partition: 'environment' },
     credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! },
   };
 }
@@ -131,43 +152,18 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
   return problems;
 }
 
-async function newestAuroraVersion(context: AwsEngineContext, major: number): Promise<string | undefined> {
-  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-  let marker: string | undefined;
-  const versions: string[] = [];
-  do {
-    const page = await rds.send(new DescribeDBEngineVersionsCommand({ Engine: 'aurora-postgresql', Marker: marker }));
-    versions.push(...(page.DBEngineVersions ?? []).map((entry) => entry.EngineVersion ?? '').filter((version) => version.startsWith(`${major}.`)));
-    marker = page.Marker;
-  } while (marker);
-  return versions.sort((a, b) => Number(a.split('.')[1]) - Number(b.split('.')[1])).pop();
-}
-
-/** Whether Aurora PostgreSQL of this major already requires TLS by default; undefined when it cannot be read. */
-async function tlsRequiredByDefault(context: AwsEngineContext, major: string): Promise<boolean | undefined> {
-  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-  let marker: string | undefined;
-  do {
-    const page = await rds.send(new DescribeEngineDefaultClusterParametersCommand({ DBParameterGroupFamily: `aurora-postgresql${major}`, Marker: marker }));
-    const forceSsl = page.EngineDefaults?.Parameters?.find((parameter) => parameter.ParameterName === 'rds.force_ssl');
-    if (forceSsl) return forceSsl.ParameterValue === '1';
-    marker = page.EngineDefaults?.Marker;
-  } while (marker);
-  return undefined;
-}
-
 /** The AWS name of a workload: its Lambda function, ECS service and task family. */
 export function awsResourceName(prefix: string, service: string): string {
   return `${prefix}-${service}`.slice(0, 60);
 }
 
-export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment'>, extra: {
-  engineVersion?: string;
-  tlsRequiredByDefault?: boolean;
+export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment' | 'shared' | 'database'>, extra: {
   secretKeys: string[];
+  /** The image the plan builds first, when the environment has none yet. */
+  image?: string;
 }): AwsEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
-  const imageUri = awsBinding(context.environment).imageUri;
+  const imageUri = awsBinding(context.environment).imageUri ?? extra.image;
   const name = (service: string) => awsResourceName(context.prefix, service);
   const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b));
   // Workloads need an image in this environment's registry, so they are created after the first build.
@@ -180,15 +176,16 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     if (buckets.length > 1) throw new Error(`Service ${service} can receive only one bucket's variables.`);
     const storage: Record<string, string> = buckets[0] ? {
       OBJECT_STORAGE_PROVIDER: 's3', OBJECT_STORAGE_BUCKET: bucketName(buckets[0]), AWS_S3_BUCKET_NAME: bucketName(buckets[0]),
-      AWS_ENDPOINT_URL: `https://s3.${context.connection.region}.amazonaws.com`, AWS_DEFAULT_REGION: context.connection.region, AWS_S3_URL_STYLE: 'virtual',
+      AWS_ENDPOINT_URL: s3Endpoint(context.connection.region), AWS_DEFAULT_REGION: context.connection.region, AWS_S3_URL_STYLE: 'virtual',
     } : {};
     for (const key of Object.keys(storage)) if (key in environmentSpec.envVars) throw new Error(`Environment variable ${key} conflicts with storage ${buckets[0]}.`);
-    return { ...environmentSpec.envVars, ...storage };
+    return { ...Object.fromEntries(Object.entries(environmentSpec.envVars).filter(([key]) => !isBuildTokenKey(key))), ...storage };
   };
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
+    ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     environmentId: context.environment.id, parameterPath: context.parameterPath,
-    ...(environmentSpec.database && extra.engineVersion ? { database: { engineVersion: extra.engineVersion, minCapacity: 0, maxCapacity: 2, ...(extra.tlsRequiredByDefault ? { tlsRequiredByDefault: true } : {}) } } : {}),
+    ...(environmentSpec.database ? { database: { clusterArn: context.shared.clusterArn, name: context.database.name } } : {}),
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: bucketName(storage) })),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
@@ -203,7 +200,8 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: envFor(logicalName),
       schedule: service.cronSchedule!, timeZone: service.timeZone ?? 'UTC', ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
     })),
-    secretKeys: extra.secretKeys,
+    secretKeys: extra.secretKeys.filter((key) => !isBuildTokenKey(key)),
+    ...(extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key)) ? { packageTokenKey: extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key))! } : {}),
   };
 }
 
@@ -211,13 +209,14 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
 export async function awsSecretStore(ctx: CommandContext, project: Project, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
   const context = await resolveAwsEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return context;
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  const access = awsAccess(context);
   return {
     name: 'AWS Parameter Store',
-    observe: async (key) => parameterExists(ssm, `${context.parameterPath}${key}`),
+    observe: async (key) => parameterExists(access, `${context.parameterPath}${key}`),
+    read: async (key) => readParameter(access, `${context.parameterPath}${key}`),
     write: async (key, value) => {
       try {
-        await ssm.send(new PutParameterCommand({ Name: `${context.parameterPath}${key}`, Type: 'SecureString', Value: value, Overwrite: true }));
+        await putParameter(access, `${context.parameterPath}${key}`, value);
         return undefined;
       } catch (error) {
         return `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}).`;
@@ -226,30 +225,32 @@ export async function awsSecretStore(ctx: CommandContext, project: Project, envi
   };
 }
 
-async function parameterExists(ssm: SSMClient, name: string): Promise<'present' | 'absent' | { unknown: string }> {
-  try { await ssm.send(new GetParameterCommand({ Name: name })); return 'present'; } catch (error) {
-    if (error instanceof ParameterNotFound) return 'absent';
-    return { unknown: `Parameter Store could not be read (${error instanceof Error ? error.name : 'error'}).` };
-  }
+/** The AWS testing environments with a database: they share one cluster. */
+export function awsSharedDatabaseEnvironments(spec: ProjectSpec): string[] {
+  return Object.keys(spec.environments).filter((name) => isAwsEngineEnvironment(spec, name) && awsProfileFor(name) === 'testing' && spec.environments[name]!.database).sort();
+}
+
+/** The shared cluster's input, sized for the testing environments in the spec (which must agree on the Postgres major). */
+async function awsSharedInputFor(context: AwsEngineContext, spec: ProjectSpec, environments: string[]): Promise<AwsSharedInput | { blocked: string[] }> {
+  const majors = [...new Set(environments.map((name) => (spec.environments[name]!.database as { version?: number }).version ?? 17))];
+  if (majors.length > 1) return { blocked: [`The AWS testing environments share one database cluster, so they must use the same Postgres version (${environments.join(', ')} use ${majors.join(' and ')}).`] };
+  const major = majors[0]!;
+  const engineVersion = await newestAuroraVersion(awsAccess(context), major).catch(() => undefined);
+  if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
+  // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
+  const tlsDefault = await tlsRequiredByDefault(awsAccess(context), engineVersion.split('.')[0]!).catch(() => undefined);
+  return { accountId: context.connection.accountId, region: context.connection.region, prefix: context.shared.prefix, environmentId: 'shared-testing',
+    database: { engineVersion, minCapacity: 0, maxCapacity: 2, ...(tlsDefault ? { tlsRequiredByDefault: true } : {}) } };
 }
 
 /** The engine configuration for an environment as it stands: what plans compare against and teardown destroys. */
-async function awsEngineConfigurationFor(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, ownedSecretKeys: string[]) {
+async function awsEngineConfigurationFor(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, ownedSecretKeys: string[], image?: string) {
   const environmentSpec = spec.environments[environmentName]!;
-  let engineVersion: string | undefined;
-  let tlsDefault: boolean | undefined;
-  if (environmentSpec.database) {
-    const major = (environmentSpec.database as { version?: number }).version ?? 17;
-    engineVersion = await newestAuroraVersion(context, major).catch(() => undefined);
-    if (!engineVersion) return { blocked: [`AWS does not offer Aurora PostgreSQL ${major} in ${context.connection.region}, or the versions could not be read.`] };
-    // Only a confirmed default of 1 skips the explicit setting; unknown keeps it (TLS stays required either way).
-    tlsDefault = await tlsRequiredByDefault(context, engineVersion.split('.')[0]!).catch(() => undefined);
-  }
   const binding = awsBinding(context.environment);
-  const databaseWired = Boolean(environmentSpec.database && binding.databaseLoginAt);
-  const secretKeys = [...ownedSecretKeys, ...(databaseWired ? [ENGINE_DATABASE_URL_KEY] : [])];
-  const input = buildAwsEngineInput(spec, environmentName, context, { ...(engineVersion ? { engineVersion } : {}), ...(tlsDefault ? { tlsRequiredByDefault: true } : {}), secretKeys });
-  return { binding, databaseWired, input, configuration: awsEngineBackend.buildConfiguration(input) };
+  // The login is created in the same apply, before anything starts, so workloads are wired to DATABASE_URL from the start.
+  const secretKeys = [...ownedSecretKeys, ...(environmentSpec.database ? [ENGINE_DATABASE_URL_KEY] : [])];
+  const input = buildAwsEngineInput(spec, environmentName, context, { secretKeys, ...(image ? { image } : {}) });
+  return { binding, input, configuration: awsEngineBackend.buildConfiguration(input), buildConfiguration: buildAwsBuildConfiguration(input) };
 }
 
 /**
@@ -285,30 +286,38 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     ...(dependsOn.length ? { dependsOn } : {}),
     metadata: { operation: AWS_SNAPSHOT_DELETE_OPERATION, accountId: context.connection.accountId, identifier },
   });
-  const record = (actions: PlanAction[], warnings: string[], engine: Record<string, unknown>) => {
-    const document = {
-      kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-      observedFingerprint: null, actions, unmanaged: [], warnings,
-      engine: { state: context.state, teardown: true, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix }, ...engine },
-    } as unknown as PlanRunDocument;
-    const runRepo = new RunRepository();
-    const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-    runRepo.updateStatus(run.id, 'succeeded');
-    return { planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings, confirmActions: actions.map((action) => action.id) };
-  };
+  const record = (actions: PlanAction[], warnings: string[], engine: Record<string, unknown>) => recordEnginePlan({
+    projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings, confirm: 'all',
+    engine: { state: context.state, teardown: true, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix }, ...engine },
+  });
   if (!spec.environments[environmentName]) {
     return record([snapshotAction(tornDown.finalSnapshot!.identifier, [])], ['Deleting the snapshot cannot be undone.'], { planId: `snapshot-${crypto.randomUUID()}` });
   }
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...engineSecretKeys(spec, environmentName), ...imported]);
-  if (built.blocked) return { blocked: built.blocked };
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { blocked: [binary.error] };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  // The shared cluster goes with the last testing environment that uses it; otherwise only this environment's database is dropped.
+  const ownCluster = Boolean(awsBinding(context.environment).databaseLoginAt && !awsBinding(context.environment).sharedDatabase);
+  const usesShared = Boolean(spec.environments[environmentName]!.database) && !ownCluster;
+  const lastOnShared = usesShared && awsSharedDatabaseEnvironments(spec).every((name) => name === environmentName);
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { blocked: [engine.blocked] };
   const planId = crypto.randomUUID();
   const planned = await engine.plan({ backend: awsEngineBackend, configuration: built.configuration, auth: context.auth, state: context.state, planId, destroy: true });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   if (planned.blockers.length) return { blocked: planned.blockers };
+  const buildPlanId = crypto.randomUUID();
+  const buildPlanned = await engine.plan({ backend: awsEngineBackend, configuration: built.buildConfiguration, auth: context.auth, state: context.buildState, planId: buildPlanId, destroy: true });
+  if (!buildPlanned.ok) return { blocked: [redactEngineOutput(buildPlanned.error, context.auth.redact)] };
+  if (buildPlanned.blockers.length) return { blocked: buildPlanned.blockers };
+  let sharedPlanned: Awaited<ReturnType<typeof engine.plan>> | undefined;
+  const sharedPlanId = crypto.randomUUID();
+  if (lastOnShared) {
+    const sharedInput = await awsSharedInputFor(context, spec, [environmentName]);
+    if ('blocked' in sharedInput) return sharedInput;
+    sharedPlanned = await engine.plan({ backend: awsEngineBackend, configuration: buildAwsSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId, destroy: true });
+    if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
+    if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
+  }
 
   const accountId = context.connection.accountId;
   const destroying = planned.actions.filter((action) => action.type !== 'noop');
@@ -320,8 +329,34 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
       reason: `Hypervibe will permanently delete every file in ${bucket.bucket} so the bucket can be removed.`,
       metadata: { operation: AWS_BUCKET_EMPTY_OPERATION, accountId, bucket: bucket.bucket },
     }));
-  const engineActions = destroying.map((action) => action.id.startsWith('storage:') && emptyActions.some((empty) => empty.id === `storage-empty:${action.resource.name}`)
+  const environmentActions = destroying.map((action) => action.id.startsWith('storage:') && emptyActions.some((empty) => empty.id === `storage-empty:${action.resource.name}`)
     ? { ...action, dependsOn: [...(action.dependsOn ?? []), `storage-empty:${action.resource.name}`] } : action);
+  // The registry and build project go after the workloads that pull from it.
+  const buildActions = buildPlanned.actions.filter((action) => action.type !== 'noop')
+    .map((action) => environmentActions.length ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...environmentActions.map((entry) => entry.id)])] } : action);
+  const afterEnvironment = (action: PlanAction): PlanAction => environmentActions.length ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...environmentActions.map((entry) => entry.id)])] } : action;
+  const sharedActions = sharedPlanned?.ok ? sharedPlanned.actions.filter((action) => action.type !== 'noop').map(afterEnvironment) : [];
+  const dropActions: PlanAction[] = usesShared && !lastOnShared ? [afterEnvironment({
+    id: 'database:postgres', type: 'destroy', verified: true, dataBearing: true, requiresConfirm: true,
+    resource: { kind: 'database', name: context.database.name, provider: 'aws' },
+    reason: `Hypervibe will permanently drop database ${context.database.name} and its logins from the shared testing cluster; the other testing environments keep theirs.`,
+    metadata: { operation: AWS_DATABASE_DROP_OPERATION, accountId, clusterIdentifier: context.shared.clusterIdentifier, database: context.database },
+  })] : [];
+  const finalSnapshotName = `${context.shared.prefix}-postgres-final`;
+  // Destroying the cluster takes a final snapshot under a fixed name, which fails while an earlier teardown's snapshot holds it.
+  const previousSnapshot: PlanAction[] = [];
+  if (sharedActions.some((action) => action.id === 'shared:database')) {
+    const existing = await clusterSnapshotState(awsAccess(context), finalSnapshotName);
+    if (existing.state === 'unknown') return { blocked: [`Hypervibe could not check whether an earlier final snapshot ${finalSnapshotName} exists: ${redactEngineOutput(existing.error, context.auth.redact)}. Plan the teardown again.`] };
+    if (existing.state === 'present') {
+      previousSnapshot.push({
+        ...snapshotAction(finalSnapshotName, environmentActions.map((action) => action.id)), id: 'database-snapshot:previous',
+        reason: `An earlier teardown's final snapshot ${finalSnapshotName}${existing.createdAt ? ` (taken ${existing.createdAt.slice(0, 10)})` : ''} holds the name this teardown's snapshot needs, and AWS cannot rename snapshots. Hypervibe will permanently delete it first; its data can no longer be restored.`,
+      });
+      for (let i = 0; i < sharedActions.length; i += 1) sharedActions[i] = { ...sharedActions[i]!, dependsOn: [...new Set([...(sharedActions[i]!.dependsOn ?? []), 'database-snapshot:previous'])] };
+    }
+  }
+  const engineActions = [...environmentActions, ...buildActions, ...dropActions, ...sharedActions];
   const families = [...(built.input.workers ?? []), ...(built.input.jobs ?? [])].map((task) => task.resourceName);
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
@@ -329,99 +364,21 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     reason: `Hypervibe will delete this environment's settings in Parameter Store (${context.parameterPath}), the task revisions its releases registered and its build logs.`,
     ...(engineActions.length ? { dependsOn: engineActions.map((action) => action.id) } : {}),
     metadata: { operation: AWS_TEARDOWN_CLEANUP_OPERATION, accountId, parameterPath: context.parameterPath, families, logGroups: [`/hypervibe/${context.prefix}/builds`],
-      ...(built.input.database && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.prefix}-postgres-final` } : {}) },
+      ...(lastOnShared && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.shared.prefix}-postgres-final` } : {}) },
   };
-  const destroysDatabase = engineActions.some((action) => action.id === 'database:postgres');
-  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(`${context.prefix}-postgres-final`, ['database:postgres'])] : [];
+  const destroysDatabase = sharedActions.some((action) => action.id === 'shared:database');
+  const snapshot = destroysDatabase && params.deleteFinalSnapshot ? [snapshotAction(finalSnapshotName, ['shared:database'])] : [];
   if (snapshot.length) cleanup.dependsOn = [...(cleanup.dependsOn ?? []), snapshot[0]!.id];
-  const actions = [...emptyActions, ...engineActions, ...snapshot, cleanup];
+  const actions = [...emptyActions, ...previousSnapshot, ...engineActions, ...snapshot, cleanup];
   const warnings = [
     `Removes AWS environment ${environmentName} in ${context.connection.region} (account ${accountId}). This cannot be undone.`,
     ...(destroysDatabase ? [snapshot.length
       ? 'The database\'s final snapshot is deleted too, so its data cannot be restored.'
-      : `The database keeps a final snapshot (${context.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month. Plan with deleteFinalSnapshot=true to remove it as well.`] : []),
+      : `This is the last testing environment on the shared database cluster, so the cluster is removed too. It keeps a final snapshot (${context.shared.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month. Plan with deleteFinalSnapshot=true to remove it as well.`] : []),
+    ...(dropActions.length ? [`${environmentName}'s database is dropped with no snapshot; the shared cluster's backups can restore the whole cluster to a point in the last day.`] : []),
     `Hypervibe's access to this account stays, for other environments of ${project.name}.`,
   ];
-  return record(actions, warnings, { planId });
-}
-
-async function deleteFinalSnapshot(context: AwsEngineContext, identifier: string): Promise<ActionResult> {
-  const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-  try {
-    await rds.send(new DeleteDBClusterSnapshotCommand({ DBClusterSnapshotIdentifier: identifier }));
-  } catch (error) {
-    if (!(error instanceof Error && error.name === 'DBClusterSnapshotNotFoundFault')) throw error;
-    return { success: true, message: `Snapshot ${identifier} no longer exists.` };
-  }
-  return { success: true, message: `Deleted the final database snapshot ${identifier}.` };
-}
-
-async function emptyBucket(context: AwsEngineContext, bucket: string): Promise<ActionResult> {
-  const s3 = new S3Client({ region: context.connection.region, credentials: context.credentials });
-  let deleted = 0;
-  for (;;) {
-    let listed;
-    try {
-      listed = await s3.send(new ListObjectVersionsCommand({ Bucket: bucket, MaxKeys: 1000 }));
-    } catch (error) {
-      if (error instanceof Error && error.name === 'NoSuchBucket') return { success: true, message: `${bucket} no longer exists.` };
-      throw error;
-    }
-    const objects = [...(listed.Versions ?? []), ...(listed.DeleteMarkers ?? [])].map((entry) => ({ Key: entry.Key!, ...(entry.VersionId ? { VersionId: entry.VersionId } : {}) }));
-    if (!objects.length) return { success: true, message: `Deleted ${deleted} file version(s) from ${bucket}.` };
-    const result = await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects, Quiet: true } }));
-    if (result.Errors?.length) return { success: false, message: `${result.Errors.length} file(s) in ${bucket} could not be deleted (${result.Errors[0]!.Code ?? 'error'}).` };
-    deleted += objects.length;
-  }
-}
-
-async function removeLeftovers(context: AwsEngineContext, metadata: { parameterPath: string; families: string[]; logGroups: string[]; prefix: string }): Promise<ActionResult> {
-  const { region } = context.connection;
-  const credentials = context.credentials;
-  const ssm = new SSMClient({ region, credentials });
-  const names: string[] = [];
-  let token: string | undefined;
-  do {
-    const page = await ssm.send(new GetParametersByPathCommand({ Path: metadata.parameterPath, Recursive: true, WithDecryption: false, NextToken: token }));
-    names.push(...(page.Parameters ?? []).map((parameter) => parameter.Name!));
-    token = page.NextToken;
-  } while (token);
-  for (let index = 0; index < names.length; index += 10) await ssm.send(new DeleteParametersCommand({ Names: names.slice(index, index + 10) }));
-  const ecs = new ECSClient({ region, credentials });
-  let revisions = 0;
-  for (const family of metadata.families) {
-    for (const status of ['ACTIVE', 'INACTIVE'] as const) {
-      const arns: string[] = [];
-      let next: string | undefined;
-      do {
-        const page = await ecs.send(new ListTaskDefinitionsCommand({ familyPrefix: family, status, nextToken: next }));
-        // familyPrefix also matches longer family names; keep only this exact family.
-        arns.push(...(page.taskDefinitionArns ?? []).filter((arn) => arn.split('/').pop()!.replace(/:\d+$/, '') === family));
-        next = page.nextToken;
-      } while (next);
-      if (status === 'ACTIVE') for (const arn of arns) await ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: arn }));
-      const deletable = arns;
-      for (let index = 0; index < deletable.length; index += 10) await ecs.send(new DeleteTaskDefinitionsCommand({ taskDefinitions: deletable.slice(index, index + 10) }));
-      revisions += status === 'ACTIVE' ? arns.length : 0;
-    }
-  }
-  const logs = new CloudWatchLogsClient({ region, credentials });
-  for (const logGroupName of metadata.logGroups) {
-    try { await logs.send(new DeleteLogGroupCommand({ logGroupName })); } catch (error) {
-      if (!(error instanceof Error && error.name === 'ResourceNotFoundException')) throw error;
-    }
-  }
-  // OpenTofu reported the roles deleted; confirm it, since a leftover role keeps the environment's access alive.
-  const iam = new IAMClient({ region: 'us-east-1', credentials });
-  const remaining: string[] = [];
-  let marker: string | undefined;
-  do {
-    const page = await iam.send(new ListRolesCommand({ PathPrefix: '/hypervibe/app/', Marker: marker }));
-    remaining.push(...(page.Roles ?? []).map((role) => role.RoleName!).filter((name) => name.startsWith(`${metadata.prefix}-`)));
-    marker = page.IsTruncated ? page.Marker : undefined;
-  } while (marker);
-  if (remaining.length) return { success: false, message: `These roles of the environment still exist: ${remaining.join(', ')}. Run the teardown plan again.` };
-  return { success: true, message: `Deleted ${names.length} setting(s) from Parameter Store, ${revisions} released task revision(s) and the build logs, and confirmed the environment's roles are gone.` };
+  return record(actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}) });
 }
 
 export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -433,142 +390,116 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveAwsEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
-  const access = await awsAccessCurrent(context.credentials, context.connection.accountId);
-  if (access === 'outdated') {
+  const setup = await awsAccessCurrent(context.credentials, context.connection.accountId);
+  if (setup === 'outdated') {
     return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
   }
-  if (typeof access === 'object') return { blocked: [access.unknown] };
+  if (typeof setup === 'object') return { blocked: [setup.unknown] };
 
   // Hypervibe-owned generated secrets, observed in Parameter Store (present, absent or unknown).
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  const access = awsAccess(context);
   const generated = engineSecretKeys(spec, environmentName);
   // Outside keys (declared in the spec or copied by a migration) must have a value; Hypervibe never invents them.
   const imported = engineOutsideKeys(spec, environmentName, (context.environment.platformBindings as { engine?: { importedSecrets?: string[] } }).engine?.importedSecrets);
-  const missingKeys: string[] = [];
-  for (const key of imported) {
-    const observed = await parameterExists(ssm, `${context.parameterPath}${key}`);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    if (observed === 'absent') missingKeys.push(key);
-  }
-  if (missingKeys.length) return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)], missingOutsideKeys: missingKeys };
-  const secretActions: PlanAction[] = [];
-  for (const key of generated) {
-    const name = `${context.parameterPath}${key}`;
-    const observed = await parameterExists(ssm, name);
-    if (typeof observed === 'object') return { blocked: [observed.unknown] };
-    secretActions.push({
-      id: `secret:${key}`, type: observed === 'present' ? 'noop' : 'create', verified: true,
-      resource: { kind: 'secret', name: key, provider: 'aws' },
-      reason: observed === 'present' ? `Secret ${key} is stored in Parameter Store.` : `Hypervibe will generate ${key} and store it in Parameter Store (${name}).`,
-      metadata: { operation: AWS_PARAMETER_OPERATION, accountId: context.connection.accountId, name },
-    });
+  const secrets = await planEngineSecrets({
+    environmentName, generated, outside: imported, optional: optionalOutsideKeys(spec, environmentName),
+    observe: (key) => parameterExists(access, `${context.parameterPath}${key}`),
+    action: (key, stored) => {
+      const name = `${context.parameterPath}${key}`;
+      return {
+        id: `secret:${key}`, type: stored ? 'noop' : 'create', verified: true,
+        resource: { kind: 'secret', name: key, provider: 'aws' },
+        reason: stored ? `Secret ${key} is stored in Parameter Store.` : `Hypervibe will generate ${key} and store it in Parameter Store (${name}).`,
+        metadata: { operation: AWS_PARAMETER_OPERATION, accountId: context.connection.accountId, name },
+      };
+    },
+  });
+  if ('blocked' in secrets) return secrets;
+  const secretActions = secrets.actions;
+
+  // The first image is built in this apply from the local commit, so the workloads are created in the same reviewed plan.
+  const workloads = Object.keys(environmentSpec.services).length;
+  const previous = awsBinding(context.environment);
+  const runtimeUpgrade = Boolean(previous.imageUri && previous.runtimeSecretsVersion !== 2 && Object.values(environmentSpec.services).some((service) => (service.workloadKind ?? 'web') === 'web'));
+  const commit = (!previous.imageUri || runtimeUpgrade) && workloads ? localCommit(project) : undefined;
+  if (runtimeUpgrade && !commit) return { blocked: ['The AWS runtime secret update needs this project’s local repository to rebuild and release its image before changing secret permissions. Run Hypervibe from the repository and plan again.'] };
+  const firstImage = commit ? `${awsRegistryUrl({ accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix })}:${awsImageTag(commit.commitSha)}` : undefined;
+  // An optional key without a value is left out, so no workload references a parameter that does not exist.
+  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported.filter((key) => !secrets.unset?.includes(key))], firstImage);
+  const { binding, input, configuration } = built;
+  if (environmentSpec.database && binding.databaseLoginAt && !binding.sharedDatabase) {
+    return { blocked: [`${environmentName} was created with its own database cluster, before testing environments shared one. Tear it down (hv_plan scope="teardown") and launch it again to move it onto the shared cluster.`] };
   }
 
-  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported]);
-  if (built.blocked) return { blocked: built.blocked };
-  const { binding, databaseWired, input, configuration } = built;
-
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { blocked: [binary.error] };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { blocked: [engine.blocked] };
+  // 0. The project's shared testing cluster (its own state, so other testing environments keep it).
+  const sharedPlanId = crypto.randomUUID();
+  let sharedActions: PlanAction[] = [];
+  if (environmentSpec.database) {
+    const sharedInput = await awsSharedInputFor(context, spec, awsSharedDatabaseEnvironments(spec));
+    if ('blocked' in sharedInput) return sharedInput;
+    const sharedPlanned = await engine.plan({ backend: awsEngineBackend, configuration: buildAwsSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
+    if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
+    if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
+    // Creating the cluster takes about 10 minutes, so it runs while the image builds and the
+    // environment is created; only the database login waits for it.
+    sharedActions = sharedPlanned.actions.map((action) => action.type === 'noop' ? action : { ...action, background: true });
+  }
+  const sharedChanging = sharedActions.filter((action) => action.type !== 'noop').map((action) => action.id);
+  // 1. Registry and build project (their own state, applied first).
+  const buildPlanId = crypto.randomUUID();
+  const buildPlanned = await engine.plan({ backend: awsEngineBackend, configuration: built.buildConfiguration, auth: context.auth, state: context.buildState, planId: buildPlanId });
+  if (!buildPlanned.ok) return { blocked: [redactEngineOutput(buildPlanned.error, context.auth.redact)] };
+  if (buildPlanned.blockers.length) return { blocked: buildPlanned.blockers };
+  const buildChanging = buildPlanned.actions.filter((action) => action.type !== 'noop').map((action) => action.id);
+  // 2. The first image.
+  const imageActions: PlanAction[] = commit ? [{
+    id: 'build:image', type: 'create', verified: true, resource: { kind: 'service', name: 'image', provider: 'aws' },
+    reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} in CodeBuild (a few cents) so the services start from it.${runtimeUpgrade ? ' It will release the new secrets loader to existing web services before narrowing runtime secret access.' : ''}`,
+    ...(buildChanging.length ? { dependsOn: buildChanging } : {}),
+    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory, image: firstImage, runtimeUpgrade },
+  }] : [];
+  // 3. Everything else.
   const planId = crypto.randomUUID();
   const planned = await engine.plan({ backend: awsEngineBackend, configuration, auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   if (planned.blockers.length) return { blocked: planned.blockers };
 
-  const secretIds = secretActions.filter((action) => action.type !== 'noop').map((action) => action.id);
-  const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && secretIds.length
-    ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...secretIds] } : action);
-  const databaseAction = engineActions.find((action) => action.id === 'database:postgres');
+  const prerequisites = [...secretActions, ...buildPlanned.actions, ...imageActions].filter((action) => action.type !== 'noop').map((action) => action.id);
+  const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && prerequisites.length
+    ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...prerequisites])] } : action);
   // The app login is created once; each on-demand worker's waker login once its secret exists.
   const wakers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
   const wakerSecrets = wakers.map((worker) => `hypervibe/${context.prefix}/${worker.resourceName}-waker`);
   const appLogin = !binding.databaseLoginAt;
+  const queryCredential = appLogin || !binding.database?.querySecretArn || engineActions.some(action => action.id === 'database-query:credential' && action.type !== 'noop');
   const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));
   const loginDependsOn = [
-    ...(databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : []),
+    ...sharedChanging,
+    ...engineActions.filter(action => action.id === 'database-query:credential' && action.type !== 'noop').map(action => action.id),
     ...wakers.map((worker) => engineActions.find((action) => action.id === `service:${worker.logicalName}`))
       .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
   ];
-  const loginActions: PlanAction[] = environmentSpec.database && (appLogin || missingWakers.length) ? [{
-    id: appLogin ? 'database-login:postgres' : 'database-login:waker', type: 'create', verified: true,
-    resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : 'worker waker login', provider: 'aws' },
+  const loginActions: PlanAction[] = environmentSpec.database && (appLogin || queryCredential || missingWakers.length) ? [{
+    id: appLogin ? 'database-login:postgres' : queryCredential ? 'database-login:query' : 'database-login:waker', type: 'create', verified: true, ...(queryCredential ? { requiresConfirm: true } : {}),
+    resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : queryCredential ? 'database query access' : 'worker waker login', provider: 'aws' },
     reason: appLogin
-      ? `Hypervibe will create the app's database login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
+      ? `Hypervibe will create ${environmentName}'s database ${context.database.name} on the shared testing cluster with the app's login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store the same application login in Parameter Store and the environment-owned query secret.`
+      : queryCredential ? 'Hypervibe will copy the existing environment application login from Parameter Store into its reviewed query credential. The application password will not change.'
       : 'Hypervibe will create the read-only database login the worker waker counts pending work with. The app login is unchanged.',
     ...(loginDependsOn.length ? { dependsOn: loginDependsOn } : {}),
-    metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: `${context.prefix}-postgres`,
-      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, wakerSecrets },
+    metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: context.shared.clusterIdentifier,
+      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, queryCredential, wakerSecrets, database: context.database },
   }] : [];
-  const actions = [...secretActions, ...engineActions, ...loginActions];
-  const workloads = Object.keys(environmentSpec.services).length;
+  const actions = [...secretActions, ...sharedActions, ...buildPlanned.actions, ...imageActions, ...engineActions, ...loginActions];
   const warnings = [
     `AWS ${context.connection.region}, ${awsProfileFor(environmentName)} profile.`,
-    ...(!binding.imageUri && workloads ? ['Services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
-    ...(environmentSpec.database && !databaseWired && workloads ? ['Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login.'] : []),
+    ...(environmentSpec.database ? [`Testing environments share one Aurora Serverless cluster (${context.shared.clusterIdentifier}); ${environmentName} gets its own database and logins on it.`] : []),
+    ...(!binding.imageUri && !commit && workloads ? ['Hypervibe could not find this project\'s local repository, so the services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
-  const document = {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision: params.specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings,
-    engine: { planId, state: context.state, aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } },
-  } as unknown as PlanRunDocument;
-  const runRepo = new RunRepository();
-  const run = runRepo.create({ projectId: project.id, environmentId: context.environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
-  runRepo.updateStatus(run.id, 'succeeded');
-  return {
-    planRunId: run.id, environmentName, specRevision: params.specRevision, actions, warnings,
-    confirmActions: actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
-  };
-}
-
-async function ensureParameter(ssm: SSMClient, action: PlanAction): Promise<ActionResult> {
-  const name = (action.metadata as { name: string }).name;
-  const existing = await parameterExists(ssm, name);
-  if (existing === 'present') return { success: true, message: `${name} already exists.` };
-  if (typeof existing === 'object') return { success: false, status: 'blocked', message: existing.unknown };
-  await ssm.send(new PutParameterCommand({ Name: name, Type: 'SecureString', Value: crypto.randomBytes(32).toString('base64url'), Overwrite: false,
-    Tags: [{ Key: 'managed-by', Value: 'hypervibe' }] }));
-  return { success: true, message: `Stored a generated value in ${name}.` };
-}
-
-async function ensureDatabaseLogin(context: AwsEngineContext, action: PlanAction, clusterArn: string, masterSecretArn: string, endpoint: string): Promise<ActionResult> {
-  const metadata = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean };
-  const data = new RDSDataClient({ region: context.connection.region, credentials: context.credentials });
-  const sql = async (statement: string) => data.send(new ExecuteStatementCommand({ resourceArn: clusterArn, secretArn: masterSecretArn, database: APP_DATABASE, sql: statement }));
-  // A paused Aurora cluster wakes on the first statement; give it time.
-  for (let attempt = 0; ; attempt++) {
-    try { await sql('SELECT 1'); break; } catch (error) {
-      if (attempt >= 8 || !/DatabaseResumingException|resum/i.test(error instanceof Error ? `${error.name} ${error.message}` : '')) throw error;
-      await new Promise((done) => setTimeout(done, 10_000));
-    }
-  }
-  if (metadata.appLogin !== false) await ensureAppLogin(context, sql, metadata.parameter, endpoint);
-  // The waker reads pending work with its own login; pg_read_all_data survives table re-creation by a data copy.
-  if (metadata.wakerSecrets.length) {
-    const wakerPassword = crypto.randomBytes(24).toString('base64url');
-    const waker = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${WAKER_LOGIN}'`);
-    await sql(`${waker.records?.length ? 'ALTER' : 'CREATE'} ROLE ${WAKER_LOGIN} LOGIN PASSWORD '${scramVerifier(wakerPassword)}'`);
-    await sql(`GRANT pg_read_all_data TO ${WAKER_LOGIN}`);
-    const secrets = new SecretsManagerClient({ region: context.connection.region, credentials: context.credentials });
-    for (const secretId of metadata.wakerSecrets) {
-      await secrets.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: JSON.stringify({ username: WAKER_LOGIN, password: wakerPassword }) }));
-    }
-  }
-  return { success: true, message: metadata.appLogin !== false
-    ? `Created the app's database login and stored ${ENGINE_DATABASE_URL_KEY} in Parameter Store.`
-    : 'Created the worker waker\'s read-only database login.' };
-}
-
-async function ensureAppLogin(context: AwsEngineContext, sql: (statement: string) => Promise<{ records?: unknown[] }>, parameter: string, endpoint: string): Promise<void> {
-  const password = crypto.randomBytes(24).toString('base64url');
-  const exists = await sql(`SELECT 1 FROM pg_roles WHERE rolname = '${APP_LOGIN}'`);
-  await sql(`${exists.records?.length ? 'ALTER' : 'CREATE'} ROLE ${APP_LOGIN} LOGIN PASSWORD '${scramVerifier(password)}'`);
-  await sql(`GRANT ${APP_LOGIN} TO CURRENT_USER`);
-  await sql(`ALTER DATABASE ${APP_DATABASE} OWNER TO ${APP_LOGIN}`);
-  await sql(`ALTER SCHEMA public OWNER TO ${APP_LOGIN}`);
-  const url = `postgresql://${APP_LOGIN}:${password}@${endpoint}:5432/${APP_DATABASE}?sslmode=require`;
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
-  await ssm.send(new PutParameterCommand({ Name: parameter, Type: 'SecureString', Value: url, Overwrite: true }));
+  return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
+    engine: { planId, state: context.state, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}), aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
 }
 
 export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -577,30 +508,49 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; aws?: { accountId: string; region: string; prefix: string } } };
+  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
   const snapshotOnly = Boolean((reviewed as { teardown?: boolean } | undefined)?.teardown) && !params.spec.environments[environmentName];
   if (!reviewed?.aws || (!snapshotOnly && !isAwsEngineEnvironment(params.spec, environmentName))) return { kind: 'blocked', reason: 'This plan is not an AWS engine plan. Re-run hv_plan.' };
   const context = await resolveAwsEngineContext(ctx, params.project, environmentName);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
-  if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.aws.accountId !== context.connection.accountId
+  if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || (reviewed.build && JSON.stringify(reviewed.build.state) !== JSON.stringify(context.buildState))
+    || (reviewed.shared && JSON.stringify(reviewed.shared.state) !== JSON.stringify(context.shared.state))
+    || reviewed.aws.accountId !== context.connection.accountId
     || reviewed.aws.region !== context.connection.region || reviewed.aws.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different AWS account, region or environment. Re-run hv_plan.' };
   }
-  const binary = await ensureEngineBinary();
-  if (!binary.ok) return { kind: 'blocked', reason: binary.error };
-  const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
-  const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
+  clearEngineCiBinding(ctx, context.environment);
+  const engine = await openTofuEngine();
+  if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
+  const access = awsAccess(context);
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
     handler: async (action) => {
       const metadata = action.metadata as { operation?: string; accountId?: string } | undefined;
       if (metadata?.accountId !== context.connection.accountId) return { success: false, status: 'blocked', message: 'AWS target changed; re-run hv_plan.' };
       try {
-        if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureParameter(ssm, action);
+        if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureGeneratedParameter(access, (action.metadata as { name: string }).name);
+        if (metadata.operation === AWS_IMAGE_BUILD_OPERATION) {
+          const { buildAwsCommitImage, upgradeAwsRuntimeImage } = await import('./infrastructure-engine-aws-release.js');
+          const { directory, commitSha, image } = action.metadata as { directory: string; commitSha: string; image: string };
+          const token = await presentBuildTokenKey(params.spec, environmentName, (key) => parameterExists(access, `${context.parameterPath}${key}`));
+          if ('error' in token) return { success: false, status: 'blocked', message: token.error };
+          const target = { ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}), region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
+          const built = await buildAwsCommitImage(target, params.spec, environmentName, directory, commitSha);
+          if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
+          if ((action.metadata as { runtimeUpgrade?: boolean }).runtimeUpgrade) {
+            const upgraded = await upgradeAwsRuntimeImage(target, params.spec, environmentName, built.imageUri);
+            if (upgraded) return { success: false, status: 'blocked', message: upgraded };
+          }
+          // Record the reference the reviewed plan creates the services from (the registry's tags are immutable), not the digest, or the next plan replaces them.
+          const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image, runtimeSecretsVersion: 2 } });
+          return { success: true, message: `Built ${built.imageUri}.`, data: { imageUri: built.imageUri } };
+        }
         if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {
-          const deleted = await deleteFinalSnapshot(context, (action.metadata as { identifier: string }).identifier);
+          const deleted = await deleteFinalSnapshot(access, (action.metadata as { identifier: string }).identifier);
           if (deleted.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const { finalSnapshot: _snapshot, ...remaining } = awsBinding(current);
@@ -608,9 +558,9 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           }
           return deleted;
         }
-        if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(context, (action.metadata as { bucket: string }).bucket);
+        if (metadata.operation === AWS_BUCKET_EMPTY_OPERATION) return await emptyBucket(access, (action.metadata as { bucket: string }).bucket);
         if (metadata.operation === AWS_TEARDOWN_CLEANUP_OPERATION) {
-          const removed = await removeLeftovers(context, { prefix: context.prefix, ...(action.metadata as { parameterPath: string; families: string[]; logGroups: string[] }) });
+          const removed = await removeLeftovers(access, { prefix: context.prefix, ...(action.metadata as { parameterPath: string; families: string[]; logGroups: string[] }) });
           if (removed.success) {
             // Nothing of this environment remains on AWS; forget its bindings so a later plan starts fresh.
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
@@ -623,19 +573,34 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           }
           return removed;
         }
+        if (metadata.operation === AWS_DATABASE_DROP_OPERATION) {
+          const { clusterIdentifier, database } = action.metadata as { clusterIdentifier: string; database: AwsEnvironmentDatabase };
+          const { clusterArn, secretArn } = await describeDatabaseCluster(access, clusterIdentifier);
+          if (!clusterArn || !secretArn) return { success: false, status: 'blocked', message: `The shared cluster ${clusterIdentifier} could not be read; re-run hv_plan.` };
+          return await dropAuroraEnvironmentDatabase(access, { clusterArn, masterSecretArn: secretArn, database });
+        }
         if (metadata.operation === AWS_DATABASE_LOGIN_OPERATION) {
           // The cluster OpenTofu just created, read from RDS: its ARN, endpoint and RDS-managed master secret.
           const identifier = (action.metadata as { clusterIdentifier: string }).clusterIdentifier;
-          const rds = new RDSClient({ region: context.connection.region, credentials: context.credentials });
-          const cluster = (await rds.send(new DescribeDBClustersCommand({ DBClusterIdentifier: identifier }))).DBClusters?.[0];
-          const clusterArn = cluster?.DBClusterArn; const secretArn = cluster?.MasterUserSecret?.SecretArn; const endpoint = cluster?.Endpoint;
+          const { clusterArn, secretArn, endpoint } = await describeDatabaseCluster(access, identifier);
           if (!clusterArn || !secretArn || !endpoint) return { success: false, status: 'blocked', message: `Database ${identifier} is not ready yet; re-run hv_plan.` };
-          const created = await ensureDatabaseLogin(context, action, clusterArn, secretArn, endpoint);
+          const login = action.metadata as { parameter: string; wakerSecrets: string[]; appLogin?: boolean; queryCredential?: boolean; database: AwsEnvironmentDatabase };
+          let querySecretArn: string | undefined;
+          if (login.queryCredential) {
+            const observed = await engine.inspectState({ backend: awsEngineBackend, auth: context.auth, state: context.state, configuration: { files: {}, resources: {} },
+              project: document => projectAwsDatabaseQuerySecret(document, { accountId: context.connection.accountId, region: context.connection.region, environmentId: context.environment.id }) });
+            if (!observed.ok || !observed.present) return { success: false, status: 'blocked', message: 'The exact environment query credential was not verified after apply. Run hv_plan and hv_apply again.' };
+            querySecretArn = observed.value;
+          }
+          const created = await ensureDatabaseLogin(access, { parameter: login.parameter, wakerSecrets: login.wakerSecrets, ...(login.appLogin !== undefined ? { appLogin: login.appLogin } : {}),
+            ...(querySecretArn ? { queryCredential: { arn: querySecretArn, environmentId: context.environment.id, accountId: context.connection.accountId } } : {}),
+            clusterArn, masterSecretArn: secretArn, endpoint, databaseUrlKey: ENGINE_DATABASE_URL_KEY, database: login.database });
           if (created.success) {
             const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
             const previous = awsBinding(current);
             const written = (action.metadata as { wakerSecrets: string[] }).wakerSecrets;
-            ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu',
+            ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu', sharedDatabase: true,
+              database: { clusterArn, accountId: context.connection.accountId, region: context.connection.region, name: login.database.name, owner: login.database.owner, ...(querySecretArn ? { querySecretArn } : previous.database?.querySecretArn ? { querySecretArn: previous.database.querySecretArn } : {}) },
               databaseLoginAt: previous.databaseLoginAt ?? new Date().toISOString(), wakerLogins: [...new Set([...(previous.wakerLogins ?? []), ...written])] } });
           }
           return created;
@@ -647,10 +612,33 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     },
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
-      const outcome = await engine.apply({ backend: awsEngineBackend, auth: context.auth, state: context.state, planId: reviewed.planId,
+      const target = [reviewed.build, reviewed.shared].find((entry) => entry && segment.id === `opentofu:${entry.planId}`) ?? { planId: reviewed.planId, state: context.state };
+      const outcome = await engine.apply({ backend: awsEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
+  // A teardown owns binding removal separately; never resurrect its identities.
+  if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
+    const recorded = await recordEngineWorkloadBindings(ctx, engine, { environment: context.environment, backend: awsEngineBackend,
+      auth: context.auth, state: context.state, provider: 'aws', projectId: context.connection.accountId, environmentId: context.connection.region,
+      project: (state) => projectAwsWorkloadBindings(state, params.spec.environments[environmentName]!.services, { accountId: context.connection.accountId, region: context.connection.region }) });
+    if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
+  await recordEngineCiBindings(ctx, engine, { provider: 'aws', context, spec: params.spec, environmentName,
+    succeeded: Boolean(result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) });
   return { kind: 'executed', envName: environmentName, result };
+}
+
+/** The local commit an infrastructure plan builds when the environment has no image yet. */
+function localCommit(project: Project): { directory: string; commitSha: string } | undefined {
+  const directory = localRepositoryFor(project, new SpecStore().get(project)?.source as { kind?: string; path?: string } | undefined);
+  if (!directory) return undefined;
+  try {
+    const commitSha = execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return /^[0-9a-f]{40}$/.test(commitSha) ? { directory, commitSha } : undefined;
+  } catch {
+    return undefined;
+  }
 }

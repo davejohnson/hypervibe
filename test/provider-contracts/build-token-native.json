@@ -1,0 +1,41 @@
+{
+  "checkedOn": "2026-11-16",
+  "evidenceKind": "Reconstructed from primary provider contracts; not recorded live traffic",
+  "aws": {
+    "api": "CodeBuild 2014-10-06",
+    "provider": "hashicorp/aws 6.70.0",
+    "sources": [
+      "https://docs.aws.amazon.com/codebuild/latest/APIReference/API_EnvironmentVariable.html",
+      "https://docs.aws.amazon.com/codebuild/latest/APIReference/API_StartBuild.html",
+      "https://docs.aws.amazon.com/codebuild/latest/userguide/run-build-cli.html",
+      "https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html",
+      "https://docs.aws.amazon.com/systems-manager/latest/userguide/ps-restrict-parameter-access.html",
+      "https://docs.docker.com/build/building/secrets/"
+    ],
+    "expectations": [
+      "PARAMETER_STORE environment variable value contains the parameter name, substituted by CodeBuild at runtime",
+      "The service role needs ssm:GetParameters on that parameter",
+      "SecureString decryption context includes PARAMETER_ARN",
+      "GetParameters supports explicit Names; GetParametersByPath cannot safely enforce child-parameter denies",
+      "docker build --secret id=npm_token,env=NPM_TOKEN passes a secret without a build argument"
+    ]
+  },
+  "azure": {
+    "api": "Microsoft.ContainerRegistry 2019-06-01-preview",
+    "provider": "hashicorp/azurerm 5.11.0",
+    "sources": [
+      "https://learn.microsoft.com/en-us/azure/container-registry/container-registry-tasks-reference-yaml",
+      "https://learn.microsoft.com/en-us/azure/container-registry/container-registry-tasks-authentication-key-vault",
+      "https://learn.microsoft.com/en-us/azure/templates/microsoft.containerregistry/2019-06-01-preview/registries/taskruns",
+      "https://github.com/hashicorp/terraform-provider-azurerm/blob/v5.11.0/website/docs/r/container_registry_task.html.markdown"
+    ],
+    "expectations": [
+      "Multi-step task env DOCKER_BUILDKIT=1 enables BuildKit including secret mounts",
+      "Task secrets accept Key Vault URLs, volumes encode secret files and volumeMounts mount them into build steps",
+      "A task system-assigned identity accesses Key Vault; the runtime identity need not have access",
+      "TaskRunRequest references taskId and overrides contextPath and values without recreating the task",
+      "EncodedTaskRunRequest contains encodedTaskContent and supports no-secret BuildKit builds"
+    ]
+  },
+  "limits": "No cloud credentials, live private package install, image-layer inspection, IAM propagation, or live task execution. Generated code and HTTP transport fixtures are offline evidence."
+}

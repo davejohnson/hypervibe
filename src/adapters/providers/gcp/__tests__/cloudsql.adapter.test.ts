@@ -405,6 +405,33 @@ describe('CloudSqlAdapter', () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it('opens a connector for an engine database whose login is kept in Secret Manager', async () => {
+    const adapter = await connectedAdapter();
+    const startLocalProxy = vi.spyOn(Connector.prototype, 'startLocalProxy').mockResolvedValue();
+    vi.spyOn(Connector.prototype, 'close').mockImplementation(() => {});
+    const stored = 'postgresql://app_a:p%40ss@/app?host=/cloudsql/gcp-project:us-west1:hv-staging-db';
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === 'https://secretmanager.googleapis.com/v1/projects/gcp-project/secrets/hv-staging-database-url/versions/latest:access') {
+        return Response.json({ payload: { data: Buffer.from(stored).toString('base64') } });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }));
+    const now = new Date();
+    const environment = { id: 'env-1', projectId: 'project-1', name: 'staging', platformBindings: {}, createdAt: now, updatedAt: now } as Environment;
+    const component = {
+      id: 'engine:env-1:postgres', environmentId: environment.id, type: 'postgres', externalId: 'hv-staging-db',
+      bindings: { provider: 'cloudsql', providerScope: { projectId: 'gcp-project', region: 'us-west1' }, connectionSecretId: 'hv-staging-database-url' },
+      createdAt: now, updatedAt: now,
+    } as Component;
+
+    const access = await adapter.acquireTemporaryDatabaseAccess(environment, component, 5432);
+
+    expect(access.connectionUrl).toMatch(/^postgresql:\/\/app_a:p%40ss@localhost\/app\?host=/);
+    expect(startLocalProxy).toHaveBeenCalledWith(expect.objectContaining({ instanceConnectionName: 'gcp-project:us-west1:hv-staging-db' }));
+    await adapter.releaseTemporaryDatabaseAccess(environment, component, access);
+  });
+
   it('closes a failed connector acquisition before surfacing the error', async () => {
     const adapter = await connectedAdapter();
     vi.spyOn(Connector.prototype, 'startLocalProxy').mockRejectedValue(new Error('connector denied'));

@@ -42,7 +42,8 @@ Read-only inspection is distinct from explicit, mapping-based adoption.
 
 ## Provider Scope
 
-New cloud development targets GCP, AWS and Azure. Prove one complete cloud journey
+New cloud development targets GCP, AWS and Azure. Those three always use the
+managed OpenTofu engine and Railway never does; the engine is not a setting. Prove one complete cloud journey
 before extending it; neither a registry entry nor a mocked test makes a provider
 supported. Record implemented capabilities, verified paths and remaining gaps in the
 [support matrix](docs/development/support-matrix.md), the single statement of scope.
@@ -90,7 +91,7 @@ have ordinary CI configuration checks with their actual pinned providers; their
 installed live lifecycle remains unverified. See the
 [DNS evidence record](docs/development/provider-evidence.md#existing-zone-dns-evidence)
 for the precise coverage. Historical direct DNS adapter methods are not invoked
-by managed domain, Pages or email record workflows; writes use saved engine plans.
+by managed domain or email record workflows; writes use saved engine plans.
 
 ## Engine Runtime And Installation
 
@@ -353,13 +354,28 @@ new violation of these rules. Existing violations are listed in its baseline fil
 which may only shrink:
 
 - `src/domain` does not import adapters or application code.
-- Cloud SDKs are imported only under `src/adapters`.
+- Cloud SDKs are imported, and cloud API hosts are called, only under `src/adapters`.
 - Tools and interfaces do not import provider adapters or per-cloud modules.
 - Nothing new depends on the Railway adapter.
 - Generic code does not add `isAwsEngineEnvironment` / `isAzureEngineEnvironment`
-  branches; the behavior belongs in the engine.
+  branches. It selects a `CloudEngine` from `src/application/cloud-engines.ts`;
+  new per-cloud behavior is a method on that interface (plan, apply, release,
+  secrets, teardown, guided connection, migration).
+- Copied code stays under the ceiling in `.jscpd.json` (`npm run check:duplication`
+  lists the clones). Lower the ceiling as duplication is removed; never raise it.
 - An exported function is not defined in two files. Shared engine helpers live in
   `src/application/engine-shared.ts`.
+
+### Hosted consumer
+
+Hypercloud, the hosted view that runs continuous health and CI checks, consumes
+this package. It imports `@hypervibe/hypervibe/hosted` in production and a few
+built modules by path in its tests (`dist/application/cloud-request-client.js`,
+`cloud-pairing.js`, `cloud-connections.js`, `cloud-secret-import.js` and
+`dist/utils/env-parser.js`). The boundary test pins those paths and exports.
+Anything Hypercloud needs at runtime belongs in `src/hosted.ts`: keep it free of
+side effects and of local state, and coordinate a breaking change with that
+repository.
 
 ## New Provider Checklist
 

@@ -1,3 +1,5 @@
+import { cloudEngineFor } from './cloud-engines.js';
+import { engineSecretStore } from './engine-secrets.js';
 import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import { createCommandRegistry } from './commands.js';
 import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.service.js';
@@ -8,14 +10,12 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
-import { acquireManagedDatabaseAccess } from '../domain/services/database-access.service.js';
+import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
 import { migrationDatabaseBindingConflict } from './migration-database-binding.js';
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
-import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { isAwsEngineEnvironment, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import {
   ENGINE_DATABASE_URL_KEY,
   engineBucketName,
@@ -116,7 +116,7 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
     }
   }
   const target: Record<string, unknown> = {
-    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1', engine: 'opentofu' },
+    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1' },
     services: Object.fromEntries(Object.entries(source.services).map(([name, service]) => [name, {
       workloadKind: service.workloadKind,
       ...(service.startCommand ? { startCommand: service.startCommand } : {}),
@@ -134,7 +134,10 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
       // Apps written for S3-style buckets (Railway, AWS) keep working unchanged.
       ...(['railway', 's3'].includes(storage.provider) ? { access: 's3' } : {}),
     }])) } : {}),
-    ...(source.migrations?.mode === 'releaseCommand' ? { migrations: source.migrations } : {}),
+    // The engine runs schema migrations as a release step. A source that ran them through the
+    // migration tool keeps its command in that form, so the move does not drop them.
+    ...(source.migrations?.mode === 'releaseCommand' ? { migrations: source.migrations }
+      : source.migrations?.mode === 'tool' && source.migrations.command ? { migrations: { mode: 'releaseCommand', command: source.migrations.command } } : {}),
     ...(options.domain ? { domain: options.domain } : {}),
   };
   return target as EnvironmentSpec;
@@ -159,17 +162,19 @@ Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[] } | 
 }
 
 /**
- * Migration into an AWS engine environment. Runtime settings are copied into
- * Parameter Store after the user sees their names; the services read them on
- * the next infrastructure apply. Copying data to AWS is not built yet.
+ * Migration into an engine that copies runtime settings only. The settings go
+ * into the cloud's secret store after the user sees their names; the services
+ * read them on the next infrastructure apply.
  */
-async function migrateToAws(ctx: CommandContext, params: {
+async function migrateSettingsOnly(ctx: CommandContext, params: {
   project: Project; from: string; to: string; importSecrets?: boolean; copyData?: boolean; cutover?: boolean;
   spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment;
 }): Promise<MigrateResult> {
-  const context = await resolveAwsEngineContext(ctx, params.project, params.to);
-  if ('blocked' in context) return { status: 'blocked', message: context.blocked };
-  const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const store = await engineSecretStore(ctx, params.project, params.spec, params.to);
+  if ('blocked' in store) return { status: 'blocked', message: store.blocked };
+  const target = ctx.repos.environments.findByProjectAndName(params.project.id, params.to);
+  if (!target) return { status: 'blocked', message: `Environment ${params.to} has no local record yet. Run hv_plan scope="infrastructure" first.` };
+  const environment = () => ctx.repos.environments.findById(target.id) ?? target;
   const engine = () => (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
   if (!engine().importedSecrets) {
     const settings = await sourceSettings(ctx, params);
@@ -178,22 +183,18 @@ async function migrateToAws(ctx: CommandContext, params: {
     if (!params.importSecrets) {
       return {
         status: 'needs_secret_import', keys, ...(leftOut.length ? { leftOut } : {}),
-        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into AWS Parameter Store for ${params.to}. Values are copied directly and never shown.`
+        message: `Hypervibe will copy ${keys.length} runtime setting(s) from ${params.from} into ${store.name} for ${params.to}. Values are copied directly and never shown.`
           + (leftOut.length ? ` ${leftOut.join(', ')} ${leftOut.length === 1 ? 'is' : 'are'} named for ${params.from} and stay${leftOut.length === 1 ? 's' : ''} there.` : ''),
       };
     }
-    const ssm = new SSMClient({ region: context.connection.region, credentials: context.credentials });
     for (const key of keys) {
-      try {
-        await ssm.send(new PutParameterCommand({ Name: `${context.parameterPath}${key}`, Type: 'SecureString', Value: values[key]!, Overwrite: true }));
-      } catch (error) {
-        return { status: 'blocked', message: `Parameter Store did not accept ${key} (${error instanceof Error ? error.name : 'error'}); nothing was recorded as imported. Run the migration again.` };
-      }
+      const failure = await store.write(key, values[key]!);
+      if (failure) return { status: 'blocked', message: `${failure} Nothing was recorded as imported. Run the migration again.` };
     }
-    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine(), kind: 'opentofu', importedSecrets: keys } });
+    ctx.repos.environments.updatePlatformBindings(target.id, { engine: { ...engine(), kind: 'opentofu', importedSecrets: keys } });
   }
   const imported = engine().importedSecrets ?? [];
-  return { status: 'blocked', message: `${imported.length} runtime setting(s) are in AWS Parameter Store for ${params.to}. Run hv_plan scope="infrastructure" and hv_apply so the services read them, then hv_deploy. Copying data to AWS is not available yet.` };
+  return { status: 'blocked', message: `${imported.length} runtime setting(s) are in ${store.name} for ${params.to}. Run hv_plan scope="infrastructure" and hv_apply so the services read them, then hv_deploy. Copying data to this cloud is not available yet.` };
 }
 
 export async function migrateEnvironment(ctx: CommandContext, params: {
@@ -255,7 +256,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     if (sourcePlanApproval && !params.cutover) return { status: 'blocked', message: 'A source-environment plan can be confirmed only during the reviewed cutover.' };
   }
   let spec = specResult.spec;
-  if (isAwsEngineEnvironment(spec, params.to)) return migrateToAws(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
+  if (cloudEngineFor(spec, params.to)?.migration === 'settings') return migrateSettingsOnly(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
@@ -407,7 +408,8 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
-    const summary = sourceAccess ? await sourceAccess.lease.withConnection(summarizeDatabase) : undefined;
+    const summary = sourceAccess ? await summarizeDatabaseAccess(sourceAccess.lease) : undefined;
+    if (params.copyData && sourceAccess?.lease.mode === 'data_api') return { status: 'blocked', message: 'Aurora Data API supports source inspection, but this migration requires a managed PostgreSQL private connector for data transfer. Hypervibe does not yet provide that connector.' };
     if (!params.copyData) {
       const what = summary ? `the ${params.from} database (${summary.tables} tables, about ${summary.rows} rows)`
         : privateRailwaySource ? `the whole ${params.from} database (exported privately inside Railway by a temporary task that is deleted afterwards)` : 'no database';
@@ -779,11 +781,19 @@ async function sourceDatabaseMajor(ctx: CommandContext, project: Project, source
   const access = await acquireManagedDatabaseAccess(project, sourceEnvironment);
   if (!access.ok) return { blocked: `Could not open the source database: ${access.error}` };
   try {
-    const summary = await access.lease.withConnection(summarizeDatabase);
+    const summary = await summarizeDatabaseAccess(access.lease);
     return { major: Math.floor(Number(summary.version) / 10000) };
   } finally {
     await access.lease.release().catch(() => undefined);
   }
+}
+
+async function summarizeDatabaseAccess(lease: DatabaseAccessLease): Promise<{ tables: number; rows: string; version: string }> {
+  if (!lease.query) return lease.withConnection(summarizeDatabase);
+  const result = await lease.query("SELECT current_setting('server_version_num') AS version, count(*)::text AS tables, COALESCE(sum(n_live_tup), 0)::text AS rows FROM pg_stat_user_tables", [], { readOnly: true });
+  const row = result.rows?.[0];
+  if (!result.success || !row || !/^\d+$/.test(String(row.version)) || !/^\d+$/.test(String(row.tables)) || !/^\d+$/.test(String(row.rows))) throw new Error('The source database summary could not be verified.');
+  return { tables: Number(row.tables), rows: String(row.rows), version: String(row.version) };
 }
 
 async function summarizeDatabase(url: string): Promise<{ tables: number; rows: string; version: string }> {

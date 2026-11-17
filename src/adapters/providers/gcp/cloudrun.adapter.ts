@@ -503,7 +503,8 @@ export class CloudRunAdapter implements
   async buildReleaseImageFromArchive(
     service: Service,
     environment: Environment,
-    source: { archive: Buffer; commitSha: string; bucket: string }
+    /** packageTokenVersion: full Secret Manager version name of a private-package token, mounted only during the build. */
+    source: { archive: Buffer; commitSha: string; bucket: string; packageTokenVersion?: string }
   ): Promise<CloudBuildResult> {
     if (!this.credentials) return { success: false, error: 'Not connected. Call connect() first.' };
     try {
@@ -526,6 +527,7 @@ export class CloudRunAdapter implements
       const build = await this.submitCloudBuild({
         token, service, sourceRepoUrl: '', revision: source.commitSha, imageUri,
         storageSource: { bucket: source.bucket, object },
+        ...(source.packageTokenVersion ? { packageTokenVersion: source.packageTokenVersion } : {}),
       });
       return { success: true, imageUri: build.imageUri, buildId: build.id, logsUrl: build.logsUrl, resolvedCommitSha: source.commitSha };
     } catch (error) {
@@ -537,12 +539,12 @@ export class CloudRunAdapter implements
   async buildReleaseImage(
     service: Service,
     environment: Environment,
-    source: { repoUrl: string; revision: string }
+    source: { repoUrl: string; revision: string; packageTokenVersion?: string }
   ): Promise<CloudBuildResult> {
     return this.buildImageForService(service, environment, {
       HYPERVIBE_SOURCE_REPO_URL: source.repoUrl,
       HYPERVIBE_SOURCE_REVISION: source.revision,
-    });
+    }, source.packageTokenVersion);
   }
 
   async resolveRuntimeIdentity(environment: Environment, service: Pick<Service, 'name' | 'buildConfig'>): Promise<ProviderRuntimeIdentity> {
@@ -685,6 +687,20 @@ export class CloudRunAdapter implements
         || binding.jobName === deploymentId
         || binding.schedulerJobName === deploymentId
       ));
+      // Background workers run as worker pools: no URL, readiness from the pool's own condition.
+      const workerPool = Object.values(bindings.services ?? {}).some((binding) => (binding as { workerPoolName?: unknown }).workerPoolName === deploymentId);
+      if (workerPool) {
+        const { projectId, region } = this.credentials;
+        const response = await fetch(`https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/workerPools/${encodeURIComponent(deploymentId)}`,
+          { headers: { Authorization: `Bearer ${token}` } });
+        if (response.status === 404) return { status: 'unknown', reason: `Cloud Run worker pool ${deploymentId} is absent in region ${region}.` };
+        if (!response.ok) return { status: 'unknown', reason: `Cloud Run worker pool observation failed: ${response.status}` };
+        const pool = await response.json() as { terminalCondition?: { state?: string; message?: string } };
+        const state = pool.terminalCondition?.state;
+        if (state === 'CONDITION_SUCCEEDED') return { status: 'deployed' };
+        if (state === 'CONDITION_FAILED') return { status: 'failed', reason: pool.terminalCondition?.message ?? `Worker pool ${deploymentId} failed to start.` };
+        return { status: 'deploying' };
+      }
       const resourceType = targetBinding?.resourceType;
       const workloadKind = targetBinding?.workloadKind;
       const scheduledTarget = resourceType === 'scheduledJob' || workloadKind === 'cron';
@@ -809,7 +825,8 @@ export class CloudRunAdapter implements
       limit: request.limit,
       errorsOnly: request.errorsOnly,
     });
-    const deploymentId = serviceBinding.serviceId;
+    const workerPool = (serviceBinding as { workerPoolName?: unknown }).workerPoolName;
+    const deploymentId = serviceBinding.serviceId ?? (typeof workerPool === 'string' ? workerPool : undefined);
     const status = deploymentId
       ? await this.getDeployStatus(request.environment, deploymentId)
       : undefined;
@@ -844,12 +861,16 @@ export class CloudRunAdapter implements
     const token = await this.getAccessToken();
     const bindings = parseHostingBindings(environment);
     const serviceBinding = bindings.services?.[serviceName];
-    const targetName = serviceBinding?.jobName ?? serviceBinding?.serviceId ?? serviceName;
+    // Logs live in the environment's own region, which may differ from the connection default.
+    if (bindings.environmentId) this.configureTarget({ region: bindings.environmentId });
+    const workerPool = (serviceBinding as { workerPoolName?: unknown } | undefined)?.workerPoolName;
+    const workerPoolName = typeof workerPool === 'string' ? workerPool : undefined;
+    const targetName = workerPoolName ?? serviceBinding?.jobName ?? serviceBinding?.serviceId ?? serviceName;
     const isJob = serviceBinding?.resourceType === 'scheduledJob' || Boolean(serviceBinding?.jobName);
     const logs = await this.queryCloudLogging({
       token,
       targetName,
-      targetKind: isJob ? 'job' : 'service',
+      targetKind: workerPoolName ? 'workerPool' : isJob ? 'job' : 'service',
       limit: options?.limit ?? 100,
       since: options?.since,
       errorsOnly: options?.errorsOnly,
@@ -1788,7 +1809,7 @@ export class CloudRunAdapter implements
   private async queryCloudLogging(params: {
     token: string;
     targetName: string;
-    targetKind: 'service' | 'job';
+    targetKind: 'service' | 'job' | 'workerPool';
     limit: number;
     since?: Date;
     errorsOnly?: boolean;
@@ -1798,7 +1819,10 @@ export class CloudRunAdapter implements
     }
 
     const { projectId, region } = this.credentials;
-    const resourceFilter = params.targetKind === 'job'
+    // Resource types and labels: https://docs.cloud.google.com/logging/docs/api/v2/resource-list
+    const resourceFilter = params.targetKind === 'workerPool'
+      ? `resource.type="cloud_run_worker_pool" AND resource.labels.worker_pool_name="${this.escapeLoggingValue(params.targetName)}"`
+      : params.targetKind === 'job'
       ? `resource.type="cloud_run_job" AND resource.labels.job_name="${this.escapeLoggingValue(params.targetName)}"`
       : `resource.type="cloud_run_revision" AND resource.labels.service_name="${this.escapeLoggingValue(params.targetName)}"`;
     const filterParts = [
@@ -2331,7 +2355,8 @@ export class CloudRunAdapter implements
   private async buildImageForService(
     service: Service,
     environment: Environment,
-    envVars: Record<string, string>
+    envVars: Record<string, string>,
+    packageTokenVersion?: string
   ): Promise<CloudBuildResult> {
     if (!this.credentials) {
       return { success: false, error: 'Not connected. Call connect() first.' };
@@ -2369,6 +2394,7 @@ export class CloudRunAdapter implements
         sourceRepoUrl,
         revision,
         imageUri,
+        ...(packageTokenVersion ? { packageTokenVersion } : {}),
       });
 
       return {
@@ -2406,6 +2432,7 @@ export class CloudRunAdapter implements
     imageUri: string;
     /** Build from an uploaded archive instead of cloning a git URL. */
     storageSource?: { bucket: string; object: string };
+    packageTokenVersion?: string;
   }): Promise<{
     id?: string;
     logsUrl?: string;
@@ -2435,8 +2462,11 @@ export class CloudRunAdapter implements
         steps: [{
           name: 'gcr.io/cloud-builders/docker',
           entrypoint: 'bash',
-          args: ['-lc', this.cloudBuildScript(params.service, params.imageUri)],
+          args: ['-lc', this.cloudBuildScript(params.service, params.imageUri, Boolean(params.packageTokenVersion))],
+          ...(params.packageTokenVersion ? { secretEnv: ['NPM_TOKEN'] } : {}),
         }],
+        // The token stays in Secret Manager; the build reads it and Docker mounts it for the install step only.
+        ...(params.packageTokenVersion ? { availableSecrets: { secretManager: [{ versionName: params.packageTokenVersion, env: 'NPM_TOKEN' }] } } : {}),
         images: [params.imageUri],
         timeout: '1200s',
         // A user-specified build identity requires an explicit logging mode.
@@ -2446,10 +2476,14 @@ export class CloudRunAdapter implements
       }),
     });
 
-    let response = await submit();
+    const deployIdentity = this.serviceAccountCreds?.client_email;
+    // Only the deployment identity is known to be able to read the token; the project default is not.
+    let response = await submit(params.packageTokenVersion ? deployIdentity : undefined);
+    if (response.status === 403 && params.packageTokenVersion) {
+      throw new Error(`Cloud Build submission failed: ${response.status} ${await response.text()}`);
+    }
     if (response.status === 403) {
       const text = await response.text();
-      const deployIdentity = this.serviceAccountCreds?.client_email;
       // Newer projects build as the Compute Engine default account (Editor).
       // Never act as it; build as the deployment identity instead.
       if (!/act as service account/i.test(text) || !deployIdentity) {
@@ -2556,7 +2590,7 @@ export class CloudRunAdapter implements
     throw new Error(`Cloud Build did not finish before timeout${logsUrl ? ` (${logsUrl})` : ''}`);
   }
 
-  private cloudBuildScript(service: Service, imageUri: string): string {
+  private cloudBuildScript(service: Service, imageUri: string, packageToken = false): string {
     const dockerfilePath = service.buildConfig.dockerfilePath?.trim() || 'Dockerfile';
     const runtime = service.buildConfig.runtime;
     let generatedDockerfile = '';
@@ -2578,15 +2612,16 @@ export class CloudRunAdapter implements
         ? '[ -f requirements.txt ] || [ -f pyproject.toml ]'
         : 'false';
 
+    const secret = packageToken ? ' --secret id=npm_token,env=NPM_TOKEN' : '';
     return [
       'set -euo pipefail',
       // Generated Dockerfiles mount the optional package token as a build secret.
       'export DOCKER_BUILDKIT=1',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
-      `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
+      `  docker build --pull${secret} -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,
       writeGeneratedDockerfile,
-      `  docker build --pull -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
+      `  docker build --pull${secret} -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
       'else',
       '  echo "No repository Dockerfile or manifest for an explicit project runtime was found. Run hv_spec to review runtime evidence; custom languages require a Dockerfile." >&2',
       '  exit 1',
@@ -3085,7 +3120,7 @@ export class CloudRunAdapter implements
   /** Only selected, reviewed credential updates remain outside the infrastructure engine. */
   async setEnvVars(environment: Environment, service: Service, vars: Record<string, string>, options: DeploymentMutationOptions = {}): Promise<Receipt> {
     if (options.requireCredentialUpdate) return this.setCredentialEnvVars(environment, service, vars);
-    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is moving to OpenTofu.' };
+    return { success: false, message: 'Only reviewed credential updates are available for existing workloads. Resource configuration is managed by the OpenTofu engine.' };
   }
 
   private async setCredentialEnvVars(environment: Environment, service: Service, vars: Record<string, string>): Promise<Receipt> {
@@ -3200,7 +3235,7 @@ providerRegistry.register({
       lifecycle: {
         hosting: {
           status: 'planned',
-          reason: 'Infrastructure is moving to OpenTofu. Authentication and operational tools remain available.',
+          reason: 'The OpenTofu engine manages infrastructure. Authentication and operational tools remain available.',
         },
       },
     },

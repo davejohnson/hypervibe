@@ -1,5 +1,7 @@
+import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
+import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
+import { assertHealthCheckPath } from '../domain/spec/health-check-path.js';
 import fs from 'fs';
-import { fetchWithRetry } from '../utils/fetch-retry.js';
 import path from 'path';
 
 /**
@@ -44,9 +46,7 @@ export async function grantCiReleaseAccess(params: {
   runtimeServiceAccountEmail: string;
   confirm?: boolean;
 }) {
-  const response = await fetchWithRetry(`https://cloudresourcemanager.googleapis.com/v3/projects/${params.gcpProjectId}`, {
-    headers: { Authorization: `Bearer ${params.adminToken}` },
-  });
+  const response = await readGcpProject(params.adminToken, params.gcpProjectId);
   if (!response.ok) throw new Error(`Could not read the GCP project (HTTP ${response.status}).`);
   const body = await response.json() as { name?: string; projectId?: string; state?: string };
   if (!/^projects\/[0-9]+$/.test(body.name ?? '') || body.projectId !== params.gcpProjectId || body.state !== 'ACTIVE') {
@@ -71,41 +71,30 @@ export interface ReleaseWorkflowInput {
   provider: string;
   releaseIdentity: string;
   /** generatedDockerfile is used only when the repository has no Dockerfile of its own; it carries that service's start command. */
-  services: Array<{ name: string; resource: string; healthPath?: string; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string }>;
+  services: Array<{ name: string; resource: string; healthPath?: string; strictHealth?: boolean; image: string; kind?: 'services' | 'jobs' | 'workerPools'; generatedDockerfile?: string;
+    /** Services and workers: the declared start command, applied with each release. */
+    startCommand?: string }>;
+  /** Name of the repository's Actions secret holding a private-package token; mounted into builds as npm_token. */
+  packageTokenSecret?: string;
+  /** The migration job and the service whose image it runs; executed after every build and before any release. */
+  releaseCommand?: { job: string; service: string };
 }
 
-const RELEASE_SCRIPT = String.raw`
-const [resource, image, healthPath, kind = 'services'] = process.argv.slice(2);
-const token = process.env.GCP_TOKEN;
-const base = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT + '/locations/' + process.env.GCP_REGION + '/' + kind + '/' + resource;
-const call = async (url, init = {}) => fetch(url, { ...init, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
-const isJob = kind === 'jobs';
-const current = await (await call(base)).json();
-const containers = ((isJob ? current.template?.template?.containers : current.template?.containers) ?? []).map((c) => ({ ...c }));
-if (containers.length !== 1) throw new Error('Workload must have exactly one container.');
-containers[0].image = image;
-// Only the image changes; the etag makes a concurrent infrastructure change fail this release instead of being overwritten.
-// Jobs take the whole resource back; services accept a mask limited to the containers.
-const body = isJob ? { ...current, template: { ...current.template, template: { ...current.template.template, containers } } } : { etag: current.etag, template: { containers } };
-const patch = await call(isJob ? base : base + '?updateMask=template.containers', { method: 'PATCH', body: JSON.stringify(body) });
-if (patch.status === 409 || patch.status === 412) throw new Error('The workload changed while releasing. Nothing was overwritten; re-run this workflow.');
-if (!patch.ok) throw new Error('Cloud Run rejected the release (HTTP ' + patch.status + '): ' + ((await patch.json().catch(() => ({}))).error?.message ?? 'no details'));
-let operation = await patch.json();
-for (let i = 0; i < 200 && !operation.done; i++) { await new Promise((r) => setTimeout(r, 3000)); operation = await (await call('https://run.googleapis.com/v2/' + operation.name)).json(); }
-if (!operation.done || operation.error) throw new Error('Rollout failed: ' + (operation.error?.message ?? 'did not finish'));
-const after = await (await call(base)).json();
-const running = isJob ? after.template?.template?.containers?.[0]?.image : after.template?.containers?.[0]?.image;
-if (running !== image || (!isJob && after.latestReadyRevision !== after.latestCreatedRevision)) throw new Error('The new image is not active.');
-if (!isJob && healthPath) {
-  const response = await fetch(new URL(healthPath, after.uri));
-  if (response.status >= 500) throw new Error(healthPath + ' returned HTTP ' + response.status);
-  console.log('Health ' + healthPath + ': HTTP ' + response.status);
+/** A GitHub Actions workflow with no stored cloud credentials; a package token is referenced only by its repository secret name. */
+/** Values written into workflow YAML and shell lines must be plain identifiers, never shell or YAML source. */
+function plain(label: string, value: string): string {
+  if (!/^[A-Za-z0-9._/:@-]+$/.test(value)) throw new Error(`The ${label} ${JSON.stringify(value)} is not supported in a workflow: use only letters, digits and . _ / : @ -`);
+  return value;
 }
-console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled run)' : after.uri ? ' at ' + after.uri : ''));
-`.trim();
 
-/** A GitHub Actions workflow with no stored credentials; every value is non-secret. */
 export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
+  plain('environment name', input.environmentName); plain('Google Cloud project', input.gcpProjectId); plain('region', input.region);
+  plain('identity provider', input.provider); plain('release identity', input.releaseIdentity);
+  if (input.releaseCommand) plain('release job', input.releaseCommand.job);
+  for (const service of input.services) {
+    plain('service name', service.name); plain('resource', service.resource); plain('image', service.image);
+    if (service.healthPath !== undefined) assertHealthCheckPath(service.healthPath);
+  }
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
   const lines: string[] = [
     `# Managed by Hypervibe. Releases ${input.environmentName} on every push to ${input.branch}.`,
@@ -138,29 +127,52 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     '      - uses: google-github-actions/setup-gcloud@v3',
     `      - run: gcloud auth configure-docker ${input.region}-docker.pkg.dev --quiet`,
   ];
+  if (input.packageTokenSecret && !/^[A-Z][A-Z0-9_]*$/.test(input.packageTokenSecret)) throw new Error('Package token secret name is not supported in a workflow.');
+  const secret = input.packageTokenSecret ? ' --secret id=npm_token,env=NPM_TOKEN' : '';
   for (const service of input.services) {
     const id = service.name.replace(/[^A-Za-z0-9_]/g, '_');
     const generated = service.generatedDockerfile ? `.hypervibe-${id}.Dockerfile` : undefined;
     lines.push(
       `      - name: Build ${service.name}`,
       `        id: build_${id}`,
+      ...(input.packageTokenSecret ? ['        env:', `          NPM_TOKEN: \${{ secrets.${input.packageTokenSecret} }}`] : []),
       '        run: |',
       // A repository Dockerfile wins; otherwise the service's generated one (with its own start command).
       ...(generated ? [
         `          DOCKERFILE=Dockerfile`,
         `          if [ ! -f Dockerfile ]; then DOCKERFILE=${generated}; printf '%s' '${Buffer.from(service.generatedDockerfile!, 'utf8').toString('base64')}' | base64 --decode > "$DOCKERFILE"; fi`,
-        `          DOCKER_BUILDKIT=1 docker build -f "$DOCKERFILE" -t ${service.image}:$GITHUB_SHA .`,
-      ] : [`          docker build -t ${service.image}:$GITHUB_SHA .`]),
+        `          DOCKER_BUILDKIT=1 docker build${secret} -f "$DOCKERFILE" -t ${service.image}:$GITHUB_SHA .`,
+      ] : [`          ${secret ? 'DOCKER_BUILDKIT=1 ' : ''}docker build${secret} -t ${service.image}:$GITHUB_SHA .`]),
       `          docker push ${service.image}:$GITHUB_SHA`,
       `          echo "digest=$(gcloud artifacts docker images describe ${service.image}:$GITHUB_SHA --format='value(image_summary.digest)')" >> "$GITHUB_OUTPUT"`,
-      `      - name: Release ${service.name}`,
+    );
+  }
+  const script = ["          cat > release.mjs <<'HYPERVIBE_RELEASE'", ...RELEASE_SCRIPT.split('\n').map((line) => `          ${line}`), '          HYPERVIBE_RELEASE'];
+  const stepId = (name: string) => name.replace(/[^A-Za-z0-9_]/g, '_');
+  if (input.releaseCommand) {
+    const source = input.services.find((service) => service.name === input.releaseCommand!.service);
+    if (!source) throw new Error('The release command needs the image of a released service.');
+    // Every image is built first, so a failed migration leaves all services on the previous release.
+    lines.push(
+      '      - name: Run release command',
       '        env:',
       '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
+      "          HYPERVIBE_RUN_JOB: '1'",
       '        run: |',
-      "          cat > release.mjs <<'HYPERVIBE_RELEASE'",
-      ...RELEASE_SCRIPT.split('\n').map((line) => `          ${line}`),
-      '          HYPERVIBE_RELEASE',
-      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}`,
+      ...script,
+      `          node release.mjs ${input.releaseCommand.job} ${source.image}@\${{ steps.build_${stepId(source.name)}.outputs.digest }} "" jobs`,
+    );
+  }
+  for (const service of input.services) {
+    const id = stepId(service.name);
+    lines.push(
+      `      - name: Release ${service.name}`,
+      '        env:',
+      ...(service.strictHealth ? ["          HYPERVIBE_HEALTH_STRICT: '1'"] : []),
+      '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
+      '        run: |',
+      ...script,
+      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ? `'${service.healthPath}'` : '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
     );
   }
   return lines.join('\n') + '\n';
