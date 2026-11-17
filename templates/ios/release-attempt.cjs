@@ -7,6 +7,28 @@ const fail = () => { throw new Error('Release evidence must be created by the su
 const positive = value => Number.isSafeInteger(value) && value > 0;
 const time = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) ? Date.parse(value) : NaN;
 
+function branchRef(value) {
+  if (typeof value !== 'string' || !value.startsWith('refs/heads/')) return false;
+  const branch = value.slice('refs/heads/'.length);
+  return branch.length > 0 && branch.length <= 255 && !/[\x00-\x20\x7f~^:?*\[\\]/.test(branch)
+    && !branch.includes('..') && !branch.includes('@{') && !branch.endsWith('.')
+    && branch.split('/').every(part => part && !part.startsWith('.') && !part.endsWith('.lock'));
+}
+
+// A run's path can include workflow-ref metadata. This validates its spelling,
+// not producer trust: callers must still verify the workflow source and attempt.
+// Only the configured branch ref is admitted; never discard an arbitrary suffix.
+function normalizeWorkflowPath(value, allowedRef) {
+  if (typeof value !== 'string') throw new Error('Workflow path metadata is invalid.');
+  const separator = value.indexOf('@');
+  const workflowPath = separator < 0 ? value : value.slice(0, separator);
+  if (!/^\.github\/workflows\/[A-Za-z0-9_.-]+\.ya?ml$/.test(workflowPath)
+      || (separator >= 0 && (!branchRef(allowedRef) || value.slice(separator + 1) !== allowedRef))) {
+    throw new Error('Workflow path metadata is invalid or outside the configured branch.');
+  }
+  return workflowPath;
+}
+
 function assertAttemptJobs(run, listing) {
   if (!run || !positive(run.id) || !positive(run.run_attempt) || run.status !== 'completed' || run.conclusion !== 'success'
       || !/^[0-9a-f]{40}$/.test(run.head_sha || '') || !Number.isFinite(time(run.run_started_at))) fail();
@@ -40,11 +62,13 @@ function assertSkippedIosReleaseAttempt(run, listing) {
   }
 }
 
-function assertSameReleaseAttempt(previous, current) {
+function assertSameReleaseAttempt(previous, current, allowedRef) {
   if (!current || current.status !== 'completed' || current.conclusion !== 'success'
-      || ['id', 'path', 'head_sha', 'run_attempt', 'run_started_at'].some(key => previous[key] !== current[key])) {
+      || (allowedRef === undefined ? previous.path !== current.path
+        : normalizeWorkflowPath(previous.path, allowedRef) !== normalizeWorkflowPath(current.path, allowedRef))
+      || ['id', 'head_sha', 'run_attempt', 'run_started_at'].some(key => previous[key] !== current[key])) {
     throw new Error('The selected workflow attempt changed while verifying release evidence.');
   }
 }
 
-module.exports = {assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt};
+module.exports = {normalizeWorkflowPath, assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt};

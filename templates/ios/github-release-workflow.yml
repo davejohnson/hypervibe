@@ -66,6 +66,8 @@ jobs:
             const numericRunId = Number(serverRunId);
             if (!/^[0-9]+$/.test(serverRunId) || !Number.isSafeInteger(numericRunId) || numericRunId <= 0) throw new Error('server_run_id must be a GitHub Actions run id');
             const expected = JSON.parse(process.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
+            const contract = {exports: {}};
+            new Function('module', Buffer.from(process.env.HYPERVIBE_RELEASE_ATTEMPT_RUNTIME, 'base64').toString('utf8'))(contract);
             const runResponse = await github.rest.actions.getWorkflowRun({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -73,7 +75,7 @@ jobs:
             });
             const run = runResponse.data;
             const workflowSha = String(run.head_sha || '').toLowerCase();
-            if (run.id !== numericRunId || run.status !== 'completed' || run.conclusion !== 'success' || run.path !== expected.workflowPath || !/^[0-9a-f]{40}$/.test(workflowSha)
+            if (run.id !== numericRunId || run.status !== 'completed' || run.conclusion !== 'success' || contract.exports.normalizeWorkflowPath(run.path, expected.workflowRef) !== expected.workflowPath || !/^[0-9a-f]{40}$/.test(workflowSha)
                 || !Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1) {
               throw new Error('Server release evidence must come from a successful run of the exact managed server workflow');
             }
@@ -89,14 +91,12 @@ jobs:
               && String(artifact.workflow_run?.head_sha || '').toLowerCase() === workflowSha
             ));
             if (matchingArtifacts.length !== 1) throw new Error('Expected exactly one unexpired server release artifact');
-            const contract = {exports: {}};
-            new Function('module', Buffer.from(process.env.HYPERVIBE_RELEASE_ATTEMPT_RUNTIME, 'base64').toString('utf8'))(contract);
             const {data: jobs} = await github.rest.actions.listJobsForWorkflowRunAttempt({
               ...context.repo, run_id: numericRunId, attempt_number: run.run_attempt, per_page: 100,
             });
             contract.exports.assertCurrentReleaseAttempt(run, matchingArtifacts[0], jobs, 'deploy');
             const {data: currentRun} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: numericRunId});
-            contract.exports.assertSameReleaseAttempt(run, currentRun);
+            contract.exports.assertSameReleaseAttempt(run, currentRun, expected.workflowRef);
             const sha = matchingArtifacts[0].name.slice(expected.artifactPrefix.length);
             if (requestedSha && requestedSha.toLowerCase() !== sha) throw new Error('commit_sha does not match the server release artifact');
             core.setOutput('artifact_id', String(matchingArtifacts[0].id));
@@ -155,6 +155,16 @@ jobs:
             try {
               const contract = {exports: {}};
               new Function('module', Buffer.from(process.env.HYPERVIBE_RELEASE_ATTEMPT_RUNTIME, 'base64').toString('utf8'))(contract);
+              // workflow_run executes this consumer on the default branch,
+              // which need not be the triggering server workflow's branch.
+              const repositoryPrefix = context.repo.owner + '/' + context.repo.repo + '/';
+              const currentWorkflow = process.env.GITHUB_WORKFLOW_REF;
+              if (typeof currentWorkflow !== 'string' || !currentWorkflow.startsWith(repositoryPrefix)) return;
+              const metadata = currentWorkflow.slice(repositoryPrefix.length);
+              const separator = metadata.indexOf('@');
+              if (separator < 0 || !/^[0-9a-f]{40}$/.test(process.env.GITHUB_WORKFLOW_SHA || '')) return;
+              const expectedRef = metadata.slice(separator + 1);
+              if (contract.exports.normalizeWorkflowPath(metadata, expectedRef) !== process.env.HYPERVIBE_IOS_WORKFLOW_PATH) return;
               const runs = [];
               let complete = false;
               for (let page = 1; page <= 5; page++) {
@@ -173,11 +183,10 @@ jobs:
               for (const run of runs) {
                 if (String(run.id) === process.env.GITHUB_RUN_ID) continue;
                 if (++inspected > 50) return;
-                if (run.status !== 'completed' || run.conclusion !== 'success' || run.path !== process.env.HYPERVIBE_IOS_WORKFLOW_PATH || !/^[0-9a-f]{40}$/.test(run.head_sha || '')
+                if (run.status !== 'completed' || run.conclusion !== 'success' || contract.exports.normalizeWorkflowPath(run.path, expectedRef) !== process.env.HYPERVIBE_IOS_WORKFLOW_PATH || !/^[0-9a-f]{40}$/.test(run.head_sha || '')
                     || !Number.isSafeInteger(run.run_attempt) || run.run_attempt <= 0 || typeof run.run_started_at !== 'string' || !Number.isFinite(Date.parse(run.run_started_at))) return;
                 // Compare the actual workflow revisions, not the mobile source
                 // SHA: a manual run can execute at B while building source A.
-                if (!/^[0-9a-f]{40}$/.test(process.env.GITHUB_WORKFLOW_SHA || '') || !String(process.env.GITHUB_WORKFLOW_REF || '').startsWith(context.repo.owner + '/' + context.repo.repo + '/' + process.env.HYPERVIBE_IOS_WORKFLOW_PATH + '@')) return;
                 const readWorkflow = async ref => {
                   const { data } = await github.rest.repos.getContent({ ...context.repo, path: process.env.HYPERVIBE_IOS_WORKFLOW_PATH, ref });
                   if (data.type !== 'file' || data.encoding !== 'base64' || typeof data.content !== 'string') throw new Error('unknown workflow source');
@@ -191,7 +200,7 @@ jobs:
                 if (!artifacts.length) {
                   contract.exports.assertSkippedIosReleaseAttempt(run, jobs);
                   const {data: currentRun} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: run.id});
-                  contract.exports.assertSameReleaseAttempt(run, currentRun);
+                  contract.exports.assertSameReleaseAttempt(run, currentRun, expectedRef);
                   continue;
                 }
                 if (artifacts.length !== 1) return;
@@ -200,7 +209,7 @@ jobs:
                 if (!/^[0-9a-f]{40}$/.test(sha) || !Number.isSafeInteger(artifact.id) || artifact.id <= 0 || artifact.expired !== false || artifact.workflow_run?.id !== run.id || artifact.workflow_run?.head_sha !== run.head_sha) return;
                 contract.exports.assertCurrentReleaseAttempt(run, artifact, jobs, 'release');
                 const {data: currentRun} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: run.id});
-                contract.exports.assertSameReleaseAttempt(run, currentRun);
+                contract.exports.assertSameReleaseAttempt(run, currentRun, expectedRef);
                 core.setOutput('artifact_id', String(artifact.id));
                 core.setOutput('run_id', String(run.id));
                 core.setOutput('sha', sha);
@@ -478,19 +487,19 @@ jobs:
             const attempt = Number(process.env.HYPERVIBE_SERVER_RUN_ATTEMPT);
             const artifactId = Number(process.env.HYPERVIBE_SERVER_ARTIFACT_ID);
             const expected = JSON.parse(process.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
+            const contract = {exports: {}};
+            new Function('module', Buffer.from(process.env.HYPERVIBE_RELEASE_ATTEMPT_RUNTIME, 'base64').toString('utf8'))(contract);
             if (![id, attempt, artifactId].every(value => Number.isSafeInteger(value) && value > 0)) throw new Error('Missing pinned server release identity');
             const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: id});
-            if (run.id !== id || run.run_attempt !== attempt || run.path !== expected.workflowPath) throw new Error('The selected server attempt changed before upload');
+            if (run.id !== id || run.run_attempt !== attempt || contract.exports.normalizeWorkflowPath(run.path, expected.workflowRef) !== expected.workflowPath) throw new Error('The selected server attempt changed before upload');
             const {data: listed} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: id, per_page: 100});
             if (!Array.isArray(listed.artifacts) || listed.total_count !== listed.artifacts.length) throw new Error('Server artifact listing is incomplete');
             const artifacts = listed.artifacts.filter(artifact => artifact.name === expected.artifactPrefix + process.env.HYPERVIBE_RELEASE_SHA);
             if (artifacts.length !== 1 || artifacts[0].id !== artifactId) throw new Error('The selected server artifact changed before upload');
             const {data: jobs} = await github.rest.actions.listJobsForWorkflowRunAttempt({...context.repo, run_id: id, attempt_number: attempt, per_page: 100});
-            const contract = {exports: {}};
-            new Function('module', Buffer.from(process.env.HYPERVIBE_RELEASE_ATTEMPT_RUNTIME, 'base64').toString('utf8'))(contract);
             contract.exports.assertCurrentReleaseAttempt(run, artifacts[0], jobs, 'deploy');
             const {data: currentRun} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: id});
-            contract.exports.assertSameReleaseAttempt(run, currentRun);
+            contract.exports.assertSameReleaseAttempt(run, currentRun, expected.workflowRef);
       - name: Run Hypervibe-managed TestFlight release
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}

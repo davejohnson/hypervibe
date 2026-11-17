@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 const localRequire = createRequire(import.meta.url);
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
 import { buildIosReleaseWorkflow } from '../ios-release-workflow.service.js';
+import { assertSameReleaseAttempt } from '../ios-release-attempt.js';
 
 // Reconstructed GitHub API evidence, not live scheduler/approval validation.
 // https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run
@@ -13,10 +14,11 @@ const SHA = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 const DISPATCH_REF_SHA = 'c'.repeat(40);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...args: any[]) => Promise<unknown>;
-function generated(environmentName = 'staging', workingDirectory = '.', inputs: string[] | null = ['mobile', 'packages/shared'], expectedInfoPlist?: Record<string, string>) {
+function generated(environmentName = 'staging', workingDirectory = '.', inputs: string[] | null = ['mobile', 'packages/shared'], expectedInfoPlist?: Record<string, string>, branch = 'main') {
   return parse(buildIosReleaseWorkflow({
     provider: 'railway', providerName: 'Railway', serverWorkflowPath: `.github/workflows/deploy-railway-${environmentName}.yml`,
-    target: { environmentName, kind: 'staging', branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web-id'],
+    target: { environmentName, kind: environmentName === 'production' ? 'production' : 'staging', branch,
+      autoDeployOnPush: environmentName !== 'production', serviceNames: ['web'], providerServiceIds: ['web-id'],
       programFingerprint: 'd'.repeat(64), releaseTarget: {scope: {providerProjectId: 'project-id', providerEnvironmentId: environmentName},
         bindingsFingerprint: 'e'.repeat(64), resources: [{logicalName: 'web', workloadKind: 'web', providerResourceType: 'service', providerResourceId: 'web-id'}]} },
     ios: {bundleId: 'com.example.app', platform: 'IOS', capabilities: [], release: {services: ['web'], trigger: 'after-server-deploy',
@@ -40,8 +42,8 @@ function runScript(script: string, github: unknown, context: unknown, env: Recor
 // A rerun retains its run id; artifact metadata has no attempt identifier.
 // https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt
 // https://docs.github.com/en/rest/actions/artifacts#list-workflow-run-artifacts
-function releaseAttemptFixture() {
-  const workflow = generated();
+function releaseAttemptFixture(environmentName = 'staging', branch = 'main') {
+  const workflow = generated(environmentName, '.', ['mobile', 'packages/shared'], undefined, branch);
   const expected = JSON.parse(workflow.jobs.eligibility.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
   const run = {id: 55, status: 'completed', conclusion: 'success', path: expected.workflowPath,
     head_sha: DISPATCH_REF_SHA, run_attempt: 2, run_started_at: '2026-10-22T11:00:00Z',
@@ -62,6 +64,80 @@ function releaseAttemptFixture() {
     workflow.jobs.eligibility.env);
   return {workflow, run, artifact, job, jobs, github, execute};
 }
+
+function recheck(f: ReturnType<typeof releaseAttemptFixture>) {
+  const steps = f.workflow.jobs.release.steps;
+  const check = steps.find((entry: any) => entry.name === 'Recheck server release attempt');
+  expect(steps.indexOf(check)).toBe(steps.findIndex((entry: any) => entry.name === 'Run Hypervibe-managed TestFlight release') - 1);
+  return runScript(check.with.script, f.github, {repo: {owner: 'owner', repo: 'app'}}, {
+    ...f.workflow.jobs.release.env, HYPERVIBE_SERVER_RUN_ID: '55', HYPERVIBE_SERVER_RUN_ATTEMPT: '2',
+    HYPERVIBE_SERVER_ARTIFACT_ID: '90', HYPERVIBE_RELEASE_SHA: SHA,
+  });
+}
+
+// Regression reported in invoice-express#231: run.path may carry @refs/heads/main.
+// GitHub separately defines the workflow ref and workflow SHA:
+// https://docs.github.com/en/actions/reference/workflows-and-actions/variables
+// These execute generated consumers with synthetic metadata, not a live release.
+describe.each(['staging', 'production'])('workflow metadata identity (%s)', environmentName => {
+  it('uses the configured producer branch rather than assuming main', async () => {
+    const f = releaseAttemptFixture(environmentName, 'release/staging');
+    f.run.path += '@refs/heads/release/staging';
+    await f.execute('workflow_run').result;
+    await recheck(f).result;
+  });
+  it.each(['', '@refs/heads/main'])('accepts server provenance with suffix %j', async suffix => {
+    const f = releaseAttemptFixture(environmentName);
+    f.run.path += suffix;
+    for (const event of ['workflow_dispatch', 'workflow_run']) {
+      const execution = f.execute(event);
+      await execution.result;
+      expect(execution.outputs).toMatchObject({sha: SHA, artifact_id: '90', server_run_attempt: '2'});
+    }
+  });
+  it.each(['', '@refs/heads/main'])('accepts upload revalidation with suffix %j', async suffix => {
+    const f = releaseAttemptFixture(environmentName);
+    f.run.path += suffix;
+    await recheck(f).result;
+  });
+  it('accepts equivalent metadata spelling on a second read without changing attempt identity', async () => {
+    const f = releaseAttemptFixture(environmentName);
+    f.github.rest.actions.getWorkflowRun.mockResolvedValueOnce({data: f.run})
+      .mockResolvedValue({data: {...f.run, path: f.run.path + '@refs/heads/main'}});
+    await f.execute('workflow_run').result;
+    await recheck(f).result;
+  });
+  it('rejects an unexpected ref on a second read', async () => {
+    const f = releaseAttemptFixture(environmentName);
+    f.github.rest.actions.getWorkflowRun.mockResolvedValueOnce({data: f.run})
+      .mockResolvedValue({data: {...f.run, path: f.run.path + '@refs/tags/main'}});
+    await expect(f.execute('workflow_run').result).rejects.toThrow();
+    await expect(recheck(f).result).rejects.toThrow();
+  });
+  it.each(['@refs/tags/main', '@refs/heads/untrusted', '@', '@@refs/heads/main', '@refs/heads/main\n', '/other.yml', '.bak'])
+    ('rejects untrusted or malformed server metadata %j at both boundaries', async suffix => {
+      const f = releaseAttemptFixture(environmentName);
+      f.run.path += suffix;
+      const initial = f.execute('workflow_run');
+      await expect(initial.result).rejects.toThrow();
+      expect(initial.outputs).toEqual({});
+      await expect(recheck(f).result).rejects.toThrow();
+    });
+  it('does not let an allowed suffix hide changed workflow source evidence', async () => {
+    const f = releaseAttemptFixture(environmentName);
+    f.run.path += '@refs/heads/main';
+    f.run.head_sha = 'f'.repeat(40);
+    await expect(f.execute('workflow_run').result).rejects.toThrow();
+    await expect(recheck(f).result).rejects.toThrow();
+  });
+});
+
+it('preserves exact metadata comparison for existing callers without a normalization ref', () => {
+  const f = releaseAttemptFixture();
+  f.run.path += '@refs/heads/main';
+  expect(() => assertSameReleaseAttempt(f.run, {...f.run})).not.toThrow();
+  expect(() => assertSameReleaseAttempt(f.run, {...f.run, path: f.run.path + '-other'})).toThrow();
+});
 
 describe.each(['workflow_dispatch', 'workflow_run'])('current server attempt (%s)', eventName => {
   it.each(['skipped deploy with retained artifact', 'successful deploy with retained artifact'])('rejects %s', async kind => {
@@ -124,15 +200,6 @@ describe.each(['workflow_dispatch', 'workflow_run'])('current server attempt (%s
 });
 
 describe('emitted recheck immediately before TestFlight release', () => {
-  function recheck(f: ReturnType<typeof releaseAttemptFixture>) {
-    const steps = f.workflow.jobs.release.steps;
-    const check = steps.find((entry: any) => entry.name === 'Recheck server release attempt');
-    expect(steps.indexOf(check)).toBe(steps.findIndex((entry: any) => entry.name === 'Run Hypervibe-managed TestFlight release') - 1);
-    return runScript(check.with.script, f.github, {repo: {owner: 'owner', repo: 'app'}}, {
-      ...f.workflow.jobs.release.env, HYPERVIBE_SERVER_RUN_ID: '55', HYPERVIBE_SERVER_RUN_ATTEMPT: '2',
-      HYPERVIBE_SERVER_ARTIFACT_ID: '90', HYPERVIBE_RELEASE_SHA: SHA,
-    });
-  }
   it('accepts the same current run and artifact identity', async () => {
     const f = releaseAttemptFixture(); await f.execute('workflow_run').result;
     await recheck(f).result;
@@ -245,17 +312,21 @@ describe('executed comparison from the last completed beta', () => {
 });
 
 function baseline(options: {changedWorkflow?: boolean; expired?: boolean; incomplete?: boolean; error?: boolean; retry?: boolean; missingCompletedArtifact?: boolean;
-  staleArtifact?: boolean; skippedRelease?: boolean; attemptChanged?: boolean; wrongSkippedAttempt?: boolean; omittedJobAttempt?: boolean; omittedSkippedJobSha?: boolean} = {}) {
-  const workflow = generated();
-  const env = {...workflow.jobs.eligibility.env, GITHUB_RUN_ID: '99', GITHUB_WORKFLOW_SHA: DISPATCH_REF_SHA, GITHUB_WORKFLOW_REF: 'owner/app/.github/workflows/hypervibe-ios-release-staging.yml@refs/heads/main'};
+  staleArtifact?: boolean; skippedRelease?: boolean; attemptChanged?: boolean; wrongSkippedAttempt?: boolean; omittedJobAttempt?: boolean; omittedSkippedJobSha?: boolean;
+  environmentName?: string; pathSuffix?: string; currentWorkflowRef?: string; finalPathSuffix?: string; serverBranch?: string} = {}) {
+  const environmentName = options.environmentName ?? 'staging';
+  const workflow = generated(environmentName, '.', ['mobile', 'packages/shared'], undefined, options.serverBranch);
+  const env = {...workflow.jobs.eligibility.env, GITHUB_RUN_ID: '99', GITHUB_WORKFLOW_SHA: DISPATCH_REF_SHA,
+    GITHUB_WORKFLOW_REF: options.currentWorkflowRef ?? `owner/app/.github/workflows/hypervibe-ios-release-${environmentName}.yml@refs/heads/main`};
   // GitHub workflow-run/job/artifact shapes reconstructed from the official REST
   // contract: attempt-scoped jobs may omit run_attempt, artifacts have no attempt.
   // https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt
   const runs = [{id: 12, status: 'completed', run_attempt: 1, run_started_at: '2026-09-26T02:00:00Z', created_at: '2026-09-26T02:00:00Z', updated_at: '2026-09-26T02:10:00Z', head_sha: DISPATCH_REF_SHA, conclusion: 'success', path: env.HYPERVIBE_IOS_WORKFLOW_PATH},
     {id: 11, status: 'completed', run_attempt: 1, run_started_at: '2026-09-26T01:00:00Z', created_at: '2026-09-26T01:00:00Z', updated_at: '2026-09-26T01:10:00Z', head_sha: BASE, conclusion: 'success', path: env.HYPERVIBE_IOS_WORKFLOW_PATH}];
+  for (const run of runs) run.path += options.pathSuffix ?? '';
   if (options.retry || options.staleArtifact) Object.assign(runs[1], {run_attempt: 2, run_started_at: '2026-09-26T03:00:00Z', updated_at: '2026-09-26T03:10:00Z'});
   const releaseHour = options.retry || options.staleArtifact ? '03' : '01';
-  const artifact = {id: 80, name: 'hypervibe-ios-release-staging-' + BASE, expired: options.expired ?? false,
+  const artifact = {id: 80, name: `hypervibe-ios-release-${environmentName}-` + BASE, expired: options.expired ?? false,
     created_at: `2026-09-26T${options.staleArtifact ? '01' : releaseHour}:05:00Z`, updated_at: `2026-09-26T${releaseHour}:05:00Z`, workflow_run: {id: 11, head_sha: BASE}};
   const listArtifacts = vi.fn(async ({run_id}: {run_id: number}) => ({data: {total_count: run_id === 12 ? 0 : 1, artifacts: run_id === 12 ? [] : [
     artifact,
@@ -278,7 +349,8 @@ function baseline(options: {changedWorkflow?: boolean; expired?: boolean; incomp
   });
   const getRun = vi.fn(async ({run_id}: {run_id: number}) => {
     const run = runs.find(item => item.id === run_id)!;
-    return {data: options.attemptChanged && run_id === 11 ? {...run, run_attempt: run.run_attempt + 1} : run};
+    return {data: {...run, ...(options.attemptChanged && run_id === 11 ? {run_attempt: run.run_attempt + 1} : {}),
+      ...(options.finalPathSuffix !== undefined ? {path: env.HYPERVIBE_IOS_WORKFLOW_PATH + options.finalPathSuffix} : {})}};
   });
   const result = runScript(step(workflow, 'Find last successful beta').with.script,
     {rest: {actions: {listWorkflowRuns: listRuns, listWorkflowRunArtifacts: listArtifacts,
@@ -316,6 +388,44 @@ describe('executed successful beta discovery', () => {
   });
   it.each([{changedWorkflow: true}, {expired: true}, {incomplete: true}, {error: true}])('keeps uncertain history out of the skip decision (%j)', async options => {
     const result = baseline(options); await result.result;
+    expect(result.outputs).toEqual({});
+  });
+});
+
+describe.each(['staging', 'production'])('previous beta workflow metadata (%s)', environmentName => {
+  // workflow_run executes the consumer on the default branch, independently
+  // of the triggering server branch. GitHub documents this event contract:
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run
+  it.each(['', '@refs/heads/main'])('uses the consumer ref when the server branch differs (%j)', async pathSuffix => {
+    const result = baseline({environmentName, serverBranch: 'staging', pathSuffix}); await result.result;
+    expect(result.outputs).toEqual({artifact_id: '80', run_id: '11', sha: BASE});
+  });
+  it.each(['', '@refs/heads/main'])('accepts the same workflow with suffix %j', async pathSuffix => {
+    const result = baseline({environmentName, pathSuffix}); await result.result;
+    expect(result.outputs).toEqual({artifact_id: '80', run_id: '11', sha: BASE});
+    expect(result.getContent.mock.calls.map(([arg]) => arg.ref)).toContain(BASE);
+    expect(result.getContent.mock.calls.map(([arg]) => arg.ref)).toContain(DISPATCH_REF_SHA);
+  });
+  it('accepts equivalent normalized identity during final baseline revalidation', async () => {
+    const result = baseline({environmentName, finalPathSuffix: '@refs/heads/main'}); await result.result;
+    expect(result.outputs.sha).toBe(BASE);
+  });
+  it('rejects an unexpected ref during final baseline revalidation', async () => {
+    const result = baseline({environmentName, finalPathSuffix: '@refs/tags/main'}); await result.result;
+    expect(result.outputs).toEqual({});
+  });
+  it.each(['@refs/tags/main', '@refs/heads/untrusted', '@', '@@refs/heads/main', '@refs/heads/main\n', '/other.yml', '.bak'])
+    ('keeps malformed or untrusted baseline metadata %j out of skip decisions', async pathSuffix => {
+      const result = baseline({environmentName, pathSuffix}); await result.result;
+      expect(result.outputs).toEqual({});
+    });
+  it('does not infer trust for the current workflow from a matching path prefix', async () => {
+    const result = baseline({environmentName, currentWorkflowRef: `owner/app/.github/workflows/hypervibe-ios-release-${environmentName}.yml@refs/tags/main`});
+    await result.result;
+    expect(result.outputs).toEqual({});
+  });
+  it('keeps different workflow source bytes out even with an allowed metadata suffix', async () => {
+    const result = baseline({environmentName, pathSuffix: '@refs/heads/main', changedWorkflow: true}); await result.result;
     expect(result.outputs).toEqual({});
   });
 });
