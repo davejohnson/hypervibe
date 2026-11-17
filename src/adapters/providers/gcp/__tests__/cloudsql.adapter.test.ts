@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Connector, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
+import { AuthClient, Connector, type GoogleAuth, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
 import { CloudSqlAdapter } from '../cloudsql.adapter.js';
 import type { Component } from '../../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
@@ -376,6 +376,16 @@ describe('CloudSqlAdapter', () => {
     };
 
     const access = await adapter.acquireTemporaryDatabaseAccess(environment, component, 5432);
+
+    // Exercise the connector's real credential resolution, without opening a
+    // network connection. A GoogleAuth from another installed major is returned
+    // as the credential instead of resolving the service account AuthClient.
+    const connector = startLocalProxy.mock.contexts[0] as unknown as {
+      sqlAdminFetcher: { auth: GoogleAuth };
+    };
+    const credential = await connector.sqlAdminFetcher.auth.getClient();
+    expect(credential).toBeInstanceOf(AuthClient);
+    expect(credential).toMatchObject({ email: 'deploy@gcp-project.iam.gserviceaccount.com' });
 
     expect(access).toMatchObject({
       source: 'private_connector',
