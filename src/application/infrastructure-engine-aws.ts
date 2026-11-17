@@ -50,6 +50,7 @@ export type AwsProfile = EnvironmentProfile;
 export const awsProfileFor = environmentProfile;
 
 export interface AwsEngineBinding {
+  database?: import('../domain/services/engine-database-access.service.js').AwsDatabaseBinding;
   kind?: 'opentofu';
   /** Image built by the release path; services are created once it exists. */
   imageUri?: string;
@@ -584,6 +585,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
             const previous = awsBinding(current);
             const written = (action.metadata as { wakerSecrets: string[] }).wakerSecrets;
             ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, kind: 'opentofu', sharedDatabase: true,
+              database: { clusterArn, accountId: context.connection.accountId, region: context.connection.region, name: login.database.name, owner: login.database.owner },
               databaseLoginAt: previous.databaseLoginAt ?? new Date().toISOString(), wakerLogins: [...new Set([...(previous.wakerLogins ?? []), ...written])] } });
           }
           return created;

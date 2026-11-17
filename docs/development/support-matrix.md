@@ -37,6 +37,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Background workers, on-demand workers | yes | yes | yes |
 | Scheduled jobs | yes | yes | yes, UTC schedules only |
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
+| Managed database query and inspection | Cloud SQL connector; retained regression coverage, live query unverified here | Aurora Data API, exact environment database; offline contracts, live unverified | Shared Flexible Server, exact environment database and private credential; offline contracts, live unverified |
 | Production-shaped environments | yes: dedicated database, deletion protection, 14 daily backups, 7 days point-in-time recovery | blocked (#625) | blocked (#625) |
 | Database size (`database.size`), deletion protection | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
@@ -64,6 +65,14 @@ require an HTTP endpoint. See [engine diagnostics](../engine-diagnostics.md) for
 native coverage, log windows, pagination bounds and execution-history limits.
 Build-log and deployment-history listing remain unavailable on these engines.
 GCP and Railway retain their existing observation paths and evidence status.
+
+Database query/inspection evidence is documented in
+[engine database access](../engine-database-access.md). Queries do not create
+network access. Azure requires an existing public endpoint; a private connector
+is not implemented. AWS Data API supports bounded SQL and migration source
+summaries; PostgreSQL socket data transfers remain blocked. Missing or ambiguous
+accepted identity/state blocks access. Server inspection keeps SQL authentication
+and running application credentials unverified.
 
 ## Rules for changing this page
 

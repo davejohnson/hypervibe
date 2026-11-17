@@ -103,7 +103,11 @@ describe('Azure apply actions', () => {
       { sqlRunner: () => async (_database, run) => { await run(async (sql) => { statements.push(sql); return { rows: [] }; }); } });
     expect(result).toMatchObject({ success: true });
     expect(azure.calls.filter((call) => call.method === 'PUT').map((call) => new URL(call.url).pathname)).toEqual(['/secrets/test--database-url', '/secrets/test--hv-waker-url']);
-    expect(azure.bindings().azure).toMatchObject({ databaseLoginAt: expect.any(String), wakerLoginAt: expect.any(String) });
+    expect(azure.bindings().azure).toMatchObject({ databaseLoginAt: expect.any(String), wakerLoginAt: expect.any(String), database: {
+      serverId: `/subscriptions/${connection.subscriptionId}/resourceGroups/${connection.resourceGroup}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${azure.context.shared.serverName}`,
+      subscriptionId: connection.subscriptionId, resourceGroup: connection.resourceGroup, host: 'srv.postgres.database.azure.com',
+      name: 'app_test', owner: 'app_test', secretUrl: `${azure.context.vault.uri}secrets/test--database-url`,
+    } });
     expect(statements).toContain('CREATE DATABASE app_test OWNER app_test');
   });
 

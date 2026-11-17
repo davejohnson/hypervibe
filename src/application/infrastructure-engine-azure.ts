@@ -24,7 +24,7 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
-  AzureTokens, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
+  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
   type AzureKeyVaultSecretStore, type SqlRunner,
 } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
@@ -58,6 +58,7 @@ export function isAzureEngineEnvironment(spec: ProjectSpec, environmentName: str
 }
 
 export interface AzureEngineBinding {
+  database?: import('../domain/services/engine-database-access.service.js').AzureDatabaseBinding;
   kind?: 'opentofu';
   /** Digest-pinned image of the last build; new workloads are created from it. */
   image?: string;
@@ -545,7 +546,12 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
         if (failed) return { success: false, message: failed };
       }
       const now = new Date().toISOString();
-      updateBinding(ctx, context, { databaseLoginAt: now, ...(urls.wakerUrl ? { wakerLoginAt: now } : {}) });
+      updateBinding(ctx, context, { database: {
+        serverId: `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${context.shared.serverName}`,
+        subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, host: String(metadata.host),
+        name: azureDatabaseNames(context.environmentName).database, owner: azureDatabaseNames(context.environmentName).login,
+        secretUrl: `${context.vault.uri}secrets/${azureVaultSecretName(context.environmentName, ENGINE_DATABASE_URL_KEY)}`,
+      }, databaseLoginAt: now, ...(urls.wakerUrl ? { wakerLoginAt: now } : {}) });
       return { success: true, message: `Created ${context.environmentName}'s database login and stored ${ENGINE_DATABASE_URL_KEY} in Key Vault.` };
     }
     case AZURE_STORAGE_EMPTY_OPERATION: {

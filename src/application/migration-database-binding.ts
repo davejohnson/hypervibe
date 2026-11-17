@@ -1,3 +1,4 @@
+import { engineDatabaseIdentity } from '../domain/services/engine-database-access.service.js';
 import type { CommandContext } from './context.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -99,8 +100,14 @@ function identities(ctx: CommandContext, project: Project, spec: ProjectSpec, en
     const nativeProject = projectId ?? connection?.[0];
     if (nativeInstance && nativeProject) add({ provider: 'cloudsql', id: nativeInstance, scope: { projectId: nativeProject } });
   }
-  // AwsEngineBinding currently persists no cluster ARN/ID or account/region.
-  // Its generated prefix and databaseLoginAt are not native identity evidence.
+  // Engine testing environments share a server but own separate logical databases.
+  if (record(bindings.aws)?.database !== undefined || record(bindings.azure)?.database !== undefined) {
+    const native = engineDatabaseIdentity(environment);
+    if (native?.provider === 'aws') add({ provider: 'rds', id: `${native.database.clusterArn}/databases/${native.database.name}`,
+      scope: { accountId: native.database.accountId, region: native.database.region } });
+    if (native?.provider === 'azure') add({ provider: 'azure-postgres', id: `${native.database.serverId.toLowerCase()}/databases/${native.database.name}`,
+      scope: { subscriptionId: native.database.subscriptionId.toLowerCase(), resourceGroup: native.database.resourceGroup.toLowerCase() } });
+  }
   const first = evidence.identities[0];
   if (first && evidence.identities.some(identity => !same(first, identity))) evidence.conflict = true;
   const primary = record(record(bindings.databaseTopology)?.primary);
