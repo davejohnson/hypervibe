@@ -64,15 +64,20 @@ export interface AzureKeyVaultSecretStore {
   name: string;
   observe(key: string): Promise<'present' | 'absent' | { unknown: string }>;
   write(key: string, value: string): Promise<string | undefined>;
+  /** Only the owner's local reveal page may receive this value. */
+  read(key: string): Promise<{ value: string } | { error: string }>;
 }
 
 /**
- * One environment's secrets in the project Key Vault. Values only go in:
- * observe reports presence and discards the value unread.
+ * One environment's secrets in the project Key Vault. Observation reads metadata
+ * only; a secret value is fetched separately when the owner clicks the local page.
  */
 export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, nameFor: (key: string) => string = azureSecretName): AzureKeyVaultSecretStore {
   if (!/^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(vaultUri)) throw new Error('Key Vault address is invalid.');
-  const call = async (method: string, key: string, body?: unknown) => tokens.fetchImpl(`${vaultUri}secrets/${nameFor(key)}?api-version=7.4`, {
+  const secretUrl = (key: string) => `${vaultUri}secrets/${encodeURIComponent(nameFor(key))}`;
+  const hasVersion = (id: unknown, key: string): boolean => typeof id === 'string'
+    && id.startsWith(`${secretUrl(key)}/`) && /^[^/?#]+$/.test(id.slice(secretUrl(key).length + 1));
+  const call = async (method: string, key: string, body?: unknown) => tokens.fetchImpl(`${secretUrl(key)}?api-version=7.4`, {
     method, headers: { authorization: `Bearer ${await tokens.get(AZURE_SCOPES.vault)}`, ...(body ? { 'content-type': 'application/json' } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(20_000),
   });
@@ -80,13 +85,49 @@ export function azureKeyVaultSecretStore(tokens: AzureTokens, vaultUri: string, 
     name: 'Azure Key Vault',
     async observe(key) {
       try {
+        // List Secrets gives current/base metadata without values. Listing versions
+        // cannot prove the current value is enabled because their order is undefined.
+        let next = `${vaultUri}secrets?api-version=7.4&maxresults=25`;
+        const visited = new Set<string>();
+        while (visited.size < 100 && !visited.has(next)) {
+          const url = new URL(next);
+          if (url.origin !== new URL(vaultUri).origin || url.pathname !== '/secrets' || url.username || url.password || url.hash) break;
+          visited.add(next);
+          const response = await tokens.fetchImpl(next, {
+            method: 'GET', headers: { authorization: `Bearer ${await tokens.get(AZURE_SCOPES.vault)}` }, signal: AbortSignal.timeout(20_000),
+          });
+          if (response.status !== 200) {
+            await response.body?.cancel();
+            return { unknown: `Key Vault could not be read (HTTP ${response.status}).` };
+          }
+          const body = await response.json() as { value?: Array<{ id?: unknown; attributes?: { enabled?: unknown } }>; nextLink?: unknown };
+          if (!Array.isArray(body?.value) || body.value.some((item) => typeof item?.id !== 'string'
+            || !item.id.startsWith(`${vaultUri}secrets/`) || !/^[A-Za-z0-9-]+$/.test(item.id.slice(`${vaultUri}secrets/`.length)))) break;
+          const current = body.value.find((item) => item.id === secretUrl(key));
+          if (current) return current.attributes?.enabled === true ? 'present' : { unknown: 'The current Key Vault secret is disabled or its enabled state is unknown.' };
+          if (body.nextLink == null) return 'absent';
+          if (typeof body.nextLink !== 'string' || !body.nextLink) break;
+          next = body.nextLink;
+        }
+        return { unknown: 'Key Vault did not return complete secret metadata.' };
+      } catch {
+        return { unknown: 'Key Vault could not be read.' };
+      }
+    },
+    async read(key) {
+      try {
         const response = await call('GET', key);
-        await response.body?.cancel();
-        if (response.status === 200) return 'present';
-        if (response.status === 404) return 'absent';
-        return { unknown: `Key Vault could not be read (HTTP ${response.status}).` };
-      } catch (error) {
-        return { unknown: `Key Vault could not be read (${error instanceof Error ? error.name : 'error'}).` };
+        if (response.status !== 200) {
+          await response.body?.cancel();
+          return { error: `Key Vault could not read the secret value (HTTP ${response.status}).` };
+        }
+        const body = await response.json() as { id?: unknown; value?: unknown };
+        if (!hasVersion(body?.id, key) || typeof body.value !== 'string' || !body.value) {
+          return { error: 'Key Vault did not return the requested secret value.' };
+        }
+        return { value: body.value };
+      } catch {
+        return { error: 'Key Vault could not read the secret value.' };
       }
     },
     async write(key, value) {

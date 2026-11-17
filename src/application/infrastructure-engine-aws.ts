@@ -5,7 +5,7 @@ import { execFileSync } from 'child_process';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import {
   deleteFinalSnapshot, describeDatabaseCluster, dropAuroraEnvironmentDatabase, emptyBucket, ensureDatabaseLogin, ensureGeneratedParameter, newestAuroraVersion, parameterExists,
-  putParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess, type AwsEnvironmentDatabase,
+  putParameter, readParameter, removeLeftovers, s3Endpoint, tlsRequiredByDefault, type AwsAccess, type AwsEnvironmentDatabase,
   clusterSnapshotState,
 } from '../adapters/providers/aws/aws-engine.client.js';
 import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
@@ -202,6 +202,7 @@ export async function awsSecretStore(ctx: CommandContext, project: Project, envi
   return {
     name: 'AWS Parameter Store',
     observe: async (key) => parameterExists(access, `${context.parameterPath}${key}`),
+    read: async (key) => readParameter(access, `${context.parameterPath}${key}`),
     write: async (key, value) => {
       try {
         await putParameter(access, `${context.parameterPath}${key}`, value);

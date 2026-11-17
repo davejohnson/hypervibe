@@ -145,6 +145,19 @@ export async function parameterExists(access: AwsAccess, name: string): Promise<
   }
 }
 
+/** Reads one generated value for the owner's local page; never forwards provider error contents. */
+export async function readParameter(access: AwsAccess, name: string): Promise<{ value: string } | { error: string }> {
+  try {
+    const { Parameter: parameter } = await new SSMClient(access).send(new GetParameterCommand({ Name: name, WithDecryption: true }));
+    if (parameter?.Name !== name || parameter.Type !== 'SecureString' || typeof parameter.Value !== 'string' || !parameter.Value) {
+      return { error: 'Parameter Store did not return the requested secret value.' };
+    }
+    return { value: parameter.Value };
+  } catch {
+    return { error: 'Parameter Store could not read the secret value.' };
+  }
+}
+
 /** Saves a value, replacing any existing one. Throws when Parameter Store rejects it. */
 export async function putParameter(access: AwsAccess, name: string, value: string): Promise<void> {
   await new SSMClient(access).send(new PutParameterCommand({ Name: name, Type: 'SecureString', Value: value, Overwrite: true }));
