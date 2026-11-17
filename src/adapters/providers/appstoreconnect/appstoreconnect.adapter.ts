@@ -263,7 +263,8 @@ export class AppStoreConnectAdapter {
       'Content-Type': 'application/json',
     };
 
-    const options: RequestInit = { method, headers };
+    // No request waits forever on a stalled connection.
+    const options: RequestInit = { method, headers, signal: AbortSignal.timeout(60_000) };
     if (body && (method === 'POST' || method === 'PATCH')) {
       options.body = JSON.stringify(body);
     }

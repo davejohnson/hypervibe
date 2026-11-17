@@ -276,6 +276,8 @@ export class SendGridAdapter {
     const options: RequestInit = {
       method,
       headers,
+      // No request waits forever on a stalled connection.
+      signal: AbortSignal.timeout(60_000),
     };
 
     if (body && (method === 'POST' || method === 'PATCH')) {
@@ -360,14 +362,22 @@ export class SendGridAdapter {
   }
 
   async listDomainAuthentications(): Promise<SendGridDomainAuthentication[]> {
-    const result = await this.request<SendGridDomainAuthentication[]>(
-      'GET',
-      '/whitelabel/domains'
-    );
-    if (!Array.isArray(result)) {
-      throw new Error('SendGrid domain-authentication observation returned an invalid list.');
+    // SendGrid pages this list; one response is not the whole account.
+    const items: SendGridDomainAuthentication[] = [];
+    const ids = new Set<unknown>();
+    for (let offset = 0; offset <= 3000; offset += 100) {
+      const page = await this.request<SendGridDomainAuthentication[]>('GET', `/whitelabel/domains?limit=100&offset=${offset}`);
+      if (!Array.isArray(page)) {
+        throw new Error('SendGrid domain-authentication observation returned an invalid list.');
+      }
+      for (const item of page) {
+        if (ids.has(item.id)) throw new Error('SendGrid repeated a domain authentication while paging; the list is incomplete.');
+        ids.add(item.id);
+        items.push(item);
+      }
+      if (page.length < 100) return items;
     }
-    return result;
+    throw new Error('SendGrid domain-authentication list is incomplete: it exceeded the read limit.');
   }
 
   async getDomainAuthentication(domainId: number): Promise<SendGridDomainAuthentication | null> {
@@ -415,14 +425,22 @@ export class SendGridAdapter {
   }
 
   async listVerifiedSenders(): Promise<SendGridVerifiedSender[]> {
-    const result = await this.request<{ results?: SendGridVerifiedSender[] }>(
-      'GET',
-      '/verified_senders'
-    );
-    if (!Array.isArray(result.results)) {
-      throw new Error('SendGrid verified-sender observation returned an invalid list.');
+    // SendGrid pages this list by the last seen ID; one response is not the whole account.
+    const items: SendGridVerifiedSender[] = [];
+    let lastSeen: number | undefined;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const result = await this.request<{ results?: SendGridVerifiedSender[] }>('GET', `/verified_senders?limit=100${lastSeen !== undefined ? `&lastSeenID=${lastSeen}` : ''}`);
+      if (!Array.isArray(result.results)) {
+        throw new Error('SendGrid verified-sender observation returned an invalid list.');
+      }
+      items.push(...result.results);
+      if (result.results.length < 100) return items;
+      const ids = result.results.map((sender) => Number(sender.id));
+      const next = Math.max(...ids);
+      if (!Number.isSafeInteger(next) || (lastSeen !== undefined && next <= lastSeen)) throw new Error('SendGrid verified-sender list is incomplete: paging did not advance.');
+      lastSeen = next;
     }
-    return result.results;
+    throw new Error('SendGrid verified-sender list is incomplete: it exceeded the read limit.');
   }
 
   /** Read-only authorization evidence for the exact account used to send mail. */

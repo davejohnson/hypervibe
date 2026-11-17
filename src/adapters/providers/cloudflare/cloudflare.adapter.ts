@@ -380,6 +380,8 @@ export class CloudflareAdapter implements IDnsProvider, IEdgeMaintenanceAdapter,
       options.body = JSON.stringify(body);
     }
 
+    // No request waits forever on a stalled connection.
+    options.signal = AbortSignal.timeout(60_000);
     const response = await fetch(`${CLOUDFLARE_API_URL}${endpoint}`, options);
     const data = (await response.json()) as CloudflareResponse<T>;
 
@@ -414,6 +416,7 @@ export class CloudflareAdapter implements IDnsProvider, IEdgeMaintenanceAdapter,
         ...(options.contentType ? { 'Content-Type': options.contentType } : {}),
       },
       ...(options.body === undefined ? {} : { body: options.body }),
+      signal: AbortSignal.timeout(60_000),
     });
     if (!response.ok) {
       throw new CloudflareApiError(`Cloudflare API error: HTTP ${response.status}`, response.status);
@@ -480,6 +483,7 @@ export class CloudflareAdapter implements IDnsProvider, IEdgeMaintenanceAdapter,
       const marker = await fetch(`https://${hostname}/.well-known/hypervibe-maintenance?nonce=${Date.now()}`, {
         redirect: 'manual',
         headers: { 'Cache-Control': 'no-cache' },
+        signal: AbortSignal.timeout(10_000),
       });
       const markerVerified = marker.status === 503
         && marker.headers.get('x-hypervibe-maintenance') === expected.contentHash;

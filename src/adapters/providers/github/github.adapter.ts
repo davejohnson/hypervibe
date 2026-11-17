@@ -205,6 +205,7 @@ export class GitHubAdapter {
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': GITHUB_API_VERSION,
       },
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {

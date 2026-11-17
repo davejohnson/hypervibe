@@ -37,8 +37,8 @@ describe('SendGridAdapter observations', () => {
   });
 
   it.each([
-    ['domain authentications', '/whitelabel/domains', (adapter: SendGridAdapter) => adapter.listDomainAuthentications()],
-    ['verified senders', '/verified_senders', (adapter: SendGridAdapter) => adapter.listVerifiedSenders()],
+    ['domain authentications', '/whitelabel/domains?limit=100&offset=0', (adapter: SendGridAdapter) => adapter.listDomainAuthentications()],
+    ['verified senders', '/verified_senders?limit=100', (adapter: SendGridAdapter) => adapter.listVerifiedSenders()],
     ['Inbound Parse routes', '/user/webhooks/parse/settings', (adapter: SendGridAdapter) => adapter.listInboundParseWebhooks()],
   ])('does not interpret an incomplete %s payload as an empty list', async (_label, path, observe) => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({}));
