@@ -632,6 +632,18 @@ async function applyDeliveryEvents(params: {
   const live = await sendgrid.adapter.getEventWebhookSettings(endpointId);
   if (endpointId && live.id !== undefined && live.id !== endpointId) return staleAction('Delivery-event endpoint identity changed.');
   const operation = stringValue(metadata, 'operation');
+  // With no endpoint on record SendGrid answers for the account's oldest webhook. Address the exact
+  // one that was observed, and leave it alone when it already delivers somewhere else.
+  const liveId = typeof live.id === 'string' && live.id ? live.id : undefined;
+  const targetId = endpointId ?? liveId;
+  if (!endpointId && operation !== EMAIL_OPERATIONS.deliveryEventsAdopt && live.url && live.url !== expectedUrl) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'The SendGrid account already has a delivery-event webhook for another address',
+      error: 'Hypervibe has no record of owning it and did not change it. Remove or repoint it in SendGrid, or adopt it through a reviewed plan.',
+    };
+  }
   if (operation === EMAIL_OPERATIONS.deliveryEventsAdopt) {
     if (!eventSettingsMatch(live, expectedUrl, desired.events)) {
       return staleAction('The reviewed delivery-event webhook adoption candidate changed.');
@@ -640,14 +652,14 @@ async function applyDeliveryEvents(params: {
     const settings = Object.fromEntries(
       SENDGRID_DELIVERY_EVENTS.map((event) => [event, desired.events.includes(event)])
     );
-    await sendgrid.adapter.updateEventWebhookSettings({ enabled: true, url: expectedUrl, ...settings }, endpointId);
+    await sendgrid.adapter.updateEventWebhookSettings({ enabled: true, url: expectedUrl, ...settings }, targetId);
   }
-  const verified = await sendgrid.adapter.getEventWebhookSettings(endpointId);
-  if (endpointId && verified.id !== undefined && verified.id !== endpointId || !eventSettingsMatch(verified, expectedUrl, desired.events)) {
+  const verified = await sendgrid.adapter.getEventWebhookSettings(targetId);
+  if (targetId && verified.id !== undefined && verified.id !== targetId || !eventSettingsMatch(verified, expectedUrl, desired.events)) {
     return { success: false, message: 'SendGrid did not verify the delivery-event webhook', error: 'Provider read-back differs from the reviewed settings.' };
   }
   updateEmailBinding(params.environment, 'deliveryEvents', {
-    ...((endpointId ?? verified.id) ? { endpointId: endpointId ?? verified.id } : {}),
+    ...((targetId ?? verified.id) ? { endpointId: targetId ?? verified.id } : {}),
     configHash: expectedHash,
     url: expectedUrl,
     service: desired.service,
