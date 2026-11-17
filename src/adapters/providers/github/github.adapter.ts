@@ -102,6 +102,8 @@ function isGitHubNotFound(error: unknown): error is GitHubApiError {
   return error instanceof GitHubApiError && error.status === 404;
 }
 
+const GITHUB_REQUEST_TIMEOUT_MS = 60_000;
+
 export class GitHubAdapter {
   readonly name = 'github';
   private credentials: GitHubCredentials | null = null;
@@ -152,6 +154,8 @@ export class GitHubAdapter {
     const options: RequestInit = {
       method,
       headers,
+      // No request waits forever on a stalled connection.
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     };
 
     if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE')) {
@@ -443,11 +447,21 @@ export class GitHubAdapter {
   }
 
   async listRepositorySecrets(owner: string, repo: string): Promise<string[]> {
-    const response = await this.request<{ secrets: Array<{ name: string }> }>(
-      'GET',
-      `/repos/${owner}/${repo}/actions/secrets?per_page=100`
-    );
-    return response.secrets.map((secret) => secret.name);
+    return this.listSecretNames(`/repos/${owner}/${repo}/actions/secrets`);
+  }
+
+  /** Every secret name at an endpoint. A list that never reaches GitHub's stated total is refused, never returned as if complete. */
+  private async listSecretNames(endpoint: string): Promise<string[]> {
+    const names: string[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const response = await this.request<{ total_count?: number; secrets?: Array<{ name: string }> }>('GET', `${endpoint}?per_page=100&page=${page}`);
+      const secrets = response.secrets ?? [];
+      names.push(...secrets.map((secret) => secret.name));
+      const total = response.total_count ?? names.length;
+      if (names.length >= total) return names;
+      if (secrets.length === 0) break;
+    }
+    throw new Error('GitHub returned an incomplete list of Actions secrets.');
   }
 
   /** Inventory is strictly read-only. A 404 alone cannot distinguish hidden
@@ -601,11 +615,7 @@ export class GitHubAdapter {
   ): Promise<string[]> {
     const environment = encodeURIComponent(environmentName);
     try {
-      const response = await this.request<{ secrets: Array<{ name: string }> }>(
-        'GET',
-        `/repos/${owner}/${repo}/environments/${environment}/secrets?per_page=100`
-      );
-      return response.secrets.map((secret) => secret.name);
+      return await this.listSecretNames(`/repos/${owner}/${repo}/environments/${environment}/secrets`);
     } catch (error) {
       if (isGitHubNotFound(error)) return [];
       throw error;
