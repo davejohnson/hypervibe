@@ -1,4 +1,5 @@
 import type { EngineReleaseResult } from '../../../domain/ports/infrastructure-engine.port.js';
+import { assertHealthCheckPath } from '../../../domain/spec/health-check-path.js';
 import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
 import type { ProjectRuntime } from '../../../domain/spec/project-runtime.js';
 import { ARM, AZURE_SCOPES, azureError, azureRest, type AzureTokens } from './azure-ops.client.js';
@@ -110,6 +111,7 @@ export function templateWithImage(template: Record<string, unknown>, image: stri
 }
 
 export async function releaseAzureApp(tokens: AzureTokens, params: { id: string; name: string; image: string; healthCheckPath?: string; web: boolean; fetchTimeoutMs?: number; waitMs?: number; retryMs?: number }): Promise<EngineReleaseResult> {
+  if (params.healthCheckPath !== undefined) assertHealthCheckPath(params.healthCheckPath);
   const current = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${params.id}?${APPS_API}`);
   if (current.status === 404) return { service: params.name, status: 'failed', message: `${params.name} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   if (current.status !== 200) return { service: params.name, status: 'unknown', message: `${params.name} could not be read (${azureError(current)}).` };

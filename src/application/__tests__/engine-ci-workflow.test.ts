@@ -58,7 +58,7 @@ describe('keyless release workflow', () => {
     const release = parsed.jobs.release.steps.find((step: { name?: string }) => step.name === 'Release web');
     expect(release.run).toContain("base + '?updateMask=template.containers'");
     expect(release.run).toContain('{ etag: current.etag, template: { containers } }');
-    expect(release.run).toContain('node release.mjs web-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} /health services');
+    expect(release.run).toContain('node release.mjs web-abc us-central1-docker.pkg.dev/demo-project/hypervibe/staging-web@${{ steps.build_web.outputs.digest }} "L2hlYWx0aA==" services');
   });
 
   it('builds each service from its own generated Dockerfile when the repository has none', () => {

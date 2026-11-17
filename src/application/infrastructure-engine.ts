@@ -1,4 +1,5 @@
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
+import { HEALTH_CHECK_PATH_PATTERN, HEALTH_CHECK_PATH_ERROR } from '../domain/spec/health-check-path.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
@@ -1409,6 +1410,10 @@ export async function releaseGcpEngineServices(ctx: CommandContext, params: {
 }): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
   const { spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName];
+  if ((params.services?.length ? params.services : Object.keys(environmentSpec?.services ?? {})).some((name) => {
+    const path = environmentSpec?.services[name]?.healthCheckPath;
+    return path !== undefined && !HEALTH_CHECK_PATH_PATTERN.test(path);
+  })) return { blocked: HEALTH_CHECK_PATH_ERROR };
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
   const source = await resolveReleaseSource(params);

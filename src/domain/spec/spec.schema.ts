@@ -5,6 +5,7 @@ import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
 import { withDefaultDatabaseProvider, withoutEngineFlag } from './database-defaults.js';
+import { HEALTH_CHECK_PATH_PATTERN, HEALTH_CHECK_PATH_ERROR } from './health-check-path.js';
 import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
 export { dnsSpecSchema, dnsSecurityPolicySchema } from './dns.schema.js';
 export type { DnsSpec, DnsSecurityPolicy } from './dns.schema.js';
@@ -73,7 +74,7 @@ export const serviceSpecSchema = z.object({
   }).default('web'),
   startCommand: z.string().min(1).optional(),
   releaseCommand: z.string().min(1).optional(),
-  healthCheckPath: z.string().min(1).optional(),
+  healthCheckPath: z.string().regex(HEALTH_CHECK_PATH_PATTERN, HEALTH_CHECK_PATH_ERROR).optional(),
   cronSchedule: z.string().min(1).optional(),
   timeZone: z.string().min(1).optional(),
   public: z.boolean().optional(),

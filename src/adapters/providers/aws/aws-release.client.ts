@@ -8,6 +8,7 @@ import { generatedContainerDockerfile } from '../../../domain/services/generated
 import type { ProjectRuntime } from '../../../domain/spec/project-runtime.js';
 import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 import { LOAD_SECRETS_PATH } from './runtime/load-secrets.js';
+import { assertHealthCheckPath } from '../../../domain/spec/health-check-path.js';
 
 /**
  * AWS calls a release makes: build an image in CodeBuild, then point a Lambda
@@ -101,6 +102,7 @@ async function imageFor(ecr: ECRClient, target: AwsReleaseTarget, tag: string): 
 }
 
 export async function releaseFunction(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string): Promise<EngineReleaseResult> {
+  assertHealthCheckPath(healthCheckPath);
   const lambda = new LambdaClient({ region: target.region, credentials: target.credentials });
   await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: resource, ImageUri: imageUri }));
   const waited = await waitUntilFunctionUpdatedV2({ client: lambda, maxWaitTime: 600 }, { FunctionName: resource }).catch(() => undefined);

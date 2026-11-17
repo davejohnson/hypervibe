@@ -6,6 +6,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
+import { HEALTH_CHECK_PATH_PATTERN, HEALTH_CHECK_PATH_ERROR } from '../domain/spec/health-check-path.js';
 import { ENGINE_PLAN_SCOPE as RELEASE_PLAN_SCOPE, ENGINE_RELEASE_OPERATION as RELEASE_OPERATION, type EngineReleaseResult } from './infrastructure-engine.js';
 
 const execFileAsync = promisify(execFile);
@@ -48,6 +49,10 @@ export function selectReleaseWorkloads(environmentSpec: EnvironmentSpec, service
   const selected = services?.length ? services : Object.keys(environmentSpec.services);
   const unknownNames = selected.filter((name) => !environmentSpec.services[name]);
   if (unknownNames.length) return { blocked: `${unknownNames.join(', ')} is not a service in this environment.` };
+  if (selected.some((name) => {
+    const path = environmentSpec.services[name]!.healthCheckPath;
+    return path !== undefined && !HEALTH_CHECK_PATH_PATTERN.test(path);
+  })) return { blocked: HEALTH_CHECK_PATH_ERROR };
   const web = selected.find((name) => (environmentSpec.services[name]!.workloadKind ?? 'web') === 'web');
   const startCommand = environmentSpec.services[web ?? selected[0]!]?.startCommand;
   return { selected, ...(web ? { web } : {}), ...(startCommand ? { startCommand } : {}) };

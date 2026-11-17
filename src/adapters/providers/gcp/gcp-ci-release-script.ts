@@ -1,3 +1,5 @@
+import { HEALTH_CHECK_PATH_PATTERN, HEALTH_CHECK_PATH_ERROR } from '../../../domain/spec/health-check-path.js';
+
 /**
  * The program a generated GitHub Actions release runs on Google Cloud: switch one
  * Cloud Run workload to a new image under its etag, wait for the rollout, and
@@ -6,7 +8,10 @@
  * not in Hypervibe.
  */
 export const RELEASE_SCRIPT = String.raw`
-const [resource, image, healthPath, kind = 'services', startCommand = '-'] = process.argv.slice(2);
+const [resource, image, healthPathData = '', kind = 'services', startCommand = '-'] = process.argv.slice(2);
+const healthPath = Buffer.from(healthPathData, 'base64').toString('utf8');
+// Validate again before provider effects, including workflows rendered from stored inputs.
+if (healthPathData && (Buffer.from(healthPath).toString('base64') !== healthPathData || !${HEALTH_CHECK_PATH_PATTERN}.test(healthPath))) throw new Error(${JSON.stringify(HEALTH_CHECK_PATH_ERROR)});
 const token = process.env.GCP_TOKEN;
 const base = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT + '/locations/' + process.env.GCP_REGION + '/' + kind + '/' + resource;
 const call = async (url, init = {}) => fetch(url, { ...init, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
@@ -45,7 +50,7 @@ if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
   process.exit(0);
 }
 if (!isJob && healthPath) {
-  const response = await fetch(new URL(healthPath, after.uri));
+  const response = await fetch(new URL(healthPath, after.uri), { redirect: 'manual' });
   if (response.status >= 500) throw new Error(healthPath + ' returned HTTP ' + response.status);
   console.log('Health ' + healthPath + ': HTTP ' + response.status);
 }

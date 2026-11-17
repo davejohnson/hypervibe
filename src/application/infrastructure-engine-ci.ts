@@ -2,6 +2,7 @@ import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
 import fs from 'fs';
 import path from 'path';
+import { assertHealthCheckPath } from '../domain/spec/health-check-path.js';
 
 /**
  * Keyless CI releases for OpenTofu-managed Cloud Run environments.
@@ -82,6 +83,9 @@ export interface ReleaseWorkflowInput {
 /** A GitHub Actions workflow with no stored cloud credentials; a package token is referenced only by its repository secret name. */
 export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
+  for (const service of input.services) {
+    if (service.healthPath !== undefined) assertHealthCheckPath(service.healthPath);
+  }
   const lines: string[] = [
     `# Managed by Hypervibe. Releases ${input.environmentName} on every push to ${input.branch}.`,
     '# Authenticates without stored keys (Workload Identity Federation) and changes only the running image.',
@@ -157,7 +161,7 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
       '          GCP_TOKEN: ${{ steps.auth.outputs.access_token }}',
       '        run: |',
       ...script,
-      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} ${service.healthPath ?? '""'} ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
+      `          node release.mjs ${service.resource} ${service.image}@\${{ steps.build_${id}.outputs.digest }} "${Buffer.from(service.healthPath ?? '').toString('base64')}" ${service.kind ?? 'services'}${service.kind === 'jobs' ? '' : ` "${Buffer.from(service.startCommand?.trim() ?? '').toString('base64')}"`}`,
     );
   }
   return lines.join('\n') + '\n';
