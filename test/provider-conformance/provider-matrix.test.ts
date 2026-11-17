@@ -227,7 +227,7 @@ describe('provider conformance matrix', () => {
       'accessKeyId',
       'secretAccessKey',
     ]);
-    expect(providerRegistry.connectionProviders('rds')).toEqual(['rds']);
+    expect(providerRegistry.connectionProviders('rds')).toEqual(['rds', 'aws']);
     expect(providerRegistry.getMetadata('rds')?.lifecycle?.databaseConnectivity)
       .toBeUndefined();
   });
