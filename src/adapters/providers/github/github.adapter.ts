@@ -7,6 +7,14 @@ import {
   type ProviderInspectionRequest,
 } from '../../../domain/registry/provider.registry.js';
 
+import {
+  effectiveBranchProtection,
+  planRulesetWrites,
+  type BranchRule,
+  type ClassicBranchProtection,
+  type Ruleset,
+} from './github-branch-rulesets.js';
+
 const GITHUB_API_URL = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
 const require = createRequire(import.meta.url);
@@ -1128,48 +1136,52 @@ export class GitHubAdapter {
   // ============= Branch Protection =============
 
   /**
-   * Get branch protection rules.
+   * Get the rules GitHub enforces on a branch: classic branch protection
+   * combined with any active rulesets that apply to it.
    */
-  async getBranchProtection(owner: string, repo: string, branch: string): Promise<{
-    required_status_checks: {
-      strict: boolean;
-      contexts: string[];
-      checks: Array<{ context: string; app_id: number | null }>;
-    } | null;
-    required_pull_request_reviews: {
-      required_approving_review_count: number;
-      dismiss_stale_reviews: boolean;
-      require_code_owner_reviews: boolean;
-    } | null;
-    enforce_admins: { enabled: boolean } | null;
-    required_linear_history: { enabled: boolean } | null;
-    allow_force_pushes: { enabled: boolean } | null;
-    allow_deletions: { enabled: boolean } | null;
-  } | null> {
+  async getBranchProtection(owner: string, repo: string, branch: string): Promise<ClassicBranchProtection | null> {
+    const classic = await this.getClassicBranchProtection(owner, repo, branch);
+    const rules = await this.listBranchRules(owner, repo, branch);
+    if (rules.length === 0) return classic;
+    return effectiveBranchProtection(classic, rules, await this.getRulesetsFor(owner, repo, rules));
+  }
+
+  private async getClassicBranchProtection(owner: string, repo: string, branch: string): Promise<ClassicBranchProtection | null> {
     try {
-      return await this.request<{
-        required_status_checks: {
-          strict: boolean;
-          contexts: string[];
-          checks: Array<{ context: string; app_id: number | null }>;
-        } | null;
-        required_pull_request_reviews: {
-          required_approving_review_count: number;
-          dismiss_stale_reviews: boolean;
-          require_code_owner_reviews: boolean;
-        } | null;
-        enforce_admins: { enabled: boolean } | null;
-        required_linear_history: { enabled: boolean } | null;
-        allow_force_pushes: { enabled: boolean } | null;
-        allow_deletions: { enabled: boolean } | null;
-      }>('GET', `/repos/${owner}/${repo}/branches/${branch}/protection`);
+      return await this.request<ClassicBranchProtection>('GET', `/repos/${owner}/${repo}/branches/${branch}/protection`);
     } catch (error) {
-      // 404 means no protection rules
+      // 404 means no classic protection; rulesets are read separately.
       if (isGitHubNotFound(error)) {
         return null;
       }
       throw error;
     }
+  }
+
+  /** Every active ruleset rule that applies to the branch, from any level. */
+  private async listBranchRules(owner: string, repo: string, branch: string): Promise<BranchRule[]> {
+    const rules: BranchRule[] = [];
+    for (let page = 1; ; page += 1) {
+      const batch = await this.request<BranchRule[]>(
+        'GET',
+        `/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}?per_page=100&page=${page}`,
+      );
+      if (!Array.isArray(batch)) throw new Error('GitHub returned an unreadable list of branch rules');
+      rules.push(...batch);
+      if (batch.length < 100) return rules;
+    }
+  }
+
+  /** Details of the repository-owned rulesets behind the given rules. */
+  private async getRulesetsFor(owner: string, repo: string, rules: BranchRule[]): Promise<Map<number, Ruleset>> {
+    const ids = new Set(rules
+      .filter((rule) => rule.ruleset_source_type === 'Repository' && typeof rule.ruleset_id === 'number')
+      .map((rule) => rule.ruleset_id as number));
+    const rulesets = new Map<number, Ruleset>();
+    for (const id of ids) {
+      rulesets.set(id, await this.request<Ruleset>('GET', `/repos/${owner}/${repo}/rulesets/${id}`));
+    }
+    return rulesets;
   }
 
   /**
@@ -1194,6 +1206,35 @@ export class GitHubAdapter {
       allowDeletions?: boolean;
     }
   ): Promise<void> {
+    const classic = await this.getClassicBranchProtection(owner, repo, branch);
+    const branchRules = await this.listBranchRules(owner, repo, branch);
+    if (branchRules.length > 0) {
+      const rulesets = await this.getRulesetsFor(owner, repo, branchRules);
+      const namesDefaultBranch = [...rulesets.values()].some((ruleset) =>
+        ruleset.conditions?.ref_name?.include?.includes('~DEFAULT_BRANCH'));
+      const isDefaultBranch = namesDefaultBranch
+        && (await this.getRepository(owner, repo)).default_branch === branch;
+      // Planned in full first, so a ruleset Hypervibe will not edit stops the change before any write.
+      const writes = planRulesetWrites({
+        branch, isDefaultBranch, classicExists: classic !== null, rules: branchRules, rulesets, desired: rules,
+      });
+      if (classic) await this.putClassicBranchProtection(owner, repo, branch, rules, classic);
+      for (const write of writes) {
+        if (write.id === undefined) await this.request('POST', `/repos/${owner}/${repo}/rulesets`, write.body);
+        else await this.request('PUT', `/repos/${owner}/${repo}/rulesets/${write.id}`, write.body);
+      }
+      return;
+    }
+    await this.putClassicBranchProtection(owner, repo, branch, rules, classic);
+  }
+
+  private async putClassicBranchProtection(
+    owner: string,
+    repo: string,
+    branch: string,
+    rules: Parameters<GitHubAdapter['updateBranchProtection']>[3],
+    existing: ClassicBranchProtection | null,
+  ): Promise<void> {
     const body: Record<string, unknown> = {
       enforce_admins: rules.enforceAdmins ?? false,
       required_linear_history: rules.requireLinearHistory ?? false,
@@ -1203,7 +1244,6 @@ export class GitHubAdapter {
     };
 
     if (rules.preserveStatusChecks) {
-      const existing = await this.getBranchProtection(owner, repo, branch);
       const current = existing?.required_status_checks;
       const contexts = current?.contexts?.length
         ? current.contexts
