@@ -6,7 +6,7 @@ import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
 import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
-  cloudRunGet, googleErrorMessage, latestWakerExecution, readCloudRunOperation, releaseImage, releaseJobImage, startCloudRunJob, workloadContainers, type WorkloadKind,
+  cloudRunGet, googleErrorMessage, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -139,6 +139,8 @@ export interface EngineBinding {
   queues?: string[];
   /** Cloud Run job that runs the release command. */
   releaseJob?: string;
+  /** A release command run that was started and not yet seen to finish; reconciled before another start. */
+  releaseRun?: PendingJobRun;
   /** IAM database user that was granted read access for on-demand worker wakers. */
   workerWakeGrant?: string;
   /** When that grant was made; a later data copy replaces the tables and drops it. */
@@ -1574,25 +1576,12 @@ async function runReleaseCommand(
   const token = await context.adapter.engineAccessToken();
   const updated = await releaseJobImage(token, context, job, build.imageUri);
   if (updated.status !== 'released') return updated;
-  let started: Response;
-  try {
-    started = await startCloudRunJob(token, context, job);
-  } catch {
-    return { status: 'unknown', message: 'Starting the release command had an unknown outcome. Check hv_logs before retrying.' };
-  }
-  if (!started.ok) return { status: 'failed', message: `The release command could not start (HTTP ${started.status}): ${await googleErrorMessage(started)}` };
-  let operation = await started.json() as { name?: string; done?: boolean; error?: { message?: string }; response?: { succeededCount?: number; failedCount?: number } };
-  const deadline = Date.now() + 30 * 60 * 1000;
-  while (!operation.done && operation.name && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    const polled = await readCloudRunOperation(await context.adapter.engineAccessToken(), operation.name);
-    if (polled.ok) operation = await polled.json() as typeof operation;
-  }
-  if (!operation.done) return { status: 'unknown', message: 'The release command is still running. Check hv_logs, then run hv_deploy again.' };
-  if (operation.error || (operation.response?.failedCount ?? 0) > 0) {
-    return { status: 'failed', message: `The release command failed: ${operation.error?.message ?? 'see hv_logs for the job output'}. No service was switched.` };
-  }
-  return { status: 'released', message: 'The release command finished successfully.' };
+  const environments = new EnvironmentRepository();
+  const binding = (): EngineBinding => ((environments.findById(context.environment.id) ?? context.environment).platformBindings as { engine?: EngineBinding }).engine ?? {};
+  return runCloudRunJobOnce(() => context.adapter.engineAccessToken(), context, job, build.imageUri, binding().releaseRun, (next) => {
+    const { releaseRun: _previous, ...rest } = binding();
+    environments.updatePlatformBindings(context.environment.id, { engine: { ...rest, ...(next ? { releaseRun: next } : {}) } });
+  });
 }
 
 async function releaseOne(

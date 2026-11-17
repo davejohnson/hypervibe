@@ -138,6 +138,114 @@ export function startCloudRunJob(token: string, target: CloudRunTarget, job: str
   });
 }
 
+/** A job run Hypervibe started and has not yet seen finish. Saved before the start so a retry never starts a second one blindly. */
+export interface PendingJobRun { image: string; startedAt: string; execution?: string }
+
+interface JobExecution { name?: string; createTime?: string; completionTime?: string; succeededCount?: number; failedCount?: number; cancelledCount?: number; template?: { containers?: Array<{ image?: string }> } }
+type JobRunResult = { status: 'released' | 'failed' | 'unknown'; message: string };
+
+const executionSucceeded = (execution: JobExecution): boolean =>
+  (execution.succeededCount ?? 0) > 0 && !(execution.failedCount ?? 0) && !(execution.cancelledCount ?? 0);
+
+/** A start is not always listed at once; within this window "not listed" does not mean "never started". */
+const START_VISIBILITY_MS = 2 * 60_000;
+
+/**
+ * Runs a one-off job (the release command) at most once per start Hypervibe makes.
+ * The pending record is saved before the start request and cleared only after the
+ * run was seen to finish. A retry first reconciles that record: it waits on a run
+ * that is still going, accepts one that already succeeded, and starts again only
+ * after a confirmed failure or a confirmed absence. An unreadable run starts nothing.
+ */
+export async function runCloudRunJobOnce(
+  token: () => Promise<string>, target: CloudRunTarget, job: string, imageUri: string,
+  pending: PendingJobRun | undefined, save: (next: PendingJobRun | undefined) => void,
+  options: { pollMs?: number; deadlineMs?: number; now?: () => number } = {},
+): Promise<JobRunResult> {
+  const now = options.now ?? Date.now;
+  const pollMs = options.pollMs ?? 5000;
+  const deadline = Date.now() + (options.deadlineMs ?? 30 * 60_000);
+  const jobUrl = `${API}/projects/${target.gcpProjectId}/locations/${target.region}/jobs/${job}`;
+  const stillRunning: JobRunResult = { status: 'unknown', message: 'The release command is still running. Run hv_deploy again to keep waiting; it will not start a second run. No service was switched.' };
+  const unreadable: JobRunResult = { status: 'unknown', message: 'An earlier release command run could not be read, so nothing was started. Run hv_deploy again; it checks that run before starting another. No service was switched.' };
+  const read = async (url: string): Promise<Record<string, unknown> | undefined> => {
+    try {
+      const response = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${await token()}` } });
+      return response.ok ? await response.json() as Record<string, unknown> : undefined;
+    } catch { return undefined; }
+  };
+  const finish = (execution: JobExecution, adopted: boolean): JobRunResult => {
+    save(undefined);
+    return executionSucceeded(execution)
+      ? { status: 'released', message: adopted ? 'The release command already finished successfully for this image; it was not run again.' : 'The release command finished successfully.' }
+      : { status: 'failed', message: 'The release command failed: see hv_logs for the job output. No service was switched.' };
+  };
+  const waitFor = async (name: string, adopted: boolean): Promise<JobRunResult> => {
+    for (;;) {
+      const execution = await read(`${API}/${name}`) as JobExecution | undefined;
+      if (execution?.completionTime) return finish(execution, adopted);
+      if (Date.now() >= deadline) return execution ? stillRunning : unreadable;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  };
+
+  if (pending && pending.image === imageUri) {
+    let name = pending.execution;
+    if (!name) {
+      // The start response was lost: find the run that request created, if any.
+      const since = Date.parse(pending.startedAt) - 60_000;
+      const found: JobExecution[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; page < 10; page++) {
+        const listed = await read(`${jobUrl}/executions?pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`) as { executions?: JobExecution[]; nextPageToken?: string } | undefined;
+        if (!listed) return unreadable;
+        found.push(...(listed.executions ?? []));
+        pageToken = listed.nextPageToken;
+        if (!pageToken) break;
+      }
+      if (pageToken) return unreadable;
+      name = found.filter((execution) => execution.template?.containers?.[0]?.image === imageUri && Date.parse(execution.createTime ?? '') >= since)
+        .sort((a, b) => Date.parse(b.createTime!) - Date.parse(a.createTime!))[0]?.name;
+      if (!name && now() - Date.parse(pending.startedAt) < START_VISIBILITY_MS) {
+        return { status: 'unknown', message: 'A release command was started moments ago and is not visible in Cloud Run yet, so nothing was started. Run hv_deploy again in a couple of minutes. No service was switched.' };
+      }
+    }
+    if (name) {
+      const execution = await read(`${API}/${name}`) as JobExecution | undefined;
+      if (!execution) return unreadable;
+      if (!execution.completionTime) { save({ ...pending, execution: name }); return waitFor(name, true); }
+      if (executionSucceeded(execution)) return finish(execution, true);
+      // The recorded run failed: a new run is the user's retry.
+    }
+  }
+
+  const record: PendingJobRun = { image: imageUri, startedAt: new Date(now()).toISOString() };
+  save(record);
+  let started: Response;
+  try {
+    started = await startCloudRunJob(await token(), target, job);
+  } catch {
+    return { status: 'unknown', message: 'Starting the release command had an unknown outcome. Run hv_deploy again: it looks for that run before starting another. No service was switched.' };
+  }
+  if (!started.ok) {
+    save(undefined);
+    return { status: 'failed', message: `The release command could not start (HTTP ${started.status}): ${await googleErrorMessage(started)}` };
+  }
+  let operation = await started.json() as { name?: string; done?: boolean; error?: { message?: string }; metadata?: { name?: string }; response?: { succeededCount?: number; failedCount?: number } };
+  if (operation.metadata?.name) save({ ...record, execution: operation.metadata.name });
+  while (!operation.done && operation.name && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const polled = await readCloudRunOperation(await token(), operation.name).catch(() => undefined);
+    if (polled?.ok) operation = { ...await polled.json() as typeof operation, metadata: operation.metadata };
+  }
+  if (!operation.done) return stillRunning;
+  save(undefined);
+  if (operation.error || (operation.response?.failedCount ?? 0) > 0) {
+    return { status: 'failed', message: `The release command failed: ${operation.error?.message ?? 'see hv_logs for the job output'}. No service was switched.` };
+  }
+  return { status: 'released', message: 'The release command finished successfully.' };
+}
+
 /** Reads a long-running operation by its full name. */
 export function readCloudRunOperation(token: string, operationName: string): Promise<Response> {
   return fetchWithRetry(`${API}/${operationName}`, { headers: { Authorization: `Bearer ${token}` } });

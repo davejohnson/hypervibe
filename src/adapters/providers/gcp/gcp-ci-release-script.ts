@@ -35,6 +35,18 @@ const running = isJob ? after.template?.template?.containers?.[0]?.image : after
 if (running !== image || (!isJob && after.latestReadyRevision !== after.latestCreatedRevision)) throw new Error('The new image is not active.');
 // A release command (migrations) runs now on the new image and must succeed before any service is switched.
 if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
+  // A run of this exact image that is still going (an earlier attempt of this workflow) is waited on, never doubled.
+  const listed = await call(base + '/executions?pageSize=100');
+  if (!listed.ok) throw new Error('Earlier release command runs could not be read (HTTP ' + listed.status + '), so nothing was started. Re-run this workflow. No service was switched.');
+  const going = ((await listed.json()).executions ?? []).find((e) => !e.completionTime && e.template?.containers?.[0]?.image === image);
+  if (going) {
+    let execution = going;
+    for (let i = 0; i < 360 && !execution.completionTime; i++) { await new Promise((r) => setTimeout(r, Number(process.env.HYPERVIBE_POLL_MS ?? 5000))); const polled = await call('https://run.googleapis.com/v2/' + going.name); if (polled.ok) execution = await polled.json(); }
+    if (!execution.completionTime) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
+    if (!(execution.succeededCount > 0) || execution.failedCount > 0 || execution.cancelledCount > 0) throw new Error('The release command failed: see the job logs in Cloud Run. No service was switched.');
+    console.log('Release command (already running) finished on ' + image);
+    process.exit(0);
+  }
   const started = await call(base + ':run', { method: 'POST', body: '{}' });
   if (!started.ok) throw new Error('The release command could not start (HTTP ' + started.status + '): ' + ((await started.json().catch(() => ({}))).error?.message ?? 'no details') + '. No service was switched.');
   let run = await started.json();

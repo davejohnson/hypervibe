@@ -438,7 +438,8 @@ function addScheduledJob(
     template: [{
       template: [{
         service_account: service.runtimeServiceAccountEmail,
-        max_retries: 1,
+        // A one-off release command (migrations) is never re-run by Cloud Run itself; a scheduled job keeps one retry.
+        max_retries: key === RELEASE_JOB_KEY ? 0 : 1,
         timeout: '3600s',
         containers: [container],
         ...(template.volumes ? { volumes: template.volumes } : {}),
