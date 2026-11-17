@@ -13,8 +13,8 @@ import { requestingAgent } from './requesting-agent.js';
 
 /**
  * Where an OpenTofu-managed environment keeps its runtime settings: Google
- * Secret Manager on GCP, Parameter Store on AWS, Key Vault on Azure. Values only ever go in; the
- * store reports presence, never contents.
+ * Secret Manager on GCP, Parameter Store on AWS, Key Vault on Azure. Observation
+ * reports presence; only the owner's local reveal page may read a value.
  */
 export interface EngineSecretStore {
   /** "Google Secret Manager", "AWS Parameter Store", "Azure Key Vault" */
@@ -25,7 +25,7 @@ export interface EngineSecretStore {
   /**
    * Reads one value for the owner's local page (revealGeneratedSecret) and for
    * nothing else. Callers must never log it or put it in a command result.
-   * Absent on clouds where this is not implemented yet.
+   * Optional for stores that do not support owner reveal.
    */
   read?(key: string): Promise<{ value: string } | { error: string }>;
 }
@@ -61,6 +61,17 @@ export const isBuildTokenKey = (key: string): boolean => (BUILD_TOKEN_KEYS as re
 /** The package token this environment declares, if any. */
 export function buildTokenKey(spec: ProjectSpec, environmentName: string): string | undefined {
   return engineOutsideKeys(spec, environmentName).find(isBuildTokenKey);
+}
+
+/** Resolves only a declared, present build token. Unknown access and required absence stop the build. */
+export async function presentBuildTokenKey(spec: ProjectSpec, environmentName: string, observe: EngineSecretStore['observe']): Promise<{ key?: string } | { error: string }> {
+  for (const key of engineOutsideKeys(spec, environmentName).filter(isBuildTokenKey)) {
+    const state = await observe(key);
+    if (typeof state === 'object') return { error: state.unknown };
+    if (state === 'present') return { key };
+    if (!optionalOutsideKeys(spec, environmentName).includes(key)) return { error: `Build token ${key} is not stored. Run hv_secrets to supply it before building.` };
+  }
+  return {};
 }
 
 /** The outside keys with no value yet; unknown stops everything rather than guessing absence. */

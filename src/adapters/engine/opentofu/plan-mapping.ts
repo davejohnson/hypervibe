@@ -163,7 +163,7 @@ export function translateEnginePlan(params: {
       ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
       ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace') ? { billable: true } : {}),
       // Replacing, deleting or adopting anything is never implied by approving the plan as a whole.
-      ...(destructive || adopting || majorUpgrade ? { requiresConfirm: true } : {}),
+      ...(destructive || adopting || majorUpgrade || (type !== 'noop' && mapping.requiresConfirm) ? { requiresConfirm: true } : {}),
       ...(type === 'noop' ? {} : {
         metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}), ...(majorUpgrade ? { engineMajorUpgrade: true } : {}) },
       }),

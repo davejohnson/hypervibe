@@ -40,10 +40,28 @@ describe('hv_launch on AWS and Azure', () => {
 
   it.each(['aws', 'azure'] as const)('refuses %s environments it cannot finish before connecting anything', async (provider) => {
     await expect(launch(provider, 'staging')).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/production profile/) });
-    await expect(launch(provider, 'dev', { deploy: { strategy: 'branch' } })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/GitHub Actions/) });
+    await expect(launch(provider, 'dev', { deploy: { strategy: 'branch' } })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/gitRemoteUrl/) });
     expect(connectAzure).not.toHaveBeenCalled();
     expect(connectAws).not.toHaveBeenCalled();
     expect(gcpBootstrap).not.toHaveBeenCalled();
+  });
+
+  it.each(['aws', 'azure'] as const)('refuses private %s branch health before access setup', async (provider) => {
+    await expect(launch(provider, 'dev', { deploy: { strategy: 'branch' }, services: { web: { workloadKind: 'web', public: false } } }))
+      .resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/Private web CI/) });
+    expect(connectAzure).not.toHaveBeenCalled(); expect(connectAws).not.toHaveBeenCalled();
+  });
+  it.each(['aws', 'azure'] as const)('refuses %s branch release commands before access setup', async (provider) => {
+    await expect(launch(provider, 'dev', { deploy: { strategy: 'branch' }, services: { web: { releaseCommand: 'npm run migrate' } } }))
+      .resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/Release-command migrations/) });
+    expect(connectAzure).not.toHaveBeenCalled(); expect(connectAws).not.toHaveBeenCalled();
+  });
+
+  it('refuses different AWS web commands before access setup', async () => {
+    await expect(launch('aws', 'dev', { deploy: { strategy: 'branch' }, services: {
+      api: { workloadKind: 'web', startCommand: 'node api.js' }, admin: { workloadKind: 'web', startCommand: 'node admin.js' },
+    } })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/different web start commands/) });
+    expect(connectAws).not.toHaveBeenCalled();
   });
 
   it('connects Azure through its own sign-in and stops at each choice the person makes', async () => {

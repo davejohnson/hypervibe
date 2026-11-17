@@ -1,3 +1,5 @@
+import { AwsEngineAdapter } from '../aws/aws-engine.adapter.js';
+import { AzureEngineAdapter } from '../azure/azure-engine.adapter.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../application/providers.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -12,6 +14,8 @@ import { GitHubAdapter } from '../github/github.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 
 const deploymentAdapterPrototypes = new Map<string, unknown>([
+  ['aws', AwsEngineAdapter.prototype],
+  ['azure', AzureEngineAdapter.prototype],
   ['railway', RailwayAdapter.prototype],
   ['cloudrun', CloudRunAdapter.prototype],
   ['github', GitHubAdapter.prototype],
