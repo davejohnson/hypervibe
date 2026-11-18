@@ -167,7 +167,7 @@ live('GCP engine disposable environment fixture', () => {
       if (!savedSpec) throw new Error('The prepared project has no readable desired state; existing environments cannot be preserved.');
       const original = JSON.parse(savedSpec.document);
       if (!original.environments || original.project !== projectName) throw new Error('The prepared project specification is invalid.');
-      await cli(['spec', 'set'], { project: projectName, replace: true, spec: { ...original,
+      await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
         runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
         environments: { ...original.environments, [environmentName]: { hosting: { provider: 'cloudrun', region },
           services: revision === 'absent' ? {} : { web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true } },

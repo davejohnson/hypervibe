@@ -155,6 +155,18 @@ describe('Azure engine backend', () => {
 
 
 describe('Azure private package build task', () => {
+  it('writes no empty resource block when an environment needs no build resources', () => {
+    // OpenTofu 1.13.9 init, observed live 2026-11-18: 'builds.tf.json line 2: "resource": {} ... Missing block label.
+    // At least one object property is required'. A block with nothing in it blocks every plan of a manual-deploy environment.
+    const config = buildAzureBuildConfiguration(fullEnvironmentInput);
+    for (const [name, file] of Object.entries(config.files)) {
+      for (const [block, body] of Object.entries(file as Record<string, unknown>)) {
+        expect(Object.keys(body as object).length, `${name} ${block}`).toBeGreaterThan(0);
+      }
+    }
+    expect(config.resources).toEqual({});
+  });
+
   it('applies a separate identity with secret-scoped read access and keeps tokens out of runtime', () => {
     const input = { ...fullEnvironmentInput, packageTokenKey: 'NODE_AUTH_TOKEN', secretKeys: ['NODE_AUTH_TOKEN', 'NPM_TOKEN', 'API_KEY'] };
     const config = buildAzureBuildConfiguration(input);
