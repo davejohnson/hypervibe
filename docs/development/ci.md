@@ -124,6 +124,17 @@ classic protection. Ruleset writes are covered by reconstructed responses in
 ordinary tests; only the read path and a no-change plan were run against a real
 repository.
 
+## Google Cloud release identity
+
+The project-shared OpenTofu plan grants the release account `roles/run.developer`
+and `roles/artifactregistry.writer` in the Google Cloud project. It grants
+`roles/iam.serviceAccountUser` on the runtime service account and
+`roles/iam.workloadIdentityUser` on the release account to the named GitHub
+repository's numeric identity. Review the complete list of environment,
+workflow, branch and triggering-event combinations in the access preview.
+Production defaults to manual dispatch. GitHub environment protection rules
+apply to the release job. No credential is retired during this setup.
+
 ## Execution authority and rollback
 
 Observe the effective privileged CI configuration, including imports, and the

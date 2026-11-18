@@ -163,7 +163,7 @@ export interface EngineBinding {
   /** Non-secret credential metadata bound to an acknowledged exact Secret Manager version. */
   secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
   /** Keyless CI release trust granted for this exact repository. */
-  ci?: { repository: string; provider: string; releaseIdentity: string };
+  ci?: { repository: string; trust?: string; provider: string; releaseIdentity: string };
   /** Current copy evidence is cleared before replacement; prior evidence is historical only. */
   migration?: MigrationCopyEvidence & {
     from: string;

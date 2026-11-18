@@ -15,10 +15,19 @@ describe('keyless release workflow', () => {
   const parsed = YAML.parse(workflow);
 
   it('authenticates through OIDC with no stored secret', () => {
+    expect(parsed.jobs.release.environment).toBe('staging');
     expect(parsed.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
     expect(workflow).not.toMatch(/secrets\./);
     const auth = parsed.jobs.release.steps.find((step: { uses?: string }) => step.uses?.startsWith('google-github-actions/auth'));
     expect(auth.with.workload_identity_provider).toContain('workloadIdentityPools/hypervibe-github');
+  });
+
+  it('keeps production dispatch-only and binds the job to the protected production environment and reviewed ref', () => {
+    const workflow = YAML.parse(renderReleaseWorkflow({ environmentName: 'production', branch: 'release', gcpProjectId: 'demo-project', region: 'us-central1',
+      provider: 'projects/123/locations/global/workloadIdentityPools/p/providers/g', releaseIdentity: 'release@demo-project.iam.gserviceaccount.com', services: [] }));
+    expect(workflow.on).toEqual({ workflow_dispatch: {} });
+    expect(workflow.jobs.release.environment).toBe('production');
+    expect(workflow.jobs.release.if).toContain('refs/heads/release');
   });
 
   // #557: only a service whose health path was declared gets the strict rule in its release step.

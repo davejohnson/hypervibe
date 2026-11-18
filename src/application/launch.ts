@@ -1,3 +1,6 @@
+import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
+import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { createHash } from 'node:crypto';
 import { strictHealthCheck } from '../domain/services/release-health.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
@@ -539,19 +542,32 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const binding = (environment.platformBindings as { engine?: EngineBinding; services?: Record<string, { serviceId?: string }> });
   let ci = binding.engine?.ci;
-  if (ci?.repository !== repository) {
+  const github = getGitHubAdapter(repository);
+  if ('error' in github) return { status: 'blocked', message: github.error };
+  const [owner, repo] = repository.split('/');
+  const observed = await github.adapter.getRepository(owner!, repo!).catch(() => undefined);
+  if (!observed || observed.full_name?.toLowerCase() !== repository.toLowerCase() || !Number.isSafeInteger(observed.id) || observed.id! <= 0) {
+    return { status: 'blocked', message: 'GitHub could not verify the exact repository identity for CI access.' };
+  }
+  const repositoryId = String(observed.id);
+  const releases = Object.entries(params.spec.environments).filter(([, env]) => env.hosting.provider === 'cloudrun' && env.deploy?.strategy === 'branch')
+    .sort(([a], [b]) => a.localeCompare(b)).map(([environmentName, env]) => ({
+      environmentName, branch: env.deploy!.branch ?? 'main', autoDeploy: effectiveBranchCiAutoDeploy(environmentName, env.deploy!.autoDeploy),
+    }));
+  const trust = createHash('sha256').update(JSON.stringify([repositoryId, repository, releases])).digest('hex');
+  if (!ci || ci.trust !== trust) {
     try {
       const confirm = params.approveAccess?.includes('ci-release') === true;
       const granted = await grantCiReleaseAccess({
-        projectId: params.project.id, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository,
+        projectId: params.project.id, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository: observed.full_name!, repositoryId, releases,
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, confirm,
       });
       if (!confirm) return {
         status: 'needs_access', accessId: 'ci-release',
         access: `Let GitHub Actions in ${repository} push images and release this app without storing a key in GitHub.`,
-        grants: { ...previewCiReleaseAccess(context.gcpProjectId, repository, context.runtimeServiceAccountEmail), planId: granted.planId, actions: granted.actions },
+        grants: { ...previewCiReleaseAccess(context.gcpProjectId, observed.full_name!, context.runtimeServiceAccountEmail, releases), planId: granted.planId, actions: granted.actions },
       };
-      ci = { repository, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
+      ci = { repository, trust, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
     } catch (error) {
       return { status: 'blocked', message: error instanceof Error ? error.message : String(error) };
     }
@@ -569,7 +585,7 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const releaseCommand = ciReleaseCommand(environmentSpec, binding.engine?.releaseJob, services);
   if (releaseCommand && 'blocked' in releaseCommand) return { status: 'blocked', message: releaseCommand.blocked };
   const content = renderReleaseWorkflow({
-    environmentName: params.environmentName, branch, gcpProjectId: context.gcpProjectId, region: context.region,
+    environmentName: params.environmentName, branch, autoDeploy: environmentSpec.deploy?.autoDeploy, gcpProjectId: context.gcpProjectId, region: context.region,
     provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,
     ...(packageTokenSecret ? { packageTokenSecret } : {}),
     ...(releaseCommand ? { releaseCommand } : {}),
