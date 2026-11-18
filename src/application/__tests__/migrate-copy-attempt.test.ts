@@ -12,11 +12,14 @@ import * as launch from '../launch.js';
 import * as engine from '../infrastructure-engine.js';
 import * as transfer from '../migration-transfer-gcp.js';
 import { migrateEnvironment } from '../migrate.js';
+import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
+import * as readiness from '../migration-cutover-readiness.js';
+import * as commands from '../commands.js';
 
 const oldCopiedAt = '2026-11-01T00:00:00.000Z';
 const manifest = { tables: { 'public.invoices': '1:42' }, totalRows: '1', version: '160000' };
 const successfulDatabase = { ok: true, source: manifest, target: manifest, restoreWarnings: 0 };
-const successfulStorage = { ok: true, source: { count: 2, bytes: 40 }, target: { count: 2, bytes: 40 }, differences: 0 };
+const successfulStorage = { ok: true, comparison: 'download', source: { count: 2, bytes: 40 }, target: { count: 2, bytes: 40 }, differences: 0 };
 
 let directory: string;
 beforeEach(() => {
@@ -50,7 +53,10 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture(kind: 'database' | 'files' | 'both') {
+function fixture(kind: 'database' | 'files' | 'both', worker: 'simulated' | 'current' = 'simulated') {
+  // State-machine cases use a transport that accepts the fixture's synthetic inputs.
+  // The credential-admission cases below exercise the installed worker's real capability.
+  if (worker === 'simulated') vi.spyOn(transfer, 'transferCredentialHandoffProblem').mockReturnValue(undefined);
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'copy-attempt', defaultPlatform: 'railway' });
   const hasDatabase = kind !== 'files';
@@ -61,7 +67,7 @@ function fixture(kind: 'database' | 'files' | 'both') {
     ...(hasFiles ? { storage: { files: { provider: 's3', externalId: 'source-files', instanceScope: { accountId: 'fixture', region: 'us-east-1' } } } } : {}),
   } });
   const target = ctx.repos.environments.create({ projectId: project.id, name: 'target', platformBindings: { engine: {
-    kind: 'opentofu', importedSecrets: [], database: { instanceName: 'target-db' },
+    kind: 'opentofu', importedSecrets: [], database: { instanceName: 'target-db' }, storage: hasFiles ? ['files'] : [],
     migration: { from: 'source', sourceMajor: 16, copiedAt: oldCopiedAt, ...(hasDatabase ? { database } : {}), storage },
   } } });
   new SpecStore().replace(project, { version: 1, project: project.name, environments: {
@@ -128,30 +134,47 @@ describe('copy evidence preservation', () => {
     expect(transfer.runTransferJob).not.toHaveBeenCalled();
   });
 
-  it('does not let an older completion overwrite a newer failed attempt', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-11-12T20:00:00.000Z'));
+  it('keeps an overlapping refresh out of the destination until its current copy finishes', async () => {
     const f = fixture('database');
-    let finishOlder!: (value: any) => void;
+    let finish!: (value: typeof successfulDatabase) => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     vi.mocked(transfer.runTransferJob).mockImplementationOnce(async () => {
       entered();
-      return await new Promise<any>((resolve) => { finishOlder = resolve; });
-    }).mockResolvedValueOnce({ ok: false, error: 'Newer copy failed' } as any);
-    const older = f.migrate({ copyData: true, refreshData: true });
+      return await new Promise<any>((resolve) => { finish = resolve; });
+    });
+    const original = f.migrate({ copyData: true, refreshData: true });
     await started;
-    const olderAttempt = f.current().copyAttempt!;
-    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked' });
-    const newer = structuredClone(f.current());
-    expect(newer.copyAttempt!.startedAt).toBe(olderAttempt.startedAt);
-    expect(newer.copyAttempt!.id).not.toBe(olderAttempt.id);
-    finishOlder(successfulDatabase);
-    await expect(older).resolves.toMatchObject({ status: 'blocked' });
-    expect(f.current()).toEqual(newer);
-    expect(f.current()).toMatchObject({ copyAttempt: { status: 'incomplete' }, previousCopy: { copiedAt: oldCopiedAt } });
-    expect(f.current()).not.toHaveProperty('copiedAt');
+    try {
+      expect(await f.migrate({ copyData: true, refreshData: true })).toMatchObject({ status: 'blocked' });
+      expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+    } finally {
+      finish(successfulDatabase);
+      await original;
+    }
+    expect(f.current().copyAttempt?.status).toBe('complete');
+  });
+
+  it('requires native cleanup evidence before retrying an interrupted job in a new invocation', async () => {
+    const f = fixture('database');
+    const resources = { gcpProjectId: 'fixture-project', region: 'us-central1', jobId: 'hv-migrate-database-abc123', secretIds: [] };
+    vi.mocked(transfer.runTransferJob).mockImplementationOnce(async (context) => {
+      await context.recordTransferResources!(resources);
+      throw new Error('Controller disconnected with a native execution pending');
+    });
+    await expect(f.migrate({ copyData: true, refreshData: true })).rejects.toThrow('Controller disconnected');
+    const observe = vi.spyOn(transfer, 'verifyTransferResourcesAbsent').mockResolvedValue(false);
+    const recover = vi.spyOn(transfer, 'recoverTerminalTransferResources').mockResolvedValue(false);
+    for (const options of [{ copyData: true, refreshData: true }, { cutover: true, confirmCutover: true }]) {
+      await expect(f.migrate(options)).resolves.toMatchObject({ status: 'blocked', message: expect.stringContaining('previous transfer') });
+    }
+    expect(observe).toHaveBeenCalledWith(expect.objectContaining({ gcpProjectId: 'fixture-project' }), resources);
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
     expect(f.releaseCalls()).toHaveLength(0);
+    expect(recover).toHaveBeenCalledTimes(1);
+    recover.mockResolvedValue(true);
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'migrated' });
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(2);
   });
 
   it('does not touch target data when the incomplete attempt cannot be persisted', async () => {
@@ -163,7 +186,7 @@ describe('copy evidence preservation', () => {
     expect(f.releaseCalls()).toHaveLength(0);
   });
 
-  it.each(['infrastructure', 'release'] as const)('rechecks copy evidence after awaiting %s', async (pauseAt) => {
+  it.each(['infrastructure', 'release'] as const)('prevents refresh from rewriting data during %s of a reused release', async (pauseAt) => {
     const f = fixture('database');
     let resume!: () => void;
     let entered!: () => void;
@@ -179,12 +202,14 @@ describe('copy evidence preservation', () => {
     });
     const older = f.migrate();
     await waiting;
-    vi.mocked(transfer.runTransferJob).mockResolvedValue({ ok: false, error: 'New copy failed' } as any);
-    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked' });
-    resume();
-    await expect(older).resolves.toMatchObject({ status: 'blocked' });
-    if (pauseAt === 'infrastructure') expect(f.releaseCalls()).toHaveLength(0);
-    expect(f.current()).not.toHaveProperty('copiedAt');
+    try {
+      await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked' });
+      expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    } finally {
+      resume();
+    }
+    await expect(older).resolves.toMatchObject({ status: 'migrated', dataCopiedAt: oldCopiedAt });
+    expect(f.current().copiedAt).toBe(oldCopiedAt);
   });
 
   it('cannot turn a changed completion snapshot into copy authority', async () => {
@@ -222,5 +247,207 @@ describe('copy evidence preservation', () => {
       ? { status: 'ready', stage: params.stopAfter } as any : { status: 'live', urls: {} } as any);
     await expect(f.migrate()).resolves.toMatchObject({ status: 'migrated', dataCopiedAt: completed.copiedAt });
     expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('all declared application buckets are required', () => {
+  it.each(['source binding', 'source scope', 'target declaration', 'target binding', 'source credentials'] as const)('stops before replacing the database when the %s is missing', async (missing) => {
+    const f = fixture('both');
+    const store = new SpecStore();
+    const spec = store.get(f.project)!.spec;
+    const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'source')!;
+    if (missing === 'source binding') f.ctx.repos.environments.updatePlatformBindings(source.id, { storage: {} });
+    if (missing === 'source scope') f.ctx.repos.environments.updatePlatformBindings(source.id, {
+      storage: { files: { provider: 's3', externalId: 'source-files', instanceScope: {} } },
+    });
+    if (missing === 'target declaration') {
+      delete spec.environments.target!.storage!.files;
+      store.replace(f.project, spec);
+    }
+    if (missing === 'target binding') f.ctx.repos.environments.updatePlatformBindings(f.target.id, {
+      engine: { ...f.target.platformBindings.engine as engine.EngineBinding, storage: [] },
+    });
+    if (missing === 'source credentials') vi.mocked(adapterFactory.getStorageAdapter).mockResolvedValue({ success: false, error: 'unavailable' } as any);
+
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringContaining('files') });
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    expect(f.releaseCalls()).toHaveLength(0);
+    expect(f.current().copiedAt).toBe(oldCopiedAt);
+    await expect(f.migrate({ verifyOnly: true })).resolves.toMatchObject({ status: 'blocked' });
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+  });
+
+  it('stops before copying when the source binding changes during target preparation', async () => {
+    const f = fixture('both');
+    const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'source')!;
+    vi.mocked(launch.launchEnvironment).mockImplementation(async (_ctx, params) => {
+      if (params.stopAfter === 'infrastructure') f.ctx.repos.environments.updatePlatformBindings(source.id, { storage: {} });
+      return params.stopAfter ? { status: 'ready', stage: params.stopAfter } as any : { status: 'live', urls: {} } as any;
+    });
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked' });
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+  });
+
+  it('keeps target-only and backup buckets outside the copy', async () => {
+    const f = fixture('files');
+    const store = new SpecStore();
+    const spec = store.get(f.project)!.spec;
+    const files = spec.environments.source!.storage!.files!;
+    spec.environments.source!.storage!.backups = { ...files, purpose: 'backup' };
+    spec.environments.target!.storage!.independent = { ...spec.environments.target!.storage!.files! };
+    store.replace(f.project, spec);
+    const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'source')!;
+    const tracked = source.platformBindings.storage as Record<string, unknown>;
+    f.ctx.repos.environments.updatePlatformBindings(source.id, { storage: { ...tracked, independent: tracked.files } });
+    await expect(f.migrate({ refreshData: true })).resolves.toMatchObject({ status: 'needs_copy_approval', storage: ['files'] });
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'migrated', storage: [{ name: 'files' }] });
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot report a verified comparison after another copy starts', async () => {
+    const f = fixture('files');
+    vi.mocked(transfer.runTransferJob).mockImplementation(async () => {
+      const binding = f.ctx.repos.environments.findById(f.target.id)!.platformBindings.engine as engine.EngineBinding;
+      f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: { ...binding, migration: {
+        from: 'source', copyAttempt: { id: 'newer', startedAt: new Date().toISOString(), status: 'incomplete' },
+      } } });
+      return successfulStorage as any;
+    });
+    await expect(f.migrate({ verifyOnly: true })).resolves.toMatchObject({ status: 'blocked' });
+  });
+
+  it('refuses to release or cut over using an older file count receipt', async () => {
+    const f = fixture('files');
+    await expect(f.migrate()).resolves.toMatchObject({ status: 'blocked', message: expect.stringContaining('refreshData=true') });
+    await expect(f.migrate({ cutover: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringContaining('refreshData=true') });
+    expect(f.releaseCalls()).toHaveLength(0);
+  });
+
+  it('checks the exact native bucket when reusing a completed copy', async () => {
+    const f = fixture('files');
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'migrated' });
+    const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'source')!;
+    f.ctx.repos.environments.updatePlatformBindings(source.id, { storage: { files: {
+      provider: 's3', externalId: 'different-bucket', instanceScope: { accountId: 'fixture', region: 'us-east-1' },
+    } } });
+    await expect(f.migrate()).resolves.toMatchObject({ status: 'blocked' });
+    expect(f.releaseCalls()).toHaveLength(1);
+  });
+
+  it.each([
+    { ok: true, differences: 0 },
+    { ok: true, comparison: 'download', source: { bytes: 40 }, target: { bytes: 40 }, differences: 0 },
+    { ok: true, comparison: 'download', source: { count: 2, bytes: 40 }, target: { count: 2, bytes: 41 }, differences: 0 },
+  ])('refuses incomplete or conflicting inventories in both copy and verification', async (result) => {
+    const f = fixture('files');
+    vi.mocked(transfer.runTransferJob).mockResolvedValue(result as any);
+    const checked = await f.migrate({ verifyOnly: true });
+    expect(['blocked', 'differs']).toContain(checked.status);
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked' });
+    expect(f.releaseCalls()).toHaveLength(0);
+  });
+});
+
+describe('current source credential handoff', () => {
+  function railwayFixture() {
+    const f = fixture('database', 'current');
+    const store = new SpecStore();
+    store.merge(f.project, { environments: {
+      source: { database: { provider: 'railway' } },
+      target: { services: { web: { workloadKind: 'web', public: true } } },
+    } });
+    const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'source')!;
+    const scope = { projectId: 'railway-project', environmentId: 'railway-env' };
+    f.ctx.repos.environments.updatePlatformBindings(source.id, scope);
+    f.ctx.repos.components.create({ environmentId: source.id, type: 'postgres', externalId: 'source-postgres',
+      bindings: { provider: 'railway', providerScope: scope } });
+    const runPrivateTask = vi.fn(async ({ command }: { command: string }) => ({
+      exitCode: 0, output: command.includes('HV_SERVER_VERSION') ? 'HV_SERVER_VERSION 160000'
+        : 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: true, source: manifest, sourceIdentity: '42:123' }),
+    }));
+    const adapter = Object.assign(Object.create(RailwayAdapter.prototype), {
+      serviceName: async () => 'source-postgres', runPrivateTask, lastPrivateTaskCleanup: true,
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter } as any);
+    vi.spyOn(transfer, 'signedObjectUrl').mockReturnValue('https://fixture.invalid/private-dump');
+    vi.mocked(engine.resolveEngineContext).mockResolvedValue({
+      environment: f.target, gcpProjectId: 'fixture-project', region: 'us-central1', adapter: {
+        engineAccessToken: async () => 'fixture', engineConnection: () => ({ credentials: '{}' }),
+      },
+    } as any);
+    return { ...f, store, runPrivateTask };
+  }
+
+  it('stops before exporting a private Railway dump and keeps the previous receipt', async () => {
+    const f = railwayFixture();
+    vi.mocked(transfer.runTransferJob).mockRestore();
+    const result = await f.migrate({ copyData: true, refreshData: true });
+    expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(false);
+    expect(f.current().copiedAt).toBe(oldCopiedAt);
+    expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+    expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
+  });
+
+  it('keeps Railway serving when the final copy cannot receive its private inputs', async () => {
+    const f = railwayFixture();
+    vi.spyOn(readiness, 'migrationCutoverReadiness').mockResolvedValue({ domain: 'source.example.com', alreadyForwarding: false, problems: [] });
+    const registry = vi.spyOn(commands, 'createCommandRegistry').mockReturnValue({ get: () => ({
+      execute: async () => ({ ok: false, error: { message: 'Unexpected source pause' } }),
+    }) } as any);
+    const before = f.store.get(f.project)!.spec;
+    const result = await f.migrate({ cutover: true, confirmCutover: true });
+    expect(f.store.get(f.project)!.spec).toEqual(before);
+    expect(registry).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+  });
+
+  it('finishes target preparation and identifies an unavailable copy before asking for its approval', async () => {
+    const f = railwayFixture();
+    await expect(f.migrate({ refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+    expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
+    expect(f.current().copiedAt).toBe(oldCopiedAt);
+  });
+
+  it('uses the previously observed major for target preparation without starting a Railway service', async () => {
+    const f = railwayFixture();
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+    expect(f.runPrivateTask).not.toHaveBeenCalled();
+    expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
+  });
+
+  it('directs empty-target qualification to hv_launch when no observed source major is available', async () => {
+    const f = railwayFixture();
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: {
+      ...f.target.platformBindings.engine as engine.EngineBinding, migration: { from: 'source' },
+    } });
+    const result = await f.migrate();
+    expect(f.runPrivateTask).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/version.*hv_launch/i) });
+    expect(f.current()).toEqual({ from: 'source' });
+  });
+
+  it('can release a completed database copy without a new private handoff', async () => {
+    const f = railwayFixture();
+    await expect(f.migrate()).resolves.toMatchObject({ status: 'migrated', dataCopiedAt: oldCopiedAt });
+    expect(f.runPrivateTask).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+  });
+
+  it('stops verification before asking for bucket credentials that cannot reach the job', async () => {
+    const f = fixture('files', 'current');
+    await expect(f.migrate({ verifyOnly: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+    expect(adapterFactory.getStorageAdapter).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+  });
+
+  it('keeps a read-only Railway database comparison from launching unreviewed native tasks', async () => {
+    const f = railwayFixture();
+    const before = structuredClone(f.current());
+    const result = await f.migrate({ verifyOnly: true });
+    expect(f.runPrivateTask).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    expect(launch.launchEnvironment).not.toHaveBeenCalled();
+    expect(f.current()).toEqual(before);
+    expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/reviewed.*verification.*tasks/i) });
   });
 });

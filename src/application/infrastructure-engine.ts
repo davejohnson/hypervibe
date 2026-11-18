@@ -129,7 +129,7 @@ function labelValue(value: string): string {
 export interface MigrationCopyEvidence {
   copiedAt?: string;
   database?: { tables: number; rows: string; match: boolean; differences: string[]; restoreWarnings: number };
-  storage?: Array<{ name: string; files: number; bytes: number; match: boolean }>;
+  storage?: Array<{ name: string; files: number; bytes: number; match: boolean; downloadVerifiedFor?: string }>;
 }
 
 export interface EngineBinding {
@@ -168,6 +168,7 @@ export interface EngineBinding {
     from: string;
     sourceMajor?: number;
     copyAttempt?: { id: string; startedAt: string; status: 'incomplete' | 'complete' };
+    finalCopy?: import('./migration-cutover-readiness.js').FinalCopyReceipt;
     previousCopy?: MigrationCopyEvidence;
   };
 }

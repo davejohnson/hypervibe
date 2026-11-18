@@ -17,6 +17,8 @@ import * as engineSecrets from '../engine-secrets.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.js';
 import * as preparation from '../../domain/services/cloud-prepare.execute.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
+import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
+import { PlanService } from '../../domain/plan/plan.service.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 
 let directory: string;
@@ -203,12 +205,30 @@ describe('launch exact saved-plan approval', () => {
       gcp: { hosting: { provider: 'cloudrun' }, services: { web: {} } },
     } });
     new ProjectSpecRepository().insert(f.project.id, 2, spec);
-    const action: PlanAction = { id: 'maintenance:staging:route', type: 'update', resource: { kind: 'maintenance', name: 'staging', provider: 'railway' }, verified: true, requiresConfirm: true, reason: 'Reviewed traffic route' };
+    const domain = 'app.example.com';
+    const edge = { hostname: domain, accountId: 'account', zoneId: 'zone', routeId: 'route', scriptName: 'maintenance', contentHash: 'marker' };
+    const workloads = { web: { serviceId: 'web-id', workloadKind: 'web' } };
+    const updatedAt = '2026-01-01T00:00:00Z', copiedAt = '2026-01-01T00:01:00Z';
+    f.ctx.repos.environments.updatePlatformBindings(source.id, { maintenance: { mode: 'application', state: 'active', updatedAt, edge, workloads } });
+    f.ctx.repos.environments.updatePlatformBindings(target.id, { engine: { kind: 'opentofu', importedSecrets: [], migration: {
+      from: 'staging', copiedAt, copyAttempt: { id: 'final-attempt', startedAt: updatedAt, status: 'complete' }, storage: [],
+      finalCopy: { sourceEnvironmentId: source.id, targetEnvironmentId: target.id, domain, targetService: 'web', copiedAt, copyAttemptId: 'final-attempt',
+        pauseFingerprint: canonicalJsonSha256({ source: source.id, updatedAt, edge, workloads }), dataFingerprint: canonicalJsonSha256({ storage: [] }) },
+    } } });
+    const action: PlanAction = { id: 'maintenance:staging:traffic', type: 'update', resource: { kind: 'maintenance', name: domain, provider: 'cloudflare' },
+      verified: true, requiresConfirm: true, reason: 'Reviewed traffic route', metadata: { operation: 'maintenanceEdgeRoute', hostname: domain, targetEnvironment: 'gcp', targetService: 'web' } };
+    let routed = false;
+    vi.spyOn(PlanService.prototype, 'plan').mockImplementation(async () => ({ blocked: [], actions: [
+      { id: 'maintenance:staging:edge', type: 'noop', verified: true, resource: { kind: 'maintenance', name: domain, provider: 'cloudflare' },
+        metadata: { operation: 'maintenanceEdgeEnable', hostname: domain } },
+      { id: 'maintenance:staging:workload:web', type: 'noop', verified: true, resource: { kind: 'maintenance', name: 'web', provider: 'railway' },
+        metadata: { operation: 'maintenanceWorkloadSuspend', serviceId: 'web-id', workloadKind: 'web' } }, { ...action, type: routed ? 'noop' : 'update' },
+    ] } as never));
     const saved = f.ctx.repos.runs.create({ projectId: f.project.id, environmentId: source.id, type: 'plan', plan: {
       kind: 'hv_plan', scope: 'full', environmentName: 'staging', specRevision: 2, observedFingerprint: null, actions: [action],
     } });
     vi.spyOn(infrastructure, 'resolveEngineContext').mockResolvedValue({ environment: target, gcpProjectId: 'demo-project' } as infrastructure.EngineContext);
-    const sourceApply = vi.fn().mockResolvedValue({ ok: true, data: { applied: true } });
+    const sourceApply = vi.fn(async () => { routed = true; return { ok: true, data: { applied: true } }; });
     const sourcePlan = vi.fn().mockResolvedValue({ ok: true, data: { planId: 'subsequent-noop', actions: [] } });
     vi.spyOn(commandsModule, 'createCommandRegistry').mockReturnValue({ get: (name: string) => ({ execute: name === 'hv_apply' ? sourceApply : sourcePlan }) } as unknown as ReturnType<typeof commandsModule.createCommandRegistry>);
     const result = await migrateEnvironment(f.ctx, { project: f.project, from: 'staging', to: 'gcp', cutover: true, planId: saved.id, confirmActions: [action.id] });

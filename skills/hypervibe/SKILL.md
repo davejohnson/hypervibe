@@ -112,13 +112,20 @@ The worker then runs only while that count is above zero and starts within
 about a minute of new work. Keep a worker always on only when it must react
 instantly or does not use the app database.
 
-`hv_migrate` moves an app from another environment (for example Railway) to an
-OpenTofu-managed GCP environment and stops at the same points, plus
+`hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
+and bucket transfers require a planned private credential handoff that is still
+unavailable. A fresh comparison of private Railway and Cloud SQL databases also
+requires reviewed verification jobs. Historical receipts record what matched at
+the time of the copy. Report these limits before requesting a maintenance window.
+For supported operations the workflow also stops at
 `needs_secret_import` and `needs_copy_approval`. The source keeps serving.
 After a verified copy, a re-run releases without copying again; pass
 `refreshData=true` only after the user approves copying again, and
 `verifyOnly=true` to compare the source and the copy (row counts, per-table
-content checksums and file hashes) without changing anything. `hv_plan scope="infrastructure"`/`hv_apply` and
+content checksums and downloaded file contents). Copy and verification read the
+selected objects across providers, which can incur transfer charges. A previous
+file receipt without byte verification requires a reviewed refresh before release
+or cutover. `hv_plan scope="infrastructure"`/`hv_apply` and
 `hv_deploy` remain available for individual steps. Google Cloud, AWS and Azure
 always use the managed OpenTofu engine, and `hv_plan` routes to it by default;
 there is no engine setting, so never add one to a spec or ask the user about it.
