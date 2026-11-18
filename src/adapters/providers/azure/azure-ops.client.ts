@@ -203,6 +203,13 @@ export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: s
 /** The one firewall rule Hypervibe ever adds: this computer's address, only while it runs setup SQL. */
 export const AZURE_SETUP_RULE = 'hypervibe-setup';
 const POSTGRES_API = 'api-version=2024-08-01';
+/** A connection failure in a line: its code and message, or those of the first address tried. Connection errors carry no password. */
+function connectionAnswer(error: unknown): string {
+  const inner = error instanceof AggregateError && error.errors.length ? error.errors[0] : error;
+  const code = (error as { code?: unknown } | null)?.code ?? (inner as { code?: unknown } | null)?.code;
+  const message = (inner instanceof Error ? inner.message : '') || (error instanceof Error ? error.message : String(error));
+  return `${typeof code === 'string' ? `${code}: ` : ''}${message}`.slice(0, 300);
+}
 const blockedAddress = (error: unknown): string | undefined =>
   /no pg_hba\.conf entry for host "(\d{1,3}(?:\.\d{1,3}){3})"/.exec(error instanceof Error ? error.message : '')?.[1];
 
@@ -246,7 +253,7 @@ export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, server
     for (let attempt = 0; !address && !allowed; attempt++) {
       try { await probe(); allowed = true; } catch (error) {
         address = blockedAddress(error);
-        if (!address && attempt >= 11) throw new Error('Hypervibe could not learn which address Azure sees this computer as, so it did not open the database server to anything.');
+        if (!address && attempt >= 11) throw new Error(`Hypervibe could not learn which address Azure sees this computer as, so it did not open the database server to anything. Last answer: ${connectionAnswer(error)}`);
         if (!address) await wait();
       }
     }

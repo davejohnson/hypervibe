@@ -149,6 +149,18 @@ describe('Azure database setup access', () => {
     expect(state.access).toBe('Disabled');
   });
 
+  it('reports what the server answered when it cannot learn this computer\'s address', async () => {
+    // Live 2026-11-18 (West US 2): the address was never learned and the message gave no reason, so the cause could not be found.
+    const timedOut = server();
+    await expect(withAzureSetupAccess(timedOut.azure.tokens, serverId, async () => { throw Object.assign(new Error('connect ETIMEDOUT 20.1.2.3:5432'), { code: 'ETIMEDOUT' }); }, async () => 'never', 0))
+      .rejects.toThrow(/did not open the database server to anything\. Last answer: ETIMEDOUT: connect ETIMEDOUT 20\.1\.2\.3:5432/);
+    // Node reports several failed addresses as one error with an empty message.
+    const several = server();
+    const aggregate = Object.assign(new AggregateError([Object.assign(new Error('connect ETIMEDOUT 20.1.2.3:5432'), { code: 'ETIMEDOUT' })], ''), { code: 'ETIMEDOUT' });
+    await expect(withAzureSetupAccess(several.azure.tokens, serverId, async () => { throw aggregate; }, async () => 'never', 0)).rejects.toThrow(/Last answer: ETIMEDOUT: connect ETIMEDOUT 20\.1\.2\.3:5432/);
+    expect(several.state).toEqual({ access: 'Disabled', rule: undefined });
+  });
+
   it('says so when it cannot close the server, even though the work succeeded', async () => {
     const { azure, probe } = server({ failClose: true });
     await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'done', 0)).rejects.toThrow(/could not turn the database server's public access off again.*hv_plan/);
