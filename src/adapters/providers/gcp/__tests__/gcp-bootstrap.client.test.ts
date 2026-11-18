@@ -83,6 +83,7 @@ describe('GcpBootstrapClient', () => {
   it.each([
     [{}, 'absent'],
     [{ projects: [] }, 'absent'],
+    [{ projects: null, nextPageToken: null }, 'absent'],
     [{ projects: {} }, 'projects must be a list'],
     [{ projects: [{}] }, 'projectId is missing'],
   ] as const)('checks the search response before reporting project absence', async (response, expected) => {

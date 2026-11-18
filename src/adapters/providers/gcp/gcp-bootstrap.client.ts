@@ -182,7 +182,8 @@ export class GcpBootstrapClient {
       const search = this.asRecord(await this.requestJson(
         `${CLOUD_RESOURCE_MANAGER_BASE}/projects:search?${query}`, { method: 'GET' }, 'project search'
       ), 'GCP project search: response body must be an object.');
-      const projects = search.projects === undefined ? [] : search.projects;
+      // ProtoJSON treats null fields as omitted, including a repeated field.
+      const projects = search.projects ?? [];
       if (!Array.isArray(projects)) throw new Error('GCP project search: projects must be a list.');
       for (const project of projects) {
         const row = this.asRecord(project, 'GCP project search: each projects entry must be an object.');
@@ -191,7 +192,7 @@ export class GcpBootstrapClient {
         if (match) fields.reject('projects[].projectId', 'must match at most once');
         match = this.parseProject(row, projectId);
       }
-      if (search.nextPageToken === undefined || search.nextPageToken === '') return match;
+      if (search.nextPageToken == null || search.nextPageToken === '') return match;
       const token = fields.text('nextPageToken', search.nextPageToken);
       if (tokens.has(token)) fields.reject('nextPageToken', 'must not repeat');
       tokens.add(token);
