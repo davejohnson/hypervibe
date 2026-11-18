@@ -31,10 +31,10 @@ describe('GCP CI infrastructure ownership', () => {
     const condition = resources.google_iam_workload_identity_pool_provider.ci_github.attribute_condition;
     const claims = { repository: 'owner/app', repository_id: '1234', workflow_ref: 'owner/app/.github/workflows/hypervibe-release-production.yml@refs/heads/main',
       ref: 'refs/heads/main', environment: 'production', event_name: 'workflow_dispatch' };
-    const admits = (changes: Record<string, string>) => runInNewContext(condition, { assertion: { ...claims, ...changes } });
+    const admits = (changes: Partial<typeof claims>) => runInNewContext(condition, { assertion: { ...claims, ...changes } });
     expect(admits({})).toBe(true);
     for (const changed of [{ repository_id: '4321' }, { repository: 'owner/other' }, { ref: 'refs/heads/dev' }, { environment: 'staging' },
-      { workflow_ref: 'owner/app/.github/workflows/check.yml@refs/heads/main' }, { event_name: 'push' }]) expect(admits(changed as Record<string, string>)).toBe(false);
+      { workflow_ref: 'owner/app/.github/workflows/check.yml@refs/heads/main' }, { event_name: 'push' }]) expect(admits(changed)).toBe(false);
     expect(resources.google_service_account_iam_member.ci_github.member).toContain('/attribute.repository_id/1234');
     expect(configuration.resources['google_iam_workload_identity_pool_provider.ci_github']).toBeDefined();
   });
