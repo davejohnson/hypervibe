@@ -69,10 +69,52 @@ function ciBranchDeployGuidance(project: Project, envName: string): {
   };
 }
 
+/** One presentation for restoring a verified release, whether an earlier one or the one already running. */
+function rollbackResponse(result: Awaited<ReturnType<typeof executeRollback>>, project: Project, mode: 'rollback' | 'redeploy') {
+  const label = mode === 'redeploy' ? 'Redeploy' : 'Rollback';
+  if (!result.ok) {
+    const code = result.reason === 'unsupported' ? 'UNSUPPORTED'
+      : result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
+      : ['invalid_run', 'invalid_target', 'already_current', 'workflow_drift', 'workflow_inactive', 'rollback_in_progress'].includes(result.reason)
+        ? 'VALIDATION'
+        : result.reason === 'observation_failed' ? 'PROVIDER_ERROR'
+        : 'NOT_FOUND';
+    return commandError(code, result.error, {
+      ...(code === 'MISSING_CONNECTION'
+        ? { details: connectionRecoveryDetails([{ provider: 'provider' in result && result.provider ? result.provider : project.defaultPlatform }], { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) }
+        : {}),
+      ...('hint' in result && result.hint ? { hint: result.hint } : {}),
+      ...(result.reason === 'workflow_drift' ? { next: ['hv_plan', 'hv_apply'] } : {}),
+      ...(result.reason === 'already_current' ? { next: ['hv_deploy', 'hv_ci_status', 'hv_health'] } : {}),
+    });
+  }
+  
+  const { ok: _ok, ...payload } = result;
+  if (!result.pending) {
+    return commandError('PROVIDER_ERROR', `${label} workflow was not dispatched.`, {
+      details: { ...payload, note: CI_ROLLBACK_NOTE },
+      hint: `Inspect the plan/apply receipts and start a fresh ${mode === 'redeploy' ? 'hv_deploy redeployCurrent=true' : 'hv_rollback'} only after resolving the blocker.`,
+      next: ['hv_runs'],
+    });
+  }
+  return commandSuccess(
+    { ...payload, note: CI_ROLLBACK_NOTE },
+    {
+      hint: `${label} was dispatched but is not yet proven. Inspect the managed workflow with hv_ci_status; after success, verify the public endpoint with hv_health.`,
+      warnings: [CI_ROLLBACK_NOTE],
+      next: ['hv_ci_status'],
+      agentInstruction: {
+        action: 'stop_and_report',
+        message: `Stop here. Report the exact ${mode === 'redeploy' ? 'redeployed' : 'rollback'} SHA and pending workflow, then inspect it only through hv_ci_status before running hv_health after success.`,
+      },
+    }
+  );
+}
+
 export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated direct/manual deploys build and immediately apply a plan; managed-CI environments must dispatch only through hv_ci_trigger after selecting the reviewed definition with hv_ci_status, never through gh or a direct CI/provider API. The planId and applyRunId are returned for the audit trail. Hypervibe-owned application secrets are generated and installed automatically. Externally owned secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override managed keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). Plan-gated direct/manual deploys build and immediately apply a plan; managed-CI environments must dispatch only through hv_ci_trigger after selecting the reviewed definition with hv_ci_status, never through gh or a direct CI/provider API. To apply saved settings on a managed-CI environment without releasing new commits, pass redeployCurrent=true: it redeploys the exact verified image already running. The planId and applyRunId are returned for the audit trail. Hypervibe-owned application secrets are generated and installed automatically. Externally owned secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override managed keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -81,9 +123,10 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
       secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
+      redeployCurrent: z.boolean().optional().describe('Managed-CI environments only. Redeploy the exact verified image already running, with no new commits, so saved settings take effect. Uses the same verified restore as hv_rollback; returns pending until hv_ci_status confirms.'),
       confirm: confirmField,
     },
-    wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs, redeployCurrent, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
 
       // Deploys are plan-gated: the spec is the source of truth for what runs.
@@ -121,6 +164,16 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ?? ctx.repos.environments.create({ projectId: project.id, name: envName });
 
       assertConfirmed(project, environment, confirm, 'hv_deploy');
+
+      if (redeployCurrent) {
+        if ([services, envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined)) {
+          return commandError('VALIDATION', 'redeployCurrent redeploys the whole running release unchanged; it takes no services or deploy inputs.', { hint: 'Save settings first through hv_spec or hv_plan secretRefs and hv_apply, then call hv_deploy with only redeployCurrent=true.' });
+        }
+        if (isEngineManaged(envSpec)) {
+          return commandError('VALIDATION', 'This environment applies saved settings through hv_plan and hv_apply, which restart services on the image already running. No redeploy is needed.', { next: ['hv_plan', 'hv_apply'] });
+        }
+        return rollbackResponse(await executeRollback({ project, environment, redeployCurrent: true }), project, 'redeploy');
+      }
 
       if (isEngineManaged(envSpec)) {
         const supplied = [envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined);
@@ -294,7 +347,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
 
   commands.register(
     'hv_rollback',
-    'Preview one exact recovery candidate read-only with action=preview, toSha, sourceWorkflowRunId and sourceArtifactId; preview never dispatches or requires confirmation. Original legacy v2 evidence is inspected without upgrading it or enabling unsupported legacy execution. Otherwise rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Not a restart: the release already running is refused, so to apply saved settings without new commits dispatch that exact commit with hv_ci_trigger inputs.commit_sha instead. Protected environments require confirm=true.',
+    'Preview one exact recovery candidate read-only with action=preview, toSha, sourceWorkflowRunId and sourceArtifactId; preview never dispatches or requires confirmation. Original legacy v2 evidence is inspected without upgrading it or enabling unsupported legacy execution. Otherwise rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Not a restart: the release already running is refused. To apply saved settings without new commits use hv_deploy redeployCurrent=true. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -345,43 +398,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ...(toSha ? { toSha } : {}),
         ...(services ? { services } : {}),
       });
-      if (!result.ok) {
-        const code = result.reason === 'unsupported' ? 'UNSUPPORTED'
-          : result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
-          : ['invalid_run', 'invalid_target', 'already_current', 'workflow_drift', 'workflow_inactive', 'rollback_in_progress'].includes(result.reason)
-            ? 'VALIDATION'
-            : result.reason === 'observation_failed' ? 'PROVIDER_ERROR'
-            : 'NOT_FOUND';
-        return commandError(code, result.error, {
-          ...(code === 'MISSING_CONNECTION'
-            ? { details: connectionRecoveryDetails([{ provider: 'provider' in result && result.provider ? result.provider : project.defaultPlatform }], { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) }
-            : {}),
-          ...('hint' in result && result.hint ? { hint: result.hint } : {}),
-          ...(result.reason === 'workflow_drift' ? { next: ['hv_plan', 'hv_apply'] } : {}),
-          ...(result.reason === 'already_current' ? { next: ['hv_ci_trigger', 'hv_ci_status', 'hv_health'] } : {}),
-        });
-      }
-
-      const { ok: _ok, ...payload } = result;
-      if (!result.pending) {
-        return commandError('PROVIDER_ERROR', 'Rollback workflow was not dispatched.', {
-          details: { ...payload, note: CI_ROLLBACK_NOTE },
-          hint: 'Inspect the rollback plan/apply receipts and start a fresh hv_rollback only after resolving the blocker.',
-          next: ['hv_runs'],
-        });
-      }
-      return commandSuccess(
-        { ...payload, note: CI_ROLLBACK_NOTE },
-        {
-          hint: 'Rollback was dispatched but is not yet proven. Inspect the managed workflow with hv_ci_status; after success, verify the public endpoint with hv_health.',
-          warnings: [CI_ROLLBACK_NOTE],
-          next: ['hv_ci_status'],
-          agentInstruction: {
-            action: 'stop_and_report',
-            message: 'Stop here. Report the exact rollback SHA and pending workflow, then inspect it only through hv_ci_status before running hv_health after success.',
-          },
-        }
-      );
+      return rollbackResponse(result, project, 'rollback');
     })
   );
 }

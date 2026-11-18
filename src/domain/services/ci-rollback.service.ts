@@ -54,7 +54,7 @@ type ReleaseEvidence = {
   createdAt: string;
 };
 
-type RollbackSelection = 'explicit' | 'last_known_good' | 'previous_successful';
+type RollbackSelection = 'current' | 'explicit' | 'last_known_good' | 'previous_successful';
 
 type ManagedCiRollbackObservation = {
   adapter: GitHubAdapter;
@@ -160,12 +160,12 @@ async function currentReleaseSha(params: {
  * Rollback only moves to a different release. Agents reach for it to restart the
  * running release after a settings change, so the refusal names the supported way.
  */
-function alreadyCurrentRelease(sha: string, workflow: { path: string; branch: string }): CiRollbackFailure {
+function alreadyCurrentRelease(sha: string, environmentName: string): CiRollbackFailure {
   return {
     ok: false,
     reason: 'already_current',
-    error: `Production is already at verified release ${sha}. Rollback restores an earlier release; it does not restart or redeploy the current one.`,
-    hint: `To apply saved settings without releasing new commits, deploy this exact commit again: hv_ci_trigger definition="${workflow.path}" ref="${workflow.branch}" inputs={"commit_sha":"${sha}"}. Then follow the run with hv_ci_status and check hv_health.`,
+    error: `${environmentName} is already at verified release ${sha}. Rollback restores an earlier release; it does not restart or redeploy the current one.`,
+    hint: `To apply saved settings without releasing new commits, redeploy the exact image already running: hv_deploy env="${environmentName}" redeployCurrent=true. Then follow the run with hv_ci_status and check hv_health.`,
   };
 }
 
@@ -173,6 +173,8 @@ async function observeManagedCiRollback(params: {
   project: Project;
   environment: Environment;
   toSha?: string;
+  /** Restore the newest verified release again instead of an earlier one. */
+  redeployCurrent?: boolean;
 }): Promise<CiRollbackFailure | { ok: true; observation: ManagedCiRollbackObservation }> {
   const storedSpec = new SpecStore().get(params.project);
   const environmentSpec = storedSpec?.spec.environments[params.environment.name];
@@ -283,7 +285,7 @@ async function observeManagedCiRollback(params: {
       if (requested && FULL_SHA.test(requested)) {
         const current = await currentReleaseSha({ adapter, owner, repo, workflowPath: workflow.path, environmentName: params.environment.name })
           .catch(() => undefined);
-        if (current === requested) return alreadyCurrentRelease(requested, workflow);
+        if (current === requested) return alreadyCurrentRelease(requested, params.environment.name);
       }
       return workflowBlock!;
     }
@@ -331,12 +333,24 @@ async function observeManagedCiRollback(params: {
       return { ok: false, reason: 'invalid_target', error: 'toSha must be a full 40-character Git commit SHA.' };
     }
     if (requestedSha && currentRelease?.sha === requestedSha) {
-      return alreadyCurrentRelease(requestedSha, workflow);
+      return alreadyCurrentRelease(requestedSha, params.environment.name);
     }
 
     let targetRelease: ReleaseEvidence | undefined;
     let selection: RollbackSelection;
-    if (requestedSha) {
+    if (params.redeployCurrent) {
+      // The newest verified release is what the services run: either the latest run
+      // proved it, or later runs failed and never replaced it with a verified one.
+      selection = 'current';
+      targetRelease = currentRelease;
+      for (const run of targetRelease ? [] : successfulRuns) {
+        const evidence = await releaseEvidenceForRun({ adapter, owner, repo, environmentName: params.environment.name, run });
+        if (evidence) {
+          targetRelease = evidence;
+          break;
+        }
+      }
+    } else if (requestedSha) {
       selection = 'explicit';
       for (const run of successfulRuns) {
         const evidence = run.id === currentRelease?.workflowRunId
@@ -390,7 +404,9 @@ async function observeManagedCiRollback(params: {
       return {
         ok: false,
         reason: 'no_target_release',
-        error: requestedSha
+        error: params.redeployCurrent
+          ? `No verified ${params.environment.name} release with unexpired evidence exists to redeploy.`
+          : requestedSha
           ? `No unexpired successful ${params.environment.name} release evidence exists for ${requestedSha}.`
           : latestRun.conclusion === 'success'
             ? `No previous distinct successful ${params.environment.name} release is available to restore.`
@@ -446,6 +462,7 @@ export async function executeManagedCiRollback(params: {
   project: Project;
   environment: Environment;
   toSha?: string;
+  redeployCurrent?: boolean;
 }): Promise<CiRollbackFailure | CiRollbackResult> {
   const observed = await observeManagedCiRollback(params);
   if (!observed.ok) return observed;
@@ -457,7 +474,9 @@ export async function executeManagedCiRollback(params: {
     type: 'update',
     resource: { kind: 'ci', name: `deploy-branch:${params.environment.name}`, provider: 'github' },
     verified: true,
-    reason: `Restore verified ${params.environment.name} release ${planned.targetRelease.sha}`,
+    reason: planned.selection === 'current'
+      ? `Redeploy the verified ${params.environment.name} release ${planned.targetRelease.sha} that is already running`
+      : `Restore verified ${params.environment.name} release ${planned.targetRelease.sha}`,
     metadata: {
       operation: GITHUB_ACTIONS_ROLLBACK_OPERATION,
       repository,

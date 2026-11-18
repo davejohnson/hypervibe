@@ -77,6 +77,7 @@ export interface CiProviderRegistration {
     project: Project;
     environment: Environment;
     toSha?: string;
+    redeployCurrent?: boolean;
   }): Promise<CiRollbackFailure | CiRollbackResult>;
 }
 
