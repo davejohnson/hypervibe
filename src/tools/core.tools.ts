@@ -37,6 +37,7 @@ import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.s
 import { databaseConsumerReadiness, databaseConsumerRolloutRequirements, databaseConsumersUnknown } from '../domain/services/database-consumer-readiness.service.js';
 import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
 import { githubActionsCanonicalEnvironment, resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
+import { retainedDatabaseStatus, explicitBackupEvidence } from '../application/retained-diagnostics.js';
 import { requiredConnectionChecklist } from '../application/spec-connections.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { CommandContext } from '../application/context.js';
@@ -679,14 +680,25 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       secretRefs: z.record(z.string(), z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, credential, intent, services, envVars, envFile, includeEnvFile, secretRefs, deleteFinalSnapshot }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: scope === 'backups' });
       if (deleteFinalSnapshot !== undefined && scope !== 'teardown') {
         return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
       }
-      const routingSpec = specStore.get(project);
+      const routingSpec = scope === 'backups' ? specStore.getForInspection(project) : specStore.get(project);
       const routingEnvironment = routingSpec ? commandEnvironment(routingSpec.spec, env) : env?.trim() || 'staging';
       const cloudRunEnvironment = routingSpec?.spec.environments[routingEnvironment]?.hosting.provider === 'cloudrun';
       const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, routingEnvironment);
+      const selected = routingSpec?.spec.environments[routingEnvironment];
+      if (scope === 'backups' && selected && (isEngineManaged(selected) || firstProviderSpecValidationFailure(routingSpec!.spec, routingEnvironment))) {
+        if ([services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined) || includeEnvFile) {
+          return commandError('VALIDATION', 'Backup reporting takes only project, env and scope. Remove deploy inputs.');
+        }
+        if (!selected.backups) return commandError('VALIDATION', 'Set explicit backups.mode in this environment before requesting a backup review.');
+        const evidence = await explicitBackupEvidence(ctx, project, retainedEnvironment, selected);
+        return commandSuccess({ environment: routingEnvironment, scope, mode: 'observation', ...evidence }, {
+          hint: 'Read the policy and recovery evidence for each resource. This review has no executable backup changes.',
+        });
+      }
       const retainedExecution = Boolean(retainedEnvironment && ctx.repos.components.findByEnvironmentId(retainedEnvironment.id)
         .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
       const retainedExecutionRecovery = retainedExecution && (scope === undefined || scope === 'full');
@@ -1003,13 +1015,18 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, pending runtime rollouts, and observed service endpoints. inSync requires a provider-observed post-configuration deployment whenever the provider reports that activation is still pending; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapCommandHandler(async ({ project: projectRef, env }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const specResult = specStore.get(project);
+      const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: true });
+      const specResult = specStore.getForInspection(project);
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec.' });
       }
       const envName = commandEnvironment(specResult.spec, env);
       const envSpec = specResult.spec.environments[envName];
+      const retainedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const lifecycleFailure = envSpec ? firstProviderSpecValidationFailure(specResult.spec, envName) : undefined;
+      const retainedDatabases = envSpec && (isEngineManaged(envSpec) || lifecycleFailure)
+        ? await retainedDatabaseStatus(ctx, project, retainedEnvironment) : [];
+      const retained = retainedDatabases.length ? { retainedDatabases } : {};
       // OpenTofu-managed environments: infrastructure drift comes from hv_plan scope="infrastructure";
       // status reports what only live observation shows, starting with background workers.
       if (envSpec && isEngineManaged(envSpec)) {
@@ -1031,13 +1048,16 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           });
           const workers = workloads.filter(row => row.kind === 'worker').map(row => ({ ...row,
             mode: envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on' }));
-          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers, workloads, ...(database ? { database } : {}) }, {
+          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers, workloads, ...retained, ...(database ? { database } : {}) }, {
             warnings: workloads.filter(row => row.activity === 'unknown').map(row => `Current activity for ${row.service} is unknown.`),
             hint: 'Run hv_health for deployment health or hv_plan scope="infrastructure" for drift.',
             next: ['hv_health', 'hv_plan'],
           });
         }
         const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
+        if ('blocked' in engine && retainedDatabases.length) return commandSuccess({
+          environment: envName, engine: 'opentofu', workers: 'not read', partial: true, ...retained,
+        }, { warnings: [engine.blocked] });
         if ('blocked' in engine) return commandError('VALIDATION', engine.blocked, { next: ['hv_connections'] });
         const ages = await secretAges(ctx, project, specResult.spec, envName);
         if (!('blocked' in ages)) {
@@ -1046,14 +1066,18 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           // A failed read is not "fresh": say the age is unknown instead of staying silent.
           if (notes.unreadable) engine.warnings.push(notes.unreadable);
         }
-        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers: engine.workers }, {
+        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers: engine.workers, ...retained }, {
           warnings: engine.warnings,
           hint: engine.warnings.length ? 'Fix the warnings above, then check hv_status again.' : 'Run hv_plan scope="infrastructure" to check infrastructure drift.',
           next: engine.warnings.length ? ['hv_plan'] : ['hv_plan', 'hv_health'],
         });
       }
 
-      validateInstalledProviders(specResult.spec, envName);
+      if (lifecycleFailure && envSpec) {
+        const evidence = await explicitBackupEvidence(ctx, project, retainedEnvironment, envSpec);
+        return commandSuccess({ environment: envName, partial: true, verified: false, ...retained, ...evidence },
+          { warnings: [lifecycleFailure.message, 'Full infrastructure drift is unavailable. Only the listed operations were observed.'] });
+      }
       if (!envSpec) {
         if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
           const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
