@@ -34,6 +34,7 @@ provider status or assert that a live run has passed.
 | Profile | Declared disposable resources | Release and verification |
 | --- | --- | --- |
 | `gcp-engine` | One public Cloud Run web service and its public-invoker IAM member | Committed local fixture archive through the installed Hypervibe release path; exact JSON body and `create`/`update` revision; encrypted engine-state identity projection and exact Cloud Run GET after teardown |
+| `aws-engine`, `azure-engine` | One testing environment: public web service, worker and PostgreSQL database, plus whatever the project shares between testing environments (network, app environment, database cluster or server, registry) | Committed local fixture through `hv_plan` → `hv_apply` → `hv_deploy`; exact JSON body with the `create`/`update` revision, a database write from the web service and one from the worker; the database must refuse a connection from the test computer; `hv_plan scope="teardown"`; then everything in the dedicated account is compared with what was there before the run. **Written 2026-11-17; never run against either cloud.** |
 | `railway` | Web service, PostgreSQL, Redis, object bucket, associated volumes, PostgreSQL-backed queue wiring | Prepared repository and managed GitHub workflow, exact commit and release artifact; exact JSON revision and SQL probe; complete native project service/volume/bucket inventory before teardown and after deletion |
 
 The GCP profile is deliberately **web-only**. It does not prove Cloud SQL,
@@ -50,13 +51,27 @@ service, volume and bucket in its dedicated initially empty Railway project.
 It does not claim every Railway workload kind, custom-domain, data-transfer or
 backup feature has passed live.
 
-The [AWS engine](opentofu-engine-aws.md) and [Azure engine](opentofu-engine-azure.md)
-have implementation notes and recorded live testing-environment evidence, but
-neither has a complete disposable lifecycle profile in this runner yet. Legacy
-GCP adapter lifecycle registrations are also planned: GCP live deployment uses
+The AWS and Azure profiles check leftovers differently from the GCP profile. They
+do not read engine state. Before the first change they record everything in the
+dedicated account, and after teardown the account must match that record:
+
+- **Azure:** every resource in the project's resource group, whatever its tags.
+- **AWS:** in the connection's region, networks, their endpoints and NAT gateways,
+  database clusters, instances and kept snapshots, container clusters, image
+  repositories and buckets. A network cannot be deleted while anything is attached,
+  so its absence also covers load balancers, tasks and network interfaces. Not
+  covered: log groups, Parameter Store entries, Secrets Manager secrets waiting out
+  their recovery window, and IAM roles (Hypervibe's own teardown checks the roles).
+
+This needs an account or subscription that holds nothing else that changes during
+the run; another project created there mid-run reads as a leftover. Neither profile
+proves moving an older project to the current layout, storage, scheduled jobs,
+on-demand workers or CI releases.
+
+Legacy GCP adapter lifecycle registrations are planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
-are unavailable after the engine cutover. Selecting these unavailable profiles
-fails; they are never counted as passing live fixtures.
+are unavailable after the engine cutover. Selecting an unregistered profile
+fails; it is never counted as a passing live fixture.
 
 ## Opt-in runner and dedicated platform
 
@@ -64,6 +79,8 @@ Build and select exactly one profile:
 
 ```sh
 HYPERVIBE_LIVE_PROFILE=gcp-engine npm run test:providers:fixtures
+HYPERVIBE_LIVE_PROFILE=aws-engine npm run test:providers:fixtures
+HYPERVIBE_LIVE_PROFILE=azure-engine npm run test:providers:fixtures
 HYPERVIBE_LIVE_PROFILE=railway npm run test:providers:fixtures
 ```
 
@@ -153,6 +170,49 @@ configuration before apply, then projects only allowlisted `address`, `type`
 and native `id` from readable encrypted engine state after attempted applies.
 It independently checks those native identities afterward. Missing, ambiguous
 or unreadable evidence stops cleanup and preserves recovery state.
+
+## AWS and Azure preview, run and cleanup
+
+Prepare once, through Hypervibe: connect the dedicated AWS account or Azure
+subscription (`hv_connections provider="aws"` or `"azure"`, `action="connect"`) and
+create a project with a saved spec in `HYPERVIBE_LIVE_DATA_DIR`. The project needs
+no environments of its own.
+
+Inputs are `HYPERVIBE_LIVE_PROJECT`, `HYPERVIBE_LIVE_DATA_DIR`,
+`HYPERVIBE_LIVE_FIXTURE_DIR` (a new absolute directory) and the marker. In the
+marker, `nativeProjectId` is the 12-digit AWS account or the Azure subscription ID,
+`region` is the connection's region or location, and `repository` is the project's
+GitHub repository, or the project name when it has no remote. Omit
+`runtimeServiceAccountEmail`. The runner uses the saved connection whose account
+matches the marker.
+
+```sh
+HYPERVIBE_LIVE_PROFILE=azure-engine \
+HYPERVIBE_LIVE_MODE=preview \
+npm run test:providers:fixtures
+```
+
+Preview adds the fixture environment to the spec, prints the first plan's changes
+and removes the environment again. Nothing is applied.
+
+```sh
+HYPERVIBE_LIVE_PROFILE=azure-engine \
+HYPERVIBE_LIVE_MODE=run \
+HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE=1 \
+npm run test:providers:fixtures
+```
+
+A run confirms every action of each plan it makes. Unlike the GCP profile it does
+not wait for a person to approve one plan ID, so that it can run unattended: the
+marker, the dedicated account and `HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE=1` are the
+whole authorization. Use it only where that is acceptable. It creates billable
+resources for the length of the run and deletes the AWS final snapshot at teardown.
+
+A run that stops early leaves `fixture-evidence.json` and `fixture-baseline.json`
+in the fixture directory. Keep both and run again with
+`HYPERVIBE_LIVE_CLEANUP_ONLY=1`; it plans the teardown again and repeats the
+comparison. A `cleaned` journal with `created`, `noop`, `updated`, `absent` and
+`databaseClosed` all true is one passing run.
 
 ## Railway and Cloudflare prerequisites
 

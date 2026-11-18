@@ -17,7 +17,8 @@ export interface FixtureJournal {
   resources: NativeFixtureResource[];
   /** Exact pre-existing resources proved retained, never reported as natively absent. */
   retainedResources?: NativeFixtureResource[];
-  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean };
+  /** databaseClosed: the database refused a connection from outside while the app was using it. */
+  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean; databaseClosed?: boolean };
 }
 
 export interface LifecycleFixtureDriver {
