@@ -136,7 +136,15 @@ export class AzureWorkloadDiagnostics {
       const revisionName = properties.latestRevisionName;
       if (typeof revisionName !== 'string' || !/^[a-z0-9-]+$/.test(revisionName)) return { presence: 'present', status: 'unknown', reason: 'Azure has not reported the current revision identity.' };
       const revision = await this.get(`${b.serviceId}/revisions/${revisionName}`); const current = record(revision?.properties);
-      return { presence: 'present', status: current.healthState === 'Unhealthy' || current.provisioningState === 'Failed' || current.runningState === 'Failed' ? 'failed'
+      const failed = current.healthState === 'Unhealthy' || current.provisioningState === 'Failed' || current.runningState === 'Failed';
+      // A single revision can prove an app-wide count only in single-revision mode after cutover.
+      const single = record(properties.configuration).activeRevisionsMode === 'Single' && properties.latestReadyRevisionName === revisionName
+        && properties.provisioningState === 'Succeeded' && current.provisioningState === 'Provisioned' && current.active === true;
+      const replicas = current.replicas;
+      const counted = single && typeof replicas === 'number' && Number.isSafeInteger(replicas) && replicas >= 0;
+      const runtime: WorkloadDeploymentObservation['runtime'] = { activity: failed ? 'failed' : !counted ? 'unknown'
+        : replicas === 0 ? 'idle' : 'running', ...(counted ? { running: replicas } : {}) };
+      return { presence: 'present', runtime, status: current.healthState === 'Unhealthy' || current.provisioningState === 'Failed' || current.runningState === 'Failed' ? 'failed'
         : properties.provisioningState === 'Succeeded' && current.provisioningState === 'Provisioned' && current.healthState === 'Healthy' && properties.latestReadyRevisionName === revisionName ? 'ready' : 'unknown' };
     } catch (error) { throw new Error(redactEngineOutput(error instanceof Error ? error.message : String(error), this.secrets)); }
   }

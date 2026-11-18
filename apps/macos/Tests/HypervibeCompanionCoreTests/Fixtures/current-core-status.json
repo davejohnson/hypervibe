@@ -64,12 +64,10 @@
       "environment": "testing",
       "specRevision": 1,
       "engine": "opentofu",
-      "workers": "not read"
+      "workers": [],
+      "workloads": []
     },
-    "hint": "Run hv_health for the web service and hv_plan scope=\"infrastructure\" for drift.",
-    "warnings": [
-      "hv_status does not read live worker state on AWS yet."
-    ],
+    "hint": "Run hv_health for deployment health or hv_plan scope=\"infrastructure\" for drift.",
     "next": [
       "hv_health",
       "hv_plan"
@@ -81,12 +79,10 @@
       "environment": "testing",
       "specRevision": 1,
       "engine": "opentofu",
-      "workers": "not read"
+      "workers": [],
+      "workloads": []
     },
-    "hint": "Run hv_health for the web service and hv_plan scope=\"infrastructure\" for drift.",
-    "warnings": [
-      "hv_status does not read live worker state on Azure yet."
-    ],
+    "hint": "Run hv_health for deployment health or hv_plan scope=\"infrastructure\" for drift.",
     "next": [
       "hv_health",
       "hv_plan"

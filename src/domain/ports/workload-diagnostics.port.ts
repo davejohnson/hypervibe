@@ -1,7 +1,14 @@
 import type { Environment } from '../entities/environment.entity.js';
 
 /** Read-only deployment evidence. Present does not imply healthy or successful execution. */
+export interface WorkloadActivity {
+  activity: 'running' | 'idle' | 'failed' | 'starting' | 'unknown';
+  running?: number;
+  desired?: number;
+  pending?: number;
+}
 export interface WorkloadDeploymentObservation {
+  runtime?: WorkloadActivity;
   presence: 'present' | 'absent' | 'unknown';
   status: string;
   reason?: string;

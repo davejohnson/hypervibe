@@ -100,7 +100,8 @@ enum HypervibeResponseMapper {
                         wakerState: worker.waker?.state,
                         lastWakeAt: parseDate(worker.waker?.lastRunAt),
                         pendingWork: worker.waker?.pendingWork,
-                        pendingWorkReadFailed: worker.waker?.readError != nil
+                        pendingWorkReadFailed: worker.waker?.readError != nil,
+                        activity: worker.activity, running: worker.running
                     )
                 }
             )
@@ -825,6 +826,8 @@ private struct StatusToolData: Decodable {
         let service: String
         let mode: String
         let instances: Int?
+        let activity: String?
+        let running: Int?
         let waker: Waker?
 
         struct Waker: Decodable {

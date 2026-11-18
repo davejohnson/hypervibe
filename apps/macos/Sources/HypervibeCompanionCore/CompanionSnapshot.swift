@@ -158,8 +158,10 @@ public struct WorkerObservation: Codable, Equatable, Identifiable, Sendable {
     public let lastWakeAt: Date?
     public let pendingWork: Int?
     public let pendingWorkReadFailed: Bool
+    public var activity: String? = nil
+    public var running: Int? = nil
 
-    public var needsAttention: Bool { pendingWorkReadFailed || wakerState == "FAILED" }
+    public var needsAttention: Bool { pendingWorkReadFailed || wakerState == "FAILED" || activity == "failed" }
 
     public var configurationSummary: String {
         let modeLabel = mode == "on-demand" ? "On demand" : mode == "always-on" ? "Always on" : "Unknown mode"
@@ -168,6 +170,15 @@ public struct WorkerObservation: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var activitySummary: String? {
+        if let activity {
+            switch activity {
+            case "idle": return "Idle · scaled to zero"
+            case "running": return running.map { "\($0) running" } ?? "Running"
+            case "starting": return "Starting"
+            case "failed": return "Workload failed"
+            default: return "Current activity unknown"
+            }
+        }
         if pendingWorkReadFailed { return "Wake-up check cannot read pending work" }
         if wakerState == "FAILED" { return "Wake-up check failed" }
         if let pendingWork { return "\(pendingWork) pending \(pendingWork == 1 ? "task" : "tasks")" }

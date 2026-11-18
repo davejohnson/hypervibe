@@ -20,8 +20,24 @@ struct CurrentCoreStatusContractTests {
         #expect(observation.engine == "opentofu")
         #expect(observation.infrastructureStatus?.contains("Drift not observed here") == true)
         #expect(observation.infrastructureStatus?.contains("hv_plan scope=\"infrastructure\"") == true)
-        if name == "aws" || name == "azure" { #expect(observation.workers == nil) }
+        if name == "aws" || name == "azure" { #expect(observation.workers == []) }
         if name == "gcpNoWorkers" { #expect(observation.workers == []) }
+    }
+
+    @Test
+    func decodesObservedWorkerActivityAndOlderServers() throws {
+        let object = try #require(JSONSerialization.jsonObject(with: fixture("aws")) as? [String: Any])
+        var payload = try #require(object["data"] as? [String: Any])
+        for (state, expected) in [("idle", "Idle · scaled to zero"), ("unknown", "Current activity unknown")] {
+            payload["workers"] = [["service": "queue", "mode": "on-demand", "activity": state]]
+            let response = object.merging(["data": payload]) { _, latest in latest }
+            let result = try HypervibeResponseMapper.decodeObservation(JSONSerialization.data(withJSONObject: response), attemptedAt: Date(), previous: nil)
+            #expect(result.workers?.first?.activitySummary == expected)
+        }
+        payload["workers"] = "not read"
+        let previous = object.merging(["data": payload]) { _, latest in latest }
+        let legacy = try HypervibeResponseMapper.decodeObservation(JSONSerialization.data(withJSONObject: previous), attemptedAt: Date(), previous: nil)
+        #expect(legacy.workers == nil)
     }
 
     @Test

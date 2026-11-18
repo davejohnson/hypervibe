@@ -7,6 +7,7 @@ import { planApiPolicy } from '../domain/services/api-policy.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { observeBackupPolicy, resolveBackupPolicies } from '../domain/services/backup-policy.service.js';
 import { planBackupPolicy } from '../domain/services/backup-policy-plan.service.js';
+import { collectProjectDeploymentHealth } from '../domain/services/health.service.js';
 import { observeBackupHealth } from '../domain/services/backup-health.service.js';
 import { assessBackupReadiness, backupEvidenceSummary } from '../domain/services/backup-readiness.js';
 import type { CommandRegistrar } from '../application/commands.js';
@@ -1115,9 +1116,23 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         if (cloud) {
           const databaseEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
           const database = envSpec.database && databaseEnvironment ? await observeManagedEngineDatabase(project, databaseEnvironment) : undefined;
-          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: 'not read', ...(database ? { database } : {}) }, {
-            warnings: [`hv_status does not read live worker state on ${cloud} yet.`],
-            hint: 'Run hv_health for the web service and hv_plan scope="infrastructure" for drift.',
+          const names = Object.keys(envSpec.services).sort();
+          const observedProvider = databaseEnvironment?.platformBindings.provider ?? project.defaultPlatform;
+          const health = databaseEnvironment && observedProvider === envSpec.hosting.provider ? await collectProjectDeploymentHealth({ project, environments: [databaseEnvironment],
+            desiredServiceNamesByEnvironment: { [envName]: names } }) : undefined;
+          const observed = health?.environments[0]?.services ?? [];
+          const workloads = names.map(service => {
+            const row = observed.find(entry => entry.service === service);
+            const presence = row?.presence ?? 'unknown';
+            return { service, kind: envSpec.services[service]!.workloadKind, presence,
+              deployment: row?.status ?? 'unknown', activity: row?.state === 'failed' && presence === 'present' ? 'failed' : 'unknown',
+              ...row?.runtime, ...(row?.reason ? { reason: row.reason } : {}) };
+          });
+          const workers = workloads.filter(row => row.kind === 'worker').map(row => ({ ...row,
+            mode: envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on' }));
+          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers, workloads, ...(database ? { database } : {}) }, {
+            warnings: workloads.filter(row => row.activity === 'unknown').map(row => `Current activity for ${row.service} is unknown.`),
+            hint: 'Run hv_health for deployment health or hv_plan scope="infrastructure" for drift.',
             next: ['hv_health', 'hv_plan'],
           });
         }
