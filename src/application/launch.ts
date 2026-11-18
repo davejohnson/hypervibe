@@ -439,8 +439,9 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
  * fallback is approveAccess "aws-setup" for the account it was shown for.
  */
 async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
-  const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName);
+  const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName, params.spec);
   if (!('blocked' in existing)) return undefined;
+  if (existing.placement) return { status: 'blocked', message: existing.blocked };
   const shownAccount = approvedAccess.has('aws-setup') ? params.awsAccountId : undefined;
   if (approvedAccess.has('aws-setup') && !shownAccount) return { status: 'blocked', message: 'Approving AWS setup needs the awsAccountId it was shown for.' };
   const connected = await connectAws({ project: params.project, spec: params.spec, ...(shownAccount ? { approveAccountId: shownAccount } : {}) });

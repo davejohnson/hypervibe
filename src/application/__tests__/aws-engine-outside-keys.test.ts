@@ -10,6 +10,7 @@ import * as awsBackend from '../../adapters/providers/aws/tofu/aws-engine.backen
 import * as setup from '../../adapters/providers/aws/aws-setup.client.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { createCommandContext } from '../context.js';
+import { resolveAwsEngineContext } from '../infrastructure-engine-aws.js';
 import { planInfrastructureEngine } from '../infrastructure-engine.js';
 
 let directory: string;
@@ -65,5 +66,32 @@ describe('AWS outside-key collection continuation', () => {
     const planned = await planInfrastructureEngine(f.ctx, { project: f.project, spec: f.spec, specRevision: 1, environmentName: 'testing' });
     expect(planned).toMatchObject({ blocked: [expect.stringContaining('could not be read')] });
     expect(planned).not.toHaveProperty('missingOutsideKeys');
+  });
+});
+
+describe('reviewed AWS placement', () => {
+  it('uses the explicit region before checking secrets or generating the shared cluster identity', async () => {
+    const f = fixture(); f.spec.environments.testing!.hosting.region = 'ca-central-1';
+    vi.spyOn(SSMClient.prototype, 'send').mockRejectedValue(new ParameterNotFound({ message: 'missing', $metadata: {} }));
+    await planInfrastructureEngine(f.ctx, { ...f, specRevision: 1, environmentName: 'testing' });
+    expect(awsBackend.awsEngineAuthentication).toHaveBeenCalledWith(expect.objectContaining({ region: 'ca-central-1' }));
+    const context = await resolveAwsEngineContext(f.ctx, f.project, 'testing', f.spec);
+    expect(context).toMatchObject({ connection: { region: 'ca-central-1' }, shared: { clusterArn: expect.stringContaining(':rds:ca-central-1:123456789012:') } });
+  });
+
+  it.each(['native scope', 'storage placement', 'shared database placement'] as const)('blocks conflicting %s before AWS access', async kind => {
+    const f = fixture(); const target = f.spec.environments.testing!;
+    target.hosting.region = 'ca-central-1';
+    if (kind === 'native scope') f.ctx.repos.environments.create({ projectId: f.project.id, name: 'testing',
+      platformBindings: { provider: 'aws', projectId: '123456789012', environmentId: 'us-west-2' } });
+    if (kind === 'storage placement') target.storage = { media: { provider: 's3', type: 'bucket', injectInto: [], region: 'us-west-2' } };
+    if (kind === 'shared database placement') {
+      target.database = { provider: 'rds', engine: 'postgres' };
+      f.spec.environments.feature = { ...target, hosting: { provider: 'aws', region: 'us-west-2' } };
+    }
+    vi.spyOn(SSMClient.prototype, 'send').mockRejectedValue(new Error('unexpected read'));
+    const plan = await planInfrastructureEngine(f.ctx, { ...f, specRevision: 1, environmentName: 'testing' });
+    expect(plan).toMatchObject({ blocked: [expect.stringMatching(/region|placement/i)] });
+    expect(awsBackend.awsEngineAuthentication).not.toHaveBeenCalled();
   });
 });

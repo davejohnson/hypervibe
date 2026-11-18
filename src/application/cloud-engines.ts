@@ -90,7 +90,7 @@ const aws: CloudEngine = {
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsTeardown(ctx, params),
   apply: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).applyAwsInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine-aws-release.js')).releaseAwsEngineServices(ctx, params),
-  secretStore: async (ctx, project, _spec, environmentName) => (await import('./infrastructure-engine-aws.js')).awsSecretStore(ctx, project, environmentName),
+  secretStore: async (ctx, project, spec, environmentName) => (await import('./infrastructure-engine-aws.js')).awsSecretStore(ctx, project, environmentName, spec),
   connect: async (params) => (await import('./aws-connect.js')).connectAwsStep(params),
   ownsPlan: (document) => Boolean(document.engine?.aws),
 };

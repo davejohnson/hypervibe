@@ -36,8 +36,9 @@ async function resolve(project: Project, environment: Environment, connected: Na
   const identity = engineDatabaseIdentity(environment);
   if (!identity) throw new Error('No accepted AWS or Azure database identity exists for this environment.');
   if (identity.provider === 'aws') {
-    const connection = AwsEngineCredentialsSchema.parse(raw); const database = identity.database;
-    if (connection.accountId !== database.accountId || connection.region !== database.region || connection.roleArn.split(':')[4] !== database.accountId) throw new Error('The selected AWS connection does not match the accepted database account and region.');
+    const database = identity.database;
+    const connection = { ...AwsEngineCredentialsSchema.parse(raw), region: database.region };
+    if (connection.accountId !== database.accountId || connection.roleArn.split(':')[4] !== database.accountId) throw new Error('The selected AWS connection does not match the accepted database account and region.');
     if (queryAccess && !isAwsDatabaseQuerySecretArn(database.querySecretArn, { ...connection, environmentId: environment.id })) throw new Error('Run hv_plan and hv_apply to provision the environment application credential for database access.');
     const policy = { Version: '2012-10-17', Statement: [
       { Effect: 'Allow', Action: ['rds:DescribeDBClusters', ...(queryAccess ? ['rds-data:BeginTransaction', 'rds-data:ExecuteStatement', 'rds-data:CommitTransaction', 'rds-data:RollbackTransaction'] : [])], Resource: database.clusterArn },
