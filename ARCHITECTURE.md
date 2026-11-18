@@ -286,8 +286,11 @@ Cloud database resources belong to the engine lifecycle. Keep SQL authentication
 connectivity, migrations and data operations in explicit operational capabilities.
 Treat persistence, backup coverage and teardown dependencies as data-bearing
 boundaries. Do not open public database access to bypass missing private access.
-A managed database must not be reachable from the internet by default. Google
-Cloud and AWS meet this; the Azure engine still uses a public endpoint (#728).
+A managed database must not be reachable from the internet by default; Google
+Cloud, AWS and Azure meet this. Azure has no API for running SQL, so Hypervibe
+opens the server to its own single address only while an approved plan step
+creates or drops a login, then closes it
+([Azure notes](docs/opentofu-engine-azure.md#database-network)).
 Preserve exact-identity cleanup of previously recorded access.
 
 ## Database Resilience

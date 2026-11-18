@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, taggedResources, type SqlRunner } from '../azure-ops.client.js';
+import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, taggedResources, withAzureSetupAccess, type SqlRunner } from '../azure-ops.client.js';
 
 const access = { tenantId: 't', clientId: 'c', clientSecret: 'client-secret-value' };
 const json = (status: number, body: unknown = {}) => new Response(status === 204 ? null : JSON.stringify(body), { status });
@@ -99,5 +99,58 @@ describe('Azure storage and absence checks', () => {
     expect(decodeURIComponent(found.calls.at(-1)!.url)).toContain("tagName eq 'hv-environment' and tagValue eq 'env1'");
     const failing = fake(() => json(403, { error: { code: 'AuthorizationFailed' } }));
     await expect(taggedResources(failing.tokens, 's', 'hv-app', 'hv-environment', 'env1')).resolves.toEqual({ unknown: expect.stringContaining('AuthorizationFailed') });
+  });
+});
+
+describe('Azure database setup access', () => {
+  const serverId = '/subscriptions/s/resourceGroups/hv-app/providers/Microsoft.DBforPostgreSQL/flexibleServers/hv-app-shared-abc123';
+  /** A server that starts closed, refuses addresses without a rule and reports the caller's address when it does. */
+  const server = (options: { failClose?: boolean } = {}) => {
+    const state = { access: 'Disabled', rule: undefined as string | undefined };
+    const azure = fake((method, url, body) => {
+      if (url.includes('/firewallRules/hypervibe-setup')) {
+        if (method === 'PUT') { state.rule = JSON.parse(body!).properties.startIpAddress; expect(JSON.parse(body!).properties.endIpAddress).toBe(state.rule); return json(202); }
+        if (method === 'DELETE') { state.rule = undefined; return json(202); }
+      }
+      if (method === 'PATCH') {
+        const wanted = JSON.parse(body!).properties.network.publicNetworkAccess as string;
+        if (wanted === 'Disabled' && options.failClose) return json(409, { error: { code: 'ServerIsBusy' } });
+        state.access = wanted; return json(202);
+      }
+      return json(200, { properties: { state: 'Ready', network: { publicNetworkAccess: state.access } } });
+    });
+    const probe = async () => {
+      if (state.access !== 'Enabled') throw new Error('connect ETIMEDOUT');
+      if (state.rule !== '203.0.113.7') throw new Error('no pg_hba.conf entry for host "203.0.113.7", user "hypervibe-deploy-app", database "postgres", SSL encryption');
+    };
+    return { azure, state, probe };
+  };
+
+  it('opens the server to this computer\'s address only, runs the work, then closes it again', async () => {
+    const { azure, state, probe } = server();
+    const seen: Array<typeof state> = [];
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { seen.push({ ...state }); return 'done'; }, 0)).resolves.toBe('done');
+    expect(seen).toEqual([{ access: 'Enabled', rule: '203.0.113.7' }]);
+    expect(state).toEqual({ access: 'Disabled', rule: undefined });
+    // Nothing wider than the one address was ever written.
+    expect(azure.calls.filter((call) => call.method === 'PUT').map((call) => call.body)).toEqual([JSON.stringify({ properties: { startIpAddress: '203.0.113.7', endIpAddress: '203.0.113.7' } })]);
+  });
+
+  it('closes the server again when the work fails, and reports the failure', async () => {
+    const { azure, state, probe } = server();
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { throw new Error('permission denied to create role'); }, 0)).rejects.toThrow('permission denied to create role');
+    expect(state).toEqual({ access: 'Disabled', rule: undefined });
+  });
+
+  it('adds no rule when it cannot learn this computer\'s address, and still closes', async () => {
+    const { azure, state } = server();
+    await expect(withAzureSetupAccess(azure.tokens, serverId, async () => { throw new Error('connect ETIMEDOUT'); }, async () => 'never', 0)).rejects.toThrow(/did not open the database server to anything/);
+    expect(azure.calls.filter((call) => call.method === 'PUT')).toEqual([]);
+    expect(state.access).toBe('Disabled');
+  });
+
+  it('says so when it cannot close the server, even though the work succeeded', async () => {
+    const { azure, probe } = server({ failClose: true });
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'done', 0)).rejects.toThrow(/could not turn the database server's public access off again.*hv_plan/);
   });
 });

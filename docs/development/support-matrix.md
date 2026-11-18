@@ -74,8 +74,8 @@ can use its runner.
 
 Database query/inspection evidence is documented in
 [engine database access](../engine-database-access.md). Queries do not create
-network access. Azure requires an existing public endpoint; a private connector
-is not implemented. AWS Data API supports bounded SQL and migration source
+network access. Azure engine databases are closed to the internet, so queries
+against them are refused until a private connector exists. AWS Data API supports bounded SQL and migration source
 summaries; PostgreSQL socket data transfers remain blocked. Missing or ambiguous
 accepted identity/state blocks access. Server inspection keeps SQL authentication
 and running application credentials unverified.

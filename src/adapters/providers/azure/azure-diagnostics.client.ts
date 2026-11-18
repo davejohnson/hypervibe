@@ -7,20 +7,30 @@ import { ARM, AZURE_SCOPES, AzureTokens, azureRest } from './azure-ops.client.js
 const APPS_API = 'api-version=2025-01-01';
 
 import { azureKey } from './tofu/azure-engine.config.js';
-export function projectAzureWorkloadBindings(state: unknown, services: Record<string, { workloadKind?: string }>, scope: { subscriptionId: string; resourceGroup: string; location: string }): Record<string, EngineWorkloadBinding> {
+export function projectAzureWorkloadBindings(state: unknown, services: Record<string, { workloadKind?: string }>, scope: { subscriptionId: string; resourceGroup: string; location: string },
+  /** The shared app environment and its log workspace, read from the shared state. */
+  shared: { managedEnvironmentId?: string; workspaceId?: string } = {}): Record<string, EngineWorkloadBinding> {
   const resources = stateResources(state); const result: Record<string, EngineWorkloadBinding> = {};
-  const managedEnvironmentId = stateString(resources.get('azurerm_container_app_environment.main')?.id);
-  const workspaceId = stateString(resources.get('azurerm_log_analytics_workspace.logs')?.workspace_id);
+  const workspaceId = shared.workspaceId;
   for (const [name, spec] of Object.entries(services)) {
     const kind = spec.workloadKind ?? 'web'; const resource = resources.get(`${kind === 'cron' ? 'azurerm_container_app_job' : 'azurerm_container_app'}.${azureKey(name)}`);
     const serviceId = stateString(resource?.id); if (!serviceId) continue;
     const prefix = `/subscriptions/${scope.subscriptionId}/resourceGroups/${scope.resourceGroup}/providers/Microsoft.App/${kind === 'cron' ? 'jobs' : 'containerApps'}/`;
     if (!serviceId.toLowerCase().startsWith(prefix.toLowerCase()) || serviceId.slice(prefix.length).includes('/')) throw new Error('Engine workload identity is outside the reviewed Azure scope.');
+    // Only the environment the workload actually runs in is recorded for it.
+    const managedEnvironmentId = shared.managedEnvironmentId && (stateString(resource?.container_app_environment_id) ?? '').toLowerCase() === shared.managedEnvironmentId.toLowerCase() ? shared.managedEnvironmentId : undefined;
     const ingress = resource?.ingress as Array<{ fqdn?: string }> | undefined;
     result[name] = { serviceId, workloadKind: kind, resourceType: kind === 'cron' ? 'container-job' : 'container-app', region: scope.location,
-      ...(managedEnvironmentId ? { managedEnvironmentId } : {}), ...(workspaceId ? { workspaceId } : {}), ...(ingress?.[0]?.fqdn ? { url: `https://${ingress[0].fqdn}` } : {}) };
+      ...(managedEnvironmentId ? { managedEnvironmentId, ...(workspaceId ? { workspaceId } : {}) } : {}), ...(ingress?.[0]?.fqdn ? { url: `https://${ingress[0].fqdn}` } : {}) };
   }
   return result;
+}
+/** The shared app environment and its log workspace, as the shared state records them. */
+export function projectAzureSharedApps(state: unknown): { managedEnvironmentId?: string; workspaceId?: string } {
+  const resources = stateResources(state);
+  const managedEnvironmentId = stateString(resources.get('azurerm_container_app_environment.main')?.id);
+  const workspaceId = stateString(resources.get('azurerm_log_analytics_workspace.logs')?.workspace_id);
+  return { ...(managedEnvironmentId ? { managedEnvironmentId } : {}), ...(workspaceId ? { workspaceId } : {}) };
 }
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 export class AzureWorkloadDiagnostics {
@@ -63,8 +73,8 @@ export class AzureWorkloadDiagnostics {
       const config = record(record(record(env?.properties).appLogsConfiguration).logAnalyticsConfiguration);
       if (config.customerId !== b.workspaceId) throw new Error('Azure did not confirm the bound Log Analytics workspace.');
       const scope = 'https://api.loganalytics.io/.default'; const token = await this.tokens.get(scope); this.secrets.push(token);
-      // The workspace is private to this engine environment. The exact GET above
-      // proves the native workload name; it is never a discovery/adoption fallback.
+      // The project's testing environments share this workspace, so the query names the
+      // exact workload. The GET above proves its native name; it is never a discovery/adoption fallback.
       const name = b.serviceId.split('/').at(-1)!; const limit = Math.max(1, Math.min(500, request.limit));
       const query = `ContainerAppConsoleLogs_CL | where ${b.resourceType === 'container-job' ? 'ContainerJobName_s' : 'ContainerAppName_s'} == '${name}' | top ${limit} by TimeGenerated desc | project TimeGenerated, Message=Log_s, Severity=tostring(column_ifexists('LogLevel_s', ''))`;
       const until = new Date().toISOString(); const since = new Date(Date.parse(until) - 24 * 60 * 60_000).toISOString();

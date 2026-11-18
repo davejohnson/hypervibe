@@ -56,7 +56,9 @@ export function parseEngineCiBinding(value: unknown): EngineCiBinding {
     for (const w of Object.values(b.services)) {
       const job = w.workloadKind === 'cron';
       if (w.region !== b.region || w.resourceType !== (job ? 'container-job' : 'container-app')
-        || w.managedEnvironmentId !== `${group}/providers/Microsoft.App/managedEnvironments/${b.prefix}-apps`
+        // The project's shared app environment (or, before 2026-11, the environment's own).
+        || !w.managedEnvironmentId?.startsWith(`${group}/providers/Microsoft.App/managedEnvironments/`)
+        || !/^hv-[a-z0-9-]{1,17}-apps$/.test(w.managedEnvironmentId.slice(`${group}/providers/Microsoft.App/managedEnvironments/`.length))
         || !w.serviceId.startsWith(`${group}/providers/Microsoft.App/${job ? 'jobs' : 'containerApps'}/${b.prefix}-`)
         || w.serviceId.split('/').length !== 9 || /[\s*?]/.test(w.serviceId)) fail();
     }

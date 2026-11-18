@@ -8,11 +8,13 @@ import type { EngineConfiguration, EngineResourceMapping } from '../../../../dom
 /**
  * Pure OpenTofu configurations for Azure. Two states per environment:
  *
- * - the **shared** state holds the PostgreSQL server and image registry. All of a
- *   project's testing environments share one (one database and login each);
- *   staging and production will each get their own.
- * - the **environment** state holds everything else: logs, the Container Apps
- *   environment, the runtime identity and its roles, storage and the workloads.
+ * - the **shared** state holds the private network, the Container Apps environment
+ *   and its logs, the PostgreSQL server (reached only through a private endpoint in
+ *   that network) and the image registry. All of a project's testing environments
+ *   share them (one database and login each); staging and production will each
+ *   get their own.
+ * - the **environment** state holds everything else: the runtime identity and its
+ *   roles, storage and the workloads.
  *
  * Values are non-secret. Runtime secrets live in the project's Key Vault (created
  * at setup, written by Hypervibe) and reach the apps as Key Vault references; the
@@ -42,6 +44,11 @@ export interface AzureSharedInput extends AzurePlacement {
 
 export interface AzureSharedNames { server: string; registry: string }
 
+/** The shared Container Apps environment's name; a virtual network can only be chosen when it is created. */
+export const azureAppsEnvironmentName = (sharedPrefix: string): string => `${sharedPrefix}-apps`;
+/** Private address space of the shared network: apps in the first /23, private endpoints after it. */
+export const AZURE_NETWORK = { space: '10.61.0.0/16', apps: '10.61.0.0/23', endpoints: '10.61.2.0/27' } as const;
+
 export interface AzureEngineInput extends AzurePlacement {
   ci?: EngineCiIntent;
   kind?: 'environment';
@@ -49,8 +56,8 @@ export interface AzureEngineInput extends AzurePlacement {
   environmentId: string;
   /** Environment name; prefixes this environment's Key Vault secret names. */
   environmentName: string;
-  /** The shared registry (and server) this environment uses, by Azure id. */
-  shared: { registryId: string; registryLoginServer: string };
+  /** The shared registry and Container Apps environment this environment uses, by Azure id. */
+  shared: { registryId: string; registryLoginServer: string; appsEnvironmentId: string };
   /** The project's Key Vault (created at setup). */
   vault: { id: string; uri: string };
   storage?: Array<{ name: string; container: string }>;
@@ -177,7 +184,7 @@ export function buildAzureConfiguration(input: AzureEngineInput | AzureSharedInp
   return input.kind === 'shared' ? buildAzureSharedConfiguration(input) : buildAzureEnvironmentConfiguration(input);
 }
 
-/** The server and registry a group of environments shares. */
+/** The network, Container Apps environment, server and registry a group of environments shares. */
 export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineConfiguration {
   checkPlacement(input);
   if (!UUID.test(input.deployPrincipalId)) throw new Error('Azure deploy identity id is invalid.');
@@ -185,9 +192,45 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
   const tags = { 'managed-by': 'hypervibe', 'hv-shared': input.label };
   const placed = { resource_group_name: input.resourceGroup, location: input.location, tags };
   const registry: EngineResourceMapping = { actionId: 'shared:registry', kind: 'service', name: 'shared image registry', billable: true };
-  const resources: Record<string, EngineResourceMapping> = { 'azurerm_container_registry.images': registry };
+  const network: EngineResourceMapping = { actionId: 'shared:network', kind: 'service', name: 'shared private network', billable: true };
+  const apps: EngineResourceMapping = { actionId: 'shared:apps', kind: 'service', name: 'shared app environment', billable: true };
+  const resources: Record<string, EngineResourceMapping> = {
+    'azurerm_container_registry.images': registry,
+    'azurerm_virtual_network.main': network, 'azurerm_subnet.apps': network, 'azurerm_subnet.endpoints': network,
+    'azurerm_log_analytics_workspace.logs': apps, 'azurerm_container_app_environment.main': apps,
+  };
+  const subnet = (name: string, range: string, extra: Record<string, unknown> = {}) => ({
+    name, resource_group_name: input.resourceGroup, virtual_network_name: '${azurerm_virtual_network.main.name}', address_prefixes: [range], ...extra });
   const files: Record<string, unknown> = {
     'provider.tf.json': providerFile(input),
+    // The database is reachable only inside this network, so the apps must run in it. A Container Apps
+    // environment can join a network only when it is created, which is why the group shares one.
+    'network.tf.json': {
+      resource: {
+        azurerm_virtual_network: { main: { name: `${input.prefix}-net`, ...placed, address_space: [AZURE_NETWORK.space] } },
+        azurerm_subnet: {
+          apps: subnet('apps', AZURE_NETWORK.apps, { delegation: [{ name: 'apps', service_delegation: [{ name: 'Microsoft.App/environments',
+            actions: ['Microsoft.Network/virtualNetworks/subnets/join/action'] }] }] }),
+          endpoints: subnet('endpoints', AZURE_NETWORK.endpoints),
+        },
+      },
+    },
+    'apps.tf.json': {
+      resource: {
+        azurerm_log_analytics_workspace: { logs: { name: `${input.prefix}-logs`, ...placed, sku: 'PerGB2018', retention_in_days: 30,
+          // About 4.5 GB a month: inside Log Analytics' 5 GB monthly free allowance.
+          daily_quota_gb: 0.15 } },
+        // Consumption profile only: no dedicated profile, private endpoint or maintenance window (those bill
+        // $0.10/hour). Joining a network bills its load balancer and two public addresses instead.
+        azurerm_container_app_environment: { main: { name: azureAppsEnvironmentName(input.prefix), ...placed,
+          log_analytics_workspace_id: '${azurerm_log_analytics_workspace.logs.id}', logs_destination: 'log-analytics',
+          infrastructure_subnet_id: '${azurerm_subnet.apps.id}',
+          workload_profile: [{ name: 'Consumption', workload_profile_type: 'Consumption' }],
+          // Azure fills in the profile's details and names the resource group holding the load balancer; neither is drift.
+          lifecycle: [{ ignore_changes: ['workload_profile', 'infrastructure_resource_group_name'] }] } },
+      },
+      output: { apps_environment_id: { value: '${azurerm_container_app_environment.main.id}' }, log_workspace_id: { value: '${azurerm_log_analytics_workspace.logs.workspace_id}' } },
+    },
     'registry.tf.json': {
       // Basic: $0.1666/day with 10 GB. Images build with ACR Tasks; no admin user or anonymous pull.
       resource: { azurerm_container_registry: { images: { name: names.registry, ...placed, sku: 'Basic', admin_enabled: false, anonymous_pull_enabled: false } } },
@@ -200,6 +243,8 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
     if (!Number.isInteger(input.database.version) || input.database.version < 13 || input.database.version > 18) throw new Error(`PostgreSQL ${input.database.version} is not supported.`);
     const server: EngineResourceMapping = { actionId: 'shared:database', kind: 'database', name: 'shared database server', dataBearing: true, billable: true };
     for (const address of ['azurerm_postgresql_flexible_server.postgres', 'azurerm_postgresql_flexible_server_active_directory_administrator.deploy',
+      'azurerm_private_dns_zone.postgres', 'azurerm_private_dns_zone_virtual_network_link.postgres', 'azurerm_private_endpoint.postgres',
+      // Retired: the rule that let every address reach the server. Mapping it lets the plan remove it from older projects.
       'azurerm_postgresql_flexible_server_firewall_rule.public']) resources[address] = server;
     files['database.tf.json'] = {
       ephemeral: { random_password: { postgres_admin: { length: 40, special: false } } },
@@ -207,7 +252,9 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
         azurerm_postgresql_flexible_server: { postgres: {
           name: names.server, ...placed, version: String(input.database.version),
           sku_name: input.database.skuName ?? 'B_Standard_B1ms', storage_mb: input.database.storageMb ?? 32768, auto_grow_enabled: true,
-          backup_retention_days: 7, geo_redundant_backup_enabled: false, public_network_access_enabled: true,
+          backup_retention_days: 7, geo_redundant_backup_enabled: false,
+          // Not reachable from the internet. Hypervibe opens it to one address for the moments it creates a login (withAzureSetupAccess).
+          public_network_access_enabled: false,
           administrator_login: 'hvadmin', administrator_password_wo: '${ephemeral.random_password.postgres_admin.result}', administrator_password_wo_version: 1,
           authentication: [{ active_directory_auth_enabled: true, password_auth_enabled: true, tenant_id: input.tenantId }],
           // Azure picks the availability zone; it is not drift.
@@ -217,10 +264,16 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
           server_name: '${azurerm_postgresql_flexible_server.postgres.name}', resource_group_name: input.resourceGroup, tenant_id: input.tenantId,
           object_id: input.deployPrincipalId, principal_name: input.deployPrincipalName, principal_type: 'ServicePrincipal',
         } },
-        // Consumption-plan Container Apps have no fixed outbound address. TLS (required by default) and
-        // generated passwords protect the endpoint, as with Aurora on AWS.
-        azurerm_postgresql_flexible_server_firewall_rule: { public: { name: 'hypervibe-public-tls', server_id: '${azurerm_postgresql_flexible_server.postgres.id}',
-          start_ip_address: '0.0.0.0', end_ip_address: '255.255.255.255' } },
+        // The apps reach the server through this endpoint; the zone makes the server's usual host name
+        // resolve to its private address inside the network, so DATABASE_URL does not change.
+        azurerm_private_dns_zone: { postgres: { name: 'privatelink.postgres.database.azure.com', resource_group_name: input.resourceGroup, tags } },
+        azurerm_private_dns_zone_virtual_network_link: { postgres: { name: `${input.prefix}-net`,
+          private_dns_zone_id: '${azurerm_private_dns_zone.postgres.id}', virtual_network_id: '${azurerm_virtual_network.main.id}', registration_enabled: false, tags } },
+        azurerm_private_endpoint: { postgres: { name: `${input.prefix}-postgres`, ...placed, subnet_id: '${azurerm_subnet.endpoints.id}',
+          private_service_connection: [{ name: 'postgres', private_connection_resource_id: '${azurerm_postgresql_flexible_server.postgres.id}',
+            subresource_names: ['postgresqlServer'], is_manual_connection: false }],
+          private_dns_zone_group: [{ name: 'default', private_dns_zone_ids: ['${azurerm_private_dns_zone.postgres.id}'] }],
+          depends_on: ['azurerm_private_dns_zone_virtual_network_link.postgres'] } },
       },
       output: { database_host: { value: '${azurerm_postgresql_flexible_server.postgres.fqdn}' } },
     };
@@ -228,7 +281,7 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
   return { files, resources };
 }
 
-/** One environment: everything except the shared server and registry. */
+/** One environment: everything except what its group shares. */
 export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): EngineConfiguration {
   checkPlacement(input);
   const tags = { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() };
@@ -249,8 +302,9 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     seen.set(name, key);
   }
 
-  // Base: logs, the Container Apps environment (consumption only), the runtime identity and its roles.
-  const base: EngineResourceMapping = { actionId: 'environment:base', kind: 'service', name: 'environment', billable: true };
+  // Retired: each environment used to have its own Container Apps environment and logs, outside any network.
+  // Mapping them lets the plan remove them from older environments, whose apps move to the shared one.
+  const base: EngineResourceMapping = { actionId: 'environment:base', kind: 'service', name: 'old app environment', billable: true };
   const runtime: EngineResourceMapping = { actionId: 'identity:runtime', kind: 'service', name: 'runtime' };
   resources['azurerm_log_analytics_workspace.logs'] = base;
   resources['azurerm_container_app_environment.main'] = base;
@@ -285,14 +339,6 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     'provider.tf.json': providerFile(input),
     'base.tf.json': {
       resource: {
-        azurerm_log_analytics_workspace: { logs: { name: `${input.prefix}-logs`, ...placed, sku: 'PerGB2018', retention_in_days: 30,
-          // About 4.5 GB a month: inside Log Analytics' 5 GB monthly free allowance.
-          daily_quota_gb: 0.15 } },
-        // No workload profiles, private endpoint or maintenance window: those bill $0.10/hour per environment.
-        azurerm_container_app_environment: { main: { name: `${input.prefix}-apps`, ...placed,
-          log_analytics_workspace_id: '${azurerm_log_analytics_workspace.logs.id}', logs_destination: 'log-analytics',
-          // Azure adds its own Consumption profile to a new environment; declaring none must not read as drift.
-          lifecycle: [{ ignore_changes: ['workload_profile'] }] } },
         azurerm_user_assigned_identity: { runtime: { name: `${input.prefix}-runtime`, ...placed } },
         azurerm_role_assignment: assignments,
         // New role assignments take a minute or two to apply; the first revision pulls and reads secrets right away.
@@ -339,7 +385,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     };
   };
   const shared = {
-    resource_group_name: input.resourceGroup, container_app_environment_id: '${azurerm_container_app_environment.main.id}', tags,
+    resource_group_name: input.resourceGroup, container_app_environment_id: input.shared.appsEnvironmentId, tags,
     identity: [{ type: 'UserAssigned', identity_ids: ['${azurerm_user_assigned_identity.runtime.id}'] }],
     registry: [...new Set([input.shared.registryLoginServer, buildRegistry.loginServer])].map((server) => ({ server, identity: '${azurerm_user_assigned_identity.runtime.id}' })),
     secret: secrets.map(({ name, vaultName }) => ({ name, key_vault_secret_id: `${input.vault.uri}secrets/${vaultName}`, identity: '${azurerm_user_assigned_identity.runtime.id}' })),
@@ -412,7 +458,6 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
 
   files['outputs.tf.json'] = { output: {
     runtime_identity_client_id: { value: '${azurerm_user_assigned_identity.runtime.client_id}' },
-    apps_environment_id: { value: '${azurerm_container_app_environment.main.id}' },
   } };
   return { files, resources };
 }

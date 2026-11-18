@@ -95,7 +95,8 @@ export function estimateAzureMonthlyCost(environment: EnvironmentSpec): CostLine
   if (workers) lines.push({ item: `${workers} worker(s) that start when jobs are due`, estimate: '$0 while idle; about 3 cents per hour while working (0.25 vCPU)' });
   const cron = workloads.filter((service) => service.workloadKind === 'cron').length;
   if (cron) lines.push({ item: `${cron} scheduled job(s)`, estimate: '$0 between runs; a few cents a month for short runs' });
-  if (environment.database) lines.push({ item: 'Postgres (Burstable B1ms, 32 GB), shared by all of the project\'s testing environments', estimate: 'about $16 per month for the project' });
+  lines.push({ item: 'Private network for the apps (load balancer and two public addresses), shared by all of the project\'s testing environments', estimate: 'about $26 per month for the project' });
+  if (environment.database) lines.push({ item: 'Postgres (Burstable B1ms, 32 GB) that the internet cannot reach, shared by all of the project\'s testing environments', estimate: 'about $24 per month for the project, including its private endpoint' });
   lines.push({ item: 'Container Registry (Basic), shared by the project', estimate: 'about $5 per month for the project' });
   if (environment.deploy?.strategy === 'branch') lines.push({ item: 'Dedicated Container Registry (Basic) for this CI environment', estimate: 'an additional registry charge; shown in the reviewed infrastructure plan' });
   const buckets = Object.keys(environment.storage ?? {}).length;

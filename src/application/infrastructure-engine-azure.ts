@@ -1,6 +1,6 @@
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
-import { projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
+import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
@@ -11,7 +11,7 @@ export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-releas
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { azureEngineAuthentication, azureEngineBackend } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 import {
-  WAKER_SECRET_KEY, azureProjectVaultName, azureSharedNames, azureStorageAccountName, azureVaultSecretName, buildAzureEnvironmentConfiguration,
+  WAKER_SECRET_KEY, azureAppsEnvironmentName, azureProjectVaultName, azureSharedNames, azureStorageAccountName, azureVaultSecretName, buildAzureEnvironmentConfiguration,
   buildAzureSharedConfiguration, buildAzureBuildConfiguration, type AzureEngineInput, type AzureSharedInput,
 } from '../adapters/providers/azure/tofu/azure-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -26,7 +26,7 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
-  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources,
+  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources, withAzureSetupAccess,
   type AzureKeyVaultSecretStore, type SqlRunner,
 } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
@@ -39,9 +39,10 @@ import { localRepositoryFor } from './local-repository.js';
 
 /**
  * The OpenTofu lifecycle for Azure environments: spec → configuration (a shared
- * state for the server and registry, an environment state for the rest),
- * Hypervibe-owned secrets in the project Key Vault, the app's database login over
- * verified TLS with an Entra token, the first image built inside the same apply,
+ * state for the private network, app environment, server and registry; an
+ * environment state for the rest), Hypervibe-owned secrets in the project Key
+ * Vault, the app's database login over verified TLS with an Entra token while the
+ * server is briefly open to this computer only, the first image built inside the same apply,
  * and the same reviewed-plan executor as GCP and AWS. See docs/opentofu-engine-azure.md.
  */
 export const AZURE_SECRET_OPERATION = 'azureSecretEnsure';
@@ -91,7 +92,7 @@ export function azureContainerName(storage: string): string {
   return storage.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').padEnd(3, '0').slice(0, 63);
 }
 
-/** Azure engine environments in the testing profile: they share one server and registry. */
+/** Azure engine environments in the testing profile: they share one network, app environment, server and registry. */
 export function azureTestingEnvironments(spec: ProjectSpec): string[] {
   return Object.keys(spec.environments).filter((name) => isAzureEngineEnvironment(spec, name) && azureProfileFor(name) === 'testing').sort();
 }
@@ -144,7 +145,7 @@ export interface AzureEngineContext {
   prefix: string;
   state: EngineStateIdentity;
   buildState: EngineStateIdentity;
-  shared: { label: string; prefix: string; state: EngineStateIdentity; registryId: string; registryLoginServer: string; serverName: string; databaseHost: string };
+  shared: { label: string; prefix: string; state: EngineStateIdentity; registryId: string; registryLoginServer: string; appsEnvironmentId: string; serverId: string; serverName: string; databaseHost: string };
   vault: { name: string; id: string; uri: string };
 }
 
@@ -163,7 +164,8 @@ export function azureEngineLayout(project: Pick<Project, 'id' | 'name'>, environ
       label, prefix: sharedPrefix,
       state: { provider: 'azure', projectId: project.id, environmentId: `shared-${label}`.slice(0, 120), partition: 'project-shared' } as EngineStateIdentity,
       registryId: `${group}/providers/Microsoft.ContainerRegistry/registries/${names.registry}`, registryLoginServer: `${names.registry}.azurecr.io`,
-      serverName: names.server, databaseHost: `${names.server}.postgres.database.azure.com`,
+      appsEnvironmentId: `${group}/providers/Microsoft.App/managedEnvironments/${azureAppsEnvironmentName(sharedPrefix)}`,
+      serverId: `${group}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${names.server}`, serverName: names.server, databaseHost: `${names.server}.postgres.database.azure.com`,
     },
     vault: { name: vaultName, id: `${group}/providers/Microsoft.KeyVault/vaults/${vaultName}`, uri: azureVaultUri(vaultName) },
   };
@@ -196,10 +198,10 @@ export function azureLocationFor(spec: ProjectSpec, environmentName: string, con
   return spec.environments[environmentName]?.hosting.region?.trim() || connection.location;
 }
 
-/** The shared server and registry live where the environments sharing them are; they must agree. */
+/** The shared network, app environment, server and registry live where the environments sharing them are; they must agree. */
 export function azureSharedLocation(spec: ProjectSpec, environments: string[], connection: { location: string }): string | { blocked: string } {
   const regions = [...new Set(environments.map((name) => azureLocationFor(spec, name, connection)))];
-  if (regions.length > 1) return { blocked: `Testing environments ${environments.join(', ')} share one database server and registry, so they need one region; they are set to ${regions.join(' and ')}.` };
+  if (regions.length > 1) return { blocked: `Testing environments ${environments.join(', ')} share one network, database server and registry, so they need one region; they are set to ${regions.join(' and ')}.` };
   return regions[0] ?? connection.location;
 }
 
@@ -238,7 +240,7 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
-    shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer },
+    shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer, appsEnvironmentId: context.shared.appsEnvironmentId },
     ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
     vault: { id: context.vault.id, uri: context.vault.uri },
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((name) => ({ name, container: azureContainerName(name) })),
@@ -373,6 +375,15 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
   const sharedActions = sharedPlanned.actions;
   const sharedChanging = changing(sharedActions);
+  // Connections made before 2026-11-17 never turned on Azure networking; only the subscription Owner can.
+  let networkingUnchecked = false;
+  if (sharedChanging.includes('shared:network')) {
+    const networking = await azureRest(context.tokens, AZURE_SCOPES.arm, 'GET', `${ARM}/subscriptions/${context.connection.subscriptionId}/providers/Microsoft.Network?api-version=2021-04-01`).catch(() => undefined);
+    if (networking?.status === 200 && networking.body.registrationState !== 'Registered') {
+      return { blocked: ['The database now lives in a private network, and networking (Microsoft.Network) is not turned on for this Azure subscription yet. Run hv_connections provider="azure" action="connect" (one sign-in) to turn it on, then plan again.'] };
+    }
+    networkingUnchecked = networking?.status !== 200;
+  }
 
   const buildInput = buildAzureEngineInput(spec, environmentName, context, { secretKeys: [...keys.all, ...keys.build].filter((key) => !secrets.unset?.includes(key)) });
   const buildPlanId = crypto.randomUUID();
@@ -399,7 +410,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const needsWaker = Object.values(environmentSpec.services).some((service) => service.onDemand);
   const loginActions: PlanAction[] = environmentSpec.database && (!binding.databaseLoginAt || (needsWaker && !binding.wakerLoginAt)) ? [{
     id: 'database-login:postgres', type: 'create', verified: true, resource: { kind: 'secret', name: ENGINE_DATABASE_URL_KEY, provider: 'azure' },
-    reason: `Hypervibe will create ${environmentName}'s database and login on ${context.shared.serverName}${needsWaker ? ', and a read-only login for the worker\'s scale rule' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Key Vault.`,
+    reason: `Hypervibe will create ${environmentName}'s database and login on ${context.shared.serverName}${needsWaker ? ', and a read-only login for the worker\'s scale rule' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Key Vault. The server is closed to the internet; for this step it accepts this computer's address only, then closes again.`,
     ...(sharedChanging.includes('shared:database') ? { dependsOn: ['shared:database'] } : {}),
     metadata: { operation: AZURE_DATABASE_LOGIN_OPERATION, subscriptionId: context.connection.subscriptionId, host: context.shared.databaseHost, waker: needsWaker },
   }] : [];
@@ -424,7 +435,9 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildInfrastructureActions), ...changing(buildActions), ...changing(loginActions)];
   const actions = [...sharedActions, ...secretActions, ...buildInfrastructureActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [
-    `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero; the shared database server is about $16/month for all testing environments.`,
+    `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero. All testing environments share one private network (about $26/month) and one database server (about $24/month with its private endpoint), which the internet cannot reach.`,
+    ...(planned.actions.some((action) => action.id === 'environment:base' && action.type !== 'noop') ? [`${environmentName}'s apps move into the project's shared private app environment: they are recreated, are briefly unavailable, and get new addresses.`] : []),
+    ...(networkingUnchecked ? ['Hypervibe could not check that networking (Microsoft.Network) is turned on for this subscription. If the apply reports that the subscription is not registered for it, run hv_connections provider="azure" action="connect" and apply again.'] : []),
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });
@@ -434,7 +447,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
  * Plans removing an Azure environment completely, as one reviewed plan with
  * every destructive action confirmed: storage is emptied, OpenTofu destroys the
  * environment's resources, its database and logins are dropped from the shared
- * server, the server and registry go only when no testing environment uses them,
+ * server, the shared network, app environment, server and registry go only when no testing environment uses them,
  * and Hypervibe confirms nothing tagged for the environment remains.
  */
 export async function planAzureTeardown(ctx: CommandContext, params: {
@@ -474,7 +487,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   if (buildPlanned.blockers.length) return { blocked: buildPlanned.blockers };
   const buildActions = withDependencies(buildPlanned.actions.filter((action) => action.type !== 'noop'), changing(environmentActions));
 
-  // The shared server and registry stay while another testing environment uses them.
+  // The shared network, app environment, server and registry stay while another testing environment uses them.
   const remaining = azureTestingEnvironments(spec).filter((name) => name !== environmentName);
   let sharedActions: PlanAction[] = [];
   let shared: Record<string, unknown> = {};
@@ -490,14 +503,14 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
     id: 'database-drop:postgres', type: 'destroy', verified: true, dataBearing: true, requiresConfirm: true,
     resource: { kind: 'database', name: `${environmentName} database`, provider: 'azure' },
-    reason: `Hypervibe will permanently delete ${environmentName}'s database and logins from the shared server ${context.shared.serverName}. Other environments' databases are untouched.`,
+    reason: `Hypervibe will permanently delete ${environmentName}'s database and logins from the shared server ${context.shared.serverName}. Other environments' databases are untouched. For this step the server accepts this computer's address only, then closes again.`,
     ...(changing(environmentActions).length ? { dependsOn: changing(environmentActions) } : {}),
     metadata: { operation: AZURE_DATABASE_DROP_OPERATION, subscriptionId, host: context.shared.databaseHost },
   }] : [];
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'azure' },
-    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${sharedActions.length ? ' (nor the shared server and registry)' : ''}, and remove it from the spec.`,
+    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${sharedActions.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec.`,
     dependsOn: [...changing(environmentActions), ...changing(buildActions), ...changing(sharedActions), ...changing(dropActions)],
     metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: sharedActions.length > 0 },
   };
@@ -506,7 +519,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const warnings = [
     `Removes Azure environment ${environmentName} (${azureLocationFor(spec, environmentName, context.connection)}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
     ...(environmentSpec.database ? ['Azure keeps no final snapshot of a deleted database; export it first if you need the data.'] : []),
-    sharedActions.length ? 'No other testing environment uses the shared server and registry, so they are removed too.' : `The shared server and registry stay for ${remaining.join(', ')}.`,
+    sharedActions.length ? 'No other testing environment uses the shared network, app environment, server and registry, so they are removed too.' : `The shared network, app environment, server and registry stay for ${remaining.join(', ')}.`,
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, teardown: true, build: { planId: buildPlanId, state: context.buildState }, ...shared });
@@ -514,6 +527,8 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
 
 export interface AzureApplyDependencies {
   sqlRunner?: (context: AzureEngineContext, host: string) => SqlRunner;
+  /** Runs setup SQL while the closed server accepts this computer; tests replace it. */
+  setupAccess?: <T>(context: AzureEngineContext, sql: SqlRunner, work: () => Promise<T>) => Promise<T>;
   buildImage?: (context: AzureEngineContext, source: { directory: string; commitSha: string }) => Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }>;
 }
 
@@ -527,6 +542,8 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
   const metadata = (action.metadata ?? {}) as Record<string, unknown>;
   const store = azureEnvironmentSecretStore(context);
   const sql = (host: string) => (deps.sqlRunner ?? ((c, h) => entraSqlRunner(c.tokens, h, azureDeployAppName(c.project.name))))(context, host);
+  const setupAccess = deps.setupAccess ?? (<T>(c: AzureEngineContext, runner: SqlRunner, work: () => Promise<T>) =>
+    withAzureSetupAccess(c.tokens, c.shared.serverId, () => runner('postgres', async (query) => { await query('SELECT 1'); }), work));
   switch (metadata.operation) {
     case AZURE_SECRET_OPERATION: {
       const key = String(metadata.key);
@@ -557,20 +574,22 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
     }
     case AZURE_DATABASE_LOGIN_OPERATION: {
       // A new server's Entra administrator takes a minute to be usable.
-      let urls: { databaseUrl: string; wakerUrl?: string } | undefined;
-      for (let attempt = 0; !urls; attempt++) {
-        try { urls = await ensureEnvironmentDatabase(sql(String(metadata.host)), { host: String(metadata.host), environmentName: context.environmentName, waker: Boolean(metadata.waker) }); } catch (error) {
-          if (attempt >= 5 || !/password authentication failed|role .* does not exist|ECONNREFUSED|ETIMEDOUT|the database system is starting up/i.test(error instanceof Error ? error.message : '')) throw error;
-          await new Promise((done) => setTimeout(done, 20_000));
+      const runner = sql(String(metadata.host));
+      const urls = await setupAccess(context, runner, async () => {
+        for (let attempt = 0; ; attempt++) {
+          try { return await ensureEnvironmentDatabase(runner, { host: String(metadata.host), environmentName: context.environmentName, waker: Boolean(metadata.waker) }); } catch (error) {
+            if (attempt >= 5 || !/password authentication failed|role .* does not exist|ECONNREFUSED|ETIMEDOUT|the database system is starting up/i.test(error instanceof Error ? error.message : '')) throw error;
+            await new Promise((done) => setTimeout(done, 20_000));
+          }
         }
-      }
+      });
       for (const [key, value] of [[ENGINE_DATABASE_URL_KEY, urls.databaseUrl], ...(urls.wakerUrl ? [[WAKER_SECRET_KEY, urls.wakerUrl]] : [])] as Array<[string, string]>) {
         const failed = await store.write(key, value);
         if (failed) return { success: false, message: failed };
       }
       const now = new Date().toISOString();
       updateBinding(ctx, context, { database: {
-        serverId: `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${context.shared.serverName}`,
+        serverId: context.shared.serverId,
         subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, host: String(metadata.host),
         name: azureDatabaseNames(context.environmentName).database, owner: azureDatabaseNames(context.environmentName).login,
         secretUrl: `${context.vault.uri}secrets/${azureVaultSecretName(context.environmentName, ENGINE_DATABASE_URL_KEY)}`,
@@ -582,9 +601,11 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       if ('error' in emptied) return { success: false, message: emptied.error };
       return { success: true, message: 'gone' in emptied ? `${metadata.container} no longer exists.` : `Deleted ${emptied.deleted} file(s) from ${metadata.container}.` };
     }
-    case AZURE_DATABASE_DROP_OPERATION:
-      await dropEnvironmentDatabase(sql(String(metadata.host)), context.environmentName);
+    case AZURE_DATABASE_DROP_OPERATION: {
+      const runner = sql(String(metadata.host));
+      await setupAccess(context, runner, () => dropEnvironmentDatabase(runner, context.environmentName));
       return { success: true, message: `Deleted ${context.environmentName}'s database and logins.` };
+    }
     case AZURE_TEARDOWN_CLEANUP_OPERATION: {
       const purged = await purgeVaultSecrets(context.tokens, context.vault.uri, azureVaultSecretName(context.environmentName, 'x').slice(0, -1));
       if ('error' in purged) return { success: false, message: purged.error };
@@ -662,9 +683,11 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
+    const sharedApps = await engine.inspectState({ backend: azureEngineBackend, configuration: { files: {}, resources: {} }, auth: context.auth, state: context.shared.state, project: projectAzureSharedApps });
+    const apps = sharedApps.ok && sharedApps.present && sharedApps.value.managedEnvironmentId?.toLowerCase() === context.shared.appsEnvironmentId.toLowerCase() ? sharedApps.value : {};
     const recorded = await recordEngineWorkloadBindings(ctx, engine, { environment: context.environment, backend: azureEngineBackend,
       auth: context.auth, state: context.state, provider: 'azure', projectId: context.connection.subscriptionId, environmentId: context.connection.resourceGroup,
-      project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }) });
+      project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }, apps) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
   }
   await recordEngineCiBindings(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName,

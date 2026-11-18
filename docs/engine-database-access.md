@@ -53,7 +53,8 @@ PostgreSQL client with certificate and hostname verification. Existing query
 transaction, timeout, result bounds and connection cleanup apply. Query never
 adds firewall rules. If public access is disabled or unknown, a managed private
 connector or an approved engine network change is required; the connector is not
-implemented. Both providers' public inspection/status results separate server
+implemented. Since 2026-11-17 the Azure engine turns public access off (#728),
+so queries against Azure engine databases are refused. Both providers' public inspection/status results separate server
 presence from unverified SQL authentication and application credential alignment.
 
 Migration source summaries can use Data API. PostgreSQL socket transfers cannot;

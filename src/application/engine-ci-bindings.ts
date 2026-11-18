@@ -134,8 +134,8 @@ function azureEnvironment(state: unknown, params: Extract<Params, { provider: 'a
   match(federation.issuer, 'https://token.actions.githubusercontent.com'); match(federation.subject, `repo:${intent.repository}:ref:refs/heads/${intent.branch}`);
   if (!Array.isArray(federation.audience) || federation.audience.length !== 1 || federation.audience[0] !== 'api://AzureADTokenExchange') throw new Error('Azure CI audience is not exact.');
   const roles = azureCiRoleDefinitions(subscriptionId, resourceGroup); const roleId = roles.release.id;
-  const managedEnvironment = get('azurerm_container_app_environment.main'); owned(managedEnvironment, context.environment.id); match(managedEnvironment.location, params.location);
-  match(managedEnvironment.id, `${group}/providers/Microsoft.App/managedEnvironments/${context.prefix}-apps`);
+  // The project's shared app environment; its identity comes from the shared state's layout, not from a name search.
+  const managedEnvironment = { id: context.shared.appsEnvironmentId };
   for (const [name, service] of Object.entries(spec.environments[environmentName]!.services)) {
     const job = service.workloadKind === 'cron'; const workload = get(`${job ? 'azurerm_container_app_job' : 'azurerm_container_app'}.${azureKey(name)}`); owned(workload, context.environment.id);
     match(workload.container_app_environment_id, text(managedEnvironment.id));
@@ -143,7 +143,9 @@ function azureEnvironment(state: unknown, params: Extract<Params, { provider: 'a
     text(grant.id); match(grant.scope, text(workload.id)); match(grant.principal_id, principalId); match(grant.role_definition_id, roleId);
   }
   const buildGrant = get('azurerm_role_assignment.ci_build'); text(buildGrant.id); match(buildGrant.principal_id, principalId); match(buildGrant.role_definition_id, roles.build.id);
-  const services = projectAzureWorkloadBindings(state, spec.environments[environmentName]!.services, { subscriptionId, resourceGroup, location: params.location });
+  const services = projectAzureWorkloadBindings(state, spec.environments[environmentName]!.services, { subscriptionId, resourceGroup, location: params.location },
+    // Each workload above was matched to this exact environment; its log workspace is not needed to release.
+    { managedEnvironmentId: managedEnvironment.id });
   complete(services, spec, environmentName);
   return { services, tenantId, clientId, subscriptionId, resourceGroup, buildScope: text(buildGrant.scope) };
 }
