@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { RunningBuild, type BuildCheckOptions } from './interfaces/mcp/running-build.js';
 import { withClientInstructions } from './interfaces/mcp/client-instructions.js';
 import { createCommandContext } from './application/context.js';
 import { createCommandRegistry } from './application/commands.js';
@@ -31,12 +32,13 @@ export const HYPERVIBE_SERVER_INSTRUCTIONS = [
 ].join('\n');
 
 class HypervibeMcpServer extends McpServer {
+  runningBuild?: RunningBuild;
   override connect(transport: Transport): Promise<void> {
-    return super.connect(withClientInstructions(transport, HYPERVIBE_SERVER_INSTRUCTIONS));
+    return super.connect(withClientInstructions(transport, HYPERVIBE_SERVER_INSTRUCTIONS, this.runningBuild));
   }
 }
 
-export function createServer(): McpServer {
+export function createServer(buildCheck?: BuildCheckOptions): McpServer {
   const server = new HypervibeMcpServer(
     {
       name: 'hypervibe',
@@ -46,6 +48,8 @@ export function createServer(): McpServer {
       instructions: HYPERVIBE_SERVER_INSTRUCTIONS,
     }
   );
+
+  if (buildCheck) server.runningBuild = new RunningBuild(buildCheck);
 
   server.registerResource('hypervibe-guidance', 'hypervibe://guidance', {
     title: 'Complete Hypervibe operating guidance',

@@ -860,7 +860,10 @@ function renderPresentation(presentation: CommandPresentation, envelope: Command
  * structured envelope is deliberately not modified.
  */
 export function formatCommandResult(commandId: string, envelope: CommandEnvelope): string {
-  if (!envelope.ok) return renderPresentation(errorPresentation(commandId, envelope), envelope);
+  if (!envelope.ok) {
+    const text = renderPresentation(errorPresentation(commandId, envelope), envelope);
+    return envelope.error?.build ? `${text}\nHypervibe ${envelope.error.build.version}` : text;
+  }
   const data = record(envelope.data);
   const presenter = PRESENTERS[commandId];
   return renderPresentation(

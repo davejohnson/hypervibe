@@ -369,7 +369,7 @@ export async function runInstall(
   const check = args.length === 3 && args[1] === '--skill-only' && args[2] === '--check';
   const skillOnly = check || (args.length === 2 && args[1] === '--skill-only');
   if (!Object.hasOwn(CLIENTS, client) || (args.length !== 1 && !skillOnly)) {
-    io.writeErr(`Choose a supported client: claude, codex, or opencode.\n\n${HELP}`);
+    io.writeErr(`Hypervibe ${HYPERVIBE_VERSION}: Choose a supported client: claude, codex, or opencode.\n\n${HELP}`);
     return 2;
   }
   if (check) {
@@ -405,7 +405,7 @@ export async function runInstall(
       try { mcp.rollback(); mcpReady = false; }
       catch { io.writeErr('The MCP configuration changed or could not be restored after a partial installation. Inspect it before retrying.\n'); }
     }
-    io.writeErr(`${error instanceof InstallError ? error.message : 'Client setup could not finish because a local file could not be read or written. Inspect the client configuration and skill before retrying.'}\n`);
+    io.writeErr(`Hypervibe ${HYPERVIBE_VERSION}: ${error instanceof InstallError ? error.message : 'Client setup could not finish because a local file could not be read or written. Inspect the client configuration and skill before retrying.'}\n`);
     if (mcpReady) io.writeErr('MCP is configured, but skill installation is incomplete. Check the skill directory before retrying.\n');
     return 1;
   } finally {
