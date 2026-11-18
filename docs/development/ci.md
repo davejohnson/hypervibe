@@ -83,6 +83,10 @@ and App Store submission must share its exact-resource validation. Retained
 artifacts without the extension and valid empty or populated operations remain
 compatible; malformed metadata never becomes permission to proceed. Execute
 producer output through these consumers in ordinary acceptance tests.
+A versioned credential operation needs a provider observation of the version
+adopted by each exact deployment. Current managed workflows cannot establish
+that fact and reject versioned requests before deploying. Railway continues to
+emit native deployment IDs for unversioned operations.
 
 ## DG-128
 

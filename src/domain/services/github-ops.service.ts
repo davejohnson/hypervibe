@@ -61,7 +61,7 @@ export type {
 };
 
 // Removing target.backupPolicy already migrates affected inputs; preserve unrelated reviewed locks.
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 7;
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 8;
 const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
@@ -485,8 +485,8 @@ function credentialActivationForRelease(operations, deployments, resources) {
   for (const [service, operation] of Object.entries(operations)) {
     if (!exactEvidenceKeys(operation, ['serviceId', 'operationId', ...(operation && operation.configurationVersion !== undefined ? ['configurationVersion'] : [])]) || !resources.some((resource) => resource.logicalName === service && resource.providerResourceId === operation.serviceId)) throw new Error('Credential operation is not an exact reviewed resource');
     const deployment = deployments.find((entry) => entry.serviceId === operation.serviceId);
-    if (deployment && deployment.configurationVersion !== operation.configurationVersion) throw new Error('Credential deployment does not prove the accepted configuration version');
-    if (deployment) result.push({ service, serviceId: operation.serviceId, operationId: operation.operationId, deploymentIds: deployment.deploymentIds, ...(operation.configurationVersion !== undefined ? { configurationVersion: operation.configurationVersion } : {}) });
+    if (deployment?.configurationVersion !== operation.configurationVersion) throw new Error('Credential deployment does not prove the accepted configuration version');
+    if (deployment) result.push({ service, serviceId: operation.serviceId, operationId: operation.operationId, deploymentIds: deployment.deploymentIds, ...(deployment.configurationVersion !== undefined ? { configurationVersion: deployment.configurationVersion } : {}) });
   }
   return normalizeCredentialActivation({ version: 1, operations: result }, resources);
 }
@@ -1137,6 +1137,13 @@ ${permissionsBlock.trimEnd()}
             const sha = (inputSha || process.env.GITHUB_SHA).toLowerCase();
             if (!/^[0-9a-f]{40}$/i.test(sha)) {
               throw new Error('commit_sha must be a full 40-character Git commit SHA, got: ' + JSON.stringify(inputSha || sha));
+            }
+            const credentialOperations = JSON.parse(context.payload.inputs?.credential_operations || '{}');
+            if (!credentialOperations || typeof credentialOperations !== 'object' || Array.isArray(credentialOperations)) {
+              throw new Error('Credential operations must be a map of reviewed workloads');
+            }
+            if (Object.values(credentialOperations).some(operation => operation && Object.hasOwn(operation, 'configurationVersion'))) {
+              throw new Error('This managed deployment cannot verify the adopted configuration version. Versioned credential activation is unavailable.');
             }
             const rollbackInput = (context.payload.inputs || {}).rollback;
             const operation = rollbackInput === true || rollbackInput === 'true' ? 'rollback' : 'deploy';

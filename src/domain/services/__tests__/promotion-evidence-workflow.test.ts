@@ -747,7 +747,7 @@ describe('generated managed-CI promotion evidence gate', () => {
     // Accepted input hash after the first discovery fix; keep its literal
     // promotion revision independent of runtime constants.
     const previousHash = (inputTarget: BranchDeployTarget) => canonicalJsonSha256({
-      version: 1, rendererRevision: 7,
+      version: 1, rendererRevision: 8,
       ...(inputTarget.promoteFromEnvironment ? { promotionRendererRevision: 1 } : {}),
       provider: 'railway', target: inputTarget, migration,
     });
