@@ -1,3 +1,4 @@
+import { sendGridCapabilityEvidence } from './sendgrid-capability-evidence.js';
 import { z } from 'zod';
 import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -662,6 +663,7 @@ export class SendGridAdapter {
 providerRegistry.register({
   metadata: {
     name: 'sendgrid',
+    maturity: {integration: sendGridCapabilityEvidence},
     displayName: 'SendGrid',
     category: 'email',
     credentialsSchema: SendGridCredentialsSchema,

@@ -1,3 +1,4 @@
+import { sendGridCapabilityEvidence } from '../adapters/providers/sendgrid/sendgrid-capability-evidence.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { detectProviderName } from '../domain/services/provider-logs.service.js';
@@ -93,7 +94,7 @@ async function readProviderLogs<T>(
 export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_logs',
-    'Fetch runtime service logs, Google Cloud release command output, build logs, recent deployments, Stripe webhook status, or sanitized SendGrid delivery logs. SendGrid requires explicit project and env and returns account-scoped evidence, not verified environment attribution. Recognized selectors that do not apply to the source are ignored with a warning.',
+    'Fetch runtime service logs, Google Cloud release command output, build logs, recent deployments, Stripe webhook status, or sanitized SendGrid delivery logs. SendGrid requires explicit project and env. ' + sendGridCapabilityEvidence.emailLogs.summary + ' Recognized selectors that do not apply to the source are ignored with a warning.',
     {
       project: projectField,
       env: envField,

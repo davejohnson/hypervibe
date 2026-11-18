@@ -149,6 +149,10 @@ Use `environment.domain` for a hosted app or email domain; DNS selection needs
 it. SendGrid records wait for an observed domain authorization. Existing
 records require explicit exact-ID adoption and preservation of unrelated values.
 
+For SendGrid, read the capability evidence in `hv_inspect({})`. The October 15,
+2026 Email Logs check covered one account search and one message timeline.
+Sender, domain and webhook writes remain live-unverified.
+
 Defaults are public DNS, required HTTPS, proxy off and no wildcards; preserve
 existing DNSSEC and CAA policy. Required security settings block when evidence
 is missing or unsatisfied. Zone creation, DNSSEC/registrar changes, automatic CAA

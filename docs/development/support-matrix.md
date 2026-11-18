@@ -19,6 +19,12 @@ secrets and their rotation, backups and tested restores, CI, promotion and
 rollback, domains, and the common outside services an app needs (Stripe,
 SendGrid, Cloudflare, GitHub, App Store Connect).
 
+SendGrid Email Logs has a dated read-only receipt for one account search and
+one exact-message timeline. Environment attribution and other account scopes
+remain unverified. The domain, sender and webhook operations have separate
+entries in `hv_inspect({})`; none has a live mutation receipt in this matrix.
+[Read the bounded October 15 receipt](../../test/provider-contracts/sendgrid-email-logs.md#bounded-live-evidence).
+
 Railway is frozen. It keeps working for existing apps and receives no new
 capabilities. Nothing new may depend on it, and it is not listed below.
 
