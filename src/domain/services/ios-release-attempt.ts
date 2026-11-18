@@ -6,7 +6,7 @@ const contractUrl = new URL('../../../templates/ios/release-attempt.cjs', import
 const contract = createRequire(import.meta.url)(fileURLToPath(contractUrl)) as {
   assertCurrentReleaseAttempt: (run: unknown, artifact: unknown, jobs: unknown, jobName: string) => void;
   assertSkippedIosReleaseAttempt: (run: unknown, jobs: unknown) => void;
-  assertSameReleaseAttempt: (previous: unknown, current: unknown) => void;
+  assertSameReleaseAttempt: (previous: unknown, current: unknown, allowedRef?: string) => void;
 };
 export const { assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt } = contract;
 

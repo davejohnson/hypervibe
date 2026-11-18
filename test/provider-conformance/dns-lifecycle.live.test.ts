@@ -13,7 +13,7 @@ import type { DnsObservedRecord } from '../../src/domain/ports/dns.port.js';
 import { parseGitHubRepoFromRemote } from '../../src/lib/git-remote.js';
 import { assertFixtureContinuation, assertFixtureLifecycleConsent, fixturePreview, type FixturePreview } from './fixture-authorization.js';
 import { assertFixtureHttpResponse, readFixtureJournal, runDisposableFixture, saveFixtureJournal, type FixtureJournal } from './lifecycle-live-harness.js';
-import { assertDnsFixtureActions, assertDnsFixtureTarget, assertDnsFixtureValues, assertDnsPreservedRecords, dnsFixtureInventory,
+import { applyDnsFixturePlan, assertDnsFixtureActions, assertDnsFixtureTarget, assertDnsFixtureValues, assertDnsPreservedRecords, dnsFixtureInventory,
   assertDnsProofPreserved, dnsFixtureCleanupState, dnsFixtureProofBaseline,
   dnsFixtureMarkerSchema, dnsFixtureZone, readDnsFixtureRecords, readDnsPreservedRecords, type SafeDnsOwnedRecord } from './dns-lifecycle-harness.js';
 
@@ -177,14 +177,10 @@ live('Disposable DNS lifecycle on a prepared app', () => {
           if (!(revision === 'create' && firstPlan)) await setDesired(revision);
           for (let attempt = 0; attempt < 8; attempt++) {
             const result = firstPlan ?? await plan(revision); firstPlan = undefined;
-            assertDnsFixtureActions(result.data.actions, marker, revision);
-            const changes = result.data.actions.filter((action: Json) => action.type !== 'noop');
-            if (!changes.length) { await preserve(); return; }
-            const applied = await cli(['apply'], { project: project.name, planId: result.data.planId,
-              confirmActions: changes.filter((action: Json) => action.billable || action.dataBearing || action.requiresConfirm).map((action: Json) => action.id) }, directory, dataDir);
-            if (!Array.isArray(applied.data?.receipts) || applied.data.receipts.some((receipt: Json) => !['succeeded', 'skipped_noop'].includes(receipt.status)))
-              throw new Error('DNS apply is incomplete; dependent fixture work is stopped.');
+            const changed = await applyDnsFixturePlan(result, marker, revision,
+              input => cli(['apply'], { project: project.name, ...input }, directory, dataDir));
             await preserve();
+            if (!changed) return;
           }
           throw new Error('DNS fixture convergence exceeded its bounded plan/apply steps.');
         },

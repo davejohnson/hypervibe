@@ -19,6 +19,7 @@ import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { receiptRolloutBaseline } from './runtime-rollout.service.js';
+import { withBackupStorageDefaults } from './backup-strategy.service.js';
 
 export const STORAGE_OPERATIONS = {
   ensure: 'storageEnsure',
@@ -606,7 +607,15 @@ export function planStorage(params: {
     if (desired[name]) continue;
     if (recoveries.parsed[name]) continue;
     if (binding.purpose === 'backup') {
-      warnings.push(`Retaining backup storage "${name}" after its policy was removed. Backup exclusion never authorizes deleting recovery history.`);
+      // Ordinary plans and status must recognize an existing implicit archive
+      // without adding backup provisioning to their storage actions.
+      if (withBackupStorageDefaults(params.environmentSpec).storage?.[name]?.purpose === 'backup') continue;
+      const reason = params.environmentSpec.backups?.mode === 'daily'
+        ? 'it is not selected by the current backup policy'
+        : params.environmentSpec.backups?.mode === 'disabled'
+          ? 'this environment is excluded from Hypervibe backup management'
+          : 'backups are not managed by Hypervibe for this environment';
+      warnings.push(`Retaining backup storage "${name}" because ${reason}. Existing provider protection and recovery history are unchanged.`);
       continue;
     }
     const observationKnown = storageObservationKnown(params.observed, binding.provider);
