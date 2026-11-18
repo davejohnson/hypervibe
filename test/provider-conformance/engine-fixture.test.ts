@@ -29,6 +29,8 @@ describe('engine fixture desired state', () => {
     expect(Object.keys(spec.environments['fx-0a1b2c3d']!.services)).toEqual(['web', 'worker']);
     expect(spec.environments['fx-0a1b2c3d']!.database).toBeTruthy();
     expect(selectLiveFixtureProfile(`${cloud}-engine`)).toMatchObject({ provider: cloud, path: 'engine-environment' });
+    const placed = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: { 'fx-0a1b2c3d': engineFixtureEnvironment(cloud, 'create', cloud === 'aws' ? 'us-west-2' : 'westus2') } });
+    expect(problems(placed, 'fx-0a1b2c3d')).toEqual([]);
   });
 });
 

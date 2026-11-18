@@ -159,7 +159,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
         const { [environmentName]: _removed, ...others } = original.environments;
         await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
-          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision) } : others } });
+          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
       };
       const plan = async (input: Json = {}) => {
         const envelope = await cli(['plan'], { project: projectName, env: environmentName, ...input });
@@ -170,7 +170,11 @@ live('AWS and Azure engine disposable environment fixture', () => {
       const apply = async (envelope: Json): Promise<boolean> => {
         const confirmActions = changesOf(envelope).filter((action) => action.billable || action.dataBearing || action.requiresConfirm).map((action) => action.id);
         const applied = await cli(['apply'], { project: projectName, planId: envelope.data.planId, confirmActions });
-        return Array.isArray(applied.data?.receipts) && applied.data.receipts.every((receipt: Json) => ['succeeded', 'skipped_noop'].includes(receipt.status));
+        if (!Array.isArray(applied.data?.receipts)) return false;
+        const failed = applied.data.receipts.filter((receipt: Json) => !['succeeded', 'success', 'skipped_noop'].includes(receipt.status));
+        // Hypervibe's own redacted reason for each step that did not finish; without it a failed run says nothing useful.
+        for (const receipt of failed) process.stdout.write(`\nApply step ${receipt.step ?? receipt.action?.id ?? '?'}: ${receipt.status}. ${String(receipt.error ?? receipt.message ?? '').slice(0, 1200)}\n`);
+        return failed.length === 0;
       };
 
       process.once('SIGINT', stop); process.once('SIGTERM', stop);

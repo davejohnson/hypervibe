@@ -202,6 +202,11 @@ HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE=1 \
 npm run test:providers:fixtures
 ```
 
+Set `HYPERVIBE_LIVE_REGION` to place the environment somewhere other than the
+connection's region. Azure needs this for a new pay-as-you-go subscription: East US 2
+refused the database size there on 2026-11-13 and again on 2026-11-18 (`westus2` worked
+the first time).
+
 A run confirms every action of each plan it makes. Unlike the GCP profile it does
 not wait for a person to approve one plan ID, so that it can run unattended: the
 marker, the dedicated account and `HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE=1` are the
