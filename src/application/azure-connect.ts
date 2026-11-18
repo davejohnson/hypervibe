@@ -83,8 +83,10 @@ export async function connectAzure(params: {
       const plan = await planFor(session, subscription);
       const pending = plan.changes.filter((change) => change.state !== 'ok');
       return {
-        titleHtml: `Set up Hypervibe in ${escapeHtml(subscription.displayName)}`,
-        leadHtml: `Hypervibe creates its own limited access in subscription ${escapeHtml(subscription.subscriptionId)} (${escapeHtml(location)}) and stops using this sign-in. These cost nothing.`,
+        // The person knows their app, not Azure region codes: the app leads, the region is a small aside.
+        titleHtml: `Set up Hypervibe for ${escapeHtml(params.project.name)}`,
+        leadHtml: `Hypervibe creates its own limited access in your Azure subscription <span title="Subscription ${escapeHtml(subscription.subscriptionId)}">${escapeHtml(subscription.displayName)}</span> and stops using this sign-in. These cost nothing. `
+          + `<span class="muted small nowrap" title="The Azure region (a group of data centers) where Hypervibe runs this app. Hypervibe picked it; there is nothing to choose.">Region: ${escapeHtml(location)}</span>`,
         items: pending.map((change) => escapeHtml(change.change)),
         approveLabel: `Approve and set up (${pending.length} change${pending.length === 1 ? '' : 's'})`,
         apply: async () => {
