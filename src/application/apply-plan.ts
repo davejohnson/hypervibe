@@ -2079,11 +2079,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
             : `Service "${action.resource.name}" is not tracked locally`,
         };
       }
+      const keys = stringArrayField(asRecord(action.metadata), 'keys');
+      const retired = new Set([...(envSpec.removeEnvVars ?? []), ...(envSpec.services[action.resource.name]?.removeEnvVars ?? [])]);
+      if (keys.length === 0 || keys.some(key => !retired.has(key))) return blockedActionIdentity(action, 'The selected service must declare each retired variable.');
       return removeHostingEnvVars({
         project: applyProject,
         environment: latestEnvironment,
         service,
-        keys: stringArrayField(asRecord(action.metadata), 'keys'),
+        keys,
       });
     }
     if (capability === 'hosting.deploy-source.disconnect') {

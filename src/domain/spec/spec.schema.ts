@@ -64,7 +64,13 @@ const DATABASE_ENV_ALIAS_SOURCES = [
 
 export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
 
+function keyRetiredAnywhere(environment: { removeEnvVars?: string[]; services: Record<string, { removeEnvVars?: string[] }> }, key: string): boolean {
+  return Boolean(environment.removeEnvVars?.includes(key)) || Object.values(environment.services).some(service => service.removeEnvVars?.includes(key));
+}
+
 export const serviceSpecSchema = z.object({
+  removeEnvVars: z.array(applicationEnvVarNameSchema).refine(keys => new Set(keys).size === keys.length,
+    'Service removal keys must be unique.').optional(),
   /** Retained filesystem storage; not object/bucket storage. */
   volume: z.object({
     mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
@@ -1846,7 +1852,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
           path: ['envFile', 'include'],
         });
       }
-      if (environment.removeEnvVars?.includes(key)) {
+      if (keyRetiredAnywhere(environment, key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `email-managed environment variable "${key}" cannot also be retired`,
@@ -1931,7 +1937,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
         path: ['envFile', 'include'],
       });
     }
-    if (environment.removeEnvVars?.includes(key)) {
+    if (keyRetiredAnywhere(environment, key)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `environment variable "${key}" must be removed by changing database.resilience.replicas`,
@@ -1970,7 +1976,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
           path: ['services', serviceName, 'databaseEnvAliases', alias],
         });
       }
-      if (environment.removeEnvVars?.includes(alias)) {
+      if (environment.removeEnvVars?.includes(alias) || service.removeEnvVars?.includes(alias)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `database alias "${alias}" cannot also be retired`,
@@ -2028,7 +2034,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
         path: ['envVarExceptions'],
       });
     }
-    if (environment.removeEnvVars?.includes(key)) {
+    if (keyRetiredAnywhere(environment, key)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `environment variable exception "${key}" cannot also be retired`,
@@ -2154,7 +2160,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
           path: ['envFile', 'include'],
         });
       }
-      if (environment.removeEnvVars?.includes(key)) {
+      if (keyRetiredAnywhere(environment, key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `Stripe-managed environment variable "${key}" cannot also be retired`,
@@ -2555,7 +2561,7 @@ export const projectSpecSchema = z.object({
       if (secret.ownership === 'hypervibe' && secret.replacementPolicy === 'immutable') {
         for (const conflictKey of secret.conflictsWith ?? []) {
           const conflictingSecret = spec.secrets[conflictKey];
-          if (environment.removeEnvVars?.includes(conflictKey)) {
+          if (keyRetiredAnywhere(environment, conflictKey)) {
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
               message: `immutable Hypervibe-owned secret "${key}" cannot retire conflicting key "${conflictKey}" without an explicit credential rewrap workflow`,
@@ -2598,7 +2604,7 @@ export const projectSpecSchema = z.object({
           path: ['environments', environmentName, 'envFile', 'include'],
         });
       }
-      if (environment.removeEnvVars?.includes(key)) {
+      if (keyRetiredAnywhere(environment, key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${secretKind} "${key}" cannot also be retired in environment "${environmentName}"`,

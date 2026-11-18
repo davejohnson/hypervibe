@@ -1,3 +1,4 @@
+import { serviceRuntimeEnv } from './runtime-env-policy.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../entities/service.entity.js';
@@ -31,6 +32,7 @@ export interface DeployOptions {
   environment: Environment;
   services?: Service[];
   envVars?: Record<string, string>;
+  removeEnvVarsByService?: Record<string, string[]>;
   envVarsByService?: Record<string, Record<string, string>>;
   verifyHttpHealth?: boolean;
   /**
@@ -517,7 +519,7 @@ export class DeployOrchestrator {
           let runtimeRolloutRequired = false;
           const rolloutBaselines: Record<string, unknown> = {};
           for (const service of alreadyDeployed) {
-            const serviceVars = { ...vars, ...(options.envVarsByService?.[service.name] ?? {}) };
+            const serviceVars = serviceRuntimeEnv({ ...vars, ...(options.envVarsByService?.[service.name] ?? {}) }, options.removeEnvVarsByService?.[service.name]);
             if (Object.keys(serviceVars).length === 0) continue;
             const receipt = options.deferProviderDeployment
               ? await options.adapter.setEnvVars(
@@ -572,10 +574,10 @@ export class DeployOrchestrator {
           }
 
           const environment = this.envRepo.findById(options.environment.id) ?? options.environment;
-          const serviceEnvVars = {
+          const serviceEnvVars = serviceRuntimeEnv({
             ...(options.envVars ?? {}),
             ...(options.envVarsByService?.[service.name] ?? {}),
-          };
+          }, options.removeEnvVarsByService?.[service.name]);
           const mutationOptions: DeploymentMutationOptions = {
             ...(options.deferProviderDeployment ? { deferDeployment: true } : {}),
             ...(options.deferWorkload ? { deferWorkload: true } : {}),

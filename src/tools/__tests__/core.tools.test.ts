@@ -3595,21 +3595,25 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('applies an explicitly confirmed environment-variable tombstone through the hosting adapter', async () => {
+  it.each([false, true])('applies a confirmed tombstone through the hosting adapter, service scoped=%s', async serviceScoped => {
+    const target = serviceScoped ? 'worker' : 'web';
     const t = await makeClient();
-    await t.call('hv_spec', {
+    const written = await t.call('hv_spec', {
       spec: {
         project: 'env-retirement-app',
         environments: {
           staging: {
             hosting: { provider: 'railway' },
-            services: { web: { startCommand: 'npm start' } },
-            envVars: { NODE_ENV: 'staging' },
-            removeEnvVars: ['OLD_API_TOKEN'],
+            services: { web: { startCommand: 'npm start' }, ...(serviceScoped ? {
+              worker: { workloadKind: 'worker', startCommand: 'npm start', removeEnvVars: ['OLD_API_TOKEN'] },
+            } : {}) },
+            envVars: { NODE_ENV: 'staging', ...(serviceScoped ? { OLD_API_TOKEN: 'keep-on-web' } : {}) },
+            ...(!serviceScoped ? { removeEnvVars: ['OLD_API_TOKEN'] } : {}),
           },
         },
       },
     });
+    expect(written).toMatchObject({ ok: true });
     verifyRailwayConnection();
 
     const project = new ProjectRepository().findByName('env-retirement-app')!;
@@ -3620,7 +3624,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         provider: 'railway',
         projectId: 'rp-1',
         environmentId: 'rail-env-1',
-        services: { web: { serviceId: 's-web' } },
+        services: { web: { serviceId: 's-web' }, ...(serviceScoped ? { worker: { serviceId: 's-worker' } } : {}) },
       },
     });
     new ServiceRepository().create({
@@ -3629,6 +3633,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       buildConfig: { startCommand: 'npm start' },
     });
 
+    if (serviceScoped) new ServiceRepository().create({ projectId: project.id, name: 'worker', buildConfig: { startCommand: 'npm start', workloadKind: 'worker' } });
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),
@@ -3643,13 +3648,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
         config: { startCommand: 'npm start' },
         sourceState: 'disconnected',
         envVarKeys: ['NODE_ENV', 'OLD_API_TOKEN'],
-        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        envVarHashes: { NODE_ENV: hashEnvValue('staging'), OLD_API_TOKEN: hashEnvValue('keep-on-web') },
         status: 'running',
       }],
       databases: [],
       partial: false,
       warnings: [],
     };
+    if (serviceScoped) observedState.services.push({ ...observedState.services[0]!, name: 'worker', externalId: 's-worker', workloadKind: 'worker' });
     const deleteEnvVars = vi.fn(async () => ({
       success: true,
       message: 'removed',
@@ -3674,28 +3680,37 @@ describe('hv_plan / hv_status / hv_apply', () => {
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter } as any);
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as any);
 
-    const plan = await t.call('hv_plan', { project: 'env-retirement-app', env: 'staging' });
+    const input = { project: 'env-retirement-app', env: 'staging', ...(serviceScoped ? { services: [target] } : {}) };
+    const plan = await t.call('hv_plan', input);
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
-      id: 'service:web:env-remove',
+      id: `service:${target}:env-remove`,
       requiresConfirm: true,
     }));
 
     const apply = await t.call('hv_apply', {
       project: 'env-retirement-app',
       planId: plan.data.planId,
-      confirmActions: ['service:web:env-remove'],
+      confirmActions: [`service:${target}:env-remove`],
     });
     expect(apply.ok).toBe(true);
     expect(deleteEnvVars).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'staging' }),
-      expect.objectContaining({ name: 'web' }),
+      expect.objectContaining({ name: target }),
       ['OLD_API_TOKEN']
     );
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'service:web:env-remove',
+      actionId: `service:${target}:env-remove`,
       status: 'succeeded',
     }));
+    if (serviceScoped) {
+      expect(deleteEnvVars).toHaveBeenCalledTimes(1);
+      observedState.services[1]!.envVarKeys = ['NODE_ENV'];
+      delete observedState.services[1]!.envVarHashes!.OLD_API_TOKEN;
+      const converged = await t.call('hv_plan', input);
+      expect(converged).toMatchObject({ ok: true, data: { pendingActionCount: 0 } });
+      expect(observedState.services[0]!.envVarKeys).toContain('OLD_API_TOKEN');
+    }
     await t.close();
   });
 

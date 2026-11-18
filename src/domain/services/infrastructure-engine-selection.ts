@@ -25,6 +25,9 @@ const present = (value: unknown): boolean => value !== undefined && value !== nu
  */
 export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   const problems: string[] = [];
+  if (Object.values(environment.services).some(service => service.removeEnvVars?.length)) {
+    problems.push('This cloud does not support confirmed service-specific variable retirement yet.');
+  }
   const unsupported: Array<[string, unknown]> = [
     ['domainRecreateRevision', environment.domainRecreateRevision],
     ['domainRegistration', environment.hosting.provider === 'cloudrun' ? undefined : environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],

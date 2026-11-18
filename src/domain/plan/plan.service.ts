@@ -2253,7 +2253,7 @@ export class PlanService {
       ...infrastructureManagedEnvKeys,
       ...reservedSecretKeys,
     ]);
-    const retiredManagedKeys = (environmentSpec.removeEnvVars ?? [])
+    const retiredManagedKeys = [...new Set([...(environmentSpec.removeEnvVars ?? []), ...Object.values(environmentSpec.services).flatMap(service => service.removeEnvVars ?? [])])]
       .filter((key) => managedEnvKeys.has(key));
     if (retiredManagedKeys.length > 0) {
       return {
@@ -2289,6 +2289,7 @@ export class PlanService {
       : undefined;
     const diff = diffEnvironment({
       spec: specForDiff,
+      serviceScopedRemovalsOnly: Boolean(serviceFilter),
       envName: environmentName,
       observed,
       local,
@@ -3102,7 +3103,7 @@ export class PlanService {
       const unfilteredActionIds = new Set(actions.map((action) => action.id));
       actions = actions.filter((action) => {
         if (action.type === 'destroy') return false;
-        if (action.metadata?.operation === 'hostingEnvRemove') return false;
+
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
         if (action.resource.kind === 'volume') return keep.has(action.resource.name);
         if (action.resource.kind === 'database' || action.resource.kind === 'cache') {
