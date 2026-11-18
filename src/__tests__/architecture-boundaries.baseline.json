@@ -57,7 +57,6 @@
     "src/domain/services/database-bootstrap.service.ts -> src/adapters/secrets/secret-store",
     "src/domain/services/database-credential-aliases.service.ts -> src/adapters/db/repositories/component.repository",
     "src/domain/services/database-credential-aliases.service.ts -> src/adapters/db/repositories/environment.repository",
-    "src/domain/services/database-credential-aliases.service.ts -> src/adapters/db/repositories/project.repository",
     "src/domain/services/database-credential-aliases.service.ts -> src/adapters/db/repositories/run.repository",
     "src/domain/services/database-credential-aliases.service.ts -> src/adapters/secrets/secret-store",
     "src/domain/services/database-credential-configuration.ts -> src/adapters/db/repositories/service.repository",

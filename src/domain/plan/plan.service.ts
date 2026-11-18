@@ -2344,7 +2344,7 @@ export class PlanService {
     const backupObservation = scope === 'backups' ? await observeBackupPolicy({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory }) : undefined;
     const databaseScopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
-      components: local.components, project: projectForPlan, adapterFactory });
+      components: local.components, project: projectForPlan, adapterFactory, databaseBindings: this.componentRepo });
     const backupPolicy = backupObservation ? planBackupPolicy(backupObservation, {
       explicitDatabaseBackups: Boolean(environmentSpec.database?.resilience?.backups),
       attempts: environment?.platformBindings.backupPolicyAttempts,
