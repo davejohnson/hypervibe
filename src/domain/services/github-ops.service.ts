@@ -1,3 +1,4 @@
+import { releaseSourceRuntimeBase64 } from './github-release-source.js';
 import { iosBuildContractFingerprint } from './ios-release-evidence.js';
 import { API_RELEASE_WORKFLOW_RENDERER_REVISION, buildApiReleaseWorkflowSteps } from './api-release-workflow.js';
 import { createHash } from 'crypto';
@@ -732,11 +733,9 @@ function buildPromotionEvidenceStep(
               repo: context.repo.repo,
               ref: 'heads/' + sourceBranch,
             });
-            const trustedHeadSha = String(sourceRef?.object?.sha || '').toLowerCase();
-            if (!sourceBranch || sourceRef?.ref !== 'refs/heads/' + sourceBranch
-              || sourceRef?.object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(trustedHeadSha)) {
-              throw new Error('Promotion source branch could not be verified');
-            }
+            const source = {exports: {}};
+            new Function('module', Buffer.from('${releaseSourceRuntimeBase64}', 'base64').toString('utf8'))(source);
+            const trustedHeadSha = source.exports.trustedReleaseHead(sourceRef, sourceBranch);
             let verified;
             for (let page = 1; page <= 10; page += 1) {
               const artifactResponse = await github.rest.actions.listArtifactsForRepo({
@@ -766,29 +765,12 @@ function buildPromotionEvidenceStep(
                 // Content fingerprints are public: authenticate the producer
                 // independently before trusting its claimed deployment commit.
                 const workflowSha = String(run.head_sha || '').toLowerCase();
-                if (run.id !== artifact.workflow_run.id
-                  || run.status !== 'completed' || run.conclusion !== 'success'
-                  || !['push', 'workflow_dispatch'].includes(run.event)
-                  || run.path !== sourceWorkflow || run.head_branch !== sourceBranch
-                  || String(run.repository?.full_name || '').toLowerCase() !== expectedRepository
-                  || String(run.head_repository?.full_name || '').toLowerCase() !== expectedRepository
-                  || !Number.isSafeInteger(run.repository?.id) || run.repository.id <= 0
-                  || run.head_repository?.id !== run.repository.id
-                  || artifact.workflow_run.repository_id !== run.repository.id
-                  || artifact.workflow_run.head_repository_id !== run.repository.id
-                  || artifact.workflow_run.head_branch !== sourceBranch
-                  || workflowSha !== artifact.workflow_run.head_sha.toLowerCase()) continue;
-                // A branch label alone cannot prove accepted source. Compare
-                // immutable commits so a same-named tag cannot supply new code.
-                const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  basehead: workflowSha + '...' + trustedHeadSha,
-                  per_page: 1,
-                });
-                if (!['ahead', 'identical'].includes(comparison?.status)
-                  || String(comparison?.base_commit?.sha || '').toLowerCase() !== workflowSha
-                  || String(comparison?.merge_base_commit?.sha || '').toLowerCase() !== workflowSha) continue;
+                if (!source.exports.matchesReleaseProducer(run, artifact, expectedRepository, sourceBranch, sourceWorkflow)) continue;
+                const accepted = await source.exports.isCommitOnReleaseBranch(workflowSha, trustedHeadSha, async (base, head) =>
+                  (await github.rest.repos.compareCommitsWithBasehead({
+                    owner: context.repo.owner, repo: context.repo.repo, basehead: base + '...' + head, per_page: 1,
+                  })).data);
+                if (!accepted) continue;
                 // The trusted workflow SHA may differ from the application SHA
                 // checked separately in the artifact name and evidence contents.
                 verified = { run, artifact };
@@ -1208,9 +1190,12 @@ ${buildReleaseEvidenceRuntimeStep()}      - name: Verify rollback release eviden
               repo: context.repo.repo,
               run_id: sourceWorkflowRunId,
             });
-            if (run.data.conclusion !== 'success' || run.data.path !== workflowPath) {
+            if (run.data.id !== sourceWorkflowRunId || run.data.run_attempt !== 1 || artifact.expired !== false) {
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
+            const source = {exports: {}};
+            new Function('module', Buffer.from('${releaseSourceRuntimeBase64}', 'base64').toString('utf8'))(source);
+            await source.exports.verifyGitHubReleaseSource(github, context.repo, ${JSON.stringify(target.branch)}, workflowPath, run.data, artifact);
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
 ${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v7
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:

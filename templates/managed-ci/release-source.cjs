@@ -11,7 +11,7 @@ function matchesReleaseProducer(run, artifact, repository, branch, workflow) {
   const repositoryId = run?.repository?.id;
   return run?.status === 'completed' && run.conclusion === 'success'
     && ['push', 'workflow_dispatch'].includes(run.event)
-    && run.head_branch === branch && run.path === workflow
+    && run.head_branch === branch && (run.path === workflow || run.path === workflow + '@refs/heads/' + branch)
     && String(run.repository?.full_name || '').toLowerCase() === expectedRepository
     && String(run.head_repository?.full_name || '').toLowerCase() === expectedRepository
     && Number.isSafeInteger(repositoryId) && repositoryId > 0 && run.head_repository.id === repositoryId

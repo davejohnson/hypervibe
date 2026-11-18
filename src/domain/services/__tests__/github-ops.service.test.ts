@@ -654,7 +654,7 @@ describe('github tools', () => {
     );
   });
 
-  it('verifies exact rollback release evidence before deployment', async () => {
+  it.each(['trusted', 'feature', 'incomplete', 'fork', 'tag', 'event'])('checks the %s rollback producer before deployment', async kind => {
     const targetSha = '0123456789abcdef0123456789abcdef01234567';
     const target = reviewedTarget('railway', {
       environmentName: 'production',
@@ -675,7 +675,9 @@ describe('github tools', () => {
     const listWorkflowRunArtifacts = vi.fn();
     const getWorkflowRun = vi.fn().mockResolvedValue({
       data: {
-        id: 42,
+        id: 42, run_attempt: 1, status: 'completed', event: kind === 'event' ? 'pull_request' : 'workflow_dispatch',
+        head_sha: 'b'.repeat(40), head_branch: kind === 'feature' ? 'feature' : 'main',
+        repository: {id: 1, full_name: 'dave/app'}, head_repository: {id: kind === 'fork' ? 2 : 1, full_name: 'dave/app'},
         conclusion: 'success',
         path: '.github/workflows/deploy-railway-production.yml',
       },
@@ -684,16 +686,16 @@ describe('github tools', () => {
       id: 7,
       name: `hypervibe-server-release-v4-production-${targetSha}`,
       expired: false,
-      workflow_run: { id: 42 },
+      workflow_run: { id: 42, head_sha: 'b'.repeat(40), head_branch: 'main', repository_id: kind === 'incomplete' ? undefined : 1, head_repository_id: 1 },
     }]);
     const github = {
       paginate,
-      rest: { actions: { listWorkflowRuns, listWorkflowRunArtifacts, getWorkflowRun } },
+      rest: { git: { getRef: async () => ({data: {ref: kind === 'tag' ? 'refs/tags/main' : 'refs/heads/main', object: {type: 'commit', sha: 'b'.repeat(40)}}}) }, actions: { listWorkflowRuns, listWorkflowRunArtifacts, getWorkflowRun } },
     };
     const core = { info: vi.fn() };
     const execute = new AsyncFunction('github', 'context', 'process', 'core', script);
 
-    await expect(execute(
+    const validation = execute(
       github,
       { repo: { owner: 'dave', repo: 'app' }, runId: 900 },
       {
@@ -707,7 +709,13 @@ describe('github tools', () => {
         },
       },
       core
-    )).resolves.toBeUndefined();
+    );
+    if (kind !== 'trusted') {
+      await expect(validation).rejects.toThrow(/source|producer|branch/);
+      expect(core.info).not.toHaveBeenCalled();
+      return;
+    }
+    await expect(validation).resolves.toBeUndefined();
 
     expect(listWorkflowRuns).toHaveBeenCalledWith({
       owner: 'dave',

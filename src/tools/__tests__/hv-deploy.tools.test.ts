@@ -135,8 +135,12 @@ function seedManagedCiRollbackProject(name: string, branch = 'main') {
   const workflowRefSha = 'f'.repeat(40);
   const getRef = vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
     ref: `refs/heads/${branch}`,
-    object: { sha: workflowRefSha },
+    object: { type: 'commit', sha: workflowRefSha },
   });
+  vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async (_owner, _repo, id) => ({
+    ...workflowRun(id, 'completed', 'success', '2026-07-20T00:00:00Z'), head_branch: branch, path: workflow.path,
+    run_attempt: 1, repository: {id: 1, full_name: 'davejohnson/' + project.name}, head_repository: {id: 1, full_name: 'davejohnson/' + project.name},
+  }));
   return { project, environment, workflow, inputHash, workflowRefSha, getRef };
 }
 
@@ -231,7 +235,7 @@ function mockRollbackPreview() {
   const trigger = mockPreviousSuccessfulRelease(workflow, sha, 'a'.repeat(40));
   vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockResolvedValue({
     ...workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
-    path: workflow.path, run_attempt: 1, repository: { full_name: `davejohnson/${project.name}` }, head_repository: { full_name: `davejohnson/${project.name}` },
+    path: workflow.path, run_attempt: 1, repository: { id: 1, full_name: `davejohnson/${project.name}` }, head_repository: { id: 1, full_name: `davejohnson/${project.name}` },
   });
   vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockResolvedValue({ 'hypervibe-server-release.json': JSON.stringify(evidence) });
   return { ...seeded, trigger, sha, evidence,
@@ -979,6 +983,21 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
+  it.each(['branch', 'event', 'tag', 'incomplete repository'])('denies rollback preview and selection for an untrusted producer (%s)', async kind => {
+    const { inputs, trigger, getRef } = mockRollbackPreview();
+    const run = await GitHubAdapter.prototype.getWorkflowRun('davejohnson', 'rollback-preview-app', 20);
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...run, id, ...(kind === 'branch' ? {head_branch: 'feature'} : kind === 'event' ? {event: 'pull_request'}
+        : kind === 'incomplete repository' ? {repository: {full_name: run.repository.full_name}} : {}),
+    }));
+    if (kind === 'tag') getRef.mockResolvedValue({ref: 'refs/tags/main', object: {sha: run.head_sha}});
+    const t = await makeClient();
+    expect((await t.call('hv_rollback', inputs)).ok).toBe(false);
+    expect((await t.call('hv_rollback', {project: inputs.project, env: 'production', toSha: 'a'.repeat(40), confirm: true})).ok).toBe(false);
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('cannot convert preview evidence selectors into execution authority even with confirmation', async () => {
     const { inputs, trigger } = mockRollbackPreview();
     const t = await makeClient();
@@ -1501,9 +1520,9 @@ describe('hv_rollback', () => {
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
     const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, previousSha);
     getRef
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: workflowRefSha } })
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: workflowRefSha } })
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: '1'.repeat(40) } });
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { type: 'commit', sha: workflowRefSha } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { type: 'commit', sha: workflowRefSha } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { type: 'commit', sha: '1'.repeat(40) } });
     const t = await makeClient();
     const result = await t.call('hv_rollback', {
       project: project.name,

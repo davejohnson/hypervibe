@@ -1,3 +1,4 @@
+import { releaseSource } from './github-release-source.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -105,6 +106,9 @@ async function releaseEvidenceForRun(params: {
   owner: string;
   repo: string;
   environmentName: string;
+  branch: string;
+  branchHead: string;
+  workflowPath: string;
   run: WorkflowRun;
 }): Promise<ReleaseEvidence | null> {
   const artifacts = await params.adapter.listWorkflowRunArtifacts(
@@ -112,9 +116,13 @@ async function releaseEvidenceForRun(params: {
     params.repo,
     params.run.id
   );
+  if (artifacts.total_count !== artifacts.artifacts.length) throw new Error('Rollback release artifact listing is incomplete.');
+  const producer = await params.adapter.getWorkflowRun(params.owner, params.repo, params.run.id);
+  if (producer.id !== params.run.id || producer.head_sha !== params.run.head_sha || producer.run_attempt !== 1) return null;
   const prefix = managedCiReleaseArtifactPrefix(params.environmentName);
   const matches = artifacts.artifacts
-    .filter((artifact) => !artifact.expired && artifact.workflow_run?.id === params.run.id)
+    .filter((artifact) => artifact.expired === false && releaseSource.matchesReleaseProducer(
+      producer, artifact, params.owner + '/' + params.repo, params.branch, params.workflowPath))
     .map((artifact): { artifact: WorkflowRunArtifact; sha: string } | null => {
       if (!artifact.name.startsWith(prefix)) return null;
       const sha = artifact.name.slice(prefix.length).toLowerCase();
@@ -132,7 +140,8 @@ async function releaseEvidenceForRun(params: {
     new Date(right.artifact.created_at).getTime() - new Date(left.artifact.created_at).getTime()
     || right.artifact.id - left.artifact.id
   ))[0];
-  if (!selected) return null;
+  if (!selected || !await releaseSource.isCommitOnReleaseBranch(producer.head_sha, params.branchHead,
+    (base, head) => params.adapter.compareCommits(params.owner, params.repo, base, head))) return null;
   return {
     sha: selected.sha,
     artifactId: selected.artifact.id,
@@ -148,6 +157,8 @@ async function currentReleaseSha(params: {
   owner: string;
   repo: string;
   workflowPath: string;
+  branch: string;
+  branchHead: string;
   environmentName: string;
 }): Promise<string | undefined> {
   const response = await params.adapter.listWorkflowRuns(params.owner, params.repo, params.workflowPath, { per_page: 100 });
@@ -256,7 +267,9 @@ async function observeManagedCiRollback(params: {
       adapter.getRef(owner, repo, `heads/${workflow.branch}`),
     ]);
     const liveWorkflow = workflows.workflows.find((candidate) => candidate.path === workflow.path);
-    const workflowRefSha = workflowRef?.object.sha;
+    const workflowRefSha = workflowRef && releaseSource.trustedReleaseHead(workflowRef, workflow.branch);
+    const source = { adapter, owner, repo, workflowPath: workflow.path, branch: workflow.branch,
+      branchHead: workflowRefSha ?? '', environmentName: params.environment.name };
     const workflowBlock: CiRollbackFailure | undefined = workflowObservation.acceptance === 'drift'
       ? {
           ok: false,
@@ -282,8 +295,8 @@ async function observeManagedCiRollback(params: {
       // Asking for the release that is already running is never a rollback, whatever
       // else is wrong. Say so first: fixing the workflow would only reach the same refusal.
       const requested = params.toSha?.trim().toLowerCase();
-      if (requested && FULL_SHA.test(requested)) {
-        const current = await currentReleaseSha({ adapter, owner, repo, workflowPath: workflow.path, environmentName: params.environment.name })
+      if (workflowRefSha && requested && FULL_SHA.test(requested)) {
+        const current = await currentReleaseSha(source)
           .catch(() => undefined);
         if (current === requested) return alreadyCurrentRelease(requested, params.environment.name);
       }
@@ -311,13 +324,7 @@ async function observeManagedCiRollback(params: {
     const successfulRuns = runs.filter((run) => run.status === 'completed' && run.conclusion === 'success');
     let currentRelease: ReleaseEvidence | undefined;
     if (latestRun.conclusion === 'success') {
-      const current = await releaseEvidenceForRun({
-        adapter,
-        owner,
-        repo,
-        environmentName: params.environment.name,
-        run: latestRun,
-      });
+      const current = await releaseEvidenceForRun({ ...source, run: latestRun });
       if (!current) {
         return {
           ok: false,
@@ -344,7 +351,7 @@ async function observeManagedCiRollback(params: {
       selection = 'current';
       targetRelease = currentRelease;
       for (const run of targetRelease ? [] : successfulRuns) {
-        const evidence = await releaseEvidenceForRun({ adapter, owner, repo, environmentName: params.environment.name, run });
+        const evidence = await releaseEvidenceForRun({ ...source, run });
         if (evidence) {
           targetRelease = evidence;
           break;
@@ -355,13 +362,7 @@ async function observeManagedCiRollback(params: {
       for (const run of successfulRuns) {
         const evidence = run.id === currentRelease?.workflowRunId
           ? currentRelease
-          : await releaseEvidenceForRun({
-              adapter,
-              owner,
-              repo,
-              environmentName: params.environment.name,
-              run,
-            });
+          : await releaseEvidenceForRun({ ...source, run });
         if (evidence?.sha === requestedSha) {
           targetRelease = evidence;
           break;
@@ -371,13 +372,7 @@ async function observeManagedCiRollback(params: {
       selection = 'previous_successful';
       for (const run of successfulRuns) {
         if (run.id === latestRun.id) continue;
-        const evidence = await releaseEvidenceForRun({
-          adapter,
-          owner,
-          repo,
-          environmentName: params.environment.name,
-          run,
-        });
+        const evidence = await releaseEvidenceForRun({ ...source, run });
         if (evidence && evidence.sha !== currentRelease?.sha) {
           targetRelease = evidence;
           break;
@@ -386,13 +381,7 @@ async function observeManagedCiRollback(params: {
     } else {
       selection = 'last_known_good';
       for (const run of successfulRuns) {
-        const evidence = await releaseEvidenceForRun({
-          adapter,
-          owner,
-          repo,
-          environmentName: params.environment.name,
-          run,
-        });
+        const evidence = await releaseEvidenceForRun({ ...source, run });
         if (evidence) {
           targetRelease = evidence;
           break;

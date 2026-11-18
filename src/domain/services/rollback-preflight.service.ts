@@ -1,3 +1,4 @@
+import { releaseSource } from './github-release-source.js';
 import { createHash } from 'node:crypto';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -31,7 +32,7 @@ export async function previewManagedCiRollback(params: {
   const sha = params.toSha.toLowerCase();
   const blockers: RollbackPreviewBlocker[] = [];
   const run = await github.getWorkflowRun(owner, repo, params.sourceWorkflowRunId);
-  if (run.id !== params.sourceWorkflowRunId || run.path !== contract.workflow.path
+  if (run.id !== params.sourceWorkflowRunId
       || run.status !== 'completed' || run.conclusion !== 'success'
       || run.repository?.full_name !== repository || run.head_repository?.full_name !== repository
       || !/^[a-f0-9]{40}$/.test(run.head_sha)) throw new Error('Rollback source run provenance is incomplete or does not belong to this successful managed workflow.');
@@ -39,6 +40,12 @@ export async function previewManagedCiRollback(params: {
   const candidates = artifacts.artifacts.filter(artifact => artifact.id === params.sourceArtifactId);
   if (artifacts.total_count !== artifacts.artifacts.length || candidates.length !== 1) throw new Error('Rollback artifact observation is incomplete or ambiguous.');
   const artifact = candidates[0];
+  const branch = contract.workflow.branch;
+  const head = releaseSource.trustedReleaseHead(await github.getRef(owner, repo, 'heads/' + branch), branch);
+  if (!releaseSource.matchesReleaseProducer(run, artifact, repository, branch, contract.workflow.path)
+      || !await releaseSource.isCommitOnReleaseBranch(run.head_sha, head, (base, tip) => github.compareCommits(owner, repo, base, tip))) {
+    throw new Error('Rollback source producer cannot be verified against the configured release branch.');
+  }
   if (run.run_attempt !== 1) blockers.push({ code: 'retried_source_run', message: 'A retried source run needs attempt-specific artifact provenance before recovery can be authorized.' });
   const legacyName = `hypervibe-server-release-${environment.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}-${sha}`;
   if (artifact.expired || artifact.workflow_run?.id !== run.id || artifact.workflow_run.head_sha !== run.head_sha

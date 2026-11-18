@@ -313,7 +313,7 @@ export class GitHubAdapter {
       { name, value }, { expectedStatus: 204 });
   }
 
-  async getRef(owner: string, repo: string, ref: string): Promise<{ ref: string; object: { sha: string } } | null> {
+  async getRef(owner: string, repo: string, ref: string): Promise<{ ref: string; object: { sha: string; type?: string } } | null> {
     try {
       return await this.request<{ ref: string; object: { sha: string } }>(
         'GET',
@@ -1032,7 +1032,7 @@ export class GitHubAdapter {
   async getWorkflowRun(owner: string, repo: string, runId: number): Promise<{
     id: number; path: string; status: string; conclusion: string | null;
     head_sha: string; head_branch: string; event: string; run_attempt: number; run_started_at?: string;
-    repository: { full_name: string }; head_repository: { full_name: string };
+    repository: { full_name: string; id?: number }; head_repository: { full_name: string; id?: number };
   }> {
     if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid workflow run id.');
     return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`);
