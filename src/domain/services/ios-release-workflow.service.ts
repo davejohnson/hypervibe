@@ -74,9 +74,10 @@ function renderTemplate(content: string, replacements: Record<string, string>): 
   });
 }
 
-function managedMatchSigningStep(gitBranch: string): string {
+function managedMatchSigningStep(gitBranch: string, capabilities: string[]): string {
   return renderTemplate(readFileSync(matchSigningStepTemplateUrl, 'utf8'), {
     GIT_BRANCH_JSON: JSON.stringify(gitBranch),
+    REQUIRE_PUSH: JSON.stringify(capabilities.includes('PUSH_NOTIFICATIONS') ? 'true' : 'false'),
   });
 }
 
@@ -172,7 +173,7 @@ export function buildIosReleaseWorkflow(params: {
       ? '\n      HYPERVIBE_SIGNING_KEYCHAIN: ${{ runner.temp }}/hypervibe-signing-${{ github.run_id }}-${{ github.run_attempt }}.keychain-db'
       : '',
     MANAGED_SIGNING_STEP: release.signing.provider === 'match'
-      ? managedMatchSigningStep(release.signing.gitBranch)
+      ? managedMatchSigningStep(release.signing.gitBranch, params.ios.capabilities)
       : '',
     BUILD_SECRET_ENV: buildSecretEnvironment,
     BUILD_COMMAND: buildCommand,

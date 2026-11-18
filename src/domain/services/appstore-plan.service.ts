@@ -44,6 +44,7 @@ export interface ObservedIos {
 export interface IosBindings {
   bundleIdResourceId?: string;
   appId?: string;
+  profileReview?: { bundleId: string; capabilities: string[] };
   testflight?: { groups?: Record<string, { groupId?: string }> };
   updatedAt?: string;
 }
@@ -277,6 +278,14 @@ export async function planIos(params: {
     }));
   }
 
+  const signing = spec.release?.signing;
+  if (signing?.provider === 'match') {
+    const pending = actions.find(action => action.metadata?.operation === IOS_OPERATIONS.capabilitiesEnable)?.metadata?.missingCapabilities as string[] | undefined;
+    const changed = parseIosBindings(params.environment).profileReview;
+    const capabilities = pending?.length ? pending : changed?.bundleId === spec.bundleId ? changed.capabilities : [];
+    if (capabilities.length) warnings.push(matchProfileGuidance(spec.bundleId, signing.gitBranch, capabilities));
+  }
+
   // App record + TestFlight (only when testflight declared)
   const declaredGroups = Object.entries(spec.testflight?.groups ?? {});
   if (declaredGroups.length > 0) {
@@ -390,6 +399,10 @@ export async function planIos(params: {
   return { actions, warnings };
 }
 
+export function matchProfileGuidance(bundleId: string, branch: string, capabilities: string[]): string {
+  return `Check the App Store signing profile for ${bundleId} after changes to ${capabilities.join(', ')}. If it lacks these entitlements, use write access to the signing repository and run fastlane match appstore --app_identifier ${bundleId} --force --git_branch=${branch}. CI uses read-only access.`;
+}
+
 export function isIosAction(action: PlanAction): boolean {
   const operation = action.metadata?.operation;
   return typeof operation === 'string' && IOS_OPERATION_SET.has(operation);
@@ -468,12 +481,21 @@ export async function applyIosAction(params: {
           ? params.action.metadata.missingCapabilities as string[]
           : spec.capabilities;
         const result = await adapter.enableCapabilities(bundleIdResourceId, missing);
+        const signing = spec.release?.signing;
+        let profileGuidance: string | undefined;
+        if (environment && signing?.provider === 'match' && result.enabled.length) {
+          persistIosBindings(environment.id, current => {
+            const previous = current.profileReview?.bundleId === spec.bundleId ? current.profileReview.capabilities : [];
+            return { ...current, profileReview: { bundleId: spec.bundleId, capabilities: [...new Set([...previous, ...result.enabled])].sort() } };
+          });
+          profileGuidance = matchProfileGuidance(spec.bundleId, signing.gitBranch, result.enabled);
+        }
         if (result.errors.length > 0) {
           return {
             success: false,
             message: `Failed to enable ${result.errors.length} capability(ies)`,
             error: result.errors.map((entry) => `${entry.type}: ${entry.error}`).join('; '),
-            data: { enabled: result.enabled, alreadyEnabled: result.alreadyEnabled, errors: result.errors },
+            data: { ...(profileGuidance ? { signingProfile: profileGuidance } : {}), enabled: result.enabled, alreadyEnabled: result.alreadyEnabled, errors: result.errors },
           };
         }
         return {
@@ -481,7 +503,7 @@ export async function applyIosAction(params: {
           message: result.enabled.length > 0
             ? `Enabled capabilities: ${result.enabled.join(', ')}`
             : 'All capabilities were already enabled',
-          data: { enabled: result.enabled, alreadyEnabled: result.alreadyEnabled },
+          data: { ...(profileGuidance ? { signingProfile: profileGuidance } : {}), enabled: result.enabled, alreadyEnabled: result.alreadyEnabled },
         };
       }
 
