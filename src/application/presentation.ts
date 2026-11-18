@@ -778,7 +778,7 @@ function specPresentation(data: DataRecord): CommandPresentation {
       stringValue(project?.name) ?? stringValue(project?.id),
       numberValue(data.revision) !== undefined ? `revision ${data.revision}` : undefined,
     ].filter(Boolean).join(' · '),
-    summary: initialized ? 'Desired state loaded.' : 'No desired state has been defined yet.',
+    summary: data.changed ? 'Desired state saved.' : initialized ? 'Desired state loaded.' : 'No desired state has been defined yet.',
     sections: details.length > 0 ? [{ title: '📎  DETAILS', lines: details }] : [],
   };
 }

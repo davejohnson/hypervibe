@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { observeManagedEngineDatabase } from '../domain/services/engine-database-access.service.js';
 import { planScheduleActivations } from '../domain/services/schedule-activation.service.js';
 import { secretAgeNotes, secretAges } from '../application/secret-rotation.js';
@@ -36,7 +37,7 @@ import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.s
 import { databaseConsumerReadiness, databaseConsumerRolloutRequirements, databaseConsumersUnknown } from '../domain/services/database-consumer-readiness.service.js';
 import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
 import { githubActionsCanonicalEnvironment, resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
-import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
+import { requiredConnectionChecklist } from '../application/spec-connections.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
@@ -57,13 +58,11 @@ import {
   syncProjectGitRemoteUrl,
   type ConnectionBlock,
 } from '../application/apply-plan.js';
-import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import {
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
   unresolvedGitHubCheckRuntimeIssues,
 } from '../domain/services/github-infrastructure.service.js';
-import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
   findRepoRoot,
   readRepoSpecFile,
@@ -405,122 +404,6 @@ function ensureProjectLocalEnv(params: {
   return mergeLocalEnvWrites(environmentLocalEnv, baseLocalEnv);
 }
 
-function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
-  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
-  const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
-    const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
-    const existing = required.get(key) ?? {
-      provider,
-      environments: new Set<string>(),
-      reasons: new Set<string>(),
-      scopeHints: new Set<string>(),
-    };
-    existing.environments.add(environment);
-    existing.reasons.add(reason);
-    scopeHints.forEach((scopeHint) => existing.scopeHints.add(scopeHint));
-    required.set(key, existing);
-  };
-
-  const devops = resolveDevOpsSelection(spec);
-  if (devops?.ci && Object.keys(spec.devops?.ci?.repositoryVariables ?? {}).length > 0) {
-    const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
-    add(registration?.connectionProvider ?? devops.ci.provider,
-      spec.devops?.canonicalEnvironment ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository'),
-      'Repository configuration variables', [devops.code.scope]);
-  }
-  for (const [envName, envSpec] of Object.entries(spec.environments)) {
-    add(envSpec.hosting.provider, envName, 'hosting');
-    if (envSpec.database) add(envSpec.database.provider, envName, 'database');
-    if (envSpec.cache) add(envSpec.cache.provider, envName, 'cache');
-    if (envSpec.domain) {
-      add('cloudflare', envName, envSpec.domainRegistration ? 'domain registration and DNS' : 'domain DNS', [
-        ...cloudflareScopeHintsForDomain(envSpec.domain),
-      ]);
-    }
-    if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
-    if (envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native' && devops?.ci) {
-      const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
-      add(
-        registration?.connectionProvider ?? devops.ci.provider,
-        envName,
-        `${devops.ci.provider} deploy workflow`,
-        [devops.code.scope]
-      );
-    }
-    if (envSpec.ios) add('appstoreconnect', envName, 'iOS bundle ID / TestFlight', [envSpec.ios.bundleId]);
-    if (envSpec.queues && Object.keys(envSpec.queues).length > 0) add(envSpec.hosting.provider, envName, 'queues');
-    for (const storage of Object.values(envSpec.storage ?? {})) add(storage.provider, envName, 'object storage');
-  }
-
-  if (spec.github && spec.github.enabled !== false) {
-    const repository = spec.github.repository ?? parseGitHubRepoFromRemote(spec.gitRemoteUrl);
-    const environment = spec.github.canonicalEnvironment
-      ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository');
-    add('github', environment, 'GitHub repository infrastructure', repository ? [repository] : []);
-  }
-
-  const items = Array.from(required.values())
-    .sort((a, b) => a.provider.localeCompare(b.provider))
-    .map((entry) => {
-      const connectionProviders = providerRegistry.connectionProviders(entry.provider);
-      const connections = connectionProviders.flatMap((connectionProvider) =>
-        ctx.repos.connections.findAllByProvider(connectionProvider)
-      );
-      const scopeHints = Array.from(entry.scopeHints);
-      const scopedConnection = scopeHints.length > 0
-        ? connectionProviders
-          .map((connectionProvider) => ctx.repos.connections.findBestMatchFromHints(connectionProvider, scopeHints))
-          .find((candidate) => candidate !== null) ?? null
-        : null;
-      const verifiedScopedConnection = scopeHints.length > 0
-        ? connectionProviders
-          .map((connectionProvider) => ctx.repos.connections.findBestVerifiedMatchFromHints(connectionProvider, scopeHints))
-          .find((candidate) => candidate !== null) ?? null
-        : null;
-      const verified = scopeHints.length > 0
-        ? Boolean(verifiedScopedConnection)
-        : connections.some((connection) => connection.status === 'verified');
-      const scope = scopeHints[0];
-      let status = 'missing';
-      if (verified) {
-        status = 'verified';
-      } else if (scopeHints.length > 0 && scopedConnection) {
-        status = 'unverified';
-      } else if (scopeHints.length === 0 && connections.length > 0) {
-        status = 'unverified';
-      }
-      const connectionBlock = {
-        provider: entry.provider,
-        reason: Array.from(entry.reasons).join(', '),
-        ...(scope ? { scope } : {}),
-      };
-      return {
-        provider: entry.provider,
-        status,
-        environments: Array.from(entry.environments).sort(),
-        reasons: Array.from(entry.reasons).sort(),
-        ...(scope ? { scope } : {}),
-        ...(!verified ? {
-          connectionSetup: connectionRecoveryDetails([connectionBlock], {
-            project: spec.project,
-            gitRemoteUrl: spec.gitRemoteUrl,
-          }).connectionSetup[0],
-        } : {}),
-        hint: verified
-          ? undefined
-          : connectionRecoveryHint(
-            [connectionBlock],
-            { after: 'Then run hv_plan.' }
-          ),
-      };
-    });
-
-  return {
-    required: items,
-    missing: items.filter((item) => item.status !== 'verified'),
-  };
-}
-
 export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContext): void {
   const specStore = new SpecStore();
   const planService = new PlanService();
@@ -646,10 +529,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       let result;
+      let changed: { fields: string[]; environments: string[] };
       let coverageReport: EnvironmentVariableCoverageReport = { complete: true, issues: [] };
       try {
         const projectName = project?.name ?? newProject!.name;
-        const previousSpec = project ? specStore.get(project)?.spec ?? null : null;
+        const previousSpec = project ? specStore.preview(project) : null;
         const baseSpec = previousSpec ?? { version: 1 as const, project: projectName, environments: {} };
         const mergedInput = replace
           ? {
@@ -670,12 +554,31 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ? { ...mergedRecord, runtime: repositoryRuntime.runtime }
           : mergedInput;
         const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
+        if (!replace && previousSpec) {
+          const patches = asRecord(spec.environments);
+          for (const gap of environmentVariableCoverage(candidateSpec).issues) {
+            if (gap.reason !== 'missing_environment' || !gap.environment) continue;
+            const envPatch = asRecord(patches?.[gap.environment]);
+            if (asRecord(envPatch?.envVars)?.[gap.key] !== null
+              || !Object.hasOwn(previousSpec.environments[gap.environment]?.envVars ?? {}, gap.key)) continue;
+            const env = candidateSpec.environments[gap.environment]!;
+            env.envVarExceptions = [...(env.envVarExceptions ?? []), gap.key];
+          }
+        }
+        const before = asRecord(previousSpec) ?? {};
+        const beforeEnvironments = previousSpec?.environments ?? {};
+        const changedKeys = (old: Record<string, unknown>, next: Record<string, unknown>) =>
+          [...new Set([...Object.keys(old), ...Object.keys(next)])].filter(key => !isDeepStrictEqual(old[key], next[key])).sort();
+        changed = { fields: changedKeys(before, candidateSpec), environments: changedKeys(beforeEnvironments, candidateSpec.environments) };
         coverageReport = environmentVariableCoverage(candidateSpec);
         const introducedCoverageIssues = introducedEnvironmentVariableCoverageIssues(previousSpec, candidateSpec);
         if (introducedCoverageIssues.length > 0) {
           throw new HvError('VALIDATION', 'Environment-variable coverage is incomplete.', {
             details: introducedCoverageIssues,
-            hint: 'This checks spec declarations, not whether live provider variables exist. Declare each key in every listed matching environment using a separately chosen envVars value, envFile include, or managed-secret target. If a key intentionally does not apply, add it to that environment\'s envVarExceptions. Hypervibe never copies values between environments.',
+            hint: introducedCoverageIssues.map(issue => issue.reason === 'missing_environment'
+              ? `Set a value or managed-secret target for ${issue.key} in ${issue.environment}, or add ${issue.key} to that environment's envVarExceptions if it does not apply there.`
+              : `Use a consistent managed-secret or ordinary declaration for ${issue.key} across its release environments.`).join(' '),
+            agentInstruction: { action: 'continue', message: 'The proposed changes were not saved. Correct the listed declarations and retry hv_spec.' },
           });
         }
         const nativeChanges = providerNativeDeployChanges(candidateSpec, previousSpec);
@@ -699,6 +602,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           throw new HvError('VALIDATION', 'Spec failed validation.', {
             details: error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
             hint: 'Fix the listed fields and retry hv_spec.',
+            agentInstruction: { action: 'continue', message: 'Correct the listed fields and retry hv_spec.' },
           });
         }
         throw error;
@@ -707,7 +611,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         throw new Error('Project initialization completed without a project record.');
       }
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
-      const connections = requiredConnectionChecklist(ctx, result.spec);
+      const connections = requiredConnectionChecklist(ctx, result.spec, changed.fields.every(key => key === 'environments') ? changed.environments : undefined);
       const localEnv = mergeLocalEnvWrites(
         result.localEnv,
         ensureProjectLocalEnv({
@@ -742,17 +646,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           envTemplate: result.envTemplate ?? null,
           environmentEnvFiles: result.environmentEnvFiles ?? [],
           localEnv: localEnv ?? null,
-          spec: result.spec,
-          backupPolicies: resolveBackupPolicies(result.spec, ctx.repos.environments.findByProjectId(project.id),
-            ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
-          repositoryRuntime,
+          changed,
           runtimeReview,
           environmentVariableCoverage: coverageReport,
           connections,
         },
         {
           hint: connections.missing.length > 0
-            ? connectionRecoveryHint(connections.missing, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then run hv_plan.' })
+            ? 'For each missing connection needed by this change, use hv_connections action="describe" with its provider, project and scope.'
             : undefined,
           warnings,
           next: connections.missing.length > 0 ? ['hv_connections', 'hv_plan'] : ['hv_plan'],

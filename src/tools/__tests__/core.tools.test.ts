@@ -234,12 +234,12 @@ describe('hv_spec', () => {
         expect(written.ok).toBe(true);
         expect(written.warnings).toContainEqual(expect.stringContaining('service:reports'));
         expect(written.warnings).toContainEqual(expect.stringContaining('may behave differently'));
-        expect(written.data.spec.environments.staging.services.reports).toBeUndefined();
+        expect(written.data).not.toHaveProperty('spec');
         const read = await t.call('hv_spec', { project: 'resource-parity-app' });
         expect(read.ok).toBe(true);
         expect(read.warnings).toContainEqual(expect.stringContaining('service:reports'));
         expect(read.data.revision).toBe(written.data.revision);
-        expect(read.data.spec).toEqual(written.data.spec);
+        expect(read.data.spec.environments.staging.services.reports).toBeUndefined();
       } finally {
         await t.close();
       }
@@ -394,7 +394,7 @@ describe('hv_spec', () => {
       });
       expect(initialized.ok).toBe(true);
       expect(initialized.data.revision).toBe(1);
-      expect(initialized.data.spec.runtime).toEqual({ kind: 'node', version: '24' });
+      expect((await t.call('hv_spec', { project: 'fresh-agent-app' })).data.spec.runtime).toEqual({ kind: 'node', version: '24' });
       expect(initialized.data.runtimeReview).toMatchObject({ status: 'review-required' });
       expect(initialized.data.project).toMatchObject({
         name: 'fresh-agent-app',
@@ -1021,10 +1021,35 @@ describe('hv_spec', () => {
       environment: 'staging',
       reason: 'missing_environment',
     }));
-    expect(result.hint).toContain('separately chosen');
+    expect(result.agentInstruction.action).toBe('continue');
+    expect(result.hint).toContain('staging');
     expect(result.hint).toContain('envVarExceptions');
     expect(JSON.stringify(result)).not.toContain('production-site-id');
     expect(new ProjectRepository().findByName('coverage-block-app')).toBeNull();
+    await t.close();
+  });
+
+  it('records an intentional envVars deletion and returns a scoped spec-write receipt', async () => {
+    const t = await makeClient();
+    const project = 'coverage-patch-app';
+    const shared = { hosting: { provider: 'railway' }, services: { web: {} }, envVars: { MEDIA_DIR: '/data' } };
+    const initial = await t.call('hv_spec', { spec: { project, environments: {
+      staging: shared, production: { ...shared, domain: 'production.example.com' },
+    } } });
+    expect(initial.ok).toBe(true);
+    const patch = await t.call('hv_spec', { project, spec: { environments: { staging: { envVars: { MEDIA_DIR: null } } } } });
+    expect(patch).toMatchObject({ ok: true, data: { revision: 2, environmentVariableCoverage: { complete: true } } });
+    expect(patch.data).not.toHaveProperty('spec');
+    expect(patch.data).not.toHaveProperty('backupPolicies');
+    expect(patch.data.changed.environments).toEqual(['staging']);
+    expect(JSON.stringify(patch.data.connections)).not.toContain('cloudflare');
+    const read = await t.call('hv_spec', { project });
+    expect(read.data.spec.environments.staging.envVars).not.toHaveProperty('MEDIA_DIR');
+    expect(read.data.spec.environments.production.envVars.MEDIA_DIR).toBe('/data');
+    const listed = await t.call('hv_connections', { project, environment: 'staging' });
+    expect(listed.ok).toBe(true);
+    expect(JSON.stringify(listed.data)).not.toMatch(/cloudflare|credentialExample|setupHelpUrls/);
+    expect(listed.hint).toContain('action="describe"');
     await t.close();
   });
 
@@ -1060,7 +1085,7 @@ describe('hv_spec', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data.environmentVariableCoverage).toEqual({ complete: true, issues: [] });
-    expect(result.data.spec.secrets.RECAPTCHA_SECRET_KEY.environments).toEqual(['staging', 'production']);
+    expect((await t.call('hv_spec', { project: 'coverage-complete-app' })).data.spec.secrets.RECAPTCHA_SECRET_KEY.environments).toEqual(['staging', 'production']);
     await t.close();
   });
 
@@ -1137,14 +1162,15 @@ describe('hv_spec', () => {
         },
       } });
       expect(initial.ok).toBe(true);
-      const beforeProduction = structuredClone(initial.data.spec.environments.production);
+      const beforeProduction = (await t.call('hv_spec', { project })).data.spec.environments.production;
       const renamed = await t.call('hv_spec', { project, spec: {
         environments: { staging: { services: { preview: null, web: { workloadKind: 'web' } } } },
       } });
       expect(renamed, JSON.stringify(renamed.error)).toMatchObject({ ok: true });
-      expect(renamed.data.spec.environments.production).toEqual(beforeProduction);
-      expect(renamed.data.spec.secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
-      expect(Object.keys(renamed.data.spec.environments.staging.services)).toEqual(['web']);
+      const read = await t.call('hv_spec', { project });
+      expect(read.data.spec.environments.production).toEqual(beforeProduction);
+      expect(read.data.spec.secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
+      expect(Object.keys(read.data.spec.environments.staging.services)).toEqual(['web']);
       expect(renamed.data.environmentVariableCoverage.issues).toHaveLength(2);
       expect(renamed.warnings).toContainEqual(expect.stringContaining('declaration'));
       // A new input is not grandfathered merely because a service was renamed.
@@ -1333,7 +1359,7 @@ describe('hv_spec', () => {
     });
 
     expect(set.ok).toBe(true);
-    expect(set.data.spec.environments.production.deploy.trigger).toBe('native');
+    expect((await t.call('hv_spec', { project: 'native-confirmed-app' })).data.spec.environments.production.deploy.trigger).toBe('native');
     expect(set.warnings).toContainEqual(expect.stringContaining('Railway native deploys require the Railway GitHub App'));
     await t.close();
   });
@@ -1365,23 +1391,12 @@ describe('hv_spec', () => {
     ]);
     const cloudflare = set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'cloudflare');
     const github = set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'github');
-    expectActionableConnectionSetup(cloudflare.connectionSetup, {
-      provider: 'cloudflare',
-      project: 'connection-check-app',
-      scope: 'connection-check-app.com',
-    });
-    expectActionableConnectionSetup(github.connectionSetup, {
-      provider: 'github',
-      project: 'connection-check-app',
-    });
-    expect(github.connectionSetup.localEnvInputs.map((input: { envKey: string }) => input.envKey)).toEqual([
-      'HYPERVIBE_GITHUB_TOKEN',
-    ]);
-    expect(cloudflare.connectionSetup.localEnvInputs.map((input: { envKey: string }) => input.envKey)).toEqual([
-      'CLOUDFLARE_API_TOKEN',
-    ]);
-    expect(set.hint).toContain('This task needs provider access that is not connected on this Mac');
-    expect(set.hint).toContain('connectionSetup');
+    expect(set.hint).toContain('action="describe"');
+    for (const entry of [cloudflare, github]) {
+      expect(entry).not.toHaveProperty('connectionSetup');
+      const described = await t.call('hv_connections', { project: 'connection-check-app', provider: entry.provider, action: 'describe', scope: entry.scope });
+      expectActionableConnectionSetup(described.data.connectionSetup, { provider: entry.provider, project: 'connection-check-app' });
+    }
     expect(set.next).toEqual(['hv_connections', 'hv_plan']);
     await t.close();
   });

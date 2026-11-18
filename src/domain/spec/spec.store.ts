@@ -268,6 +268,14 @@ function parseStoredSpec(row: Pick<ProjectSpecRow, 'document' | 'revision' | 'wr
 export class SpecStore {
   private repo = new ProjectSpecRepository();
 
+  /** Read the desired input for editing or discovery without recording a revision or creating local files. */
+  preview(project: Project): ProjectSpec | null {
+    const repoSpec = readRepoSpecFile();
+    if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) return repoSpec.spec;
+    const latest = this.repo.findLatest(project.id);
+    return latest ? parseStoredSpec(latest, project.id) : desiredStateToSpec(project);
+  }
+
   /** Inspect already recorded desired state without adopting edits or bootstrapping legacy projects. */
   getForInspection(project: Project): SpecResult | null {
     const latest = this.repo.findLatest(project.id);

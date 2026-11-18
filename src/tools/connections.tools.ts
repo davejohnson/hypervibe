@@ -1,3 +1,4 @@
+import { requiredConnectionChecklist } from '../application/spec-connections.js';
 import { cloudEngineForConnection } from '../application/cloud-engines.js';
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -124,7 +125,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
-      environment: z.string().optional().describe('action="connect": the environment this access is for, shown on the connect page.'),
+      environment: z.string().optional().describe('Select the environment for project connection discovery, or show it on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
       azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
       azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
@@ -222,6 +223,16 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           });
         }
         const { project, context } = await resolveGuidanceContext();
+        if (environment && !project) return commandError('VALIDATION', 'Select a project to list connections for an environment.');
+        if (project) {
+          const spec = new SpecStore().preview(project);
+          if (environment && !Object.hasOwn(spec?.environments ?? {}, environment)) {
+            return commandError('NOT_FOUND', `Environment "${environment}" has no recorded spec in ${project.name}.`);
+          }
+          const checklist = spec ? requiredConnectionChecklist(ctx, spec, environment ? [environment] : undefined) : { required: [] };
+          return commandSuccess({ project: { id: project.id, name: project.name }, connections: checklist.required },
+            { hint: 'Use hv_connections action="describe" with the provider, project and scope for setup guidance.' });
+        }
         return listConnections(project, context);
       }
 
