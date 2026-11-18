@@ -482,8 +482,9 @@ export function buildAzureBuildConfiguration(input: AzureEngineInput): EngineCon
       tags: { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() } } };
     resources['azurerm_container_registry.ci_images'] = { actionId: 'registry:ci-images', kind: 'service', name: 'CI image registry', billable: true, requiresConfirm: true };
   }
-  files['builds.tf.json'] = { resource };
+  // OpenTofu rejects an empty resource block, so the file exists only when something goes in it.
   if (!input.packageTokenKey && !managedRegistry) return { files, resources };
+  files['builds.tf.json'] = { resource };
   if (input.packageTokenKey && !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(input.packageTokenKey)) throw new Error('Invalid package token key.');
   const secretName = input.packageTokenKey ? azureVaultSecretName(input.environmentName, input.packageTokenKey) : undefined;
   const mapping: EngineResourceMapping = { actionId: 'builds:images', kind: 'service', name: 'image builds' };

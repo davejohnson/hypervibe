@@ -35,7 +35,7 @@ async function processOutput(executable: string, args: string[], cwd: string, da
     child.stdout.on('data', (chunk) => { bytes += chunk.length; if (bytes > 8 * 1024 * 1024) child.kill('SIGTERM'); else stdout += chunk; });
     child.stderr.resume(); // Provider diagnostics can echo secrets. Do not persist or print them.
     child.once('error', () => { clearTimeout(timer); reject(new Error('The fixture command could not start.')); });
-    child.once('close', (code) => { clearTimeout(timer); if (code !== 0) reject(new Error(`Fixture command ${args[0]} failed or was interrupted; preserve the encrypted state.`)); else resolve(stdout); });
+    child.once('close', (code) => { clearTimeout(timer); if (code !== 0 && !stdout.trimStart().startsWith('{')) reject(new Error(`Fixture command ${args[0]} failed or was interrupted; preserve the encrypted state.`)); else resolve(stdout); });
     child.stdin.end(input ? JSON.stringify(input) : undefined);
   });
 }
@@ -64,6 +64,9 @@ live('AWS and Azure engine disposable environment fixture', () => {
     if (!existsSync(cliPath)) throw new Error('Build the installed CLI with npm run build before selecting live tests.');
     const databaseFile = path.join(dataDir, 'hypervibe.db');
     if (!existsSync(databaseFile)) throw new Error(`The dedicated ${cloud} test project must already be connected through Hypervibe in HYPERVIBE_LIVE_DATA_DIR.`);
+    // Ordinary tests run with a placeholder key so they never touch a real one. A live run must use the
+    // data directory's own key, here and in the CLI processes it starts.
+    if (process.env.HYPERVIBE_SECRET_KEY === '00'.repeat(32)) delete process.env.HYPERVIBE_SECRET_KEY;
     const db = new Database(databaseFile, { readonly: true, fileMustExist: true });
     const previousDataDir = process.env.HYPERVIBE_DATA_DIR;
     const interrupted = new AbortController();
@@ -126,7 +129,11 @@ live('AWS and Azure engine disposable environment fixture', () => {
         let envelope: Json;
         try { envelope = JSON.parse(await processOutput(process.execPath, [cliPath, ...command, '--input', '-', '--json'], workspace, dataDir, input)); }
         catch { throw new Error(`Hypervibe ${command.join(' ')} failed; fixture recovery state was preserved.`); }
-        if (envelope.ok !== true) throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}).`);
+        if (envelope.ok !== true) {
+          // Hypervibe's own redacted blockers say what to fix; nothing else from the failed command is shown.
+          const blocked = (envelope.error?.details?.blocked ?? []).map((entry: unknown) => String(entry).slice(0, 800)).join('\n');
+          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}).${blocked ? `\n${blocked}` : ''}`);
+        }
         return envelope;
       };
       if (!existsSync(path.join(workspace, '.git'))) {
@@ -150,7 +157,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
       const setEnvironment = async (revision: 'create' | 'update' | undefined) => {
         const original = savedSpec();
         const { [environmentName]: _removed, ...others } = original.environments;
-        await cli(['spec', 'set'], { project: projectName, replace: true, spec: { ...original,
+        await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
           environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision) } : others } });
       };

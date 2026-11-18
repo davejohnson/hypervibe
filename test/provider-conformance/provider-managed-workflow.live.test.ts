@@ -318,7 +318,7 @@ function datastoreConnectionProfiles(
 }
 
 async function setSpec(spec: JsonObject): Promise<void> {
-  await runHypervibe(['spec', 'set'], {
+  await runHypervibe(['spec'], {
     project: projectName,
     replace: true,
     spec,

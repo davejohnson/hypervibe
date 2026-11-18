@@ -134,7 +134,7 @@ live('Disposable DNS lifecycle on a prepared app', () => {
         if (!isDeepStrictEqual(retained, originalRetained)) throw new Error('The retained app configuration changed during the DNS fixture; stop before changing desired state.');
         const desired = revision === 'absent' ? baseline.originalEnvironment : { ...baseline.originalEnvironment, domain: marker.hostname, domainProxy: false,
           dns: { ...marker.dns, ttl: revision === 'create' ? 300 : 600 } };
-        await cli(['spec', 'set'], { project: project.name, replace: true, spec: { ...current, environments: { ...current.environments, [environment.name]: desired } } }, directory, dataDir);
+        await cli(['spec'], { project: project.name, replace: true, spec: { ...current, environments: { ...current.environments, [environment.name]: desired } } }, directory, dataDir);
       };
       const plan = async (stage: 'create' | 'update' | 'absent') => {
         const result = await cli(['plan'], { project: project.name, env: environment.name }, directory, dataDir);
