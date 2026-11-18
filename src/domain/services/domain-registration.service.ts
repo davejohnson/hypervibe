@@ -64,7 +64,7 @@ function hasStandardQuote(candidate: RegistrarDomainCandidate): boolean {
 function registrationOptions(environmentSpec: EnvironmentSpec): Record<string, unknown> {
   const spec = environmentSpec.domainRegistration;
   return {
-    years: spec?.years ?? 'default',
+    years: spec?.years ?? 1,
     autoRenew: spec?.autoRenew ?? false,
     privacyMode: spec?.privacyMode ?? 'redaction',
   };
@@ -138,14 +138,14 @@ export function cloudflareRegistrarCredentialProblem(domain: string): string | n
 
 function workflowActionResult(domain: string, workflow: RegistrarWorkflowStatus, action: 'started' | 'polled'): ActionResult {
   if (workflow.state === 'succeeded' && workflow.completed === true) {
-    return { success: true, message: `Cloudflare registration for ${domain} succeeded`, data: { workflow } };
+    return { success: true, message: `Cloudflare registration for ${domain} succeeded`, data: { workflow: { state: workflow.state, completed: workflow.completed } } };
   }
   if (workflow.state === 'failed' || workflow.completed) {
     return {
       success: false,
       message: `Cloudflare registration for ${domain} failed`,
       error: workflow.error?.message ?? `Registration workflow reached terminal state ${workflow.state}.`,
-      data: { workflow },
+      data: { workflow: { state: workflow.state, completed: workflow.completed } },
     };
   }
   if (workflow.state === 'action_required') {
@@ -154,7 +154,7 @@ function workflowActionResult(domain: string, workflow: RegistrarWorkflowStatus,
       status: 'blocked',
       message: `Cloudflare registration for ${domain} requires user action`,
       error: workflow.error?.message ?? 'Cloudflare paused the registration workflow and requires user action before Hypervibe can continue.',
-      data: { workflow },
+      data: { workflow: { state: workflow.state, completed: workflow.completed } },
     };
   }
 
@@ -166,7 +166,7 @@ function workflowActionResult(domain: string, workflow: RegistrarWorkflowStatus,
     success: false,
     status: 'pending',
     message: `Cloudflare registration for ${domain} ${verb} ${workflow.state}. ${extra}`,
-    data: { workflow },
+    data: { workflow: { state: workflow.state, completed: workflow.completed } },
   };
 }
 
@@ -429,9 +429,9 @@ export async function applyCloudflareDomainRegistration(params: {
   try {
     const workflow = await adapter.createRegistrarRegistration(accountId, {
       domainName: domain,
-      ...(registrationSpec.autoRenew !== undefined ? { autoRenew: registrationSpec.autoRenew } : {}),
-      ...(registrationSpec.privacyMode ? { privacyMode: registrationSpec.privacyMode } : {}),
-      ...(registrationSpec.years !== undefined ? { years: registrationSpec.years } : {}),
+      autoRenew: registrationSpec.autoRenew ?? false,
+      privacyMode: registrationSpec.privacyMode ?? 'redaction',
+      years: registrationSpec.years ?? 1,
     });
     persistWorkflow(envRepo, project, envName, domain, accountId, workflow);
     return workflowActionResult(domain, workflow, 'started');

@@ -46,7 +46,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |
 | Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
-| Buying a domain | blocked (#627) | blocked (#627) | blocked (#627) |
+| Buying a domain | reviewed Cloudflare purchase followed by Cloudflare DNS and Cloud Run attachment; offline coverage (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
 | Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
@@ -65,6 +65,10 @@ normal-CI transport and public-command checks, but have no live validation yet.
 They use exact state-derived workload identities; worker/job-only health does not
 require an HTTP endpoint. See [engine diagnostics](../engine-diagnostics.md) for
 native coverage, log windows, pagination bounds and execution-history limits.
+For AWS and Azure, `hv_status` shows current workload activity when exact service
+counts are available. Scaling a service to zero is distinct from a missing or
+unreadable workload. Worker queue depth, next wake and database pause history
+still need coverage.
 Build-log and deployment-history listing remain unavailable on these engines.
 GCP and Railway retain their existing observation paths and evidence status.
 

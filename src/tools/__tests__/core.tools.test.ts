@@ -2230,6 +2230,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(create).toHaveBeenCalledWith('acct-1', {
       domainName: 'apreskeys.com',
       autoRenew: true,
+      privacyMode: 'redaction',
       years: 1,
     });
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
