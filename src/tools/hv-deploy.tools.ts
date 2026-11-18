@@ -294,7 +294,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
 
   commands.register(
     'hv_rollback',
-    'Preview one exact recovery candidate read-only with action=preview, toSha, sourceWorkflowRunId and sourceArtifactId; preview never dispatches or requires confirmation. Original legacy v2 evidence is inspected without upgrading it or enabling unsupported legacy execution. Otherwise rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
+    'Preview one exact recovery candidate read-only with action=preview, toSha, sourceWorkflowRunId and sourceArtifactId; preview never dispatches or requires confirmation. Original legacy v2 evidence is inspected without upgrading it or enabling unsupported legacy execution. Otherwise rollback a managed-CI environment through one plan-authorized command. Providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers and direct-provider deployments fail closed without deploying current source. Database migrations and provider-side manual configuration are never reversed implicitly. Not a restart: the release already running is refused, so to apply saved settings without new commits dispatch that exact commit with hv_ci_trigger inputs.commit_sha instead. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -348,7 +348,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       if (!result.ok) {
         const code = result.reason === 'unsupported' ? 'UNSUPPORTED'
           : result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
-          : ['invalid_run', 'invalid_target', 'workflow_drift', 'workflow_inactive', 'rollback_in_progress'].includes(result.reason)
+          : ['invalid_run', 'invalid_target', 'already_current', 'workflow_drift', 'workflow_inactive', 'rollback_in_progress'].includes(result.reason)
             ? 'VALIDATION'
             : result.reason === 'observation_failed' ? 'PROVIDER_ERROR'
             : 'NOT_FOUND';
@@ -358,6 +358,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
             : {}),
           ...('hint' in result && result.hint ? { hint: result.hint } : {}),
           ...(result.reason === 'workflow_drift' ? { next: ['hv_plan', 'hv_apply'] } : {}),
+          ...(result.reason === 'already_current' ? { next: ['hv_ci_trigger', 'hv_ci_status', 'hv_health'] } : {}),
         });
       }
 

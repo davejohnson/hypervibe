@@ -32,6 +32,30 @@ and `hv_ci_status` to monitor the result. Verify service health after a successf
 release. Do not dispatch or inspect managed CI through a code-host connector,
 provider CLI, browser, or direct API to work around a Hypervibe blocker.
 
+### Change a setting without releasing new code
+
+Save the value first, then apply it. Non-secret values go in the environment's
+`envVars` through `hv_spec`; secrets go through `hv_plan` `secretRefs` or the
+`hv_secrets action="collect"` page, never chat. Review `hv_plan`, then `hv_apply`.
+
+- Google Cloud, AWS and Azure: the apply restarts the services on the image that
+  is already running. It never releases new commits, and no deploy is needed.
+- Managed-CI environments (existing Railway branch deploys): the value is saved,
+  but running services keep the old one until the next deployment. `hv_status`
+  reports `restartRequired`. To activate it without new commits, read the current
+  release SHA from the newest successful deploy run in
+  `hv_ci_status include=["runs"]`, then deploy that exact commit again:
+  `hv_ci_trigger definition=<deploy workflow path> ref=<deploy branch>
+  inputs={"commit_sha":"<sha>"}`. Follow the run with `hv_ci_status`, then
+  `hv_health`. A promoted environment still needs an unexpired successful release
+  of that commit in its source environment; if the run reports that it is missing,
+  say so instead of deploying something newer.
+
+`hv_rollback` is not a restart. It only restores an earlier release and refuses
+the one already running. Do not push a commit, re-run a provider deployment or use
+a provider console to force a restart. If the deploy workflow needs a sync first,
+the tools say so: complete that reviewed `hv_plan`/`hv_apply` before dispatching.
+
 Ordinary deployment does not require backup setup, an archive bucket or fresh
 recovery evidence. Read backup coverage through `hv_status` or an explicit backup
 plan; ordinary plans do not run recurring-backup health checks or read recovery

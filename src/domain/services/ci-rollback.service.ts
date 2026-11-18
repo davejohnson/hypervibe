@@ -28,6 +28,7 @@ export const CI_ROLLBACK_NOTE =
   'Managed CI rollback restores application code from a previously verified exact Git SHA. It does not reverse database migrations or provider-side manual configuration; startup and release-command migrations must remain backward-compatible.';
 
 export type CiRollbackFailureReason =
+  | 'already_current'
   | 'invalid_target'
   | 'no_target_release'
   | 'no_adapter'
@@ -141,6 +142,33 @@ async function releaseEvidenceForRun(params: {
   };
 }
 
+/** The release the newest run verified, or undefined when that is not established. */
+async function currentReleaseSha(params: {
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+  workflowPath: string;
+  environmentName: string;
+}): Promise<string | undefined> {
+  const response = await params.adapter.listWorkflowRuns(params.owner, params.repo, params.workflowPath, { per_page: 100 });
+  const latestRun = sortRunsNewestFirst(response.workflow_runs)[0];
+  if (!latestRun || latestRun.status !== 'completed' || latestRun.conclusion !== 'success') return undefined;
+  return (await releaseEvidenceForRun({ ...params, run: latestRun }))?.sha;
+}
+
+/**
+ * Rollback only moves to a different release. Agents reach for it to restart the
+ * running release after a settings change, so the refusal names the supported way.
+ */
+function alreadyCurrentRelease(sha: string, workflow: { path: string; branch: string }): CiRollbackFailure {
+  return {
+    ok: false,
+    reason: 'already_current',
+    error: `Production is already at verified release ${sha}. Rollback restores an earlier release; it does not restart or redeploy the current one.`,
+    hint: `To apply saved settings without releasing new commits, deploy this exact commit again: hv_ci_trigger definition="${workflow.path}" ref="${workflow.branch}" inputs={"commit_sha":"${sha}"}. Then follow the run with hv_ci_status and check hv_health.`,
+  };
+}
+
 async function observeManagedCiRollback(params: {
   project: Project;
   environment: Environment;
@@ -225,30 +253,39 @@ async function observeManagedCiRollback(params: {
       adapter.listWorkflows(owner, repo),
       adapter.getRef(owner, repo, `heads/${workflow.branch}`),
     ]);
-    if (workflowObservation.acceptance === 'drift') {
-      return {
-        ok: false,
-        reason: 'workflow_drift',
-        error: `Managed rollback is blocked because ${workflow.path} is missing or differs from the current desired workflow.`,
-        hint: 'Run hv_plan and hv_apply, merge the generated GitHub infrastructure pull request, then retry hv_rollback.',
-      };
-    }
     const liveWorkflow = workflows.workflows.find((candidate) => candidate.path === workflow.path);
-    if (!liveWorkflow || liveWorkflow.state !== 'active') {
-      return {
-        ok: false,
-        reason: 'workflow_inactive',
-        error: `Managed rollback is blocked because ${workflow.path} is not active.`,
-      };
-    }
     const workflowRefSha = workflowRef?.object.sha;
-    if (!workflowRefSha || !FULL_SHA.test(workflowRefSha)) {
-      return {
-        ok: false,
-        reason: 'workflow_drift',
-        error: `Managed rollback is blocked because GitHub branch ${workflow.branch} has no exact commit.`,
-        hint: 'Restore the configured deploy branch, then retry hv_rollback.',
-      };
+    const workflowBlock: CiRollbackFailure | undefined = workflowObservation.acceptance === 'drift'
+      ? {
+          ok: false,
+          reason: 'workflow_drift',
+          error: `Managed rollback is blocked because ${workflow.path} is missing or differs from the current desired workflow.`,
+          hint: 'Run hv_plan and hv_apply, merge the generated GitHub infrastructure pull request, then retry hv_rollback.',
+        }
+      : !liveWorkflow || liveWorkflow.state !== 'active'
+        ? {
+            ok: false,
+            reason: 'workflow_inactive',
+            error: `Managed rollback is blocked because ${workflow.path} is not active.`,
+          }
+        : !workflowRefSha || !FULL_SHA.test(workflowRefSha)
+          ? {
+              ok: false,
+              reason: 'workflow_drift',
+              error: `Managed rollback is blocked because GitHub branch ${workflow.branch} has no exact commit.`,
+              hint: 'Restore the configured deploy branch, then retry hv_rollback.',
+            }
+          : undefined;
+    if (workflowBlock || !workflowRefSha) {
+      // Asking for the release that is already running is never a rollback, whatever
+      // else is wrong. Say so first: fixing the workflow would only reach the same refusal.
+      const requested = params.toSha?.trim().toLowerCase();
+      if (requested && FULL_SHA.test(requested)) {
+        const current = await currentReleaseSha({ adapter, owner, repo, workflowPath: workflow.path, environmentName: params.environment.name })
+          .catch(() => undefined);
+        if (current === requested) return alreadyCurrentRelease(requested, workflow);
+      }
+      return workflowBlock!;
     }
 
     const runsResponse = await adapter.listWorkflowRuns(owner, repo, workflow.path, { per_page: 100 });
@@ -294,11 +331,7 @@ async function observeManagedCiRollback(params: {
       return { ok: false, reason: 'invalid_target', error: 'toSha must be a full 40-character Git commit SHA.' };
     }
     if (requestedSha && currentRelease?.sha === requestedSha) {
-      return {
-        ok: false,
-        reason: 'invalid_target',
-        error: `Production is already at verified release ${requestedSha}.`,
-      };
+      return alreadyCurrentRelease(requestedSha, workflow);
     }
 
     let targetRelease: ReleaseEvidence | undefined;

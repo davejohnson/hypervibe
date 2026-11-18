@@ -1256,6 +1256,49 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
+  it.each([
+    ['the workflow is in sync', false],
+    ['the workflow has drifted', true],
+  ])('refuses the running release and names the redeploy path when %s', async (_label, drifted) => {
+    const { project, workflow } = seedManagedCiRollbackProject(`rollback-current-${drifted ? 'drift' : 'sync'}-app`);
+    const currentSha = 'c'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent')
+      .mockResolvedValue(drifted ? `${workflow.content}# user-modified workflow\n` : workflow.content);
+    const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, 'b'.repeat(40));
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      toSha: currentSha,
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain(`already at verified release ${currentSha}`);
+    expect(result.error.message).toContain('does not restart or redeploy');
+    expect(result.hint).toContain(`hv_ci_trigger definition="${workflow.path}" ref="main" inputs={"commit_sha":"${currentSha}"}`);
+    expect(result.next).toEqual(['hv_ci_trigger', 'hv_ci_status', 'hv_health']);
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('still reports workflow drift for a different release', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-other-drift-app');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(`${workflow.content}# user-modified workflow\n`);
+    const trigger = mockPreviousSuccessfulRelease(workflow, 'c'.repeat(40), 'b'.repeat(40));
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', { project: project.name, env: 'production', toSha: 'b'.repeat(40), confirm: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toContain('missing or differs');
+    expect(result.next).toEqual(['hv_plan', 'hv_apply']);
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('blocks managed rollback when the generated workflow has drifted', async () => {
     const { project, environment, workflow, inputHash } = seedManagedCiRollbackProject(
       'rollback-workflow-drift-app'
