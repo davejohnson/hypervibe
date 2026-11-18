@@ -57,8 +57,10 @@ export async function connectAws(params: {
       const plan = await planFor(session);
       const pending = plan.changes.filter((change) => change.state !== 'ok');
       return {
-        titleHtml: `Set up Hypervibe in ${escapeHtml(region)}`,
-        leadHtml: `Hypervibe creates its own limited access in account ${escapeHtml(plan.accountId)} and stops using this sign-in. These cost nothing.`,
+        // The person knows their app, not AWS region codes: the app leads, the region is a small aside.
+        titleHtml: `Set up Hypervibe for ${escapeHtml(params.project.name)}`,
+        leadHtml: `Hypervibe creates its own limited access in AWS account ${escapeHtml(plan.accountId)} and stops using this sign-in. These cost nothing. `
+          + `<span class="muted small nowrap" title="The AWS region (a group of data centers) where Hypervibe runs this app. Hypervibe picked it; there is nothing to choose.">Region: ${escapeHtml(region)}</span>`,
         items: (pending.length ? pending : plan.changes).map((change) => escapeHtml(change.change)),
         approveLabel: pending.length ? `Approve and set up (${pending.length} change${pending.length === 1 ? '' : 's'})` : 'Confirm and save access',
         apply: async () => {
