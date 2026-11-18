@@ -56,6 +56,7 @@ export interface AwsEngineBinding {
   kind?: 'opentofu';
   /** Image built by the release path; services are created once it exists. */
   imageUri?: string;
+  imageLaunchVersion?: 1;
   /** The app's database login exists and DATABASE_URL is in Parameter Store. */
   databaseLoginAt?: string;
   /** The environment's database is on the project's shared testing cluster (earlier versions gave each environment its own). */
@@ -157,7 +158,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   image?: string;
 }): AwsEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
-  const imageUri = awsBinding(context.environment).imageUri ?? extra.image;
+  const imageUri = extra.image ?? awsBinding(context.environment).imageUri;
   const name = (service: string) => awsResourceName(context.prefix, service);
   const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b));
   // Workloads need an image in this environment's registry, so they are created after the first build.
@@ -182,6 +183,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: bucketName(storage) })),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
+      ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
       env: envFor(logicalName), ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
     })),
     workers: withImage.filter(([, service]) => service.workloadKind === 'worker').map(([logicalName, service]) => ({
@@ -414,7 +416,10 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // The first image is built in this apply from the local commit, so the workloads are created in the same reviewed plan.
   const workloads = Object.keys(environmentSpec.services).length;
   const previous = awsBinding(context.environment);
-  const commit = !previous.imageUri && workloads ? localCommit(project) : undefined;
+  const upgrade = previous.imageUri && previous.imageLaunchVersion !== 1 && Object.values(environmentSpec.services)
+    .some(service => (service.workloadKind ?? 'web') === 'web' && service.startCommand);
+  const commit = (!previous.imageUri || upgrade) && workloads ? localCommit(project) : undefined;
+  if (upgrade && !commit) return { blocked: ['Run the plan in the local repository to build an image that supports per-service web commands.'] };
   const firstImage = commit ? `${awsRegistryUrl({ accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix })}:${awsImageTag(commit.commitSha)}` : undefined;
   // An optional key without a value is left out, so no workload references a parameter that does not exist.
   const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported.filter((key) => !secrets.unset?.includes(key))], firstImage);
@@ -534,7 +539,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
           if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
           // Record the reference the reviewed plan creates the services from (the registry's tags are immutable), not the digest, or the next plan replaces them.
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image } });
+          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image, imageLaunchVersion: 1 } });
           return { success: true, message: `Built ${built.imageUri}.`, data: { imageUri: built.imageUri } };
         }
         if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {

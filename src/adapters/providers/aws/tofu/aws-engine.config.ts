@@ -342,7 +342,13 @@ function addBuilds(input: AwsEngineInput, files: Record<string, unknown>, resour
         version: '0.2',
         phases: {
           pre_build: { commands: ['aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY%%/*}"'] },
-          build: { commands: ['if [ -n "${NPM_TOKEN:-}" ]; then set -- --secret id=npm_token,env=NPM_TOKEN; else set --; fi; docker build "$@" --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
+          build: { commands: ['if [ -n "${NPM_TOKEN:-}" ]; then set -- --secret id=npm_token,env=NPM_TOKEN; else set --; fi; docker build "$@" --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "hypervibe-source:$IMAGE_TAG" .',
+            // ECS Express overrides CMD only. Preserve the original default argv in CMD so each service can replace it completely.
+            'config=$(docker image inspect --format \'{{json .Config}}\' "hypervibe-source:$IMAGE_TAG")',
+            'argv=$(printf "%s" "$config" | jq -ce \'if ((.OnBuild // []) | length) > 0 then error("Cannot inherit ONBUILD triggers in an ECS launch image") else (.Entrypoint // []) + (.Cmd // []) end\')',
+            'tag="${RELEASE_TAG:-$IMAGE_TAG}"',
+            'printf "FROM hypervibe-source:%s\\nENTRYPOINT []\\nCMD %s\\n" "$IMAGE_TAG" "$argv" | docker build --platform linux/amd64 -t "$REGISTRY:$tag" -',
+            'docker push "$REGISTRY:$tag"'] },
         },
       }).replace(/\$\{/g, () => '$${') }],
       logs_config: [{ cloudwatch_logs: [{ status: 'ENABLED', group_name: `/hypervibe/${input.prefix}/builds` }] }],

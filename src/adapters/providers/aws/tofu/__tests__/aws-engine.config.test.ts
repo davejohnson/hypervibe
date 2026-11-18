@@ -59,7 +59,7 @@ describe('AWS web services', () => {
       infrastructure_role_arn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-web-infrastructure',
       execution_role_arn: '${aws_iam_role.runtime.arn}', task_role_arn: '${aws_iam_role.runtime.arn}',
       scaling_target: [{ min_task_count: 1, max_task_count: 3 }],
-      lifecycle: [{ ignore_changes: ['primary_container[0].image'] }],
+      lifecycle: [{ ignore_changes: ['primary_container[0].image', 'primary_container[0].command'] }],
     });
     const container = service.primary_container[0];
     expect(container.container_port).toBe(8080);
