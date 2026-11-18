@@ -64,6 +64,17 @@ Portable execution authority must compare its source against a current, strict n
 
 A shared container image default is distinct from each workload's runtime command. Preserve explicit web/worker/cron commands when selecting a generated image default; test the real spec-to-workflow path with different workload commands and execute the emitted Dockerfile-generation shell. Never require workers to use the web command just to build a shared image.
 
+Managed CI publication creates a complete commit from the reviewed default-branch
+files, then creates a fresh branch at that commit. The publication receipt binds
+the repository, environment branch, base, workflow inputs and immutable head.
+Retries reobserve the exact branch and PR even after an unclear response or an
+edited PR description. Closing or merging a PR permits a new proposal from the
+current default branch; the prior branch stays intact. For legacy publications,
+GitHub must confirm the exact repository, head and base of the closed PR.
+A changed head, an active legacy PR or unowned work requires owner review.
+Review or finish the existing PR and run a fresh publication plan. Publication
+only prepares repository changes for review.
+
 ## DG-125
 
 Generated-workflow tests must execute the emitted shell and JavaScript against a realistic multi-service fixture. Substring assertions may supplement those contract tests, but cannot stand in for proving target selection, provider calls, evidence writing, rollback, and fail-closed behavior.

@@ -333,6 +333,7 @@ export async function observeManagedWorkflowFiles(params: {
   contract: ManagedWorkflowContract;
 }): Promise<{
   desiredFiles: Array<{ path: string; content: string }>;
+  observedHashes: Record<string, string | null>;
   liveContentHash: string | null;
   retiredPaths: string[];
   retiredFilePresent: boolean;
@@ -387,6 +388,7 @@ export async function observeManagedWorkflowFiles(params: {
         : 'drift';
   return {
     desiredFiles,
+    observedHashes: Object.fromEntries(observed.map(file => [file.path, file.content === null ? null : sha256(file.content)])),
     liveContentHash,
     retiredPaths,
     retiredFilePresent,
@@ -592,6 +594,7 @@ function buildAction(params: {
   reviewedEnvironmentSecrets?: string[];
   missingEnvironmentSecrets?: string[];
   staleEnvironmentSecrets?: string[];
+  observedHashes?: Record<string, string | null>;
   retiredPaths?: string[];
   workflowPublicationRequired?: boolean;
   iosBuildCredentialsSource?: IosBuildCredentialsSource;
@@ -624,6 +627,7 @@ function buildAction(params: {
         aggregateContentHash: workflowFilesContentHash(workflowFiles(params.workflow)),
         inputHash: params.inputHash,
         companionPaths: (params.workflow.companionFiles ?? []).map((file) => file.path),
+        ...(params.observedHashes ? { observedHashes: params.observedHashes } : {}),
         ...(params.retiredPaths?.length ? { retiredPaths: params.retiredPaths } : {}),
       },
       ...(params.missingProviderSecrets?.length ? { missingProviderSecrets: params.missingProviderSecrets } : {}),
@@ -827,7 +831,7 @@ export async function planGitHubActionsDeploy(params: {
         reason,
         verified: true,
         workflowPublicationRequired: true,
-        retiredPaths: observation.retiredPaths,
+        retiredPaths: observation.retiredPaths, observedHashes: observation.observedHashes,
         dependsOn: params.dependsOn,
       }),
       warnings,
@@ -1021,6 +1025,9 @@ export async function applyGitHubActionsDeploy(params: {
         error: 'The reviewed publication action no longer matches live repository state. Re-run hv_plan before syncing secrets.',
       };
     }
+    if (!reviewedWorkflow.observedHashes || JSON.stringify(reviewedWorkflow.observedHashes) !== JSON.stringify(observation.observedHashes)) {
+      return {success: false, status: 'blocked', message: 'Managed workflow contents changed or a prior plan lacks exact file observations. Review a new hv_plan before publication.'};
+    }
     const reviewedRetiredPaths = Array.isArray(reviewedWorkflow.retiredPaths)
       ? reviewedWorkflow.retiredPaths.filter((path): path is string => typeof path === 'string')
       : [];
@@ -1066,6 +1073,7 @@ export async function applyGitHubActionsDeploy(params: {
       targetBranch: workflow.branch,
       retiredManagedPaths: reviewedRetiredPaths,
       proposalBranch: managedWorkflowPublicationBranch(environmentName),
+      reviewedFileHashes: observation.observedHashes,
       requireDefaultTarget: true,
     });
     return {

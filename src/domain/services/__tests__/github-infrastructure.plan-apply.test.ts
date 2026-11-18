@@ -33,6 +33,7 @@ import {
   GITHUB_INFRASTRUCTURE_PR_TITLE,
   githubInfrastructureConnectionBlock,
   planGitHubInfrastructure,
+  proposeGitHubInfrastructureFiles,
 } from '../github-infrastructure.service.js';
 
 import * as managedBackups from '../managed-backup-workflows.service.js';
@@ -567,6 +568,45 @@ describe('GitHub infrastructure plan/apply', () => {
       message: 'GitHub connection is unavailable',
     });
     expect(JSON.stringify(applied)).not.toContain('unavailable-secret-value');
+  });
+
+  it.each([true, false])('starts a fresh managed publication after an exact closed legacy PR (merged=%s) and reuses it after lost acknowledgments', async merged => {
+    const branch = 'hypervibe/managed-ci-staging-e919a753';
+    const base = 'b'.repeat(40), oldHead = 'c'.repeat(40), nextHead = 'd'.repeat(40);
+    const refs = new Map([['heads/main', base], ['heads/' + branch, oldHead]]);
+    const repos = {full_name: REPOSITORY};
+    const old = infrastructurePull({number: 237, title: 'Renamed by reviewer', body: 'Superseded',
+      state: 'closed', merged_at: merged ? '2026-10-30T10:00:00Z' : null, head: {ref: branch, sha: oldHead, repo: repos}, base: {ref: 'main', sha: base, repo: repos}});
+    const pulls: GitHubPullRequestSummary[] = [old];
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({success: true});
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({default_branch: 'main'});
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockImplementation(async (_o, _r, ref) => refs.has(ref) ? {ref: 'refs/' + ref, object: {sha: refs.get(ref)!}} : null);
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockImplementation(async (_o, _r, filter) =>
+      pulls.filter(p => 'owner:' + p.head.ref === filter?.head && (filter?.state === 'all' || filter?.state === p.state)));
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({status: 'diverged', ahead_by: 1, behind_by: 2});
+    const update = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockImplementation(async (_o, _r, ref, sha) => {
+      expect(refs.has(ref.slice(5))).toBe(false); refs.set(ref.slice(5), sha); throw new Error('Lost response');
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue('old');
+    const createCommit = vi.spyOn(GitHubAdapter.prototype, 'createPublicationCommit').mockResolvedValue(nextHead);
+    const createPull = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockImplementation(async (_o, _r, input) => {
+      pulls.push(infrastructurePull({number: 238, title: input.title, html_url: 'https://github.com/owner/example/pull/238', state: 'open', merged_at: null,
+        head: {repo: repos, ref: input.head, sha: nextHead}, base: {repo: repos, ref: 'main', sha: base}}));
+      throw new Error('Lost response');
+    });
+    const proposal = {repository: REPOSITORY, targetBranch: 'main', proposalBranch: branch, requireDefaultTarget: true,
+      desiredFiles: [{path: '.github/workflows/deploy.yml', content: 'reviewed content', hash: 'a'.repeat(64)}]};
+    expect(await proposeGitHubInfrastructureFiles(proposal)).toMatchObject({status: 'pending', data: {pullRequestNumber: 238}});
+    pulls[1].title = 'Edited after publication'; pulls[1].body = null;
+    expect(await proposeGitHubInfrastructureFiles(proposal)).toMatchObject({status: 'pending', data: {pullRequestNumber: 238}});
+    expect(createPull).toHaveBeenCalledTimes(1);
+    expect(createCommit).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(refs.get('heads/' + branch)).toBe(oldHead);
+    refs.set('heads/' + pulls[1].head.ref, 'e'.repeat(40));
+    expect(await proposeGitHubInfrastructureFiles(proposal)).toMatchObject({status: 'blocked'});
+    expect(createPull).toHaveBeenCalledTimes(1);
   });
 
   it('creates a deterministic infrastructure branch and returns a pending PR receipt', async () => {

@@ -1,3 +1,4 @@
+import { mockManagedPublication } from './managed-publication.test-utils.js';
 import '../../../application/providers.js';
 import * as githubCredentialActivation from '../../../adapters/providers/github/github-credential-activation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -226,6 +227,7 @@ function reviewedDeployAction(
           ios: environmentSpec.ios,
         }),
         aggregateContentHash: workflowFilesContentHash(workflowFiles(workflow)),
+        observedHashes: Object.fromEntries(workflowFiles(workflow).map(file => [file.path, null])),
         retiredPaths: [],
       },
     },
@@ -373,26 +375,6 @@ function mockVerifiedGitHub(): void {
     success: true,
     login: 'davejohnson',
     scopes: ['repo', 'workflow'],
-  });
-}
-
-function mockFreshManagedWorkflowPullRequest(number: number): void {
-  vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-  let branchCreated = false;
-  vi.spyOn(GitHubAdapter.prototype, 'getRef').mockImplementation(async (_owner, _repo, ref) => {
-    if (ref === 'heads/main') return { ref: 'refs/heads/main', object: { sha: 'base-sha' } };
-    if (ref === `heads/${MANAGED_WORKFLOW_BRANCH}` && branchCreated) {
-      return { ref: `refs/heads/${MANAGED_WORKFLOW_BRANCH}`, object: { sha: 'base-sha' } };
-    }
-    return null;
-  });
-  vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
-  vi.spyOn(GitHubAdapter.prototype, 'createRef').mockImplementation(async () => {
-    branchCreated = true;
-  });
-  vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
-    number,
-    html_url: `https://github.com/davejohnson/billforge/pull/${number}`,
   });
 }
 
@@ -913,19 +895,17 @@ describe('ci-deploy.service', () => {
       expect(listEnvironmentSecrets).not.toHaveBeenCalled();
       expect(database).not.toHaveBeenCalled();
       mockVerifiedGitHub();
-      mockFreshManagedWorkflowPullRequest(72);
+      const {write} = mockManagedPublication(72);
       vi.spyOn(GitHubAdapter.prototype, 'getFile').mockImplementation(async (_owner, _repo, filePath) =>
         filePath === workflow.path ? { sha: 'accepted-file', content: acceptedContent } : null);
-      const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: false, updated: true });
+
       const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
       const publication = await applyGitHubActionsDeploy({ project, environmentName: 'production',
         environmentSpec: protectedSpec, action: result.action!, authority: 'publication-only' });
       expect(publication).toMatchObject({ success: false, status: 'pending' });
       expect(write).toHaveBeenCalledOnce();
-      expect(write.mock.calls[0][2]).toBe(workflow.path);
-      expect(write.mock.calls[0][3]).toBe(workflow.content);
-      expect(write.mock.calls[0][3]).not.toContain('Verify retained backup health');
-      expect(write.mock.calls[0][5]).toBe(MANAGED_WORKFLOW_BRANCH);
+      expect(write.mock.calls[0][4]).toEqual([{path: workflow.path, content: workflow.content}]);
+      expect(workflow.content).not.toContain('Verify retained backup health');
       expect(setSecret).not.toHaveBeenCalled();
       expect(database).not.toHaveBeenCalled();
       // Model the reviewed publication being accepted, then use the normal
@@ -1457,32 +1437,7 @@ describe('ci-deploy.service', () => {
       const setDeploySecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret');
       mockVerifiedGitHub();
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
-      vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-      vi.spyOn(GitHubAdapter.prototype, 'getRef')
-        .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
-        .mockResolvedValueOnce({ ref: `refs/heads/${MANAGED_WORKFLOW_BRANCH}`, object: { sha: 'base-sha' } });
-      vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockImplementation(
-        async (_owner, _repo, options) => options?.head === 'davejohnson:hypervibe/github-infrastructure'
-          ? [{
-              number: 99,
-              html_url: 'https://github.com/davejohnson/billforge/pull/99',
-              title: '[Hypervibe] Sync GitHub infrastructure',
-              body: 'Hypervibe generated this pull request from unrelated desired state.',
-              state: 'open',
-              merged_at: null,
-              head: { ref: 'hypervibe/github-infrastructure', sha: 'base-sha' },
-              base: { ref: 'main', sha: 'base-sha' },
-            }]
-          : []
-      );
-      vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
-        .mockResolvedValue({ created: false, updated: true });
-      vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
-      const createPullRequest = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
-        number: 42,
-        html_url: 'https://github.com/davejohnson/billforge/pull/42',
-      });
-
+      const {createPull: createPullRequest} = mockManagedPublication(42);
       const result = await applyGitHubActionsDeploy({
         project,
         environmentName: 'production',
@@ -1502,7 +1457,7 @@ describe('ci-deploy.service', () => {
       expect(createPullRequest).toHaveBeenCalledWith(
         'davejohnson',
         'billforge',
-        expect.objectContaining({ head: MANAGED_WORKFLOW_BRANCH })
+        expect.objectContaining({ head: MANAGED_WORKFLOW_BRANCH + '-v2' })
       );
     });
 
@@ -1990,28 +1945,20 @@ describe('ci-deploy.service', () => {
 
       mockVerifiedGitHub();
       vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(oldWorkflow.content);
-      mockFreshManagedWorkflowPullRequest(42);
+      const {write} = mockManagedPublication(42);
       vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
-      const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
-        .mockResolvedValue({ created: true, updated: false });
-
+      const plan = await planGitHubActionsDeploy({project, environmentName: 'production',
+        environmentSpec: changedEnvironmentSpec, environment: envRepo.findById(environmentId)});
       const result = await applyGitHubActionsDeploy({
         project,
         environmentName: 'production',
         environmentSpec: changedEnvironmentSpec,
-        action: reviewedDeployAction(project, changedEnvironmentSpec, true),
+        action: plan.action!,
         authority: 'publication-only',
       });
 
       expect(result).toMatchObject({ success: false, status: 'pending' });
-      expect(createOrUpdateFile).toHaveBeenCalledWith(
-        'davejohnson',
-        'billforge',
-        latestWorkflow.path,
-        latestWorkflow.content,
-        expect.any(String),
-        MANAGED_WORKFLOW_BRANCH
-      );
+      expect(write.mock.calls[0][4]).toContainEqual(expect.objectContaining({path: latestWorkflow.path, content: latestWorkflow.content}));
     });
 
     it.each([
@@ -2091,7 +2038,7 @@ describe('ci-deploy.service', () => {
         },
       });
 
-      mockFreshManagedWorkflowPullRequest(43);
+      const {write} = mockManagedPublication(43);
       vi.spyOn(GitHubAdapter.prototype, 'getFile').mockImplementation(
         async (_owner, _repo, path) => path === retiredPath
           ? { content: retiredContent, sha: 'retired-ios-sha' }
@@ -2114,14 +2061,8 @@ describe('ci-deploy.service', () => {
 
       expect(result).toMatchObject({ success: false, status: 'pending' });
       expect(updateFile).not.toHaveBeenCalled();
-      expect(deleteFile).toHaveBeenCalledWith(
-        'davejohnson',
-        'billforge',
-        retiredPath,
-        'retired-ios-sha',
-        expect.any(String),
-        MANAGED_WORKFLOW_BRANCH
-      );
+      expect(write.mock.calls[0][4]).toEqual([{path: retiredPath, content: null}]);
+      expect(deleteFile).not.toHaveBeenCalled();
       expect(setDeploySecret).not.toHaveBeenCalled();
     });
 

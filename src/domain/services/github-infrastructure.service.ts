@@ -1,3 +1,4 @@
+import { publishManagedWorkflow } from './managed-workflow-publication.js';
 import { reviewGitHubFile } from './github-file-review.js';
 import { PINNED_ACTIONS } from './pinned-actions.js';
 import { createHash } from 'crypto';
@@ -2688,6 +2689,13 @@ export async function proposeGitHubInfrastructureFiles(params: {
   const staleFiles = { success: false, status: 'blocked' as const,
     message: 'Repository files changed since review. Run hv_plan again to review their current contents and ownership.' };
   if (!await matchesReviewedFiles(baseRef.object.sha, false)) return staleFiles;
+  if (params.proposalBranch && params.requireDefaultTarget) {
+    return publishManagedWorkflow({adapter, owner: parts.owner, repo: parts.repo, repository, baseBranch,
+      baseSha: baseRef.object.sha, legacyBranch: proposalBranch, desiredFiles, retiredPaths: params.retiredManagedPaths ?? [],
+      reviewedFileHashes: params.reviewedFileHashes, title: GITHUB_INFRASTRUCTURE_PR_TITLE,
+      body: buildGitHubInfrastructurePullRequestBody});
+  }
+
   const retirementChanged = async (ref: string): Promise<boolean> => {
     try {
       for (const file of params.retiredManagedFiles ?? []) {

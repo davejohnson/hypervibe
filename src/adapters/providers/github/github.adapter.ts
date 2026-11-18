@@ -79,10 +79,12 @@ export interface GitHubPullRequestSummary {
   state: 'open' | 'closed';
   merged_at: string | null;
   head: {
+    repo?: { full_name: string };
     ref: string;
     sha: string;
   };
   base: {
+    repo?: { full_name: string };
     ref: string;
     sha: string;
   };
@@ -323,6 +325,25 @@ export class GitHubAdapter {
       if (isGitHubNotFound(error)) return null;
       throw error;
     }
+  }
+
+  /** Materialize a complete commit before publishing any branch. Never move a ref here. */
+  async createPublicationCommit(owner: string, repo: string, parentSha: string, message: string,
+    files: Array<{ path: string; content: string | null }>): Promise<string> {
+    const prefix = `/repos/${owner}/${repo}/git`;
+    const parent = await this.request<{sha: string; tree: {sha: string}; committer: {date: string}}>('GET', prefix + '/commits/' + parentSha);
+    if (parent.sha !== parentSha || !/^[a-f0-9]{40}$/.test(parent.tree?.sha)
+        || !Number.isFinite(Date.parse(parent.committer?.date))) throw new Error('Cannot verify the base commit for publication.');
+    const tree = await this.request<{sha: string}>('POST', prefix + '/trees', {base_tree: parent.tree.sha,
+      tree: files.map(file => ({path: file.path, mode: '100644', type: 'blob', ...(file.content === null ? {sha: null} : {content: file.content})}))});
+    if (!/^[a-f0-9]{40}$/.test(tree.sha)) throw new Error('Cannot verify the publication tree.');
+    // A retry materializes the same object even if GitHub lost the first response.
+    const author = {name: 'Hypervibe', email: 'hypervibe@users.noreply.github.com', date: parent.committer.date};
+    const commit = await this.request<{sha: string; tree: {sha: string}; parents: Array<{sha: string}>}>('POST', prefix + '/commits',
+      {message, tree: tree.sha, parents: [parentSha], author, committer: author});
+    if (!/^[a-f0-9]{40}$/.test(commit.sha) || commit.tree?.sha !== tree.sha
+        || commit.parents?.length !== 1 || commit.parents[0].sha !== parentSha) throw new Error('Cannot verify the complete publication commit.');
+    return commit.sha;
   }
 
   async createRef(owner: string, repo: string, ref: string, sha: string): Promise<void> {

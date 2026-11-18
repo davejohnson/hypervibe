@@ -1,3 +1,4 @@
+import { mockManagedPublication } from '../../domain/services/__tests__/managed-publication.test-utils.js';
 import { compileManagedGitHubFiles } from '../../domain/services/github-infrastructure.service.js';
 import type { IProviderLifecycleAdapter } from '../../domain/ports/provider.port.js';
 import '../../application/providers.js';
@@ -29,7 +30,6 @@ import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.por
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import {
   githubActionsWorkflowInputHash,
-  managedWorkflowPublicationBranch,
   workflowFiles,
   workflowFilesContentHash,
 } from '../../domain/services/ci-deploy.service.js';
@@ -1711,33 +1711,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
   }
 
-  function mockPendingGitHubPublication(projectName: string, pullRequestNumber: number) {
-    const proposalBranch = managedWorkflowPublicationBranch('production');
+  function mockPendingGitHubPublication(_projectName: string, pullRequestNumber: number) {
     const getFileContent = vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
       scopes: ['repo', 'workflow', 'read:packages'],
     });
-    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-    vi.spyOn(GitHubAdapter.prototype, 'getRef')
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        ref: `refs/heads/${proposalBranch}`,
-        object: { sha: 'base-sha' },
-      });
-    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
-    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
-    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
-      number: pullRequestNumber,
-      html_url: `https://github.com/davejohnson/${projectName}/pull/${pullRequestNumber}`,
-    });
-    const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
-      created: true,
-      updated: false,
-    });
+    const {write: writeWorkflow} = mockManagedPublication(pullRequestNumber);
     const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
     return { getFileContent, writeWorkflow, setSecret };
   }
@@ -2613,14 +2594,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
         pullRequestUrl: 'https://github.com/davejohnson/ci-plan-app/pull/42',
       }),
     }));
-    expect(writeWorkflow).toHaveBeenCalledWith(
-      'davejohnson',
-      'ci-plan-app',
-      '.github/workflows/deploy-railway-production.yml',
-      expect.stringContaining('Deploy Railway (production)'),
-      expect.any(String),
-      managedWorkflowPublicationBranch('production')
-    );
+    expect(writeWorkflow.mock.calls[0][4]).toContainEqual({
+      path: '.github/workflows/deploy-railway-production.yml', content: expect.stringContaining('Deploy Railway (production)'),
+    });
     expect(writeWorkflow).toHaveBeenCalledTimes(1);
     expect(setSecret).not.toHaveBeenCalled();
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
