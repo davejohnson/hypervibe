@@ -163,6 +163,8 @@ export const ENGINE_ACTION_TYPE: Record<Exclude<EngineChangeAction, 'read'>, Pla
 /** The outcome of releasing code to one service: released, failed, or unknown and safe to check again. */
 export interface EngineReleaseResult {
   service: string;
+  kind?: 'release-command';
+  logs?: { command: 'hv_logs'; arguments: { project: string; env: string; source: 'release-command'; execution: string } };
   status: 'released' | 'failed' | 'unknown';
   imageUri?: string;
   /** Exact registered ECS revision, retained for current-release observations. */

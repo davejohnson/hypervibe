@@ -57,6 +57,7 @@ export interface ProviderBuildLogsResult {
 /** Provider port for bounded runtime log reads. */
 export interface IProviderRuntimeLogsAdapter {
   readProviderLogs(request: ProviderRuntimeLogsRequest): Promise<ProviderRuntimeLogsResult>;
+  readReleaseCommandLogs?(request: Omit<ProviderRuntimeLogsRequest, 'serviceName'> & { execution?: string }): Promise<ProviderRuntimeLogsResult>;
 }
 
 /** Provider port for bounded deployment-history reads. */

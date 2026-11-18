@@ -93,14 +93,15 @@ async function readProviderLogs<T>(
 export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_logs',
-    'Fetch runtime service logs, build logs, recent deployments, Stripe webhook status, or sanitized SendGrid delivery logs. SendGrid requires explicit project and env and returns account-scoped evidence, not verified environment attribution. Recognized selectors that do not apply to the source are ignored with a warning.',
+    'Fetch runtime service logs, Google Cloud release command output, build logs, recent deployments, Stripe webhook status, or sanitized SendGrid delivery logs. SendGrid requires explicit project and env and returns account-scoped evidence, not verified environment attribution. Recognized selectors that do not apply to the source are ignored with a warning.',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service name. Defaults to the first bound service for source=service/build.'),
-      source: z.enum(['service', 'build', 'deployments', 'stripe-webhooks', 'sendgrid']).describe('What to fetch'),
+      source: z.enum(['service', 'release-command', 'build', 'deployments', 'stripe-webhooks', 'sendgrid']).describe('What to fetch'),
       limit: z.number().int().min(1).max(500).optional().describe('Max entries, or tail lines for build logs (default 100 service logs, 10 deployments, 50 SendGrid messages/events; build logs are unbounded when omitted)'),
-      errorsOnly: z.boolean().optional().describe('source=service: error-like lines; source=sendgrid search: deferred, dropped, bounced or blocked messages'),
+      errorsOnly: z.boolean().optional().describe('source=service or release-command: error-like lines; source=sendgrid search: deferred, dropped, bounced or blocked messages'),
+      execution: z.string().min(1).max(512).optional().describe('source=release-command only: full Cloud Run execution name from hv_deploy. Omit to view the bound job across executions.'),
       deploymentId: z.string().optional().describe('source=build only: specific deployment (defaults to latest)'),
       mode: z.enum(['sandbox', 'live']).optional().describe('source=stripe-webhooks only: optional assertion against the selected environment-scoped connection mode'),
       messageId: z.string().max(512).optional().describe('source=sendgrid only: exact SendGrid sg_message_id from a prior log search, with event details. Cannot combine with search filters.'),
@@ -108,7 +109,10 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       since: z.string().max(40).optional().describe('source=sendgrid search only: ISO timestamp within the last 30 days; default 24 hours before until. Filters message creation time.'),
       until: z.string().max(40).optional().describe('source=sendgrid search only: ISO timestamp, no later than now; defaults to now'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, mode, messageId, recipient, since, until }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, execution, mode, messageId, recipient, since, until }) => {
+      if (execution !== undefined && source !== 'release-command') {
+        throw new HvError('VALIDATION', 'An execution selector requires source="release-command".');
+      }
       if (source === 'sendgrid') {
         if (!projectRef || !env) throw new HvError('VALIDATION', 'SendGrid log inspection requires explicit project and env selectors.');
         const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: true });
@@ -168,21 +172,21 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         );
       }
 
-      const warnings = ignoredOptionWarnings('hv_logs', `source="${source}"`, source === 'service'
-        ? { deploymentId, mode, messageId, recipient, since, until }
+      const warnings = ignoredOptionWarnings('hv_logs', `source="${source}"`, source === 'service' || source === 'release-command'
+        ? { ...(source === 'release-command' ? { service } : {}), deploymentId, mode, messageId, recipient, since, until }
         : source === 'build'
           ? { errorsOnly, mode, messageId, recipient, since, until }
           : { errorsOnly, deploymentId, mode, messageId, recipient, since, until });
 
       const { project, environment, bindings, provider } = resolveEnvOrThrow(ctx, projectRef, env);
       const boundServices = Object.keys(bindings.services ?? {});
-      if (service && !bindings.services?.[service]) {
+      if (source !== 'release-command' && service && !bindings.services?.[service]) {
         throw new HvError('NOT_FOUND', `Service "${service}" is not bound in ${environment.name}.`, {
           details: { available: boundServices },
           hint: 'Choose a bound service, or converge its desired-state binding with hv_plan and hv_apply first.',
         });
       }
-      const serviceName = service ?? boundServices[0];
+      const serviceName = source === 'release-command' ? undefined : service ?? boundServices[0];
 
       if (source === 'deployments') {
         if (!supportsLogsDeploymentsProvider(provider)) {
@@ -199,13 +203,13 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         );
       }
 
-      if (!serviceName) {
+      if (source !== 'release-command' && !serviceName) {
         throw new HvError('NOT_FOUND', 'No services bound in this environment.', {
           hint: 'Deploy first with hv_apply, or pass service explicitly.',
         });
       }
 
-      if (source === 'build') {
+      if (source === 'build' && serviceName) {
         if (!supportsLogsBuildProvider(provider)) {
           throw new HvError('UNSUPPORTED', logsBuildUnsupportedMessage(provider));
         }
@@ -233,7 +237,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           provider,
           project,
           environment,
-          serviceName,
+          serviceName ?? { source: 'release-command', execution },
           limit ?? 100,
           { errorsOnly }
         )
@@ -243,8 +247,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           source,
           provider,
           environment: environment.name,
-          service: serviceName,
-          deploymentStatus,
+          ...(source === 'service' ? { service: serviceName, deploymentStatus } : { execution }),
           ...(window ? { window } : {}),
           count: logs.length,
           logs,

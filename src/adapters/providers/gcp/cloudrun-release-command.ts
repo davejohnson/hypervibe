@@ -10,6 +10,14 @@ export function cloudRunReleaseCommandHash(command: string): string {
   return hashEnvValue(command.trim());
 }
 
+/** Cloud Logging labels use the short execution id; the receipt retains its full job scope. */
+export function cloudRunExecutionId(jobResource: string, name: unknown): string | undefined {
+  const prefix = `${jobResource}/executions/`;
+  if (typeof name !== 'string' || !name.startsWith(prefix)) return undefined;
+  const id = name.slice(prefix.length);
+  return /^[a-z0-9][a-z0-9-]*$/.test(id) ? id : undefined;
+}
+
 /** Deterministic Cloud Run Job id that remains collision-safe after the 63-character limit. */
 export function cloudRunMigrationJobName(serviceName: string): string {
   const normalized = serviceName

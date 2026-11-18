@@ -51,7 +51,7 @@ describe('release command runs once', () => {
       list: () => ({ executions: [{ name: executionName, createTime: '2026-11-17T10:00:01Z', template: { containers: [{ image }] } }] }),
       execution: () => (++reads < 2 ? { name: executionName } : { name: executionName, completionTime: '2026-11-17T10:03:00Z', succeededCount: 1 }),
     });
-    expect(await run(store)).toMatchObject({ status: 'released' });
+    expect(await run(store)).toMatchObject({ status: 'released', execution: executionName });
     expect(calls).not.toContain('run');
     expect(store.get()).toBeUndefined();
   });
@@ -59,7 +59,7 @@ describe('release command runs once', () => {
   it('does not run again when the unobserved run already succeeded', async () => {
     const store = memory({ image, startedAt: '2026-11-17T09:50:00.000Z', execution: executionName });
     const calls = cloud({ execution: () => ({ name: executionName, completionTime: '2026-11-17T09:52:00Z', succeededCount: 1 }) });
-    expect(await run(store)).toMatchObject({ status: 'released', message: expect.stringMatching(/already finished/i) });
+    expect(await run(store)).toMatchObject({ status: 'released', execution: executionName, message: expect.stringMatching(/already finished/i) });
     expect(calls).toEqual(['get-execution']);
     expect(store.get()).toBeUndefined();
   });
@@ -89,10 +89,34 @@ describe('release command runs once', () => {
   });
 
   // #546: "done" alone is not proof the command ran.
-  it('fails when the finished run reports no successful task', async () => {
+  it('retains an accepted, unidentifiable execution when the operation is done without task counts', async () => {
     const store = memory();
-    cloud({ run: () => Response.json({ name: 'projects/demo/locations/us-central1/operations/op9', done: true, response: {} }) });
-    expect(await run(store)).toMatchObject({ status: 'failed', message: expect.stringMatching(/did not report a successful run/) });
+    const calls = cloud({ run: () => Response.json({ done: true, response: {} }) });
+    expect(await run(store)).toMatchObject({ status: 'unknown' });
+    expect(store.get()).toBeDefined();
+    const later = { ...opts, now: () => opts.now() + 60 * 60_000 };
+    const retried = await runCloudRunJobOnce(async () => 't', target, 'release', image, store.get(), store.save, later);
+    expect(retried.status).toBe('unknown');
+    expect(calls).toEqual(['run', 'list']);
+  });
+
+  it('rejects conflicting operation identities before reporting an execution or switching services', async () => {
+    const store = memory();
+    cloud({ run: () => Response.json({ done: true, metadata: { name: executionName },
+      response: { name: executionName.replace('/jobs/release/', '/jobs/other/'), succeededCount: 1 } }) });
+    const result = await run(store);
+    expect(result.status).toBe('unknown');
+    expect(result).not.toHaveProperty('execution');
+  });
+
+  it('does not attribute either of two matching executions to a lost start', async () => {
+    const store = memory({ image, startedAt: '2026-11-17T09:59:30.000Z' });
+    const match = { createTime: '2026-11-17T09:59:31Z', template: { containers: [{ image }] } };
+    const calls = cloud({ list: () => ({ executions: [ { ...match, name: executionName }, { ...match, name: executionName + '-other' } ] }) });
+    const result = await run(store);
+    expect(result.status).toBe('unknown');
+    expect(result).not.toHaveProperty('execution');
+    expect(calls).toEqual(['list']);
   });
 
   it('ignores a record for a different image', async () => {
@@ -105,7 +129,7 @@ describe('release command runs once', () => {
   it('still running at the deadline keeps the record so a retry waits instead of starting', async () => {
     const store = memory();
     cloud({ run: () => Response.json({ name: 'projects/demo/locations/us-central1/operations/op4', metadata: { name: executionName } }), operation: () => ({ name: 'projects/demo/locations/us-central1/operations/op4' }) });
-    expect(await run(store)).toMatchObject({ status: 'unknown' });
+    expect(await run(store)).toMatchObject({ status: 'unknown', execution: executionName });
     expect(store.get()).toMatchObject({ image, execution: executionName });
   });
 });

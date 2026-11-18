@@ -1,4 +1,5 @@
 import type { EngineReleaseResult } from '../../../domain/ports/infrastructure-engine.port.js';
+import { cloudRunExecutionId } from './cloudrun-release-command.js';
 import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 
 /**
@@ -139,13 +140,17 @@ export function startCloudRunJob(token: string, target: CloudRunTarget, job: str
 }
 
 /** A job run Hypervibe started and has not yet seen finish. Saved before the start so a retry never starts a second one blindly. */
-export interface PendingJobRun { image: string; startedAt: string; execution?: string }
+export interface PendingJobRun { image: string; startedAt: string; accepted?: true; execution?: string }
 
 interface JobExecution { name?: string; createTime?: string; completionTime?: string; succeededCount?: number; failedCount?: number; cancelledCount?: number; template?: { containers?: Array<{ image?: string }> } }
-type JobRunResult = { status: 'released' | 'failed' | 'unknown'; message: string };
+export type JobRunResult = { execution?: string; status: 'released' | 'failed' | 'unknown'; message: string };
 
-const executionSucceeded = (execution: JobExecution): boolean =>
-  (execution.succeededCount ?? 0) > 0 && !(execution.failedCount ?? 0) && !(execution.cancelledCount ?? 0);
+function executionStatus(execution: JobExecution): JobRunResult['status'] {
+  const counts = [execution.succeededCount, execution.failedCount, execution.cancelledCount];
+  if (counts.some((count) => count !== undefined && (!Number.isSafeInteger(count) || count < 0))) return 'unknown';
+  if ((execution.failedCount ?? 0) > 0 || (execution.cancelledCount ?? 0) > 0) return 'failed';
+  return (execution.succeededCount ?? 0) > 0 ? 'released' : 'unknown';
+}
 
 /** A start is not always listed at once; within this window "not listed" does not mean "never started". */
 const START_VISIBILITY_MS = 2 * 60_000;
@@ -165,7 +170,8 @@ export async function runCloudRunJobOnce(
   const now = options.now ?? Date.now;
   const pollMs = options.pollMs ?? 5000;
   const deadline = Date.now() + (options.deadlineMs ?? 30 * 60_000);
-  const jobUrl = `${API}/projects/${target.gcpProjectId}/locations/${target.region}/jobs/${job}`;
+  const jobResource = `projects/${target.gcpProjectId}/locations/${target.region}/jobs/${job}`;
+  const jobUrl = `${API}/${jobResource}`;
   const stillRunning: JobRunResult = { status: 'unknown', message: 'The release command is still running. Run hv_deploy again to keep waiting; it will not start a second run. No service was switched.' };
   const unreadable: JobRunResult = { status: 'unknown', message: 'An earlier release command run could not be read, so nothing was started. Run hv_deploy again; it checks that run before starting another. No service was switched.' };
   const read = async (url: string): Promise<Record<string, unknown> | undefined> => {
@@ -175,16 +181,20 @@ export async function runCloudRunJobOnce(
     } catch { return undefined; }
   };
   const finish = (execution: JobExecution, adopted: boolean): JobRunResult => {
+    const status = executionStatus(execution);
+    if (status === 'unknown') {
+      return { status, execution: execution.name, message: 'Cloud Run has not confirmed whether the release command succeeded or failed. Its run is retained for the next hv_deploy. No service was switched.' };
+    }
     save(undefined);
-    return executionSucceeded(execution)
-      ? { status: 'released', message: adopted ? 'The release command already finished successfully for this image; it was not run again.' : 'The release command finished successfully.' }
-      : { status: 'failed', message: 'The release command failed: see hv_logs for the job output. No service was switched.' };
+    if (status === 'failed') return { status, execution: execution.name, message: 'Cloud Run reported an unsuccessful release command task. No service was switched.' };
+    return { status, execution: execution.name, message: adopted ? 'The release command already finished successfully for this image; it was not run again.' : 'The release command finished successfully.' };
   };
   const waitFor = async (name: string, adopted: boolean): Promise<JobRunResult> => {
     for (;;) {
       const execution = await read(`${API}/${name}`) as JobExecution | undefined;
+      if (execution && execution.name !== name) return unreadable;
       if (execution?.completionTime) return finish(execution, adopted);
-      if (Date.now() >= deadline) return execution ? stillRunning : unreadable;
+      if (Date.now() >= deadline) return { ...(execution ? stillRunning : unreadable), execution: name };
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
   };
@@ -204,17 +214,24 @@ export async function runCloudRunJobOnce(
         if (!pageToken) break;
       }
       if (pageToken) return unreadable;
-      name = found.filter((execution) => execution.template?.containers?.[0]?.image === imageUri && Date.parse(execution.createTime ?? '') >= since)
-        .sort((a, b) => Date.parse(b.createTime!) - Date.parse(a.createTime!))[0]?.name;
+      const matches = found.filter((execution) => execution.template?.containers?.[0]?.image === imageUri && Date.parse(execution.createTime ?? '') >= since);
+      if (matches.length > 1 || (matches.length === 1 && !cloudRunExecutionId(jobResource, matches[0]?.name))) return unreadable;
+      name = matches[0]?.name;
+      if (!name && pending.accepted) {
+        return { status: 'unknown', message: 'Cloud Run accepted the earlier release command, but its execution could not be identified. No new run was started.' };
+      }
       if (!name && now() - Date.parse(pending.startedAt) < START_VISIBILITY_MS) {
         return { status: 'unknown', message: 'A release command was started moments ago and is not visible in Cloud Run yet, so nothing was started. Run hv_deploy again in a couple of minutes. No service was switched.' };
       }
     }
     if (name) {
+      if (!cloudRunExecutionId(jobResource, name)) return unreadable;
       const execution = await read(`${API}/${name}`) as JobExecution | undefined;
-      if (!execution) return unreadable;
-      if (!execution.completionTime) { save({ ...pending, execution: name }); return waitFor(name, true); }
-      if (executionSucceeded(execution)) return finish(execution, true);
+      if (!execution) return { ...unreadable, execution: name };
+      if (execution.name !== name) return unreadable;
+      if (pending.execution !== name) save({ ...pending, execution: name });
+      if (!execution.completionTime) return waitFor(name, true);
+      if (executionStatus(execution) !== 'failed') return finish(execution, true);
       // The recorded run failed: a new run is the user's retry.
     }
   }
@@ -231,20 +248,34 @@ export async function runCloudRunJobOnce(
     save(undefined);
     return { status: 'failed', message: `The release command could not start (HTTP ${started.status}): ${await googleErrorMessage(started)}` };
   }
-  let operation = await started.json() as { name?: string; done?: boolean; error?: { message?: string }; metadata?: { name?: string }; response?: { succeededCount?: number; failedCount?: number } };
-  if (operation.metadata?.name) save({ ...record, execution: operation.metadata.name });
-  while (!operation.done && operation.name && Date.now() < deadline) {
+  // Acceptance survives an unreadable operation or an empty execution listing.
+  const accepted = { ...record, accepted: true as const };
+  save(accepted);
+  let operation = await started.json() as { name?: string; done?: boolean; error?: { message?: string }; metadata?: { name?: string }; response?: JobExecution };
+  let execution: string | undefined;
+  for (;;) {
+    for (const name of [operation.metadata?.name, operation.response?.name]) {
+      if (name === undefined) continue;
+      if (!cloudRunExecutionId(jobResource, name) || (execution && name !== execution)) {
+        save(accepted);
+        return { status: 'unknown', message: 'Cloud Run reported a conflicting release execution. No service was switched.' };
+      }
+      if (!execution) {
+        execution = name;
+        save({ ...accepted, execution });
+      }
+    }
+    if (operation.done || !operation.name || Date.now() >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     const polled = await readCloudRunOperation(await token(), operation.name).catch(() => undefined);
-    if (polled?.ok) operation = { ...await polled.json() as typeof operation, metadata: operation.metadata };
+    if (polled?.ok) operation = await polled.json() as typeof operation;
   }
-  if (!operation.done) return stillRunning;
-  save(undefined);
-  if (operation.error || (operation.response?.failedCount ?? 0) > 0) {
-    return { status: 'failed', message: `The release command failed: ${operation.error?.message ?? 'see hv_logs for the job output'}. No service was switched.` };
+  if (!operation.done) return { ...stillRunning, execution };
+  if (operation.error) {
+    save(undefined);
+    return { execution, status: 'failed', message: `The release command failed: ${operation.error.message ?? 'Cloud Run reported an execution error'}. No service was switched.` };
   }
-  if (!((operation.response?.succeededCount ?? 0) > 0)) return { status: 'failed', message: 'The release command did not report a successful run: see hv_logs for the job output. No service was switched.' };
-  return { status: 'released', message: 'The release command finished successfully.' };
+  return finish({ ...operation.response, name: execution }, false);
 }
 
 /** Reads a long-running operation by its full name. */
