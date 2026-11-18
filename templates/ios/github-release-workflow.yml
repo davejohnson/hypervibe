@@ -259,7 +259,9 @@ jobs:
               const paths = JSON.parse(process.env.HYPERVIBE_IOS_INPUT_PATHS);
               const relevant = filename => paths.some(input => input === '.' || filename === input || filename.startsWith(input + '/'));
               for (const file of data.files) {
-                if (!['added', 'removed', 'modified', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) || typeof file.filename !== 'string' || !file.filename || (file.status === 'renamed' && typeof file.previous_filename !== 'string')) return;
+                if (!['added', 'removed', 'modified', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status)
+                    || typeof file.filename !== 'string' || !file.filename
+                    || (file.status === 'renamed' && (typeof file.previous_filename !== 'string' || !file.previous_filename))) return;
                 if (relevant(file.filename) || (typeof file.previous_filename === 'string' && relevant(file.previous_filename))) return;
               }
               core.setOutput('should_release', 'false');

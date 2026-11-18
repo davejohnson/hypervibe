@@ -75,8 +75,8 @@ describe('build-only credential environment rendering', () => {
     const previousContract = { version: 1, rendererRevision: 7, ...input };
     const config = ios();
     expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(previousContract));
-    // Revision 7 still compared raw workflow paths, including @ref metadata.
-    for (const rendererRevision of [4, 5, 6, 7]) {
+    // Revision 8 could skip a rename with an unknown previous path.
+    for (const rendererRevision of [4, 5, 6, 7, 8]) {
       expect(githubActionsWorkflowInputHash({ ...input, ios: config })).not.toBe(canonicalJsonSha256({
         ...previousContract,
         ios: { rendererRevision, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },
