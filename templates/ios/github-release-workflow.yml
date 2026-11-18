@@ -44,6 +44,7 @@ jobs:
       HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT: @@IOS_BUILD_FINGERPRINT_JSON@@
       HYPERVIBE_IOS_INPUT_PATHS: @@IOS_INPUT_PATHS_JSON@@
       HYPERVIBE_IOS_WORKFLOW_PATH: @@IOS_WORKFLOW_PATH_JSON@@
+      HYPERVIBE_RELEASE_SOURCE_RUNTIME: @@RELEASE_SOURCE_RUNTIME_JSON@@
       HYPERVIBE_RELEASE_ATTEMPT_RUNTIME: @@IOS_RELEASE_ATTEMPT_RUNTIME_JSON@@
     steps:
       - uses: actions/setup-node@v6
@@ -99,6 +100,10 @@ jobs:
             contract.exports.assertSameReleaseAttempt(run, currentRun, expected.workflowRef);
             const sha = matchingArtifacts[0].name.slice(expected.artifactPrefix.length);
             if (requestedSha && requestedSha.toLowerCase() !== sha) throw new Error('commit_sha does not match the server release artifact');
+            const source = {exports: {}};
+            new Function('module', Buffer.from(process.env.HYPERVIBE_RELEASE_SOURCE_RUNTIME, 'base64').toString('utf8'))(source);
+            await source.exports.verifyGitHubReleaseSource(github, context.repo, expected.workflowRef.slice('refs/heads/'.length),
+              expected.workflowPath, {...currentRun, path: contract.exports.normalizeWorkflowPath(currentRun.path, expected.workflowRef)}, matchingArtifacts[0], sha);
             core.setOutput('artifact_id', String(matchingArtifacts[0].id));
             core.setOutput('sha', sha);
             core.setOutput('server_run_id', serverRunId);

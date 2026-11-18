@@ -140,7 +140,10 @@ does not create that authority or certify historical artifacts as executable.
 ## Mobile release isolation
 
 Keep project build code and signing inputs separate from App Store submission
-credentials. Preparation and release jobs do not execute project checkout code;
+credentials. Before admitting a build, verify both the server workflow commit and
+the selected application commit belong to the configured release branch in the
+reviewed repository. A manual force request retains this requirement.
+Preparation and release jobs do not execute project checkout code;
 the isolated release job revalidates the IPA, exact server evidence and original
 upload identity before provider effects. Require successful jobs and artifact
 timestamps correlated to the exact run attempt, and recheck immediately before

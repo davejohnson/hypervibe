@@ -1,3 +1,4 @@
+import { releaseSourceRuntimeBase64 } from './github-release-source.js';
 import { readFileSync } from 'fs';
 import { createHash } from 'node:crypto';
 import { IOS_RELEASE_EVIDENCE_VERSION, iosBuildContractFingerprint, iosReleaseBuildInputs, iosBuildContractRuntimeBase64 } from './ios-release-evidence.js';
@@ -14,7 +15,7 @@ import {
 } from './managed-ci-evidence.js';
 
 // Bump for intentional migrations of the generated iOS release contract.
-export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 9;
+export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 10;
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -140,6 +141,7 @@ export function buildIosReleaseWorkflow(params: {
     CREDENTIAL_ACTIVATION_VALIDATOR_JSON: JSON.stringify(Buffer.from(MANAGED_CI_CREDENTIAL_ACTIVATION_VALIDATOR_SOURCE).toString('base64')),
     SERVER_CONTRACT_RUNTIME_JSON: JSON.stringify(Buffer.from(MANAGED_CI_DEPLOYMENT_CONTRACT_RUNTIME_SOURCE).toString('base64')),
     IOS_BUILD_CONTRACT_RUNTIME_JSON: JSON.stringify(iosBuildContractRuntimeBase64()),
+    RELEASE_SOURCE_RUNTIME_JSON: JSON.stringify(releaseSourceRuntimeBase64),
     IOS_RELEASE_ATTEMPT_RUNTIME_JSON: JSON.stringify(iosReleaseAttemptRuntimeBase64()),
     IOS_EVIDENCE_VERSION: String(IOS_RELEASE_EVIDENCE_VERSION),
     IOS_BUILD_FINGERPRINT_JSON: JSON.stringify(iosBuildContractFingerprint(params.ios, params.target.runtime)),

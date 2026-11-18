@@ -1303,8 +1303,10 @@ describe('github tools', () => {
       workflowPath: workflow.path,
     });
     const provenanceScript = extractGitHubScript(releaseWorkflow, 'Resolve release provenance');
+    const serverBranch = target.branch;
     const serverRun = {
-      id: 91,
+      id: 91, head_branch: serverBranch, event: 'workflow_dispatch',
+      repository: { id: 7, full_name: 'owner/repo' }, head_repository: { id: 7, full_name: 'owner/repo' },
       status: 'completed',
       conclusion: 'success',
       head_sha: releaseSha,
@@ -1317,7 +1319,7 @@ describe('github tools', () => {
       name: expectedServerRelease.artifactPrefix + releaseSha,
       expired: false,
       created_at: evidence.verifiedAt,
-      workflow_run: { id: serverRun.id, head_sha: releaseSha },
+      workflow_run: { id: serverRun.id, head_sha: releaseSha, head_branch: serverBranch, repository_id: 7, head_repository_id: 7 },
     };
     const serverJob = {id: 41, run_id: serverRun.id, head_sha: releaseSha, name: 'deploy', status: 'completed', conclusion: 'success',
       started_at: serverRun.run_started_at, completed_at: new Date(Date.parse(evidence.verifiedAt) + 60_000).toISOString()};
@@ -1340,7 +1342,7 @@ describe('github tools', () => {
         'core',
         provenanceScript
       )(
-        { rest: { actions: { getWorkflowRun, listWorkflowRunArtifacts, listJobsForWorkflowRunAttempt } } },
+        { rest: { git: { getRef: async () => ({ data: { ref: 'refs/heads/' + serverBranch, object: { type: 'commit', sha: releaseSha } } }) }, actions: { getWorkflowRun, listWorkflowRunArtifacts, listJobsForWorkflowRunAttempt } } },
         {
           eventName: options.eventName ?? 'workflow_dispatch',
           payload: options.eventName === 'workflow_run'
