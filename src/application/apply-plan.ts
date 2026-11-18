@@ -796,7 +796,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: outcome.reason }] }
       : { ...outcome, actionScopedWarnings: [] };
   }
-  if (planScope === 'infrastructure-engine') {
+  if (planScope === 'infrastructure-engine' || planScope === 'domain-registration') {
     if (invalidSpec) return invalidSpec;
     const engineOutcome = await applyInfrastructureEngine(ctx, { project, spec, specRevision: params.specRevision,
       planId, confirmActions: params.confirmActions });

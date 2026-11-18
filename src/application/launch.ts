@@ -220,7 +220,7 @@ async function runLaunch(ctx: CommandContext, params: {
     const loaded = new ConvergeExecutor().loadPlan(params.planId);
     if ('error' in loaded) return { status: 'blocked', message: loaded.error };
     const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
-    if (![ENGINE_PLAN_SCOPE, 'dns-engine'].includes(loaded.document.scope ?? '') || loaded.run.projectId !== params.project.id
+    if (![ENGINE_PLAN_SCOPE, 'dns-engine', 'domain-registration'].includes(loaded.document.scope ?? '') || loaded.run.projectId !== params.project.id
       || loaded.document.environmentName !== params.environmentName || !environment || loaded.run.environmentId !== environment.id) {
       return { status: 'blocked', message: 'The saved plan belongs to a different project, environment or lifecycle scope. Review a new hv_launch plan.' };
     }

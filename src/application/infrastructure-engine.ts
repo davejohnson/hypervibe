@@ -63,6 +63,7 @@ import {
   executeDomainAction, planDomain, observeDomainMapping, type DomainPlanActions,
 } from './infrastructure-engine-domain.js';
 import { getDnsBindingIdentity, getDnsBindingSelection, getDnsOwnedDomain, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
+import { planRegistrarStage, applyRegistrarStage } from './registrar-stage.js';
 import { persistDnsPlanRun } from './dns-hosting.js';
 import { verifyDnsTrafficAbsent } from './dns-absence.js';
 import { verifyGcpDomainEngineOwnership } from './gcp-domain-ownership.js';
@@ -723,6 +724,11 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     return { blocked: ['Queues need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["queues"], or run hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle" (preview, then confirm).'] };
   }
 
+  if (environmentSpec!.domainRegistration?.register) {
+    const registration = await planRegistrarStage(ctx, project, context.environment, environmentSpec!, params.specRevision);
+    if (registration) return registration;
+  }
+
   // Hypervibe-owned secrets: explicit, observed, tri-state.
   const token = await context.adapter.engineAccessToken();
   const desiredKeys = engineSecretKeys(spec, environmentName);
@@ -1161,8 +1167,12 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   planId: string;
   confirmActions: string[];
 }): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
-  const loaded = new ConvergeExecutor().loadPlan(params.planId);
+  const executor = new ConvergeExecutor();
+  const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
+  if (loaded.document.scope === 'domain-registration') {
+    return applyRegistrarStage(ctx, executor, loaded, params.project, params.spec.environments[loaded.document.environmentName], params.specRevision, params.confirmActions);
+  }
   return cloudEngineForPlan(loaded.document as PlanRunDocument & { engine?: Record<string, unknown> }, params.spec).apply(ctx, params);
 }
 

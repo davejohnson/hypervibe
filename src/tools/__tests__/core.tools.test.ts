@@ -2065,6 +2065,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.actions).not.toContainEqual(expect.objectContaining({
       id: 'domain:requested-example.com:register',
     }));
+    expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare', reason: expect.stringContaining('availability') }));
     expect(plan.warnings).toContainEqual(expect.stringContaining(
       'did not return an availability result for requested-example.com'
     ));
@@ -2238,7 +2239,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('keeps Cloudflare domain registration pending while the Registrar workflow is in progress', async () => {
+  it.each([false, true])('keeps a Cloudflare purchase pending without resubmitting (lost acknowledgement: %s)', async (lost) => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -2298,6 +2299,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
       state: 'in_progress',
     });
 
+    if (lost) create.mockRejectedValueOnce(new Error('Connection closed after submission'));
+    const poll = vi.spyOn(CloudflareAdapter.prototype, 'getRegistrarRegistrationStatus').mockResolvedValue({
+      completed: false, created_at: '2026-06-15T00:00:00Z', updated_at: '2026-06-15T00:01:00Z',
+      links: { self: '/status' }, state: 'in_progress',
+    });
+
     const plan = await t.call('hv_plan', { project: 'domain-pending-app', env: 'production' });
     expect(plan.ok).toBe(true);
     const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com');
@@ -2315,7 +2322,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'domain:pending-example.com:register',
       status: 'pending',
-      message: expect.stringContaining('in_progress'),
+      message: expect.stringContaining(lost ? 'unknown' : 'in_progress'),
     }));
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'domain:pending-example.com',
@@ -2333,10 +2340,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
       'pending-example.com': {
         provider: 'cloudflare',
         accountId: 'acct-1',
-        state: 'in_progress',
+        state: lost ? 'submitted' : 'in_progress',
         completed: false,
       },
     });
+    const next = await t.call('hv_plan', { project: project.name, env: 'production' });
+    const purchase = next.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com:register');
+    expect(purchase.type).toBe('update');
+    await t.call('hv_apply', { project: project.name, planId: next.data.planId });
+    expect(poll).toHaveBeenCalledWith('acct-1', 'pending-example.com');
+    expect(create).toHaveBeenCalledTimes(1);
     await t.close();
   });
 

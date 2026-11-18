@@ -2388,6 +2388,11 @@ export class PlanService {
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
     const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
 
+    if (environmentSpec.domainRegistration?.register && domainRegistration.warnings.length
+      && !blocked.some(entry => entry.provider === 'cloudflare')) {
+      blocked.push({ category: 'prerequisite', provider: 'cloudflare', policy: 'hard', reason: domainRegistration.warnings.join(' ') });
+    }
+
     let actions: PlanAction[] = [
       ...(domainRegistration.action ? [domainRegistration.action] : []),
       ...nativeDeploySources.actions,

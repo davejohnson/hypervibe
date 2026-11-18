@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
 import { applyInfrastructureEngine, planInfrastructureEngine, verifyGcpDnsSource } from '../infrastructure-engine.js';
+import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import * as dns from '../dns-engine.js';
 import * as absence from '../dns-absence.js';
 import { domainEngineKey } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
@@ -91,6 +92,38 @@ function fixture(options: { owned?: boolean; mapping?: boolean; remove?: boolean
 }
 
 describe('Google hosting and DNS stage composition', () => {
+  it('stages a reviewed Cloudflare purchase before DNS or hosting work', async () => {
+    const f = fixture();
+    const accountId = 'a'.repeat(32);
+    const name = 'example.com';
+    const env = f.spec.environments.staging!;
+    env.domain = name;
+    env.dns = { provider: 'cloudflare', zone: { id: 'b'.repeat(32), name, accountId } };
+    env.domainRegistration = { provider: 'cloudflare', register: true, years: 1, accountId };
+    const connection = f.ctx.repos.connections.create({ provider: 'cloudflare', scope: name,
+      credentialsEncrypted: f.ctx.secretStore.encryptObject({ accountId, apiToken: 'cfut_fixture' }) });
+    f.ctx.repos.connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([{ name, registrable: true,
+      tier: 'standard', pricing: { currency: 'USD', registration_cost: '10.00', renewal_cost: '11.00' } }]);
+    const purchase = vi.spyOn(CloudflareAdapter.prototype, 'createRegistrarRegistration').mockResolvedValue({
+      state: 'succeeded', completed: true, created_at: '', updated_at: '', links: { self: '/status' } });
+    const params = { ...f, specRevision: 1, environmentName: 'staging' };
+    const plan = await planInfrastructureEngine(f.ctx, params);
+    if ('blocked' in plan) throw Error(plan.blocked.join(' '));
+    expect(plan.actions.map(action => action.id)).toEqual(['domain:example.com:register']);
+    expect(plan.confirmActions).toEqual(['domain:example.com:register']);
+    const apply = (confirmActions: string[]) => applyInfrastructureEngine(f.ctx, { ...params, planId: plan.planRunId, confirmActions });
+    await apply([]);
+    expect(purchase).not.toHaveBeenCalled();
+    await apply(plan.confirmActions);
+    expect(purchase).toHaveBeenCalledOnce();
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.engine).not.toHaveBeenCalled();
+    const next = await planInfrastructureEngine(f.ctx, params);
+    expect(next).not.toHaveProperty('blocked');
+    expect(f.prepare).toHaveBeenCalledOnce();
+    expect(purchase).toHaveBeenCalledOnce();
+  });
   it('finishes cancellation explicitly when the mapping never reached the provider', async () => {
     const f = fixture({ owned: true, mapping: false, remove: true });
     f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: undefined,

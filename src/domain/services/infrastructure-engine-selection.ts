@@ -27,7 +27,7 @@ export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   const problems: string[] = [];
   const unsupported: Array<[string, unknown]> = [
     ['domainRecreateRevision', environment.domainRecreateRevision],
-    ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
+    ['domainRegistration', environment.hosting.provider === 'cloudrun' ? undefined : environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
     ['email', environment.email?.enabled ? environment.email : undefined],
     ['deploy.trigger="native"', environment.deploy?.trigger === 'native' ? environment.deploy : undefined],

@@ -50,6 +50,17 @@ function summarizeRegistrarDomain(domain: RegistrarDomainCandidate) {
   };
 }
 
+function exactCandidate(checked: RegistrarDomainCandidate[], domain: string): RegistrarDomainCandidate | undefined {
+  const matches = checked.filter(entry => typeof entry.name === 'string' && normalizeDomain(entry.name) === domain);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function hasStandardQuote(candidate: RegistrarDomainCandidate): boolean {
+  const price = candidate.pricing;
+  return candidate.tier === 'standard' && !!price && /^[A-Z]{3}$/.test(price.currency)
+    && /^\d+(?:\.\d+)?$/.test(price.registration_cost) && /^\d+(?:\.\d+)?$/.test(price.renewal_cost);
+}
+
 function registrationOptions(environmentSpec: EnvironmentSpec): Record<string, unknown> {
   const spec = environmentSpec.domainRegistration;
   return {
@@ -126,7 +137,7 @@ export function cloudflareRegistrarCredentialProblem(domain: string): string | n
 }
 
 function workflowActionResult(domain: string, workflow: RegistrarWorkflowStatus, action: 'started' | 'polled'): ActionResult {
-  if (workflow.state === 'succeeded') {
+  if (workflow.state === 'succeeded' && workflow.completed === true) {
     return { success: true, message: `Cloudflare registration for ${domain} succeeded`, data: { workflow } };
   }
   if (workflow.state === 'failed' || workflow.completed) {
@@ -230,10 +241,13 @@ export async function planCloudflareDomainRegistration(params: {
   }
 
   const binding = registrationBinding(environment, domain);
+  if (binding && binding.accountId !== accountId) {
+    return { warnings: [`The registration for ${domain} belongs to a different or unknown Cloudflare account. Check the registrar connection before continuing.`] };
+  }
   if (binding?.completed && binding.state === 'succeeded') {
     return { warnings };
   }
-  if (binding?.state && !binding.completed && binding.state !== 'failed') {
+  if (binding && !(binding.state === 'failed' && binding.completed === true)) {
     return {
       action: registrationAction({
         domain,
@@ -250,7 +264,7 @@ export async function planCloudflareDomainRegistration(params: {
   let candidate: RegistrarDomainCandidate | undefined;
   try {
     const checked = await adapter.checkRegistrarDomains(accountId, [domain]);
-    candidate = checked.find((entry) => normalizeDomain(entry.name) === domain);
+    candidate = exactCandidate(checked, domain);
   } catch (error) {
     warnings.push(`Cloudflare Registrar availability check failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`);
     return { warnings };
@@ -260,7 +274,7 @@ export async function planCloudflareDomainRegistration(params: {
     warnings.push(`Cloudflare did not return an availability result for ${domain}; domain registration cannot be planned.`);
     return { warnings };
   }
-  if (!candidate.registrable) {
+  if (candidate.registrable !== true) {
     warnings.push(`Cloudflare reports ${domain} is not registrable through the Registrar API${candidate.reason ? ` (${candidate.reason})` : ''}.`);
     return { warnings };
   }
@@ -272,6 +286,9 @@ export async function planCloudflareDomainRegistration(params: {
   const pricing = candidate.pricing
     ? ` (${candidate.pricing.currency} ${candidate.pricing.registration_cost} registration, ${candidate.pricing.renewal_cost} renewal)`
     : '';
+  if (!hasStandardQuote(candidate)) {
+    return { warnings: [`Cloudflare did not return complete standard registration and renewal prices for ${domain}. Check again before purchasing.`] };
+  }
   return {
     action: registrationAction({
       domain,
@@ -321,22 +338,22 @@ export async function applyCloudflareDomainRegistration(params: {
   const plannedAccountId = typeof action.metadata?.accountId === 'string'
     ? action.metadata.accountId
     : undefined;
-  const effectiveAccountId = binding?.state && !binding.completed && binding.state !== 'failed'
-    ? binding.accountId ?? accountId
-    : accountId;
-  if (!plannedAccountId || plannedAccountId !== effectiveAccountId) {
+  if (!plannedAccountId || plannedAccountId !== accountId || (binding && binding.accountId !== accountId)) {
     return {
       success: false,
       status: 'blocked',
       message: `Cloudflare registration action for ${domain} has stale account authority`,
-      error: `The reviewed account is ${plannedAccountId ?? 'missing'}, but the current registration target is ${effectiveAccountId}. Re-run hv_plan.`,
+      error: `The reviewed account is ${plannedAccountId ?? 'missing'}, but the current registration target is ${accountId}. Re-run hv_plan.`,
     };
   }
 
-  if (binding?.state && !binding.completed && binding.state !== 'failed') {
+  if (binding?.completed && binding.state === 'succeeded') {
+    return { success: true, message: `The registration for ${domain} already completed.` };
+  }
+  if (binding && !(binding.state === 'failed' && binding.completed === true)) {
     try {
-      const workflow = await adapter.getRegistrarRegistrationStatus(effectiveAccountId, domain);
-      persistWorkflow(envRepo, project, envName, domain, effectiveAccountId, workflow);
+      const workflow = await adapter.getRegistrarRegistrationStatus(accountId, domain);
+      persistWorkflow(envRepo, project, envName, domain, accountId, workflow);
       return workflowActionResult(domain, workflow, 'polled');
     } catch (error) {
       return {
@@ -347,10 +364,14 @@ export async function applyCloudflareDomainRegistration(params: {
     }
   }
 
+  if (action.type !== 'create' || !action.requiresConfirm || !action.billable) {
+    return { success: false, status: 'blocked', message: 'This status check cannot start a registration. Run hv_plan to review current terms.' };
+  }
+
   let candidate: RegistrarDomainCandidate | undefined;
   try {
     const checked = await adapter.checkRegistrarDomains(accountId, [domain]);
-    candidate = checked.find((entry) => normalizeDomain(entry.name) === domain);
+    candidate = exactCandidate(checked, domain);
   } catch (error) {
     return {
       success: false,
@@ -358,7 +379,7 @@ export async function applyCloudflareDomainRegistration(params: {
       error: error instanceof Error ? error.message : String(error),
     };
   }
-  if (!candidate?.registrable) {
+  if (candidate?.registrable !== true) {
     return {
       success: false,
       message: `${domain} is not registrable through Cloudflare Registrar API`,
@@ -380,7 +401,8 @@ export async function applyCloudflareDomainRegistration(params: {
   const currentCandidate = summarizeRegistrarDomain(candidate);
   const currentRegistration = registrationOptions(environmentSpec);
   if (
-    !reviewedCandidate
+    !hasStandardQuote(candidate)
+    || !reviewedCandidate
     || !reviewedRegistration
     || JSON.stringify(reviewedCandidate) !== JSON.stringify(currentCandidate)
     || JSON.stringify(reviewedRegistration) !== JSON.stringify(currentRegistration)
@@ -394,6 +416,16 @@ export async function applyCloudflareDomainRegistration(params: {
     };
   }
 
+  // Save the attempt before the billable POST. A lost acknowledgement must only
+  // lead to a status read for this account and domain, even after a restart.
+  const target = environment ?? envRepo.create({ projectId: project.id, name: envName });
+  const registrations = asRecord(target.platformBindings.domainRegistrations) ?? {};
+  if (!envRepo.replacePlatformBindingsIfUnchanged(target, { ...target.platformBindings, domainRegistrations: {
+    ...registrations, [domain]: { provider: 'cloudflare', accountId, state: 'submitted', completed: false },
+  } })) {
+    return { success: false, status: 'blocked', message: 'The environment changed while preparing the purchase. Run hv_plan again.' };
+  }
+  envRepo.syncRepoBindingsForId(target.id);
   try {
     const workflow = await adapter.createRegistrarRegistration(accountId, {
       domainName: domain,
@@ -403,11 +435,10 @@ export async function applyCloudflareDomainRegistration(params: {
     });
     persistWorkflow(envRepo, project, envName, domain, accountId, workflow);
     return workflowActionResult(domain, workflow, 'started');
-  } catch (error) {
+  } catch {
     return {
-      success: false,
-      message: `Cloudflare registration failed for ${domain}`,
-      error: error instanceof Error ? error.message : String(error),
+      success: false, status: 'pending',
+      message: `The registration outcome for ${domain} is unknown. Run hv_plan and hv_apply to check the existing request.`,
     };
   }
 }

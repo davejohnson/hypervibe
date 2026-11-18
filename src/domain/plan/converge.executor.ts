@@ -242,6 +242,7 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-credentials',
     'infrastructure-engine',
     'dns-engine',
+    'domain-registration',
   ]).optional(),
   environmentName: z.string().min(1),
   dns: z.object({ descriptor: dnsPlanDescriptorSchema, source: z.record(z.string(), z.unknown()).optional() }).strict().optional(),
@@ -272,6 +273,19 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'domain-registration') {
+    const [action] = document.actions;
+    if (document.actions.length !== 1 || !action || action.resource.kind !== 'domain' || action.resource.provider !== 'cloudflare'
+      || action.metadata?.operation !== 'cloudflareRegistrarRegistration' || typeof action.metadata.accountId !== 'string'
+      || action.id !== `domain:${action.resource.name}:register` || action.verified !== true || engineSegmentOf(action)
+      || !(action.type === 'create' && action.billable === true && action.requiresConfirm === true
+        || action.type === 'update' && !action.billable && !action.requiresConfirm)
+      || document.dns || document.overrides || document.lockEnvironmentIds || document.sourceCommitSha
+      || document.inputRequired?.length || document.observedFingerprint !== null) {
+      ctx.addIssue({ code: 'custom', message: 'Registration plans require one exact account and domain purchase or status check.' });
+    }
+    return;
+  }
   if (document.scope === 'dns-engine') {
     const descriptor = document.dns?.descriptor;
     const reconciliation = descriptor && document.actions.length === 1
