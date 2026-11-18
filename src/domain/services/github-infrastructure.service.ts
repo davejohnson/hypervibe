@@ -1,3 +1,4 @@
+import { reviewGitHubFile } from './github-file-review.js';
 import { PINNED_ACTIONS } from './pinned-actions.js';
 import { createHash } from 'crypto';
 import { parse as parseYaml } from 'yaml';
@@ -1352,6 +1353,8 @@ function infrastructureAction(params: {
   type: 'update' | 'noop';
   verified: boolean;
   drift: string[];
+  fileDiff?: PlanAction['diff'];
+  reviewedFileHashes?: Record<string, string | null>;
   blockedReason?: string;
   billable?: boolean;
   requiresConfirm?: boolean;
@@ -1369,7 +1372,7 @@ function infrastructureAction(params: {
       ? 'GitHub-managed repository files are in sync'
       : `GitHub infrastructure needs a reviewable repository change (${params.drift.join(', ') || 'state unavailable'})`,
     ...(params.drift.length > 0
-      ? { diff: params.drift.map((path) => ({ field: `file:${path}`, from: 'drift', to: 'desired' })) }
+      ? { diff: params.fileDiff ?? params.drift.map((path) => ({ field: `file:${path}`, from: params.verified ? 'Observed' : 'unknown', to: 'Review the declared repository change' })) }
       : {}),
     ...(params.billable ? { billable: true } : {}),
     ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
@@ -1379,6 +1382,7 @@ function infrastructureAction(params: {
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
+      ...(params.reviewedFileHashes ? { reviewedFileHashes: params.reviewedFileHashes } : {}),
       ...(params.backupWorkflowPublicationRequired ? { backupWorkflowPublicationRequired: true } : {}),
       ...(params.backupEnvironment ? { backupEnvironment: params.backupEnvironment } : {}),
       ...(params.retiredManagedFiles ? { retiredManagedFiles: params.retiredManagedFiles } : {}),
@@ -1880,12 +1884,16 @@ export async function planGitHubInfrastructure(params: {
   // desired repository writes nor prerequisites for unrelated reconciliation.
   const deferredBackupPaths = new Set(Object.keys(params.spec.environments).flatMap(managedBackupFilePaths));
   const preservedManifestPaths: string[] = [];
+  const ownedPaths = new Set<string>();
+  let manifestRead: string | null | undefined;
   let backupPreservationBlockedReason: string | undefined;
   {
     try {
       const content = await adapterResult.adapter.getFileContent(parts.owner, parts.repo, GITHUB_INFRASTRUCTURE_MANIFEST);
+      manifestRead = content;
       if (content !== null) {
         for (const filePath of new Set(parseManifest(content, true))) {
+          ownedPaths.add(filePath);
           if (!isManagedBackupFilePath(filePath)) continue;
           deferredBackupPaths.add(filePath);
           preservedManifestPaths.push(filePath);
@@ -1899,17 +1907,30 @@ export async function planGitHubInfrastructure(params: {
     files = files.map(file => file.path === GITHUB_INFRASTRUCTURE_MANIFEST
       ? managedManifestFile(file.content, [...parseManifest(file.content), ...preservedManifestPaths]) : file);
   }
-  const drift: string[] = [];
-  for (const file of files) {
+  const fileDiff: NonNullable<PlanAction['diff']> = [];
+  const reviewedFileHashes: Record<string, string | null> = {};
+  const desiredPaths = new Set(files.map(file => file.path));
+  const retired = [...ownedPaths].filter(path => !desiredPaths.has(path) && !deferredBackupPaths.has(path));
+  let unownedFile = false;
+  for (const file of [...files, ...retired.map(path => ({path, content: null}))]) {
     try {
-      const current = await adapterResult.adapter.getFileContent(parts.owner, parts.repo, file.path);
-      if (current !== file.content) drift.push(file.path);
-    } catch (error) {
+      const current = file.path === GITHUB_INFRASTRUCTURE_MANIFEST ? manifestRead
+        : await adapterResult.adapter.getFileContent(parts.owner, parts.repo, file.path);
+      if (current === undefined) throw new Error('Unknown managed manifest');
+      reviewedFileHashes[file.path] = current === null ? null : sha256(current);
+      if (current === file.content) continue;
+      fileDiff.push(reviewGitHubFile(file.path, current, file.content));
+      if (current !== null && file.path !== GITHUB_INFRASTRUCTURE_MANIFEST && !ownedPaths.has(file.path)) {
+        unownedFile = true;
+        warnings.push(`Publication requires ownership of ${file.path}. Review the existing file before adopting it into the managed repository manifest.`);
+      }
+    } catch {
       verified = false;
-      drift.push(file.path);
-      warnings.push(`Cannot read ${file.path}: ${error instanceof Error ? error.message : String(error)}`);
+      fileDiff.push(reviewGitHubFile(file.path, undefined, file.content));
+      warnings.push(`Cannot verify the current contents of ${file.path}. Restore read access and run hv_plan again.`);
     }
   }
+  const drift = fileDiff.map(change => change.field.slice('file:'.length));
   let restoreDrillBlockedReason: string | undefined = restoreDrills.issues[0]?.code;
   if (restoreDrills.requiredSecrets.length > 0) {
     try {
@@ -1931,7 +1952,7 @@ export async function planGitHubInfrastructure(params: {
   }
   const infrastructureBlockedReason = artifactContractIssues.length > 0
     ? 'github_autofix_artifact_contract_incomplete'
-    : restoreDrillBlockedReason ?? backupPreservationBlockedReason ?? taskPrerequisites.blockedReason;
+    : restoreDrillBlockedReason ?? backupPreservationBlockedReason ?? taskPrerequisites.blockedReason ?? (unownedFile ? 'github_repository_file_ownership_unknown' : undefined);
   const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
   const taskWorkflowDrift = drift.some((path) => taskPrerequisites.paths.has(path));
   const publicationAction = infrastructureAction({
@@ -1939,7 +1960,7 @@ export async function planGitHubInfrastructure(params: {
     files,
     type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
     verified,
-    drift,
+    drift, fileDiff, reviewedFileHashes,
     billable: !infrastructureBlockedReason && (taskWorkflowDrift || drift.some((path) => restoreDrillPaths.has(path))),
     requiresConfirm: !infrastructureBlockedReason && taskWorkflowDrift,
     preservedManagedPaths: [...deferredBackupPaths].sort(),
@@ -2596,6 +2617,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   proposalBranch?: string;
   requireDefaultTarget?: boolean;
   reconcileManifest?: boolean;
+  reviewedFileHashes?: Record<string, string | null>;
   /** Exact previously bound workflow paths this reviewed proposal may retire. */
   retiredManagedPaths?: string[];
   /** Exact backup paths whose independent lifecycle must survive this proposal. */
@@ -2654,6 +2676,18 @@ export async function proposeGitHubInfrastructureFiles(params: {
     };
   }
 
+  const matchesReviewedFiles = async (ref: string, allowPublished: boolean) => {
+    const desired = new Map(desiredFiles.map(file => [file.path, file.hash]));
+    for (const [path, expected] of Object.entries(params.reviewedFileHashes ?? {})) {
+      const bytes = await adapter.getFileContent(parts.owner, parts.repo, path, ref);
+      const observed = bytes === null ? null : sha256(bytes);
+      if (observed !== expected && !(allowPublished && observed === (desired.get(path) ?? null))) return false;
+    }
+    return true;
+  };
+  const staleFiles = { success: false, status: 'blocked' as const,
+    message: 'Repository files changed since review. Run hv_plan again to review their current contents and ownership.' };
+  if (!await matchesReviewedFiles(baseRef.object.sha, false)) return staleFiles;
   const retirementChanged = async (ref: string): Promise<boolean> => {
     try {
       for (const file of params.retiredManagedFiles ?? []) {
@@ -2682,6 +2716,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   });
   if (!branch.success) return branch.result;
   const existingPull = branch.existingPull;
+  if (!await matchesReviewedFiles(proposalBranch, true)) return staleFiles;
   if (params.retiredManagedFiles && await retirementChanged(proposalBranch)) return retirementBlocked;
 
   const oldManifest = params.reconcileManifest
@@ -2850,10 +2885,14 @@ export async function applyGitHubInfrastructure(params: {
   const targetBranch = typeof params.action.metadata?.targetBranch === 'string'
     ? params.action.metadata.targetBranch
     : undefined;
+  if (params.action.metadata?.blockedReason || !params.action.verified) {
+    return { success: false, status: 'blocked', message: 'Repository observations or ownership are incomplete. Review the hv_plan warnings before publishing.' };
+  }
   return proposeGitHubInfrastructureFiles({
     repository,
     desiredFiles,
     ...(targetBranch ? { targetBranch } : {}),
+    reviewedFileHashes: params.action.metadata?.reviewedFileHashes as Record<string, string | null> | undefined,
     reconcileManifest: true,
     ...(backupPaths ? { managedPathScope: backupPaths } : {}),
     ...(retiredManagedFiles ? { retiredManagedFiles } : {}),

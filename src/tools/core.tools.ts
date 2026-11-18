@@ -1130,7 +1130,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           });
           const workers = workloads.filter(row => row.kind === 'worker').map(row => ({ ...row,
             mode: envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on' }));
-          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers, workloads, ...(database ? { database } : {}) }, {
+          return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers, workloads, ...(database ? { database } : {}) }, {
             warnings: workloads.filter(row => row.activity === 'unknown').map(row => `Current activity for ${row.service} is unknown.`),
             hint: 'Run hv_health for deployment health or hv_plan scope="infrastructure" for drift.',
             next: ['hv_health', 'hv_plan'],
@@ -1145,7 +1145,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           // A failed read is not "fresh": say the age is unknown instead of staying silent.
           if (notes.unreadable) engine.warnings.push(notes.unreadable);
         }
-        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', workers: engine.workers }, {
+        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers: engine.workers }, {
           warnings: engine.warnings,
           hint: engine.warnings.length ? 'Fix the warnings above, then check hv_status again.' : 'Run hv_plan scope="infrastructure" to check infrastructure drift.',
           next: engine.warnings.length ? ['hv_plan'] : ['hv_plan', 'hv_health'],
@@ -1169,6 +1169,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           const drift = actions.filter((action) => action.type !== 'noop');
           return commandSuccess({
             environment: envName,
+            coverage: { repositoryFiles: 'included', repositorySettings: 'included', runtime: 'outside repository status' },
             specRevision: specResult.revision,
             specSource: specResult.source ?? { kind: 'local' },
             verified: actions.every((action) => action.verified),
@@ -1444,6 +1445,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ...(managedDatabaseContract(envSpec)
             ? { managedDatabase: managedDatabaseContract(envSpec) }
             : {}),
+          coverage: { runtime: 'included', repositoryFiles: 'review declared repository changes with hv_plan in the canonical environment' },
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
           verified: observed !== null && !observed.partial && databaseAliases?.state !== 'unknown',

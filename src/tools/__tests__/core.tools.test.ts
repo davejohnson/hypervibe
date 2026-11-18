@@ -1,3 +1,4 @@
+import { compileManagedGitHubFiles } from '../../domain/services/github-infrastructure.service.js';
 import type { IProviderLifecycleAdapter } from '../../domain/ports/provider.port.js';
 import '../../application/providers.js';
 import { z } from 'zod';
@@ -1740,6 +1741,40 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
     return { getFileContent, writeWorkflow, setSecret };
   }
+
+  it('shows secret-safe repository changes and observation coverage in public status and plan', async () => {
+    const t = await makeClient();
+    const name = 'reviewable-repository';
+    const setup = await t.call('hv_spec', {spec: {project: name, gitRemoteUrl: 'https://github.com/davejohnson/' + name,
+      environments: {}, runtime: {kind: 'node', version: '22', installCommand: 'npm ci'},
+      github: {actions: {tests: {kind: 'check', category: 'test', runtime: {kind: 'node'}, commands: ['npm test']}}}}});
+    expect(setup.ok).toBe(true);
+    verifyConnection('github', {apiToken: 'fixture', login: 'davejohnson'});
+    const files = compileManagedGitHubFiles(setup.data.spec.github, setup.data.spec.runtime);
+    const workflow = files.find(f => f.path.startsWith('.github/workflows/'))!;
+    let live: string | Error = workflow.content.replace('hv_spec;', 'hv_spec_set;');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, filePath) => {
+      if (filePath === workflow.path) {
+        if (live instanceof Error) throw live;
+        return live;
+      }
+      return files.find(f => f.path === filePath)?.content ?? null;
+    });
+    for (const [value, expected] of [[live, 'generator header'], [workflow.content.replace('npm test', 'private-observed-command'), 'job steps'],
+      [new Error('private-observed-command'), 'unknown']] as const) {
+      live = value;
+      for (const command of ['hv_status', 'hv_plan']) {
+        const result = await t.call(command, {project: name});
+        expect(result.ok).toBe(true);
+        const actions = result.data.drift ?? result.data.actions;
+        const summary = actions.find((a: any) => a.id === 'repo:github-infrastructure-pr').diff.find((field: any) => field.field === 'file:' + workflow.path);
+        expect(JSON.stringify(summary)).toContain(expected);
+        expect(JSON.stringify(result)).not.toContain('private-observed-command');
+        if (command === 'hv_status') expect(result.data.coverage.repositoryFiles).toBe('included');
+      }
+    }
+    await t.close();
+  });
 
   it('rejects a stored unsupported workload spec before provider observation or planning', async () => {
     const project = new ProjectRepository().create({ name: 'stored-unsupported-workload-app' });

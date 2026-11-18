@@ -128,6 +128,27 @@ describe('GitHub infrastructure plan/apply', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it('binds repository publication to the observed managed bytes and refuses a later change', async () => {
+    const declared = spec();
+    const files = compileManagedGitHubFiles(declared.github!, declared.runtime);
+    const selected = files.find(f => f.path.includes('/workflows/'))!;
+    const live = new Map(files.map(file => [file.path, file.content]));
+    live.set(selected.path, selected.content.replace('hv_spec;', 'hv_spec_set;'));
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, path) => live.get(path) ?? null);
+    const planned = await planGitHubInfrastructure({project, spec: declared, environmentName: 'production'});
+    const action = planned.actions.find(a => a.id === GITHUB_INFRASTRUCTURE_ACTION_ID)!;
+    // Isolate the repository proposal from unrelated GitHub settings in this fixture.
+    expect(action.diff?.find(diff => diff.field === 'file:' + selected.path)?.to).toContain('generator header');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({success: true});
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({default_branch: 'main'});
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({ref: 'refs/heads/main', object: {sha: 'a'.repeat(40)}});
+    const create = vi.spyOn(GitHubAdapter.prototype, 'createRef');
+    live.set(selected.path, 'another contributor changed this workflow');
+    const result = await applyGitHubInfrastructure({action});
+    expect(result.status).toBe('blocked');
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('marks actual backup workflow file drift as confirmed billable publication work', async () => {
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
     vi.spyOn(managedBackups, 'compileManagedBackupFiles').mockResolvedValue({ files: [{
