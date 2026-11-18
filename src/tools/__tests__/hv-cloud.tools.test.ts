@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
@@ -85,10 +86,27 @@ function createGitTransportFixture() {
   const pending = () => context.secretStore.decryptObject<Record<string, unknown>>(
     stored()!.credentialsEncrypted
   );
-  return { git, run, requests, fetchImpl, stored, pending };
+  return { directory, git, run, requests, fetchImpl, stored, pending };
 }
 
 describe('hv_cloud_pair', () => {
+  it('keeps a bounded local hint for the exact committed bytes without sending the spec', async () => {
+    const fixture = createGitTransportFixture();
+    const content = '{"private":"example-only"}';
+    mkdirSync(path.join(fixture.directory, '.hypervibe'));
+    const file = path.join(fixture.directory, '.hypervibe/spec.json');
+    writeFileSync(file, content);
+    fixture.git('add', '.hypervibe/spec.json');
+    fixture.git('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-qm', 'declared spec');
+    const revision = fixture.git('rev-parse', 'HEAD');
+    writeFileSync(file, 'uncommitted-private-example');
+    const result = await fixture.run();
+    expect(result).toMatchObject({ ok: true, data: { localSource: { version: 1, repository: 'northstar/launchpad',
+      revision, specSha256: createHash('sha256').update(content).digest('hex'), workingTree: 'dirty', publication: 'unverified' } } });
+    expect(JSON.stringify(fixture.requests)).not.toMatch(/example-only|uncommitted-private|specSha256/);
+    expect(fixture.pending().localSource).toEqual((result as any).data.localSource);
+  });
+
   it('infers the symbolic branch from the same client workspace as the repository through the real HTTP client', async () => {
     const fixture = createGitTransportFixture();
 

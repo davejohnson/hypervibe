@@ -252,6 +252,14 @@ export class ConnectionRepository {
     return this.findById(id);
   }
 
+  /** Commit one exchanged device grant without overwriting a newer pairing. */
+  completePendingPairing(expected: Connection, encrypted: string): boolean {
+    const now = new Date().toISOString();
+    const update = getDb().prepare(`UPDATE connections SET credentials_encrypted = ?, status = 'verified',
+      last_verified_at = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND credentials_encrypted = ?`);
+    return update.run(encrypted, now, now, expected.id, expected.credentialsEncrypted).changes === 1;
+  }
+
   /** Preserve a concurrently rotated primary and commit role provenance with its verified value. */
   updateVerifiedCredentialsIfUnchanged(expected: Connection, credentialsEncrypted: string, audit: CreateAuditEventInput): Connection | null {
     const db = getDb();

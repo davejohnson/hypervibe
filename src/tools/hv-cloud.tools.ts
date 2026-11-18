@@ -1,3 +1,4 @@
+import { localPairingSource } from '../application/cloud-pairing-source.js';
 import { z } from 'zod';
 import type { CommandRegistrar } from '../application/commands.js';
 import type { CommandContext } from '../application/context.js';
@@ -33,6 +34,7 @@ function publicConnectionSummary(connection: VerifiedHypervibeCloudConnection) {
     project: connection.project,
     environments: connection.environments.map(({ id, key, name }) => ({ id, key, name })),
     pairedAt: connection.pairedAt,
+    ...(connection.localSource ? { localSource: connection.localSource } : {}),
   };
 }
 
@@ -91,16 +93,14 @@ export function registerHvCloudTools(
         ? decryptConnection(ctx, stored.credentialsEncrypted)
         : null;
 
+      if (connection && (connection.repository.toLowerCase() !== repository.toLowerCase() || connection.baseUrl !== baseUrl)) {
+        throw new HvError('VALIDATION', 'This saved pairing belongs to a different repository or Hypervibe cloud URL.');
+      }
       if (action === 'status') {
         if (!stored || !connection) {
           throw new HvError('NOT_FOUND', `No active Hypervibe cloud pairing was found for ${repository}.`, {
             hint: 'Start pairing first with hypervibe cloud pair.',
             next: ['hv_cloud_pair'],
-          });
-        }
-        if (connection.baseUrl !== baseUrl) {
-          throw new HvError('VALIDATION', 'The active pairing belongs to a different Hypervibe cloud URL.', {
-            hint: `Retry status with baseUrl="${connection.baseUrl}".`,
           });
         }
         if (connection.status === 'verified') {
@@ -125,6 +125,7 @@ export function registerHvCloudTools(
             userCode: connection.userCode,
             verificationUrl: connection.verificationUrl,
             expiresAt: connection.expiresAt,
+            ...(connection.localSource ? { localSource: connection.localSource } : {}),
             ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
             retryAfterSeconds: result.retryAfterSeconds,
           }, {
@@ -144,12 +145,11 @@ export function registerHvCloudTools(
             token,
           })),
           pairedAt: now().toISOString(),
+          ...(connection.localSource ? { localSource: connection.localSource } : {}),
         };
-        ctx.repos.connections.updateCredentials(
-          stored.id,
-          ctx.secretStore.encryptObject(verified)
-        );
-        ctx.repos.connections.updateStatus(stored.id, 'verified');
+        if (!ctx.repos.connections.completePendingPairing(stored, ctx.secretStore.encryptObject(verified))) {
+          throw new HvError('VALIDATION', 'The local pairing changed during the exchange. Check the current pairing status.');
+        }
         return commandSuccess(publicConnectionSummary(verified), {
           hint: 'Pairing complete. Hypervibe can now report activity for these spec-declared environments.',
         });
@@ -172,6 +172,7 @@ export function registerHvCloudTools(
           userCode: connection.userCode,
           verificationUrl: connection.verificationUrl,
           expiresAt: connection.expiresAt,
+          ...(connection.localSource ? { localSource: connection.localSource } : {}),
           ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
         }, {
           hint: 'Open the approval link, then run hypervibe cloud pair --action status.',
@@ -191,6 +192,7 @@ export function registerHvCloudTools(
         verificationUrl: result.verificationUrl,
         expiresAt: result.expiresAt,
         sourceBranch,
+        localSource: localPairingSource(primaryWorkspaceDirectory(), repository),
       };
       ctx.repos.connections.upsert({
         provider: HYPERVIBE_CLOUD_CONNECTION_PROVIDER,
@@ -203,6 +205,7 @@ export function registerHvCloudTools(
         userCode: pending.userCode,
         verificationUrl: pending.verificationUrl,
         expiresAt: pending.expiresAt,
+        localSource: pending.localSource,
         ...(pending.sourceBranch ? { sourceBranch: pending.sourceBranch } : {}),
       }, {
         hint: 'Open the approval link, then run hypervibe cloud pair --action status.',
