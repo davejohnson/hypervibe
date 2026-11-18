@@ -134,9 +134,9 @@ describe('AzureResourceManagerClient', () => {
       })));
 
     const client = new AzureResourceManagerClient(credentials);
-    await expect(
-      client.listAll(COLLECTION, '2025-08-01')
-    ).rejects.toThrow(/duplicate resource identity/);
+    const message = String(await client.listAll(COLLECTION, '2025-08-01').catch(error => error));
+    expect(message).toMatch(/value\[\]\.id must be unique/);
+    expect(message.toLowerCase()).not.toContain(duplicate.toLowerCase());
   });
 
   it('treats only 404 as absence and never includes response bodies in errors', async () => {

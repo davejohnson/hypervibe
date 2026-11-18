@@ -197,9 +197,9 @@ export class AzureResourceManagerClient {
         next,
         apiVersion
       );
-      if (!Array.isArray(body.value)) {
+      if (!Array.isArray(body?.value)) {
         throw new Error(
-          'Azure Resource Manager list observation returned an invalid response.'
+          'Azure Resource Manager list: value must be a list.'
         );
       }
       for (const item of body.value) {
@@ -213,7 +213,7 @@ export class AzureResourceManagerClient {
           : null;
         if (id && resourceIds.has(id)) {
           throw new Error(
-            `Azure Resource Manager returned duplicate resource identity ${id}.`
+            'Azure Resource Manager list: value[].id must be unique across all pages.'
           );
         }
         if (id) resourceIds.add(id);

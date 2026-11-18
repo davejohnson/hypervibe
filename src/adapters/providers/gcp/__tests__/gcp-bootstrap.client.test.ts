@@ -73,6 +73,45 @@ describe('GcpBootstrapClient', () => {
     expect(String(transportError)).not.toContain('access-token-that-must-stay-private');
   });
 
+  it('rejects a successful null project response, including after a forbidden lookup', async () => {
+    await expect(client(async () => Response.json(null)).getProject(PROJECT_ID))
+      .rejects.toThrow(/project lookup.*object/);
+    const search = vi.fn().mockResolvedValueOnce(new Response(null, { status: 403 })).mockResolvedValueOnce(Response.json(null));
+    await expect(client(search).getProject(PROJECT_ID)).rejects.toThrow(/project search.*object/);
+  });
+
+  it.each([
+    [{}, 'absent'],
+    [{ projects: [] }, 'absent'],
+    [{ projects: {} }, 'projects must be a list'],
+    [{ projects: [{}] }, 'projectId is missing'],
+  ] as const)('checks the search response before reporting project absence', async (response, expected) => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(null, { status: 403 })).mockResolvedValueOnce(Response.json(response));
+    const read = client(fetch).getProject(PROJECT_ID);
+    if (expected === 'absent') {
+      await expect(read).resolves.toBeNull();
+    } else {
+      await expect(read).rejects.toThrow(expected);
+    }
+  });
+
+  it('continues an incomplete project search before reporting absence', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ projects: [], nextPageToken: 'page 2' }))
+      .mockResolvedValueOnce(Response.json({ projects: [project()] }));
+    await expect(client(fetch).getProject(PROJECT_ID)).resolves.toMatchObject({ projectId: PROJECT_ID });
+    expect(new URL(fetch.mock.calls[2]![0]).searchParams.get('pageToken')).toBe('page 2');
+  });
+
+  it.each([
+    [{ billingAccounts: {} }, 'billingAccounts must be a list'],
+    [{ billingAccounts: [{ name: 'billingAccounts/ABC' }, { name: 'billingAccounts/ABC' }] }, 'name must be unique'],
+  ])('names malformed billing list fields without exposing identities', async (body, rule) => {
+    const message = String(await client(async () => Response.json(body)).listOpenBillingAccounts().catch(error => error));
+    expect(message).toContain(rule);
+    expect(message).not.toContain('billingAccounts/ABC');
+  });
+
   it('paginates and returns only exact open Cloud Billing accounts', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
@@ -133,14 +172,18 @@ describe('GcpBootstrapClient', () => {
   });
 
   it.each([
-    { open: 'false' }, { open: 0 }, { open: {} },
-    { name: undefined }, { name: 'projects/not-a-billing-account' },
-    { masterBillingAccount: 'bad-parent' }, { masterBillingAccount: 0 },
-  ])('rejects malformed billing account fields: %j', async (fields) => {
+    ['open', 'false', 'true or false'], ['open', 0, 'true or false'], ['open', {}, 'true or false'],
+    ['name', undefined, 'missing'], ['name', 'projects/not-a-billing-account', 'billingAccounts/'],
+    ['masterBillingAccount', 'bad-parent', 'billingAccounts/'], ['masterBillingAccount', 0, 'text'],
+  ] as const)('identifies an invalid billing field %s', async (field, value, rule) => {
     const fetchMock = vi.fn(async () => Response.json({ billingAccounts: [
-      { name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', open: true, ...fields },
+      { name: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', open: true, [field]: value },
     ] }));
-    await expect(client(fetchMock).listOpenBillingAccounts()).rejects.toThrow('invalid resource identity');
+    const message = String(await client(fetchMock).listOpenBillingAccounts().catch(error => error));
+    expect(message).toContain(field);
+    expect(message).toContain(rule);
+    expect(message).not.toContain('AAAAAA-BBBBBB-CCCCCC');
+    expect(message).not.toContain('bad-parent');
   });
 
   it.each([
@@ -170,8 +213,11 @@ describe('GcpBootstrapClient', () => {
     const fetchMock = vi.fn(async () => Response.json({
       name: `projects/${PROJECT_ID}/billingInfo`, projectId: PROJECT_ID, ...fields,
     }));
-    await expect(client(fetchMock).getProjectBillingInfo(PROJECT_ID))
-      .rejects.toThrow('different or invalid resource identity');
+    const field = fields.billingEnabled === true ? 'billingAccountName' : Object.keys(fields)[0]!;
+    const message = String(await client(fetchMock).getProjectBillingInfo(PROJECT_ID).catch(error => error));
+    expect(message).toContain(field);
+    expect(message).not.toContain(PROJECT_ID);
+    expect(message).not.toContain('another-project');
   });
 
   it('observes exact service state and does not interpret forbidden as absence', async () => {
@@ -201,6 +247,26 @@ describe('GcpBootstrapClient', () => {
       PROJECT_ID,
       serviceName
     )).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('identifies rejected project, service, service account and key fields without returning their values', async () => {
+    const sensitive = 'unexpected-private-value';
+    const serviceName = 'iam.googleapis.com';
+    const cases: Array<[() => Promise<unknown>, RegExp]> = [
+      [() => client(async () => Response.json(project({ projectId: sensitive }))).getProject(PROJECT_ID), /projectId.*requested/],
+      [() => client(async url => String(url).includes('/v3/projects/') ? Response.json(project())
+        : Response.json({ name: `${PROJECT_NAME}/services/${serviceName}`, parent: PROJECT_NAME, config: { name: sensitive } }))
+        .getServiceState(PROJECT_ID, serviceName), /config.name.*requested/],
+      [() => client(async () => Response.json({ name: ACCOUNT_NAME, projectId: PROJECT_ID, email: ACCOUNT_EMAIL, uniqueId: sensitive }))
+        .getServiceAccount(PROJECT_ID, ACCOUNT_ID), /uniqueId.*numeric/],
+      [() => client(async () => Response.json({ name: KEY_NAME, keyAlgorithm: sensitive })).getServiceAccountKey(KEY_NAME),
+        /keyAlgorithm.*KEY_ALG_RSA_2048/],
+    ];
+    for (const [read, rule] of cases) {
+      const message = String(await read().catch(error => error));
+      expect(message).toMatch(rule);
+      for (const value of [sensitive, PROJECT_ID, PROJECT_NAME, KEY_NAME]) expect(message).not.toContain(value);
+    }
   });
 
   it('rejects uncertain service-account policy state before mutation', async () => {
@@ -294,7 +360,7 @@ describe('GcpBootstrapClient', () => {
     await expect(client(fetchMock as typeof fetch).createServiceAccountKey(
       PROJECT_ID,
       ACCOUNT_ID
-    )).rejects.toThrow('different or invalid resource identity');
+    )).rejects.toThrow(/privateKeyData.*base64/);
     expect(methods).toEqual(['POST', 'DELETE', 'GET']);
   });
 

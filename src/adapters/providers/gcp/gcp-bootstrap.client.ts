@@ -1,3 +1,5 @@
+import { responseFields } from '../../../lib/provider-response-fields.js';
+
 const CLOUD_RESOURCE_MANAGER_BASE = 'https://cloudresourcemanager.googleapis.com/v3';
 const CLOUD_BILLING_BASE = 'https://cloudbilling.googleapis.com/v1';
 const IAM_BASE = 'https://iam.googleapis.com/v1';
@@ -166,18 +168,36 @@ export class GcpBootstrapClient {
       // globally unique id and fails if anyone else owns it, so nothing foreign
       // can be adopted through this path.
       if (!(error instanceof GcpBootstrapApiError) || error.status !== 403) throw error;
-      const search = await this.requestJson(
-        `${CLOUD_RESOURCE_MANAGER_BASE}/projects:search?query=${encodeURIComponent(`id:${projectId}`)}`,
-        { method: 'GET' },
-        'project search'
-      ) as { projects?: unknown[] };
-      const visible = (search?.projects ?? []).filter((project) =>
-        (project as { projectId?: unknown }).projectId === projectId);
-      if (visible.length === 0) return null;
-      if (visible.length > 1) throw new Error('GCP project search returned an ambiguous match.');
-      payload = visible[0]!;
+      return this.searchProject(projectId);
     }
     return payload === null ? null : this.parseProject(payload, projectId);
+  }
+
+  private async searchProject(projectId: string): Promise<GcpBootstrapProject | null> {
+    const fields = responseFields('GCP project search');
+    const query = new URLSearchParams({ query: `id:${projectId}` });
+    const tokens = new Set<string>();
+    let match: GcpBootstrapProject | null = null;
+    for (let page = 0; page < PAGE_CAP; page++) {
+      const search = this.asRecord(await this.requestJson(
+        `${CLOUD_RESOURCE_MANAGER_BASE}/projects:search?${query}`, { method: 'GET' }, 'project search'
+      ), 'GCP project search: response body must be an object.');
+      const projects = search.projects === undefined ? [] : search.projects;
+      if (!Array.isArray(projects)) throw new Error('GCP project search: projects must be a list.');
+      for (const project of projects) {
+        const row = this.asRecord(project, 'GCP project search: each projects entry must be an object.');
+        const id = fields.matches('projects[].projectId', row.projectId, PROJECT_ID_PATTERN, 'must be a valid Google project ID');
+        if (id !== projectId) continue;
+        if (match) fields.reject('projects[].projectId', 'must match at most once');
+        match = this.parseProject(row, projectId);
+      }
+      if (search.nextPageToken === undefined || search.nextPageToken === '') return match;
+      const token = fields.text('nextPageToken', search.nextPageToken);
+      if (tokens.has(token)) fields.reject('nextPageToken', 'must not repeat');
+      tokens.add(token);
+      query.set('pageToken', token);
+    }
+    throw new Error('GCP project search exceeded the page limit.');
   }
 
   async listOpenBillingAccounts(): Promise<GcpBillingAccount[]> {
@@ -199,12 +219,12 @@ export class GcpBootstrapClient {
         ? []
         : payload.billingAccounts;
       if (!Array.isArray(values)) {
-        throw new Error('GCP billing account list returned an invalid response.');
+        throw new Error('GCP billing account list: billingAccounts must be a list.');
       }
       for (const value of values) {
         const account = this.parseBillingAccount(value);
         if (identities.has(account.name)) {
-          throw new Error('GCP billing account list returned a duplicate resource identity.');
+          throw new Error('GCP billing account list: billingAccounts[].name must be unique.');
         }
         identities.add(account.name);
         if (account.open) accounts.push(account);
@@ -213,10 +233,8 @@ export class GcpBootstrapClient {
       if (payload.nextPageToken === undefined || payload.nextPageToken === '') {
         return accounts;
       }
-      if (typeof payload.nextPageToken !== 'string'
-        || pageTokens.has(payload.nextPageToken)) {
-        throw new Error('GCP billing account pagination returned an invalid continuation token.');
-      }
+      if (typeof payload.nextPageToken !== 'string') throw new Error('GCP billing account list: nextPageToken must be text.');
+      if (pageTokens.has(payload.nextPageToken)) throw new Error('GCP billing account list: nextPageToken must not repeat.');
       pageTokens.add(payload.nextPageToken);
       pageToken = payload.nextPageToken;
     }
@@ -368,16 +386,13 @@ export class GcpBootstrapClient {
     );
     if (payload === null) return null;
     const record = this.asRecord(payload, 'GCP service lookup returned an invalid response.');
-    const config = this.asRecord(record.config, 'GCP service lookup returned an invalid response.');
-    if (record.name !== expectedName
-      || record.parent !== expectedName.slice(0, expectedName.lastIndexOf('/services/'))
-      || config.name !== serviceName
-      || (record.state !== 'ENABLED'
-        && record.state !== 'DISABLED'
-        && record.state !== 'STATE_UNSPECIFIED')) {
-      throw new Error('GCP service lookup returned a different or invalid resource identity.');
-    }
-    return { name: record.name, state: record.state };
+    const fields = responseFields('GCP service lookup');
+    fields.exact('name', record.name, expectedName);
+    fields.exact('parent', record.parent, expectedName.slice(0, expectedName.lastIndexOf('/services/')));
+    const config = this.asRecord(record.config, 'GCP service lookup: config must be an object.');
+    fields.exact('config.name', config.name, serviceName);
+    const state = fields.oneOf('state', record.state, ['ENABLED', 'DISABLED', 'STATE_UNSPECIFIED'] as const);
+    return { name: expectedName, state };
   }
 
   async getServiceAccountKey(keyName: string): Promise<{ name: string } | null> {
@@ -388,16 +403,16 @@ export class GcpBootstrapClient {
     );
     if (payload === null) return null;
     const record = this.asRecord(payload, 'GCP service account key lookup returned an invalid response.');
-    if (record.name !== keyName
-      || record.keyAlgorithm !== 'KEY_ALG_RSA_2048') {
-      throw new Error('GCP service account key lookup returned a different or invalid resource identity.');
-    }
+    const fields = responseFields('GCP service account key lookup');
+    fields.exact('name', record.name, keyName);
+    fields.oneOf('keyAlgorithm', record.keyAlgorithm, ['KEY_ALG_RSA_2048']);
     return { name: keyName };
   }
 
   private async getNullable(url: string, operation: string): Promise<unknown | null> {
     try {
-      return await this.requestJson(url, { method: 'GET' }, operation);
+      return this.asRecord(await this.requestJson(url, { method: 'GET' }, operation),
+        `GCP ${operation}: response body must be an object.`);
     } catch (error) {
       if (error instanceof GcpBootstrapApiError && error.status === 404) return null;
       throw error;
@@ -437,19 +452,17 @@ export class GcpBootstrapClient {
 
   private parseProject(value: unknown, expectedProjectId: string): GcpBootstrapProject {
     const record = this.asRecord(value, 'GCP project lookup returned an invalid response.');
-    if (!PROJECT_NAME_PATTERN.test(this.stringValue(record.name))
-      || record.projectId !== expectedProjectId
-      || (record.state !== 'ACTIVE'
-        && record.state !== 'DELETE_REQUESTED'
-        && record.state !== 'STATE_UNSPECIFIED')
-      || (record.parent !== undefined
-        && (typeof record.parent !== 'string' || !PARENT_PATTERN.test(record.parent)))) {
-      throw new Error('GCP project lookup returned a different or invalid resource identity.');
+    const fields = responseFields('GCP project lookup');
+    const name = fields.matches('name', record.name, PROJECT_NAME_PATTERN, 'must start with projects/ followed by a positive project number');
+    fields.exact('projectId', record.projectId, expectedProjectId);
+    const state = fields.oneOf('state', record.state, ['ACTIVE', 'DELETE_REQUESTED', 'STATE_UNSPECIFIED'] as const);
+    if (record.parent !== undefined) {
+      fields.matches('parent', record.parent, PARENT_PATTERN, 'must identify an organization or folder by its positive numeric ID');
     }
     return {
-      name: record.name as string,
+      name,
       projectId: expectedProjectId,
-      state: record.state,
+      state,
       ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
       ...(typeof record.parent === 'string' ? { parent: record.parent } : {}),
     };
@@ -459,17 +472,15 @@ export class GcpBootstrapClient {
     const record = this.asRecord(value, 'GCP billing account list returned an invalid response.');
     // Cloud Billing uses implicit proto3 scalars: omitted/null fields have their
     // default value. An ordinary account has no master billing account.
-    const open = record.open ?? false;
-    const masterBillingAccount = record.masterBillingAccount ?? '';
-    if (!BILLING_ACCOUNT_NAME_PATTERN.test(this.stringValue(record.name))
-      || typeof open !== 'boolean'
-      || typeof masterBillingAccount !== 'string'
-      || (masterBillingAccount !== ''
-        && !BILLING_ACCOUNT_NAME_PATTERN.test(masterBillingAccount))) {
-      throw new Error('GCP billing account list returned an invalid resource identity.');
+    const fields = responseFields('GCP billing account list');
+    const name = fields.matches('name', record.name, BILLING_ACCOUNT_NAME_PATTERN, 'must have the form billingAccounts/account-id');
+    const open = fields.boolean('open', record.open ?? false);
+    const masterBillingAccount = fields.text('masterBillingAccount', record.masterBillingAccount ?? '');
+    if (masterBillingAccount && !BILLING_ACCOUNT_NAME_PATTERN.test(masterBillingAccount)) {
+      fields.reject('masterBillingAccount', 'must be empty or have the form billingAccounts/account-id');
     }
     return {
-      name: record.name as string,
+      name,
       open,
       ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
       ...(masterBillingAccount === '' ? {} : { masterBillingAccount }),
@@ -482,16 +493,16 @@ export class GcpBootstrapClient {
   ): GcpProjectBillingInfo {
     const record = this.asRecord(value, 'GCP project billing lookup returned an invalid response.');
     const expectedName = `projects/${expectedProjectId}/billingInfo`;
-    const billingEnabled = record.billingEnabled ?? false;
-    const billingAccountName = record.billingAccountName ?? '';
-    if (record.name !== expectedName
-      || record.projectId !== expectedProjectId
-      || typeof billingEnabled !== 'boolean'
-      || typeof billingAccountName !== 'string'
-      || (billingAccountName !== ''
-        && !BILLING_ACCOUNT_NAME_PATTERN.test(billingAccountName))
-      || (billingEnabled && billingAccountName === '')) {
-      throw new Error('GCP project billing lookup returned a different or invalid resource identity.');
+    const fields = responseFields('GCP project billing lookup');
+    fields.exact('name', record.name, expectedName);
+    fields.exact('projectId', record.projectId, expectedProjectId);
+    const billingEnabled = fields.boolean('billingEnabled', record.billingEnabled ?? false);
+    const billingAccountName = fields.text('billingAccountName', record.billingAccountName ?? '');
+    if (billingAccountName && !BILLING_ACCOUNT_NAME_PATTERN.test(billingAccountName)) {
+      fields.reject('billingAccountName', 'must have the form billingAccounts/account-id');
+    }
+    if (billingEnabled && !billingAccountName) {
+      fields.reject('billingAccountName', 'must identify an account when billingEnabled is true');
     }
     return {
       name: expectedName,
@@ -509,18 +520,16 @@ export class GcpBootstrapClient {
     const record = this.asRecord(value, 'GCP service account lookup returned an invalid response.');
     const email = this.serviceAccountEmail(expectedProjectId, expectedAccountId);
     const name = `projects/${expectedProjectId}/serviceAccounts/${email}`;
-    if (record.name !== name
-      || record.projectId !== expectedProjectId
-      || record.email !== email
-      || typeof record.uniqueId !== 'string'
-      || !/^[1-9][0-9]*$/.test(record.uniqueId)
-      || (record.disabled !== undefined && typeof record.disabled !== 'boolean')) {
-      throw new Error('GCP service account lookup returned a different or invalid resource identity.');
-    }
+    const fields = responseFields('GCP service account lookup');
+    fields.exact('name', record.name, name);
+    fields.exact('projectId', record.projectId, expectedProjectId);
+    fields.exact('email', record.email, email);
+    const uniqueId = fields.matches('uniqueId', record.uniqueId, /^[1-9][0-9]*$/, 'must be a positive numeric ID');
+    if (record.disabled !== undefined) fields.boolean('disabled', record.disabled);
     return {
       name,
       projectId: expectedProjectId,
-      uniqueId: record.uniqueId,
+      uniqueId,
       email,
       ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
       ...(typeof record.description === 'string' ? { description: record.description } : {}),
@@ -534,19 +543,16 @@ export class GcpBootstrapClient {
     expectedAccountId: string
   ): GcpCreatedServiceAccountKey {
     const record = this.asRecord(value, 'GCP service account key creation returned an invalid response.');
-    if (typeof record.name !== 'string') {
-      throw new Error('GCP service account key creation returned an invalid resource identity.');
-    }
-    const identity = this.assertServiceAccountKeyName(record.name);
-    if (identity.projectId !== expectedProjectId
-      || identity.accountId !== expectedAccountId
-      || record.privateKeyType !== 'TYPE_GOOGLE_CREDENTIALS_FILE'
-      || record.keyAlgorithm !== 'KEY_ALG_RSA_2048'
-      || typeof record.privateKeyData !== 'string'
-      || !this.isBase64(record.privateKeyData)) {
-      throw new Error('GCP service account key creation returned a different or invalid resource identity.');
-    }
-    return { name: record.name, privateKeyData: record.privateKeyData };
+    const fields = responseFields('GCP service account key creation');
+    const name = fields.text('name', record.name);
+    const identity = this.assertServiceAccountKeyName(name);
+    fields.exact('name (project)', identity.projectId, expectedProjectId);
+    fields.exact('name (service account)', identity.accountId, expectedAccountId);
+    fields.oneOf('privateKeyType', record.privateKeyType, ['TYPE_GOOGLE_CREDENTIALS_FILE']);
+    fields.oneOf('keyAlgorithm', record.keyAlgorithm, ['KEY_ALG_RSA_2048']);
+    const privateKeyData = fields.text('privateKeyData', record.privateKeyData);
+    if (!this.isBase64(privateKeyData)) fields.reject('privateKeyData', 'must contain nonempty base64 data');
+    return { name, privateKeyData };
   }
 
   private parseIamPolicy(value: unknown, operation: string): GcpIamPolicy {
@@ -679,10 +685,6 @@ export class GcpBootstrapClient {
       throw new Error(message);
     }
     return value as JsonRecord;
-  }
-
-  private stringValue(value: unknown): string {
-    return typeof value === 'string' ? value : '';
   }
 
   private isBase64(value: string): boolean {
