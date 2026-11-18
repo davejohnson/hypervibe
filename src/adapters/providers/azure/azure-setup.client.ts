@@ -1,3 +1,4 @@
+import { responseFields } from '../../../lib/provider-response-fields.js';
 import { azureCiRoleDefinitions } from './azure-ci-roles.js';
 import { azureDeployToken, type AzureEngineCredentials } from './azure-engine.adapter.js';
 import crypto from 'crypto';
@@ -353,14 +354,21 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
     }
     // A successful PUT or conflict does not prove the exact requested grant.
     const verified = ensure(await rest(fetchImpl, tokens.arm, 'GET', url), 'Verifying the exact role assignment', [200]);
-    const properties = verified.body.properties as { principalId?: string; principalType?: string; scope?: string; roleDefinitionId?: string; condition?: string | null; conditionVersion?: string | null } | undefined;
-    if (String(verified.body.id).toLowerCase() !== url.slice(ARM.length).split('?')[0]!.toLowerCase()
-      || properties?.principalId?.toLowerCase() !== servicePrincipalId.toLowerCase() || properties.principalType !== 'ServicePrincipal'
-      || properties.scope?.toLowerCase() !== scope.toLowerCase()
-      || properties.roleDefinitionId?.toLowerCase() !== roleDefinition(subscriptionId, grant.role).toLowerCase()
-      || (properties.condition ?? undefined) !== grant.condition
-      || (grant.condition && properties.conditionVersion !== '2.0')) {
-      throw new Error('Azure did not confirm the exact role assignment and access condition. No local credential was created; review the conflicting grant through setup before continuing.');
+    const fields = responseFields('Azure role assignment verification');
+    if (!verified.body || typeof verified.body !== 'object' || Array.isArray(verified.body)) {
+      fields.reject('response body', 'must be an object');
+    }
+    fields.exact('id', verified.body.id, url.slice(ARM.length).split('?')[0]!, true);
+    const properties = verified.body.properties as Record<string, unknown> | undefined;
+    fields.exact('properties.principalId', properties?.principalId, servicePrincipalId, true);
+    fields.oneOf('properties.principalType', properties?.principalType, ['ServicePrincipal']);
+    fields.exact('properties.scope', properties?.scope, scope, true);
+    fields.exact('properties.roleDefinitionId', properties?.roleDefinitionId, roleDefinition(subscriptionId, grant.role), true);
+    if (grant.condition) {
+      fields.exact('properties.condition', properties?.condition, grant.condition);
+      fields.oneOf('properties.conditionVersion', properties?.conditionVersion, ['2.0']);
+    } else if (properties?.condition != null) {
+      fields.reject('properties.condition', 'must be absent for this assignment');
     }
   }
 

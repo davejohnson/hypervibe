@@ -170,6 +170,16 @@ describe('RdsAdapter temporary database access', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps account numbers and the cluster ARN out of an RDS workload account mismatch', async () => {
+    const { adapter, ec2Send } = await connectedAdapter();
+    const otherArn = CLUSTER_ARN.replace(ACCOUNT_ID, '987654321098');
+    const other = { ...environment, platformBindings: { ...environment.platformBindings, projectId: otherArn } };
+    const message = String(await adapter.acquireTemporaryDatabaseAccess(other, component, 5432).catch(error => error));
+    expect(message).toMatch(/Account.*match/);
+    expect(message).not.toMatch(/123456789012|987654321098|arn:aws:/);
+    expect(ec2Send).not.toHaveBeenCalled();
+  });
+
   it('adds the caller IPv4 as a temporary /32 rule and revokes exactly that rule', async () => {
     const { adapter, ec2Send } = await connectedAdapter();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('203.0.113.42\n')));

@@ -574,13 +574,13 @@ function logsPresentation(data: DataRecord): CommandPresentation {
   const source = stringValue(data.source) ?? 'service';
   const context = [
     stringValue(data.environment),
-    stringValue(data.service),
+    source === 'release-command' ? stringValue(data.execution) ?? 'release command (all executions)' : stringValue(data.service),
     stringValue(data.provider),
   ].filter(Boolean).join(' · ');
   const sections: PresentationSection[] = [];
   let summary: string | undefined;
 
-  if (source === 'service') {
+  if (source === 'service' || source === 'release-command') {
     const logs = arrayValue(data.logs);
     const count = numberValue(data.count) ?? logs.length;
     const deploymentStatus = stringValue(data.deploymentStatus);
@@ -610,7 +610,7 @@ function logsPresentation(data: DataRecord): CommandPresentation {
 
   const details = genericLines(data, new Set([
     'source', 'provider', 'environment', 'service', 'deploymentStatus', 'deploymentId',
-    'count', 'logs', 'buildLogs', 'lineCount', 'returnedLines', 'truncated', 'deployments', 'webhooks',
+    'count', 'logs', 'execution', 'buildLogs', 'lineCount', 'returnedLines', 'truncated', 'deployments', 'webhooks',
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {

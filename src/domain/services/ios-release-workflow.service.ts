@@ -14,7 +14,7 @@ import {
 } from './managed-ci-evidence.js';
 
 // Bump for intentional migrations of the generated iOS release contract.
-export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 8;
+export const IOS_RELEASE_WORKFLOW_RENDERER_REVISION = 9;
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',

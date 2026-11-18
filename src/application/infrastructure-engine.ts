@@ -10,7 +10,7 @@ import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
 import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
-  cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type PendingJobRun, type WorkloadKind,
+  cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type JobRunResult, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -1516,10 +1516,13 @@ export async function releaseGcpEngineServices(ctx: CommandContext, params: {
       const name = action.resource.name;
       if (action.metadata?.workloadKind === 'release-command') {
         const outcome = await runReleaseCommand(context, params.project, spec, environmentName, name, String(action.metadata.resource), source, builtImages);
-        if (outcome.status !== 'released') results.push({ service: 'release command', ...outcome });
-        return outcome.status === 'released'
-          ? { success: true, message: outcome.message }
-          : { success: false, ...(outcome.status === 'unknown' ? { status: 'pending' as const } : {}), message: outcome.message, error: outcome.message };
+        return {
+          success: outcome.status === 'released',
+          message: outcome.message,
+          ...(outcome.status !== 'released' ? { error: outcome.message } : {}),
+          ...(outcome.status === 'unknown' ? { status: 'pending' as const } : {}),
+          ...(outcome.execution ? { data: { execution: outcome.execution } } : {}),
+        };
       }
       const result = await releaseOne(context, params.project, spec, environmentName, name, String(action.metadata?.resource), source,
         (['jobs', 'workerPools'] as const).find((kind) => kind === action.metadata?.workloadKind) ?? 'services', builtImages);
@@ -1537,6 +1540,16 @@ export async function releaseGcpEngineServices(ctx: CommandContext, params: {
     if (!results.some((result) => result.service === name)) {
       results.push({ service: name, status: 'failed', message: `${name} was not released because an earlier release step did not finish. ${execution.error ?? ''}`.trim() });
     }
+  }
+  if (releaseCommand) {
+    const receipt = execution.receipts.find((entry) => entry.actionId === 'release-command:migrations');
+    const executionName = receipt?.data?.execution;
+    results.unshift({
+      kind: 'release-command', service: 'release command',
+      status: receipt?.status === 'succeeded' ? 'released' : receipt?.status === 'failed' && receipt.message ? 'failed' : 'unknown',
+      message: receipt?.message ?? 'Hypervibe could not verify the release command outcome.',
+      ...(typeof executionName === 'string' ? { logs: { command: 'hv_logs', arguments: { project: params.project.name, env: environmentName, source: 'release-command', execution: executionName } } } : {}),
+    });
   }
   return { results, applyRunId: execution.applyRunId, source: source.summary };
 }
@@ -1621,7 +1634,7 @@ async function buildServiceImage(
 async function runReleaseCommand(
   context: EngineContext, project: Project, spec: ProjectSpec, environmentName: string, primaryService: string,
   job: string, source: ReleaseSource, builtImages: Map<string, { imageUri: string; logsUrl?: string }>
-): Promise<Pick<EngineReleaseResult, 'status' | 'message'>> {
+): Promise<JobRunResult> {
   const build = await buildServiceImage(context, project, spec, environmentName, primaryService, source, builtImages);
   if (!build.success) return { status: 'failed', message: build.error };
   const token = await context.adapter.engineAccessToken();

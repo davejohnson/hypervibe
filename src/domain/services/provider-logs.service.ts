@@ -174,7 +174,7 @@ export async function fetchProviderLogs(
   provider: string,
   project: Project,
   environment: Environment,
-  serviceName: string,
+  target: string | { source: 'release-command'; execution?: string },
   lines: number,
   options: { errorsOnly?: boolean } = {}
 ): Promise<ProviderRuntimeLogsResult> {
@@ -191,16 +191,15 @@ export async function fetchProviderLogs(
   // the upstream bounded scan in that case, then enforce the caller's limit
   // locally so an over-returning provider cannot widen the public result.
   const scanLimit = options.errorsOnly ? 500 : lines;
-  const providerResult = await readProviderOperation(
-    provider,
-    'service log read',
-    () => runtimeLogsAdapter.readProviderLogs({
-      environment,
-      serviceName,
-      limit: scanLimit,
-      errorsOnly: options.errorsOnly,
-    })
-  );
+  const request = { environment, limit: scanLimit, errorsOnly: options.errorsOnly };
+  let providerResult: ProviderRuntimeLogsResult;
+  if (typeof target === 'string') {
+    providerResult = await readProviderOperation(provider, 'service log read', () => runtimeLogsAdapter.readProviderLogs({ ...request, serviceName: target }));
+  } else {
+    const read = runtimeLogsAdapter.readReleaseCommandLogs?.bind(runtimeLogsAdapter);
+    if (!read) throw new NotSupportedError(provider, 'release command log reads');
+    providerResult = await readProviderOperation(provider, 'release command log read', () => read({ ...request, execution: target.execution }));
+  }
   return {
     ...providerResult,
     logs: boundedProviderLogs(providerResult.logs, lines, options.errorsOnly === true),

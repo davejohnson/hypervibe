@@ -37,10 +37,12 @@ import type {
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
 import { resourceName } from '../../../domain/services/resource-names.js';
+import { redactExactValues } from '../../../utils/redact-exact-values.js';
 import { fetchWithRetry } from '../../../utils/fetch-retry.js';
 import {
   CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
   cloudRunMigrationJobName,
+  cloudRunExecutionId,
 } from './cloudrun-release-command.js';
 
 // Credentials schema for self-registration
@@ -821,6 +823,47 @@ export class CloudRunAdapter implements
         data: { applied: 0, skipped: 1, mutationAttempted: false, code: 'ENGINE_TASK_UNSUPPORTED' },
       },
     };
+  }
+
+  async readReleaseCommandLogs(request: Omit<ProviderRuntimeLogsRequest, 'serviceName'> & { execution?: string }): Promise<ProviderRuntimeLogsResult> {
+    const bindings = parseHostingBindings(request.environment);
+    const engine = bindings.engine as { kind?: string; releaseJob?: unknown } | undefined;
+    const job = engine?.releaseJob;
+    if (engine?.kind !== 'opentofu' || typeof job !== 'string' || !job.trim()) {
+      throw new Error('This environment has no bound release command job.');
+    }
+    const region = bindings.environmentId;
+    if (!this.credentials || !region || bindings.projectId !== this.credentials.projectId) {
+      throw new Error('The release command job needs a matching Google Cloud project and a bound region.');
+    }
+    const jobResource = `projects/${bindings.projectId}/locations/${region}/jobs/${job}`;
+    const executionId = cloudRunExecutionId(jobResource, request.execution);
+    if (request.execution !== undefined && !executionId) {
+      throw new Error('The requested execution does not belong to the bound release command job.');
+    }
+    const sensitive = [this.credentials.credentials, this.serviceAccountCreds?.private_key ?? ''];
+    try {
+      const token = await this.getAccessToken();
+      sensitive.push(token);
+      // Application output can describe a failure at DEFAULT severity. The shared reader
+      // applies errorsOnly to this bounded set after reading both stdout and stderr.
+      const entries = await this.queryCloudLogging({
+        token, region, executionId, targetKind: 'job', targetName: job, limit: request.limit,
+      });
+      const logs = entries.map((entry) => {
+        const resource = entry.resource;
+        if (resource?.type !== 'cloud_run_job' || resource.labels?.job_name !== job
+          || resource.labels.project_id !== bindings.projectId || resource.labels.location !== region
+          || (executionId && entry.labels?.['run.googleapis.com/execution_name'] !== executionId)) {
+          throw new Error('Cloud Logging returned an entry outside the requested release execution or job.');
+        }
+        const log = this.toLogEntry(entry);
+        return { timestamp: log.timestamp.toISOString(), severity: log.severity, message: redactExactValues(log.message, sensitive) };
+      });
+      return { logs };
+    } catch (error) {
+      throw new Error(redactExactValues(error instanceof Error ? error.message : String(error), sensitive));
+    }
   }
 
   async readProviderLogs(request: ProviderRuntimeLogsRequest): Promise<ProviderRuntimeLogsResult> {
@@ -1818,6 +1861,8 @@ export class CloudRunAdapter implements
     token: string;
     targetName: string;
     targetKind: 'service' | 'job' | 'workerPool';
+    region?: string;
+    executionId?: string;
     limit: number;
     since?: Date;
     errorsOnly?: boolean;
@@ -1826,7 +1871,8 @@ export class CloudRunAdapter implements
       return [];
     }
 
-    const { projectId, region } = this.credentials;
+    const { projectId } = this.credentials;
+    const region = params.region ?? this.credentials.region;
     // Resource types and labels: https://docs.cloud.google.com/logging/docs/api/v2/resource-list
     const resourceFilter = params.targetKind === 'workerPool'
       ? `resource.type="cloud_run_worker_pool" AND resource.labels.worker_pool_name="${this.escapeLoggingValue(params.targetName)}"`
@@ -1837,6 +1883,7 @@ export class CloudRunAdapter implements
       `resource.labels.project_id="${this.escapeLoggingValue(projectId)}"`,
       `resource.labels.location="${this.escapeLoggingValue(region)}"`,
       resourceFilter,
+      params.executionId ? `labels."run.googleapis.com/execution_name"="${this.escapeLoggingValue(params.executionId)}"` : undefined,
       params.since ? `timestamp >= "${params.since.toISOString()}"` : undefined,
       params.errorsOnly ? 'severity>=WARNING' : undefined,
     ].filter((entry): entry is string => Boolean(entry));

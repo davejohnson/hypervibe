@@ -188,11 +188,15 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
             agentInstruction: { action: 'stop_and_report', message: 'Report the blocker. Releases never create infrastructure.' },
           });
         }
+        const jobLogs = released.results.find((result) => result.kind === 'release-command')?.logs;
+        const logHint = jobLogs && `Read the release command output with hv_logs source="release-command" project=${JSON.stringify(jobLogs.arguments.project)} env=${JSON.stringify(jobLogs.arguments.env)} execution=${JSON.stringify(jobLogs.arguments.execution)}.`;
         const failed = released.results.filter((result) => result.status !== 'released');
         if (failed.length) {
           return commandError('PROVIDER_ERROR', 'The release did not complete.', {
             details: { environment: envName, results: released.results },
-            hint: failed.some((result) => result.status === 'unknown') ? 'Check hv_status before retrying; the outcome is not yet known.' : 'Fix the reported problem, then re-run hv_deploy.',
+            hint: [logHint, failed.some((result) => result.status === 'unknown')
+              ? 'Check hv_status before retrying; the outcome is not yet known.'
+              : 'Fix the reported problem, then re-run hv_deploy.'].filter(Boolean).join(' '),
             next: ['hv_status', 'hv_logs'],
           });
         }
@@ -203,8 +207,9 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           ...(released.source ? { source: released.source } : {}),
           results: released.results,
           serviceUrls: Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url])),
-          message: `Released ${released.results.length} service(s).`,
+          message: `Released ${released.results.filter((result) => result.kind !== 'release-command').length} service(s).`,
         }, {
+          ...(logHint ? { hint: logHint } : {}),
           ...(released.source?.uncommittedChangesExcluded
             ? { warnings: ['Only committed code was deployed; uncommitted changes in this repository were not included.'] } : {}),
           next: ['hv_health'],

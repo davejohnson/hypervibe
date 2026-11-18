@@ -59,8 +59,8 @@ function releaseAttemptFixture(environmentName = 'staging', branch = 'main') {
     listWorkflowRunArtifacts: vi.fn(async () => ({data: {total_count: 1, artifacts: [artifact]}})),
     listJobsForWorkflowRunAttempt: vi.fn(async () => ({data: jobs})),
   }}};
-  const execute = (eventName: string) => runScript(step(workflow, 'Resolve release provenance').with.script, github,
-    {eventName, repo: {owner: 'owner', repo: 'app'}, payload: {workflow_run: run, inputs: {commit_sha: SHA, server_run_id: '55'}}},
+  const execute = (eventName: string, force = false) => runScript(step(workflow, 'Resolve release provenance').with.script, github,
+    {eventName, repo: {owner: 'owner', repo: 'app'}, payload: {workflow_run: run, inputs: {commit_sha: SHA, server_run_id: '55', force: String(force)}}},
     workflow.jobs.eligibility.env);
   return {workflow, run, artifact, job, jobs, github, execute};
 }
@@ -234,80 +234,114 @@ describe('executed iOS change gate before protected jobs', () => {
   });
 });
 
-function manifest(workflow: any) {
-  return {version: 2, environment: 'staging', mobile: {repository: 'owner/app', sha: BASE,
+function manifest(workflow: any, environment: string) {
+  return {version: 2, environment, mobile: {repository: 'owner/app', sha: BASE,
     buildContractFingerprint: workflow.jobs.eligibility.env.HYPERVIBE_IOS_BUILD_CONTRACT_FINGERPRINT},
   server: {repository: 'owner/app', sha: BASE},
   app: {bundleId: 'com.example.app', appId: 'app-id', buildId: 'build-id', ipaSha256: 'f'.repeat(64)}};
 }
-function relevance(options: {files?: unknown; status?: string; mergeBase?: string; evidence?: unknown; force?: boolean; error?: boolean; baseline?: string; workingDirectory?: string; expectedInfoPlist?: Record<string, string>} = {}) {
-  const workflow = generated('staging', options.workingDirectory ?? '.', options.workingDirectory ? null : ['mobile', 'packages/shared'], options.expectedInfoPlist);
+function relevance(environmentName: string, options: {files?: unknown; status?: string; mergeBase?: string; evidence?: unknown; force?: boolean; error?: boolean; baseline?: string; candidate?: string; workingDirectory?: string; expectedInfoPlist?: Record<string, string>} = {}) {
+  const workflow = generated(environmentName, options.workingDirectory ?? '.', options.workingDirectory ? null : ['mobile', 'packages/shared'], options.expectedInfoPlist);
   const emitted = step(workflow, 'Determine iOS change relevance');
   const compare = vi.fn(async () => {
     if (options.error) throw new Error('API unavailable');
     return {data: {status: options.status ?? 'ahead', merge_base_commit: {sha: options.mergeBase ?? BASE},
       files: options.files === undefined ? [{filename: 'web/page.tsx', status: 'modified'}, {filename: 'infra/main.tf', status: 'added'}] : options.files}};
   });
-  const read = vi.fn(() => JSON.stringify(options.evidence === undefined ? manifest(workflow) : options.evidence));
+  const read = vi.fn(() => JSON.stringify(options.evidence === undefined ? manifest(workflow, environmentName) : options.evidence));
   const execution = runScript(emitted.with.script, {rest: {repos: {compareCommitsWithBasehead: compare}}},
-    {eventName: 'workflow_dispatch', repo: {owner: 'owner', repo: 'app'}, payload: {inputs: {force: options.force ?? false}}},
-    {...workflow.jobs.eligibility.env, HYPERVIBE_CANDIDATE_SHA: SHA, HYPERVIBE_BASELINE_SHA: options.baseline ?? BASE, HYPERVIBE_BASELINE_PATH: '/beta.json'}, read);
+    {eventName: options.force === undefined ? 'workflow_run' : 'workflow_dispatch', repo: {owner: 'owner', repo: 'app'},
+      payload: options.force === undefined ? {} : {inputs: {force: String(options.force)}}},
+    {...workflow.jobs.eligibility.env, HYPERVIBE_CANDIDATE_SHA: options.candidate ?? SHA, HYPERVIBE_BASELINE_SHA: options.baseline ?? BASE, HYPERVIBE_BASELINE_PATH: '/beta.json'}, read);
   return {...execution, compare, read};
 }
 
-describe('executed comparison from the last completed beta', () => {
+describe.each(['staging', 'production'])('generated iOS release decision (%s)', environmentName => {
   it('skips web and infrastructure changes while comparing the entire unbuilt range', async () => {
-    const result = relevance(); await result.result;
+    const result = relevance(environmentName); await result.result;
     expect(result.outputs.should_release).toBe('false');
     expect(result.compare).toHaveBeenCalledWith({owner: 'owner', repo: 'app', basehead: BASE + '...' + SHA, per_page: 1, page: 1});
   });
-  it.each(['mobile/View.swift', 'packages/shared/api.ts', 'package-lock.json', '.github/workflows/hypervibe-ios-release-staging.yml'])('builds when an earlier unbuilt commit affects %s', async filename => {
-    const result = relevance({files: [{filename, status: 'modified'}, {filename: 'web/page.tsx', status: 'modified'}]});
-    await result.result; expect(result.outputs.should_release).toBe('true');
+  it('skips an unforced dispatch at the same validated beta commit without comparing files', async () => {
+    const result = relevance(environmentName, {candidate: BASE, force: false}); await result.result;
+    expect(result.outputs.should_release).toBe('false');
+    expect(result.compare).not.toHaveBeenCalled();
   });
-  it('detects a file moved out of the mobile tree', async () => {
-    const result = relevance({files: [{filename: 'archive/View.swift', previous_filename: 'mobile/View.swift', status: 'renamed'}]});
+  it.each([
+    {status: 'added', filename: 'mobile/View.swift'},
+    {status: 'removed', filename: 'packages/shared/api.ts'},
+    {status: 'modified', filename: 'package-lock.json'},
+    {status: 'modified', filename: `.github/workflows/hypervibe-ios-release-${environmentName}.yml`},
+    {status: 'renamed', filename: 'mobile/View.swift', previous_filename: 'archive/View.swift'},
+    {status: 'renamed', filename: 'archive/View.swift', previous_filename: 'mobile/View.swift'},
+  ])('builds for a $status input at $filename', async file => {
+    const result = relevance(environmentName, {files: [file, {filename: 'web/page.tsx', status: 'modified'}]});
     await result.result; expect(result.outputs.should_release).toBe('true');
   });
   it('treats a path prefix without a directory boundary as irrelevant', async () => {
-    const result = relevance({files: [{filename: 'mobile-web/home.tsx', status: 'modified'}]});
+    const result = relevance(environmentName, {files: [{filename: 'mobile-web/home.tsx', status: 'modified'}]});
     await result.result; expect(result.outputs.should_release).toBe('false');
   });
   it.each([
     ['previously unchecked metadata', undefined],
     ['different embedded backend', {AppEnvironment: 'staging', APIBaseURL: 'https://invoiceperfect.com'}],
   ] as const)('builds for a changed metadata contract despite web-only changes: %s', async (_label, previous) => {
-    const evidence = manifest(generated('staging', '.', ['mobile', 'packages/shared'], previous));
-    const result = relevance({evidence, expectedInfoPlist: {AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com'}});
+    const evidence = manifest(generated(environmentName, '.', ['mobile', 'packages/shared'], previous), environmentName);
+    const result = relevance(environmentName, {evidence, expectedInfoPlist: {AppEnvironment: 'staging', APIBaseURL: 'https://staging.invoiceperfect.com'}});
     await result.result;
     expect(result.outputs.should_release).toBe('true');
     expect(result.compare).not.toHaveBeenCalled();
+  });
+  it('requires a build when a rename has an empty previous filename', async () => {
+    const result = relevance(environmentName, {files: [{filename: 'archive/View.swift', status: 'renamed', previous_filename: ''}]});
+    await result.result;
+    expect(result.outputs.should_release).toBe('true');
   });
   it.each([
     {evidence: null}, {evidence: {}}, {baseline: ''}, {status: 'diverged'}, {mergeBase: DISPATCH_REF_SHA},
     {files: null}, {files: [{filename: 'web/a.ts', status: 'renamed'}]}, {error: true},
     {files: Array.from({length: 300}, (_, index) => ({filename: `web/${index}.tsx`, status: 'modified'}))},
   ])('requires a build when baseline/comparison evidence is absent, unknown, or truncated (%j)', async options => {
-    const result = relevance(options); await result.result; expect(result.outputs.should_release).toBe('true');
+    const result = relevance(environmentName, options); await result.result; expect(result.outputs.should_release).toBe('true');
   });
   it.each(['environment', 'fingerprint', 'repository', 'sha', 'bundle', 'version', 'ipa'])('does not skip using stale or differently scoped %s evidence', async field => {
-    const evidence = manifest(generated());
-    if (field === 'environment') evidence.environment = 'production';
+    const evidence = manifest(generated(environmentName), environmentName);
+    if (field === 'environment') evidence.environment = environmentName === 'production' ? 'staging' : 'production';
     if (field === 'fingerprint') evidence.mobile.buildContractFingerprint = '0'.repeat(64);
     if (field === 'repository') evidence.mobile.repository = 'another/repo';
     if (field === 'sha') evidence.mobile.sha = SHA;
     if (field === 'bundle') evidence.app.bundleId = 'another.bundle';
     if (field === 'version') evidence.version = 1;
     if (field === 'ipa') evidence.app.ipaSha256 = '';
-    const result = relevance({evidence}); await result.result;
+    const result = relevance(environmentName, {evidence}); await result.result;
     expect(result.outputs.should_release).toBe('true'); expect(result.compare).not.toHaveBeenCalled();
   });
   it('manual force bypasses only relevance and leaves the earlier provenance steps mandatory', async () => {
-    const result = relevance({force: true}); await result.result;
+    const result = relevance(environmentName, {force: true}); await result.result;
     expect(result.outputs.should_release).toBe('true'); expect(result.compare).not.toHaveBeenCalled();
-    const steps = generated().jobs.eligibility.steps;
-    expect(steps.findIndex((item: any) => item.name === 'Verify server release gate')).toBeLessThan(steps.findIndex((item: any) => item.name === 'Determine iOS change relevance'));
-    expect(step(generated(), 'Verify server release gate').if).toBeUndefined();
+    const workflow = generated(environmentName);
+    const eligibility = workflow.jobs.eligibility;
+    const decision = step(workflow, 'Determine iOS change relevance');
+    expect(eligibility.outputs.should_release).toBe('${{ steps.' + decision.id + '.outputs.should_release }}');
+    expect(workflow.jobs.prepare.needs).toBe('eligibility');
+    expect(workflow.jobs.prepare.if).toBe("${{ needs.eligibility.outputs.should_release == 'true' }}");
+    for (const name of ['Resolve release provenance', 'Download verified server release evidence', 'Verify server release gate', 'Verify mobile source contract']) {
+      const required = step(workflow, name);
+      expect(eligibility.steps.indexOf(required)).toBeLessThan(eligibility.steps.indexOf(decision));
+      expect(required.if).toBeUndefined();
+      expect(required['continue-on-error']).toBeUndefined();
+    }
+  });
+  it.each([
+    ['untrusted workflow ref', /outside the configured branch/],
+    ['expired server artifact', /unexpired server release artifact/],
+  ] as const)('rejects a forced release with %s', async (invalid, expectedError) => {
+    const f = releaseAttemptFixture(environmentName);
+    if (invalid === 'untrusted workflow ref') f.run.path += '@refs/heads/unreviewed';
+    else f.artifact.expired = true;
+    const execution = f.execute('workflow_dispatch', true);
+    await expect(execution.result).rejects.toThrow(expectedError);
+    expect(execution.outputs).toEqual({});
   });
 });
 
@@ -359,16 +393,24 @@ function baseline(options: {changedWorkflow?: boolean; expired?: boolean; incomp
   return {...result, listArtifacts, getContent, listRuns, listJobs, getRun};
 }
 describe('executed successful beta discovery', () => {
-  it('does not advance the baseline for a successful skipped run without a beta artifact', async () => {
-    const result = baseline(); await result.result;
+  it.each(['staging', 'production'])('compares from the last completed %s beta across a later skipped run', async environmentName => {
+    const result = baseline({environmentName}); await result.result;
     expect(result.outputs).toEqual({artifact_id: '80', run_id: '11', sha: BASE});
+    const decision = relevance(environmentName, {baseline: result.outputs.sha});
+    await decision.result;
+    expect(decision.outputs.should_release).toBe('false');
+    expect(decision.compare).toHaveBeenCalledWith(expect.objectContaining({basehead: BASE + '...' + SHA}));
     expect(result.listArtifacts.mock.calls.map(([arg]) => arg.run_id)).toEqual([12, 11]);
     expect(result.getContent.mock.calls.map(([arg]) => arg.ref)).toContain(BASE);
     expect(result.getContent.mock.calls.map(([arg]) => arg.ref)).toContain(DISPATCH_REF_SHA);
   });
-  it('requires a build when a successful beta artifact was deleted instead of proving a skipped release', async () => {
-    const result = baseline({missingCompletedArtifact: true}); await result.result;
+  it.each(['staging', 'production'])('builds when the last completed %s release has lost its artifact', async environmentName => {
+    const result = baseline({environmentName, missingCompletedArtifact: true}); await result.result;
     expect(result.outputs).toEqual({});
+    const decision = relevance(environmentName, {baseline: result.outputs.sha ?? ''});
+    await decision.result;
+    expect(decision.outputs.should_release).toBe('true');
+    expect(decision.compare).not.toHaveBeenCalled();
   });
   it('uses latest completed release order when an older run is retried successfully', async () => {
     const result = baseline({retry: true}); await result.result;
@@ -432,11 +474,13 @@ describe.each(['staging', 'production'])('previous beta workflow metadata (%s)',
 
 
 describe('exact mobile source contract before protected build jobs', () => {
-  it('fails before a build when deployed source A has different mobile configuration than workflow B', async () => {
-    const workflow = generated();
+  it.each(['staging', 'production'])('rejects a forced %s build when the deployed mobile configuration differs from the reviewed workflow', async environmentName => {
+    const workflow = generated(environmentName);
     const gate = step(workflow, 'Verify mobile source contract');
-    const github = {rest: {repos: {getContent: vi.fn(async () => ({data: {type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({environments: {staging: {ios: {bundleId: 'another.app'}}}})).toString('base64')}}))}}};
-    const execution = runScript(gate.with.script, github, {repo: {owner: 'owner', repo: 'app'}}, {...workflow.jobs.eligibility.env, ...gate.env, HYPERVIBE_CANDIDATE_SHA: SHA});
+    const github = {rest: {repos: {getContent: vi.fn(async () => ({data: {type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({environments: {[environmentName]: {ios: {bundleId: 'another.app'}}}})).toString('base64')}}))}}};
+    const execution = runScript(gate.with.script, github,
+      {eventName: 'workflow_dispatch', repo: {owner: 'owner', repo: 'app'}, payload: {inputs: {force: 'true'}}},
+      {...workflow.jobs.eligibility.env, ...gate.env, HYPERVIBE_CANDIDATE_SHA: SHA});
     await expect(execution.result).rejects.toThrow(/mobile.*source|source.*mobile/i);
   });
   it.each(['matching', 'different', 'omitted'] as const)('verifies %s embedded backend expectations in the exact deployed source', async variant => {
@@ -478,7 +522,7 @@ it.each([true, false])('executes source fingerprints with equivalent defaults an
 
 
 it.each(['./mobile', 'mobile/', './mobile/', 'mobile\\native'])('never skips legacy workingDirectory %s because of path spelling', async workingDirectory => {
-  const result = relevance({workingDirectory, files: [{filename: 'mobile/View.swift', status: 'modified'}]});
+  const result = relevance('staging', {workingDirectory, files: [{filename: 'mobile/View.swift', status: 'modified'}]});
   await result.result;
   expect(result.outputs.should_release).toBe('true');
 });

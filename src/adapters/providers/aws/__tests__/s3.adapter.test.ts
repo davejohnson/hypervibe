@@ -22,6 +22,32 @@ function environment(): Environment {
 
 describe('S3StorageAdapter', () => {
 
+  it.each([
+    [undefined, 'is missing'],
+    ['wrong-account-value', '12 digits'],
+  ])('identifies an invalid STS Account before reading buckets', async (Account, reason) => {
+    const s3 = { send: vi.fn(), destroy: vi.fn() };
+    const sts = { send: vi.fn(async () => ({ Account })), destroy: vi.fn() };
+    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
+    await adapter.connect(credentials);
+    const verified = await adapter.verify();
+    expect(verified).toMatchObject({ success: false, error: expect.stringContaining('Account') });
+    expect(verified.error).toContain(reason);
+    expect(verified.error).not.toContain('wrong-account-value');
+    await expect(adapter.inspectStorageResources({ resource: 'storage', limit: 1 })).rejects.toThrow('Account');
+    expect(s3.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps both account numbers out of an S3 binding mismatch', async () => {
+    const s3 = { send: vi.fn(), destroy: vi.fn() };
+    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
+    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
+    await adapter.connect(credentials);
+    const { receipt } = await adapter.ensureContext('app', environment(), { accountId: '987654321098' }, region);
+    expect(receipt.error).toMatch(/Account.*match/);
+    expect(receipt.error).not.toMatch(/123456789012|987654321098/);
+  });
+
   it('inventories bounded buckets with durable account scope', async () => {
     const s3 = {
       send: vi.fn(async (command: unknown) => {

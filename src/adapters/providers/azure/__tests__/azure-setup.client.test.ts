@@ -147,7 +147,7 @@ describe('Azure setup apply', () => {
     });
   });
 
-  it.each([false, true])('verifies existing role assignment conflicts before success (stale condition: %s)', async (stale) => {
+  it.each(['matching', 'condition', 'principalId', 'scope', 'body'])('reports the field that conflicts with the reviewed role assignment (%s)', async (field) => {
     const azure = fakeAzure([
       ['POST', /\/register\?/, () => json(200)], ['PUT', /\/resourceGroups\/hv-billforge\?/, () => json(200)], ['PUT', /\/vaults\//, () => json(200)],
       ['PATCH', /applications\(uniqueName=/, () => json(204)], ['GET', /applications\(uniqueName=/, () => json(200, { id: 'app-object', appId: 'client-id' })],
@@ -156,12 +156,20 @@ describe('Azure setup apply', () => {
       ['PUT', /\/roleAssignments\//, () => json(409, { error: { code: 'RoleAssignmentExists' } })],
       ['GET', /\/roleAssignments\//, (_body, url) => {
         const requested = azure.calls.filter((call) => call.method === 'PUT' && call.url === url).at(-1)?.body as { properties: Record<string, unknown> };
+        if (field === 'body') return json(200, null);
         return json(200, { id: url.replace('https://management.azure.com', '').split('?')[0], properties: { ...requested.properties, scope: `/subscriptions/${SUB}/resourceGroups/hv-billforge`,
-          ...(stale && requested.properties.condition ? { condition: appRoleAssignmentCondition() } : {}) } });
+          ...(field === 'condition' && requested.properties.condition ? { condition: appRoleAssignmentCondition() } : {}),
+          ...(field === 'principalId' ? { principalId: 42 } : {}), ...(field === 'scope' ? { scope: undefined } : {}) } });
       }],
     ]);
     const applying = applyAzureSetup(session(), plan, { createSecret: false, fetchImpl: azure.fetchImpl, retryDelayMs: 1 });
-    if (stale) await expect(applying).rejects.toThrow(/role assignment|grant/i);
+    if (field !== 'matching') {
+      const message = String(await applying.catch(error => error));
+      expect(message).toContain(field === 'body' ? 'response body' : `properties.${field}`);
+      expect(message).toContain(field === 'body' ? 'object' : field === 'scope' ? 'missing' : field === 'principalId' ? 'text' : 'match');
+      expect(message).not.toContain(SUB);
+      expect(message).not.toContain('sp-object');
+    }
     else expect((await applying).secret).toBeUndefined();
     expect(azure.calls.some((call) => call.url.endsWith('/addPassword') || (call.method === 'POST' && call.url.endsWith('/federatedIdentityCredentials')))).toBe(false);
   });

@@ -1,3 +1,4 @@
+import { stsAccountId } from './aws-account-id.js';
 import { AwsEngineCredentialsSchema } from './aws-engine.adapter.js';
 import { awsEngineAuthentication } from './tofu/aws-engine.backend.js';
 import { createPostgresCredentialLifecycle } from '../database/database-credential.js';
@@ -480,7 +481,7 @@ export class RdsAdapter implements IDatabaseOperations, IObservableDatabase {
     const connectedAccountId = await this.resolveAccountId();
     if (accountId !== connectedAccountId) {
       throw new Error(
-        `Amazon RDS binding scope account ${accountId} does not match connected account ${connectedAccountId}.`
+        'AWS STS caller identity: Account does not match the bound RDS account.'
       );
     }
   }
@@ -489,10 +490,7 @@ export class RdsAdapter implements IDatabaseOperations, IObservableDatabase {
     if (this.accountId) return this.accountId;
     if (!this.sts) throw new Error('Amazon STS adapter is not connected.');
     const identity = await this.sts.send(new GetCallerIdentityCommand({}));
-    if (!identity.Account || !/^\d{12}$/.test(identity.Account)) {
-      throw new Error('AWS did not return a valid account identity for the RDS connection.');
-    }
-    this.accountId = identity.Account;
+    this.accountId = stsAccountId(identity);
     return this.accountId;
   }
 
@@ -526,7 +524,7 @@ export class RdsAdapter implements IDatabaseOperations, IObservableDatabase {
     const accountId = await this.resolveAccountId();
     if (cluster.accountId !== accountId) {
       throw new Error(
-        `Bound ECS cluster ${cluster.projectId} is outside the connected AWS account ${accountId}.`
+        'AWS STS caller identity: Account does not match the bound ECS cluster account.'
       );
     }
     const persisted = parseAwsWorkloadNetworkBinding(environment);

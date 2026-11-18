@@ -1,3 +1,4 @@
+import { stsAccountId } from './aws-account-id.js';
 import { z } from 'zod';
 import {
   GetBucketTaggingCommand,
@@ -121,9 +122,7 @@ export class S3StorageAdapter implements IStorageOperations {
   async verify(): Promise<VerifyResult> {
     try {
       const identity = await this.stsClient().send(new GetCallerIdentityCommand({}));
-      return typeof identity.Account === 'string'
-        ? { success: true, email: `AWS account ${identity.Account}` }
-        : { success: false, error: 'AWS STS did not return an account identity.' };
+      return { success: true, email: `AWS account ${stsAccountId(identity)}` };
     } catch (error) {
       return { success: false, error: errorMessage(error) };
     }
@@ -159,21 +158,19 @@ export class S3StorageAdapter implements IStorageOperations {
       }
       this.configureRegion(region);
       const identity = await this.stsClient().send(new GetCallerIdentityCommand({}));
-      if (typeof identity.Account !== 'string') {
-        throw new Error('AWS STS did not return an account identity.');
-      }
-      if (context.accountId && context.accountId !== identity.Account) {
-        throw new Error(`Bound AWS account ${context.accountId} does not match connected account ${identity.Account}.`);
+      const accountId = stsAccountId(identity);
+      if (context.accountId && context.accountId !== accountId) {
+        throw new Error('AWS STS caller identity: Account does not match the bound storage account.');
       }
       const resolved = {
-        accountId: identity.Account,
+        accountId,
         region,
         projectName,
         environmentName: environment.name,
         environmentId: environment.id,
       };
       return {
-        receipt: { success: true, message: `AWS S3 context is ready in ${identity.Account}/${region}` },
+        receipt: { success: true, message: `AWS S3 context is ready in ${accountId}/${region}` },
         context: resolved,
       };
     } catch (error) {
@@ -226,9 +223,7 @@ export class S3StorageAdapter implements IStorageOperations {
     request: ProviderInspectionRequest
   ): Promise<Record<string, unknown>> {
     const identity = await this.stsClient().send(new GetCallerIdentityCommand({}));
-    if (typeof identity.Account !== 'string' || identity.Account.length === 0) {
-      throw new Error('AWS STS did not return an account identity.');
-    }
+    const accountId = stsAccountId(identity);
     const buckets: Array<{ Name?: string; BucketRegion?: string }> = [];
     let continuationToken: string | undefined;
     do {
@@ -252,7 +247,7 @@ export class S3StorageAdapter implements IStorageOperations {
         kind: 'object',
         status: 'ready',
         ...(bucket.BucketRegion ? { region: bucket.BucketRegion } : {}),
-        providerScope: { accountId: identity.Account },
+        providerScope: { accountId },
       })),
       ...(matched.length === 0 && (request.id || request.name)
         ? { [request.id ? 'id' : 'name']: request.id ?? request.name }

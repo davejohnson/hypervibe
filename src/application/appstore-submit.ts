@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parse as parseYaml } from 'yaml';
 import { createHash } from 'node:crypto';
 import type { CommandContext } from './context.js';
 import { commandError, commandSuccess, HvError, type CommandEnvelope } from './results.js';
@@ -11,7 +12,7 @@ import { resolveManagedWorkflowContract, workflowFiles, workflowFilesContentHash
 import { environmentDeploymentContractHash } from '../domain/services/deployment-contract.service.js';
 import { managedCiReleaseArtifactPrefix, MANAGED_CI_RELEASE_EVIDENCE_VERSION, normalizeCredentialActivation } from '../domain/services/managed-ci-evidence.js';
 import { iosBuildContractFingerprint, IOS_RELEASE_EVIDENCE_VERSION } from '../domain/services/ios-release-evidence.js';
-import { assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt } from '../domain/services/ios-release-attempt.js';
+import { assertCurrentReleaseAttempt, assertSkippedIosReleaseAttempt, assertSameReleaseAttempt, normalizeWorkflowPath } from '../domain/services/ios-release-attempt.js';
 import { iosReleaseWorkflowPath } from '../domain/services/ios-release-workflow.service.js';
 import { canonicalJsonSha256 } from '../lib/canonical-json.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -59,7 +60,8 @@ export type ServerSubmissionManifest = z.infer<typeof serverManifestSchema>;
 type Contract = Extract<ReturnType<typeof resolveManagedWorkflowContract>, { ok: true }>;
 type Run = Awaited<ReturnType<GitHubAdapter['getWorkflowRun']>>;
 type Artifact = Awaited<ReturnType<GitHubAdapter['listWorkflowRunArtifacts']>>['artifacts'][number];
-type SelectedEvidence = { run: Run; artifact: Artifact; body: unknown; sha: string; sha256: string; jobName: 'deploy' | 'release' };
+type RunIdentity = { id: number; repository: string; workflow: string; ref: string; event: string };
+type SelectedEvidence = { identity: RunIdentity; run: Run; artifact: Artifact; body: unknown; sha: string; sha256: string; jobName: 'deploy' | 'release' };
 
 export interface AppStoreSubmitInput {
   project?: string; environment: string; appIdentifier: string; platform?: 'IOS' | 'MAC_OS' | 'TV_OS';
@@ -72,12 +74,37 @@ function runId(value: string): number {
   if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(result)) invalid('Release run IDs must be positive safe integers.');
   return result;
 }
-function validateRun(run: Run, repository: string, workflow: string, id: number): void {
-  if (run.id !== id || run.path !== workflow || run.status !== 'completed' || run.conclusion !== 'success'
+function validateRun(run: Run, expected: RunIdentity, previous?: Run): void {
+  let path: string;
+  try { path = normalizeWorkflowPath(run.path, expected.ref); }
+  catch { invalid('Release workflow path metadata must match the reviewed workflow branch.'); }
+  if (run.id !== expected.id || path !== expected.workflow || run.status !== 'completed' || run.conclusion !== 'success'
+      || !run.head_branch || `refs/heads/${run.head_branch}` !== expected.ref || run.event !== expected.event
       || !sha.safeParse(run.head_sha).success || !Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1
-      || run.repository?.full_name?.toLowerCase() !== repository.toLowerCase()
-      || run.head_repository?.full_name?.toLowerCase() !== repository.toLowerCase()) {
+      || run.repository?.full_name?.toLowerCase() !== expected.repository.toLowerCase()
+      || run.head_repository?.full_name?.toLowerCase() !== expected.repository.toLowerCase()) {
     invalid('Release evidence must belong to a successful exact managed workflow run in this repository.');
+  }
+  if (previous) {
+    try { assertSameReleaseAttempt(previous, run, expected.ref); }
+    catch { invalid('The selected workflow attempt changed while verifying release evidence.'); }
+  }
+}
+
+function validateDeclaredTrigger(program: string, run: Run): void {
+  // Trigger declarations belong to the workflow at the program SHA, which may differ from the deployed SHA.
+  let workflow: unknown;
+  try { workflow = parseYaml(program); }
+  catch { invalid('The selected workflow trigger configuration could not be read.'); }
+  const triggers = z.object({ on: z.record(z.string(), z.unknown()) }).safeParse(workflow);
+  if (!triggers.success || !Object.hasOwn(triggers.data.on, run.event)) {
+    invalid('The selected workflow does not declare the reported release event.');
+  }
+  if (run.event === 'push') {
+    const push = z.object({ branches: z.tuple([z.string()]) }).safeParse(triggers.data.on.push);
+    if (!push.success || push.data.branches[0] !== run.head_branch) {
+      invalid('The selected server workflow does not declare push deployment on this branch.');
+    }
   }
 }
 
@@ -135,36 +162,20 @@ async function selectEvidence(params: {
     if (runs.length > 1 && runs[0].updated_at === runs[1].updated_at) invalid('Multiple successful releases have the same time. Select an exact run ID.');
     ids = runs.map((run) => run.id);
   }
+  let defaultBranch: string | undefined;
   for (const id of ids) {
     const run = await github.getWorkflowRun(owner, repo, id);
-    validateRun(run, params.repository, params.workflow, id);
-    const listed = await github.listWorkflowRunArtifacts(owner, repo, id);
-    if (!Array.isArray(listed.artifacts) || listed.total_count !== listed.artifacts.length) {
-      invalid('Release artifact listing is incomplete. Select a run with complete observable evidence.');
+    let branch = params.contract.workflow.branch;
+    if (params.jobName === 'release' && run.event === 'workflow_run') {
+      // GitHub executes this consumer on the repository default branch, independently of the server branch.
+      defaultBranch ??= (await github.getRepository(owner, repo)).default_branch;
+      if (!defaultBranch) invalid('The default branch for the automatic beta workflow could not be verified.');
+      branch = defaultBranch;
+    } else if (run.event !== 'workflow_dispatch' && !(params.jobName === 'deploy' && run.event === 'push')) {
+      invalid('The selected workflow event cannot produce this managed release.');
     }
-    const matching = listed.artifacts.filter((artifact) => artifact.name.startsWith(params.prefix));
-    if (matching.length === 0 && !params.runId && params.jobName === 'release') {
-      // Missing evidence permits fallback only when this exact attempt proves
-      // eligibility succeeded and every protected release job was skipped.
-      const jobs = await github.listWorkflowRunAttemptJobs(owner, repo, id, run.run_attempt);
-      try { assertSkippedIosReleaseAttempt(run, jobs); }
-      catch { invalid('Missing beta release evidence cannot prove a relevance skip.'); }
-      const freshRun = await github.getWorkflowRun(owner, repo, id);
-      validateRun(freshRun, params.repository, params.workflow, id);
-      try { assertSameReleaseAttempt(run, freshRun); }
-      catch { invalid('The skipped beta workflow attempt changed during observation.'); }
-      continue;
-    }
-    if (matching.length !== 1) invalid('Expected one release manifest in the selected workflow run.');
-    const artifact = matching[0];
-    const releaseSha = artifact.name.slice(params.prefix.length);
-    if (!sha.safeParse(releaseSha).success || artifact.expired !== false || artifact.workflow_run?.id !== id
-        || !Number.isSafeInteger(artifact.id) || artifact.id <= 0) invalid('The selected release artifact is expired or has invalid provenance.');
-
-    const jobs = await github.listWorkflowRunAttemptJobs(owner, repo, id, run.run_attempt);
-    try { assertCurrentReleaseAttempt(run, artifact, jobs, params.jobName); }
-    catch { invalid('Release evidence must come from the successful job in the current workflow attempt.'); }
-
+    const identity: RunIdentity = { id, repository: params.repository, workflow: params.workflow, ref: `refs/heads/${branch}`, event: run.event };
+    validateRun(run, identity);
     // The run head proves which program executed, not which commit that program deployed.
     const desiredFiles = workflowFiles(params.contract.workflow);
     const executedFile = desiredFiles.find((file) => file.path === params.workflow);
@@ -180,14 +191,38 @@ async function selectEvidence(params: {
       })));
       if (workflowFilesContentHash(files) !== binding.contentHash) invalid('The selected release did not run the currently reviewed managed workflow program.');
     }
+    validateDeclaredTrigger(executedContent, run);
+    const listed = await github.listWorkflowRunArtifacts(owner, repo, id);
+    if (!Array.isArray(listed.artifacts) || listed.total_count !== listed.artifacts.length) {
+      invalid('Release artifact listing is incomplete. Select a run with complete observable evidence.');
+    }
+    const matching = listed.artifacts.filter((artifact) => artifact.name.startsWith(params.prefix));
+    if (matching.length === 0 && !params.runId && params.jobName === 'release') {
+      // Missing evidence permits fallback only when this exact attempt proves
+      // eligibility succeeded and every protected release job was skipped.
+      const jobs = await github.listWorkflowRunAttemptJobs(owner, repo, id, run.run_attempt);
+      try { assertSkippedIosReleaseAttempt(run, jobs); }
+      catch { invalid('Missing beta release evidence cannot prove a relevance skip.'); }
+      const freshRun = await github.getWorkflowRun(owner, repo, id);
+      validateRun(freshRun, identity, run);
+      continue;
+    }
+    if (matching.length !== 1) invalid('Expected one release manifest in the selected workflow run.');
+    const artifact = matching[0];
+    const releaseSha = artifact.name.slice(params.prefix.length);
+    if (!sha.safeParse(releaseSha).success || artifact.expired !== false || artifact.workflow_run?.id !== id
+        || !Number.isSafeInteger(artifact.id) || artifact.id <= 0) invalid('The selected release artifact is expired or has invalid provenance.');
+
+    const jobs = await github.listWorkflowRunAttemptJobs(owner, repo, id, run.run_attempt);
+    try { assertCurrentReleaseAttempt(run, artifact, jobs, params.jobName); }
+    catch { invalid('Release evidence must come from the successful job in the current workflow attempt.'); }
+
     const files = await github.readArtifactFiles(owner, repo, artifact.id);
     const content = files[params.filename];
     if (Object.keys(files).length !== 1 || typeof content !== 'string') invalid('The release artifact must contain exactly its named manifest.');
     const freshRun = await github.getWorkflowRun(owner, repo, id);
-    validateRun(freshRun, params.repository, params.workflow, id);
-    try { assertSameReleaseAttempt(run, freshRun); }
-    catch { invalid('The selected workflow attempt changed while verifying release evidence.'); }
-    return { run, artifact, sha: releaseSha, body: JSON.parse(content), sha256: createHash('sha256').update(content, 'utf8').digest('hex'), jobName: params.jobName };
+    validateRun(freshRun, identity, run);
+    return { identity, run, artifact, sha: releaseSha, body: JSON.parse(content), sha256: createHash('sha256').update(content, 'utf8').digest('hex'), jobName: params.jobName };
   }
   invalid('No successful managed release with a manifest was found. Select exact run IDs with hv_ci_status.');
 }
@@ -196,8 +231,7 @@ async function selectEvidence(params: {
 async function recheckEvidence(github: GitHubAdapter, owner: string, repo: string, evidence: SelectedEvidence): Promise<void> {
   try {
     const run = await github.getWorkflowRun(owner, repo, evidence.run.id);
-    validateRun(run, evidence.run.repository.full_name, evidence.run.path, evidence.run.id);
-    assertSameReleaseAttempt(evidence.run, run);
+    validateRun(run, evidence.identity, evidence.run);
     const [listed, jobs] = await Promise.all([
       github.listWorkflowRunArtifacts(owner, repo, run.id),
       github.listWorkflowRunAttemptJobs(owner, repo, run.id, run.run_attempt),
@@ -211,8 +245,7 @@ async function recheckEvidence(github: GitHubAdapter, owner: string, repo: strin
     }
     assertCurrentReleaseAttempt(run, matches[0], jobs, evidence.jobName);
     const freshRun = await github.getWorkflowRun(owner, repo, run.id);
-    validateRun(freshRun, evidence.run.repository.full_name, evidence.run.path, evidence.run.id);
-    assertSameReleaseAttempt(run, freshRun);
+    validateRun(freshRun, evidence.identity, run);
   } catch (error) {
     if (error instanceof HvError) throw error;
     invalid('The selected release attempt or its evidence changed or could not be verified before submission.');
@@ -413,11 +446,12 @@ async function executeAppStoreRelease(ctx: CommandContext, input: AppStoreSubmit
     iosArtifactId: mobileEvidence.artifact.id, serverArtifactId: serverEvidence.artifact.id,
     appId: app.id, versionId: version.id, buildId: build.id, buildNumber: build.version,
   };
+  const selectedEvidence = [mobileEvidence, serverEvidence, ...(originalServerEvidence ? [originalServerEvidence] : [])];
   const releaseFingerprint = canonicalJsonSha256({
-    releaseGate, mobile, server, sourceRunAttempt: mobileEvidence.run.run_attempt, targetRunAttempt: serverEvidence.run.run_attempt,
-    originalServerProof: originalServerEvidence ? {
-      runId: originalServerEvidence.run.id, runAttempt: originalServerEvidence.run.run_attempt, artifactId: originalServerEvidence.artifact.id,
-    } : null,
+    releaseGate, mobile, server,
+    workflows: selectedEvidence.map(({ identity, run, artifact }) => ({
+      ...identity, headSha: run.head_sha, attempt: run.run_attempt, startedAt: run.run_started_at, artifactId: artifact.id,
+    })),
     desired: canonicalJsonSha256(desired), sourceApi: sourceApi ?? null, targetApi: targetApi ?? null,
   });
   const retryInput = { confirm: true, iosRunId: releaseGate.iosRunId, serverRunId: releaseGate.serverRunId, releaseFingerprint };
@@ -434,8 +468,7 @@ async function executeAppStoreRelease(ctx: CommandContext, input: AppStoreSubmit
   if (freshBuild?.id !== build.id || freshBuild.version !== build.version) {
     invalid('The attached build or selected release run changed before submission.');
   }
-  await Promise.all([mobileEvidence, serverEvidence, ...(originalServerEvidence ? [originalServerEvidence] : [])]
-    .map(evidence => recheckEvidence(github, owner, repo, evidence)));
+  await Promise.all(selectedEvidence.map(evidence => recheckEvidence(github, owner, repo, evidence)));
   await verifyCurrentServerRun(github, owner, repo, targetContract.workflow.path, serverEvidence.run.id);
   const { reviewSubmission, reusedExistingSubmission } = await apple.adapter.submitForReview({ appId: app.id, appStoreVersionId: version.id, platform: version.platform });
   ctx.repos.audit.create({ action: 'appstore.submit', resourceType: 'appstore', resourceId: app.id,

@@ -81,6 +81,12 @@ A branch name or caller-provided digest does not prove provider-resolved source.
 Successful staging evidence covers only its actual workloads, integrations, and
 data configuration; identify differences before promotion.
 
+On Google Cloud, `hv_deploy` reports the migration job's outcome separately from
+each service's health. When Cloud Run identifies the execution, follow the
+result's `hv_logs` arguments to read that run's output. For recent output across
+the environment's migration job, use `hv_logs source="release-command"` with
+the project and environment and omit `execution`.
+
 Use the application's existing web/worker/cron topology. Background workers on
 request-scaled platforms need continuous execution and nonzero capacity; HTTP
 health probes are per-service configuration, and jobs have different provider
