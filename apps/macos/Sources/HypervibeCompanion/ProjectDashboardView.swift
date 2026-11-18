@@ -381,6 +381,42 @@ struct ProjectDashboardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                        if let infrastructureStatus = observation.infrastructureStatus {
+                            Label("OpenTofu", systemImage: "server.rack")
+                                .font(.caption.weight(.medium))
+                            Text(infrastructureStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            if let workers = observation.workers {
+                                if workers.isEmpty {
+                                    Text("No background workers configured.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    Text(observation.health == .stale || observation.health == .failed ? "Last saved worker status" : "Worker status")
+                                        .font(.caption.weight(.medium))
+                                    ForEach(workers) { worker in
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(worker.service).font(.caption.weight(.medium))
+                                            Text(worker.configurationSummary)
+                                                .font(.caption).foregroundStyle(.secondary)
+                                            if let activity = worker.activitySummary {
+                                                Text(activity).font(.caption)
+                                                    .foregroundStyle(worker.needsAttention ? CompanionColor.warning : .secondary)
+                                            }
+                                            if let checkedAt = worker.lastWakeAt {
+                                                Text("Wake-up check \(checkedAt.formatted(.relative(presentation: .named)))")
+                                                    .font(.caption).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text("Worker status not observed on this cloud.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+
                         if let checks = environment.publicEndpointHealth,
                             !checks.isEmpty {
                             let failed = checks.filter { !$0.ok }

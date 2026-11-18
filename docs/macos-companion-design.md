@@ -375,6 +375,15 @@ Call `hv_status` once per configured environment. Its response is the source for
 
 The app records both the last attempt and the last successful response locally. A failed refresh does not make an old successful result fresh.
 
+OpenTofu status has a separate response contract: it reports the engine and worker
+observations without claiming infrastructure drift was checked. The companion
+shows that limitation and directs chat to `hv_plan scope="infrastructure"`.
+Configured worker instances, pending work and wake-up checks remain distinct from
+application health. Missing worker observation stays unknown; zero configured
+instances for an on-demand worker does not mean the app failed. Current core
+responses are captured by the ordinary TypeScript contract test and decoded by
+the macOS Swift contract check.
+
 The UI shows **In sync** only when:
 
 - the latest refresh succeeded;

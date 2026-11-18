@@ -206,7 +206,7 @@ export interface GcpCloudSqlInput {
   tier?: string;
   /** Refuse deletion, both in the engine and on Google's side, until turned off in a reviewed change. */
   deletionProtection?: boolean;
-  /** Daily backups to keep and days of transaction log for point-in-time recovery. */
+  /** Creation-only backup/PITR defaults; ordinary plans preserve existing native policy. */
   retainedBackups?: number;
   transactionLogDays?: number;
   /** PostgreSQL major version (default 16). */
@@ -492,6 +492,11 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     seen.add(key);
     const mapping: EngineResourceMapping = {
       actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true,
+      costAttributes: service.workload === 'job'
+        ? ['template.*.template.*.containers.*.resources.*.limits.cpu', 'template.*.template.*.containers.*.resources.*.limits.memory']
+        : ['template.*.containers.*.resources.*.limits.cpu', 'template.*.containers.*.resources.*.limits.memory',
+          'template.*.containers.*.resources.*.cpu_idle', 'template.*.scaling.*.min_instance_count',
+          'template.*.scaling.*.max_instance_count', 'scaling.*.manual_instance_count'],
     };
     if (service.workload === 'job') {
       addScheduledJob(input, service, key, jobs, schedules, jobIam);
@@ -553,7 +558,8 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     }
   }
   const sql: Record<string, Record<string, unknown>> = {};
-  const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true };
+  const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true,
+    costAttributes: ['settings.*.tier', 'settings.*.disk_size', 'settings.*.disk_type', 'settings.*.availability_type', 'settings.*.edition'] };
   const onDemand = input.services.some((service) => service.workload === 'worker' && service.pendingWorkQuery);
   if (input.database) {
     if (!/^[a-z][a-z0-9-]{0,96}[a-z0-9]$/.test(input.database.instanceName)) throw new Error('Cloud SQL instance name is invalid.');
@@ -566,6 +572,20 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       // Hypervibe's confirmation gate always governs deletion. A protected database also refuses
       // deletion here and in the Google console until protection is turned off in its own change.
       deletion_protection: input.database.deletionProtection === true,
+      // Backup changes need their own scoped review. Retain the provider's full policy,
+      // including fields absent from our input, on updates and interrupted-create adoption.
+      // Enterprise Plus can retain longer PITR logs, so its edition must survive too.
+      lifecycle: [{
+        ignore_changes: ['settings[0].backup_configuration', 'settings[0].edition'],
+        // Enterprise-only defaults cannot resize a retained Plus instance.
+        // Evaluate the effective plan values, after ignore_changes preserves its
+        // edition, instead of hiding all tier drift (which would disable sizing).
+        // https://cloud.google.com/sql/docs/postgres/machine-series-overview
+        postcondition: [{
+          condition: '${self.settings[0].edition != "ENTERPRISE_PLUS" || !(startswith(self.settings[0].tier, "db-custom-") || contains(["db-f1-micro", "db-g1-small"], self.settings[0].tier))}',
+          error_message: 'This database uses Cloud SQL Enterprise Plus, but the requested size is only available on Enterprise. Hypervibe cannot apply this size change while preserving the database recovery settings.',
+        }],
+      }],
       settings: [{
         deletion_protection_enabled: input.database.deletionProtection === true,
         // Shared-core tiers require the Enterprise edition.

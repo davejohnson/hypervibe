@@ -723,7 +723,22 @@ function errorPresentation(commandId: string, envelope: CommandEnvelope): Comman
   const command = commandLabel(commandId);
   const details = envelope.error?.details;
   const validationRows = Array.isArray(details) ? validationIssueRows(details) : undefined;
-  const detailLines = validationRows
+  const releaseDetails = commandId === 'hv_deploy' ? record(details) : undefined;
+  const releaseResults = Array.isArray(releaseDetails?.results)
+    ? releaseDetails.results.map(record) : undefined;
+  const releaseLines = releaseResults?.every(result => result && typeof result.service === 'string')
+    ? [
+        ...genericLines(releaseDetails!, new Set(['results'])),
+        ...releaseResults.flatMap(result => [
+          '',
+          `${result!.service} · ${result!.status ?? 'unknown'}`,
+          ...formatCommandDataLines(Object.fromEntries(
+            Object.entries(result!).filter(([key]) => key !== 'service' && key !== 'status')
+          )),
+        ]),
+      ]
+    : undefined;
+  const detailLines = validationRows ?? releaseLines
     ?? (details !== undefined ? formatCommandDataLines(details) : []);
   const isConfirmation = code === 'CONFIRM_REQUIRED';
   const isBlocked = code === 'MISSING_CONNECTION';

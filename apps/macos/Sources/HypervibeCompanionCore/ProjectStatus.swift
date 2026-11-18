@@ -83,6 +83,15 @@ public struct EnvironmentStatus: Equatable, Sendable {
             label = "Down"
         }
 
+        for worker in environment.observation?.workers ?? [] where worker.needsAttention && health != .failed {
+            issues.append(StatusIssue(
+                id: "\(name)|worker|\(worker.service)", level: .attention,
+                title: "\(worker.service)'s wake-up check needs attention in \(name)",
+                chatPrompt: "Use Hypervibe to inspect the \(worker.service) worker in the \(name) environment of \(projectName). Check its wake-up status and logs, then explain what needs fixing before making changes."
+            ))
+            label = label ?? "Worker needs attention"
+        }
+
         switch health {
         case .blocked:
             let providers = environment.observation?.blockedProviders ?? []
@@ -137,7 +146,7 @@ public struct EnvironmentStatus: Equatable, Sendable {
             return EnvironmentStatus(level: .good, label: "Live", issues: [])
         }
         guard health == .inSync else {
-            return EnvironmentStatus(level: .unknown, label: "Not checked", issues: [])
+            return EnvironmentStatus(level: .unknown, label: environment.observation?.engine == "opentofu" ? "Drift not checked" : "Not checked", issues: [])
         }
         let services = environment.observation?.services ?? []
         if !services.isEmpty, services.allSatisfy({ $0.status == .empty }) {

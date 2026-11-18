@@ -232,7 +232,7 @@ now implemented as described above; database and domain evidence follows below.
 
 | Capability | Ownership | Live evidence |
 | --- | --- | --- |
-| Cloud SQL Postgres | OpenTofu: instance (backups + PITR), database. Hypervibe: login, generated password, `DATABASE_URL` secret | Created; login set; service wired in round 2; app writes/reads rows; later config apply kept login, data and image |
+| Cloud SQL Postgres | OpenTofu: instance (backups + PITR at creation; existing protection preserved), database. Hypervibe: login, generated password, `DATABASE_URL` secret | Created; login set; service wired in round 2; app writes/reads rows; later config apply kept login, data and image |
 | Custom domain | Hypervibe: ownership proof (TXT + Site Verification API), DNS-only records, certificate wait. OpenTofu: Cloud Run domain mapping | `pilot.hypervibe.dev` verified and mapped with no Search Console step; certificate was still issuing when last checked |
 | Cloud Storage | OpenTofu: private bucket, object access for the runtime identity | Validated and planned; not yet created live (see below) |
 | Local-commit builds | Hypervibe: `git archive` of HEAD → private expiring bucket → Cloud Build as the deployment identity | An unpushed local commit was built and released |
@@ -262,6 +262,22 @@ CI releases, scheduled jobs, Memorystore and Pub/Sub are now implemented in
 [`gcp-engine.backend.ts`](../src/adapters/providers/gcp/tofu/gcp-engine.backend.ts).
 Their presence in source does not extend the live evidence above. The current DNS
 engine also needs its own installed lifecycle evidence, as noted near the top.
+
+GCP releases can also run without a local checkout using a verified GitHub
+connection for the selected repository. Hypervibe resolves the deployment branch
+(or requested revision) to one commit, downloads that commit's archive, and sends
+the bytes through the existing private upload path. Cloud Build runs inside the
+archive's validated wrapper directory and never receives the GitHub API token or
+download URL. Missing repository access blocks before a build; there is no
+anonymous clone fallback. AWS and Azure still require a local checkout.
+
+Source downloads are bounded to 128 MiB compressed and 512 MiB expanded, with a
+60-second deadline. Archives with multiple roots, unsafe paths or links containing
+parent-directory traversal are rejected without local extraction. These controls,
+the public deploy path and serialized Cloud Build request have offline regression
+coverage; authenticated remote-source builds have not been run against live GCP.
+See [GitHub's archive API](https://docs.github.com/en/rest/repos/contents#download-a-repository-archive-tar)
+and [Cloud Build working directories](https://docs.cloud.google.com/build/docs/build-config-file-schema#dir).
 
 The original follow-ups included Google OAuth client registration, database
 password rotation without downtime, import, shared state across machines, retained

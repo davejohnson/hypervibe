@@ -541,4 +541,20 @@ describe('hv_db_query', () => {
     expect(serializedAudit).not.toContain('url-secret');
     await t.close();
   });
+
+  it('keeps thrown mutation failures uncertain in the public response and audit without suggesting a blind retry', async () => {
+    const query = vi.spyOn(DatabaseAdapter.prototype, 'query').mockRejectedValue(new Error('Query acknowledgment was lost'));
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_db_query', {
+        connectionUrl: 'postgresql://user:secret@database.example.com:5432/app',
+        sql: 'UPDATE counters SET value = value + 1', allowMutations: true,
+      });
+      expect(result).toMatchObject({ ok: false, error: { details: { mutationOutcome: 'unknown' } } });
+      expect(result.hint).toContain('read-only query');
+      expect(result.hint).not.toContain('retry the diagnostic query');
+      expect(new AuditRepository().findByAction('db_query.failed')[0].details.mutationOutcome).toBe('unknown');
+      expect(query).toHaveBeenCalledOnce();
+    } finally { await t.close(); }
+  });
 });

@@ -44,6 +44,9 @@ const GCP_ADC_SETUP_URL =
 const GCP_CLOUD_CLI_INSTALL_URL = 'https://cloud.google.com/sdk/docs/install';
 const GCP_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const BOOTSTRAP_PROVIDERS = ['cloudrun', 'cloudsql'] as const;
+// Google documents new-key propagation of 60 seconds or more. Bound the wait
+// across both consumers; never retry key creation or a retained credential.
+const NEW_KEY_VERIFICATION_DELAYS_MS = [2000, 4000, 8000, 16000, 30000] as const;
 
 type BootstrapProvider = typeof BOOTSTRAP_PROVIDERS[number];
 type BootstrapStepState = 'not-started' | 'created' | 'reused';
@@ -72,6 +75,7 @@ export interface GcpBootstrapDependencies {
   prepareCloud: typeof runCloudPrepare;
   setupProject: typeof runGcpProjectSetup;
   verifyPreparation: typeof verifyAndRecordBootstrapPreparation;
+  sleep: (milliseconds: number) => Promise<void>;
   verifyProvider: (
     provider: BootstrapProvider,
     credentials: Record<string, unknown>
@@ -136,6 +140,7 @@ const defaultDependencies: GcpBootstrapDependencies = {
   setupProject: runGcpProjectSetup,
   verifyPreparation: verifyAndRecordBootstrapPreparation,
   verifyProvider: verifyProviderConnection,
+  sleep: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
 };
 
 /**
@@ -355,8 +360,15 @@ export async function runGcpBootstrap(
       },
     };
     const verifiedCredentials = {} as Record<BootstrapProvider, Record<string, unknown>>;
+    let propagationRetries = 0;
     for (const provider of BOOTSTRAP_PROVIDERS) {
-      const verification = await dependencies.verifyProvider(provider, rawCredentials[provider]);
+      let verification = await dependencies.verifyProvider(provider, rawCredentials[provider]);
+      while (createdKeyName && verification.success === false && isNewKeySignatureFailure(verification.error)) {
+        const delay = NEW_KEY_VERIFICATION_DELAYS_MS[propagationRetries++];
+        if (delay === undefined) break;
+        await dependencies.sleep(delay);
+        verification = await dependencies.verifyProvider(provider, rawCredentials[provider]);
+      }
       if (!verification.success
         || verification.email !== serviceAccountEmail
         || !verification.validatedCredentials) {
@@ -701,6 +713,20 @@ function addCredentialSensitiveValues(
   sensitiveValues.add(json);
   const credential = parseExactCredential(json, projectId, serviceAccountEmail);
   sensitiveValues.add(credential.private_key);
+}
+
+function isNewKeySignatureFailure(error: string | undefined): boolean {
+  // Both GCP adapters retain the token endpoint's status and OAuth JSON. The
+  // exact pair distinguishes this candidate from clock skew, disabled clients,
+  // authorization failures and unrelated text mentioning a signature.
+  const response = error?.match(/^Token exchange failed: 400 (\{[\s\S]*\})\s*$/)?.[1];
+  if (!response) return false;
+  try {
+    const body = JSON.parse(response) as { error?: unknown; error_description?: unknown };
+    return body.error === 'invalid_grant' && body.error_description === 'Invalid JWT Signature.';
+  } catch {
+    return false;
+  }
 }
 
 async function verifyProviderConnection(

@@ -99,6 +99,9 @@ export class DatabaseAdapter implements IDatabaseQueryAdapter {
     });
 
     let transactionStarted = false;
+    const mutation = options.readOnly === false;
+    let mutationCommitted = false;
+    const committedMessage = ' The mutation committed. Its returned rows are unavailable; inspect the database with a read-only query. Do not repeat the write.';
     try {
       await client.connect();
       if (options.readOnly) {
@@ -106,6 +109,10 @@ export class DatabaseAdapter implements IDatabaseQueryAdapter {
         transactionStarted = true;
       }
       const result = await client.query(sql, params);
+      // Without BEGIN, PostgreSQL acknowledges each successful statement only
+      // after its implicit COMMIT. Diagnostic limits cannot roll that write back.
+      // https://www.postgresql.org/docs/17/tutorial-transactions.html
+      mutationCommitted = mutation;
 
       const maxRows = options.maxRows ?? DEFAULT_MAX_QUERY_ROWS;
       if (result.rows.length > maxRows) {
@@ -114,7 +121,9 @@ export class DatabaseAdapter implements IDatabaseQueryAdapter {
         return {
           success: false,
           rowCount: result.rowCount ?? result.rows.length,
-          error: `Query result exceeded the ${maxRows}-row diagnostic limit. Add a narrower WHERE clause or LIMIT.`,
+          ...(mutation ? { mutationOutcome: 'committed' as const } : {}),
+          error: `Query result exceeded the ${maxRows}-row diagnostic limit.`
+            + (mutation ? committedMessage : ' Add a narrower WHERE clause or LIMIT.'),
         };
       }
 
@@ -126,7 +135,9 @@ export class DatabaseAdapter implements IDatabaseQueryAdapter {
         return {
           success: false,
           rowCount: result.rowCount ?? result.rows.length,
-          error: `Query result exceeded the ${maxResponseBytes}-byte diagnostic response limit. Select fewer or smaller columns.`,
+          ...(mutation ? { mutationOutcome: 'committed' as const } : {}),
+          error: `Query result exceeded the ${maxResponseBytes}-byte diagnostic response limit.`
+            + (mutation ? committedMessage : ' Select fewer or smaller columns.'),
         };
       }
 
@@ -137,6 +148,7 @@ export class DatabaseAdapter implements IDatabaseQueryAdapter {
 
       return {
         success: true,
+        ...(mutation ? { mutationOutcome: 'committed' as const } : {}),
         rows: result.rows,
         rowCount: result.rowCount ?? 0,
         fields: result.fields?.map(f => ({
@@ -151,7 +163,10 @@ export class DatabaseAdapter implements IDatabaseQueryAdapter {
       }
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        ...(mutation ? { mutationOutcome: mutationCommitted ? 'committed' as const : 'unknown' as const } : {}),
+        error: (error instanceof Error ? error.message : String(error)) + (mutation
+          ? mutationCommitted ? committedMessage : ' The mutation outcome is unknown. Inspect the database with a read-only query before considering another write.'
+          : ''),
       };
     } finally {
       await client.end().catch(() => {});

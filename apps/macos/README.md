@@ -142,6 +142,22 @@ Run the tests:
 swift test --package-path apps/macos
 ```
 
+The companion status contract uses responses captured from the current registered
+`hv_status` handler, with synthetic provider observations and no cloud calls.
+Ordinary `npm test` checks those captures have not drifted; the macOS contract
+check decodes the same files with Swift. When a deliberate response change needs
+new fixtures, run:
+
+```sh
+HYPERVIBE_UPDATE_COMPANION_FIXTURES=1 npm test -- src/tools/__tests__/macos-status.contract.test.ts
+swift test --package-path apps/macos --filter CurrentCoreStatusContractTests
+```
+
+Do not edit the captured JSON by hand. Engine status keeps infrastructure drift
+unverified and displays worker configuration separately from application health.
+AWS and Azure worker status remains explicitly unobserved when core reports
+`workers: "not read"`.
+
 Build the menu bar executable and native helpers:
 
 ```sh

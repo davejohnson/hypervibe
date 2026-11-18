@@ -91,7 +91,7 @@ export class AuroraQueryClient {
       const rejectResult = async (message: string): Promise<DatabaseQueryResult> => {
         const rolledBack = await this.rollback(transactionId!);
         transactionId = undefined; // Failed rollback remains in pending for the lease's final cleanup attempt.
-        return { success: false, error: message + (options.readOnly === false
+        return { success: false, ...(options.readOnly === false ? { mutationOutcome: rolledBack ? 'rolled_back' as const : 'unknown' as const } : {}), error: message + (options.readOnly === false
           ? rolledBack ? ' The mutation was rolled back.' : ' Transaction rollback could not be verified when the query ended; check cleanup status before retrying.'
           : '') };
       };
@@ -129,7 +129,7 @@ export class AuroraQueryClient {
         if (committed.transactionStatus !== 'Transaction Committed') throw new Error('Unconfirmed transaction commit.');
         this.pending.delete(transactionId); transactionId = undefined;
       }
-      return { success: true, rows, rowCount: rows.length || response.numberOfRecordsUpdated || 0,
+      return { success: true, ...(options.readOnly === false ? { mutationOutcome: 'committed' as const } : {}), rows, rowCount: rows.length || response.numberOfRecordsUpdated || 0,
         fields: Object.keys(rows[0] ?? {}).map(name => ({ name, dataType: 'unknown' })) };
     } catch (error) {
       if (beginAttempted && !transactionId) {
@@ -138,7 +138,7 @@ export class AuroraQueryClient {
           ? 'Aurora database is still waking up. Wait a moment and retry the query; no SQL was submitted.'
           : 'Aurora rejected the database connection. Check database access and availability before retrying; no SQL was submitted.' };
       }
-      return { success: false, error: options.readOnly === false
+      return { success: false, ...(options.readOnly === false ? { mutationOutcome: 'unknown' as const } : {}), error: options.readOnly === false
         ? 'Aurora query failed or its result could not be verified. A submitted mutation may have committed; inspect its outcome before retrying.'
         : 'Aurora read-only query failed or its result could not be verified. Check access and SQL before retrying.' };
     }

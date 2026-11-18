@@ -135,6 +135,11 @@ commands. Mixed or unrecognized changes run the complete check. Set
 `changeScope: "all"` on a dedicated infrastructure validator that should run
 for those files too.
 
+Checks run on `ubuntu-latest` unless their `runner` is `macos-latest`. Use
+the macOS runner for Swift/macOS tests that need Apple's frameworks. Hypervibe's
+own macOS contract check compares current core responses with the app's decoder
+on pull requests; it does not launch or validate the installed desktop app.
+
 Autofix runs only for a failed run from the same repository on the configured
 target branch. It always opens a draft pull request. The generated patch cannot
 change `.github/`, `.hypervibe/`, agent instruction files, or `.env` files, and

@@ -126,7 +126,7 @@ describe('production settings on Google Cloud', () => {
 
   it('states size, monthly cost, backups and protection in one plan sentence', () => {
     expect(gcpDatabaseShape('production', { provider: 'cloudsql', engine: 'postgres' }).summary).toBe(
-      'Database: 1 vCPU, 3.75 GB, about US$50 a month plus storage. 14 daily backups and 7 days of point-in-time recovery. Deletion protection is on.');
+      'Database: 1 vCPU, 3.75 GB, about US$50 a month plus storage. New databases start with 14 daily backups and 7 days of point-in-time recovery; existing backup and recovery settings are preserved. Deletion protection is on.');
   });
 
   it('protects the instance in the engine and on Google, and keeps the declared backups', () => {

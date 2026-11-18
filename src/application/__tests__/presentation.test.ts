@@ -3,6 +3,25 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it('keeps complete release failures and their log links readable', () => {
+    const message = 'The selected private repository could not be read with the connected GitHub account. Connect repository read access before retrying the deployment.';
+    const logsUrl = 'https://console.cloud.google.com/cloud-build/builds/long-build-identifier?project=example';
+    const envelope = commandError('PROVIDER_ERROR', 'The release did not complete.', {
+      details: { environment: 'production', results: [
+        { service: 'web', status: 'failed', message, logsUrl },
+        { service: 'worker', status: 'unknown', message: 'The request timed out; inspect the current revision before retrying.' },
+      ] },
+    });
+    const output = formatCommandResult('hv_deploy', envelope);
+    expect(output).toContain(message);
+    expect(output).toContain(logsUrl);
+    expect(output).toContain('web');
+    expect(output).toContain('worker');
+    expect(output).toContain('unknown');
+    expect(output).toContain('production');
+    expect(envelope.error?.details).toMatchObject({ results: [{ message, logsUrl }, { status: 'unknown' }] });
+  });
+
   it('labels rollback evidence inspection as a preview, never a completed restore', () => {
     for (const status of ['evidence-compatible', 'blocked']) {
       const output = formatCommandResult('hv_rollback', commandSuccess({ mode: 'preview', status, restoreVerified: false,

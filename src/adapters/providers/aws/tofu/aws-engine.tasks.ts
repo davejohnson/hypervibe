@@ -59,7 +59,8 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
   for (const service of web) {
     const key = awsKey(service.logicalName);
     const port = webPort(service);
-    const mapping: EngineResourceMapping = { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true };
+    const mapping: EngineResourceMapping = { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true,
+      costAttributes: ['cpu', 'memory', 'desired_count', 'scaling_target.*.min_task_count', 'scaling_target.*.max_task_count'] };
     const env = { ...service.env, PORT: String(port) };
     // Environments created when web services ran on Lambda: removing those resources is part of replacing the service.
     for (const address of [`aws_lambda_function.${key}`, `aws_lambda_function_url.${key}`, `aws_lambda_permission.${key}_url`, `aws_lambda_permission.${key}_invoke`, `aws_cloudwatch_log_group.${key}`]) resources[address] = mapping;
@@ -99,7 +100,8 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
 
   for (const worker of workers) {
     const key = awsKey(worker.logicalName);
-    const mapping: EngineResourceMapping = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true };
+    const mapping: EngineResourceMapping = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true,
+      costAttributes: ['cpu', 'memory', 'desired_count'] };
     definitions[key] = taskDefinition(worker);
     services[key] = {
       name: worker.resourceName, cluster: '${aws_ecs_cluster.main.id}', task_definition: `\${aws_ecs_task_definition.${key}.arn}`, launch_type: 'FARGATE',
@@ -143,7 +145,8 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
 
   for (const job of jobs) {
     const key = awsKey(job.logicalName);
-    const mapping: EngineResourceMapping = { actionId: `service:${job.logicalName}`, kind: 'service', name: job.logicalName, billable: true };
+    const mapping: EngineResourceMapping = { actionId: `service:${job.logicalName}`, kind: 'service', name: job.logicalName, billable: true,
+      costAttributes: ['cpu', 'memory'] };
     definitions[key] = taskDefinition(job);
     schedules[key] = {
       name: job.resourceName, schedule_expression: schedulerCron(job.schedule), schedule_expression_timezone: job.timeZone ?? 'UTC', flexible_time_window: [{ mode: 'OFF' }],

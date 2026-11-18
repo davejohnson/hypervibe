@@ -89,6 +89,23 @@ enum HypervibeResponseMapper {
             throw HypervibeClientError.malformedResponse("hv_status returned no data.")
         }
 
+        if payload.engine == "opentofu" {
+            return ObservationSummary(
+                health: .unverified, verified: false, driftCount: 0, unmanagedCount: 0,
+                blockedProviders: [], latestAttemptAt: attemptedAt, latestSuccessfulAt: nil,
+                engine: payload.engine,
+                workers: payload.workers?.map { worker in
+                    WorkerObservation(
+                        service: worker.service, mode: worker.mode, instances: worker.instances,
+                        wakerState: worker.waker?.state,
+                        lastWakeAt: parseDate(worker.waker?.lastRunAt),
+                        pendingWork: worker.waker?.pendingWork,
+                        pendingWorkReadFailed: worker.waker?.readError != nil
+                    )
+                }
+            )
+        }
+
         let blockedProviders = Array(Set(payload.blocked.map(\.provider))).sorted()
         let isBlocked = !blockedProviders.isEmpty || payload.inputRequired.count > 0
         let health: EnvironmentHealth
@@ -148,7 +165,9 @@ enum HypervibeResponseMapper {
             latestAttemptAt: attemptedAt,
             latestSuccessfulAt: previous?.latestSuccessfulAt,
             services: previous?.services,
-            driftedResources: previous?.driftedResources
+            driftedResources: previous?.driftedResources,
+            engine: previous?.engine,
+            workers: previous?.workers
         )
     }
 
@@ -743,6 +762,8 @@ private typealias Deploy = DesiredEnvironment.Deploy
 private typealias IOS = DesiredEnvironment.IOS
 
 private struct StatusToolData: Decodable {
+    let engine: String?
+    let workers: [Worker]?
     let verified: Bool
     let inSync: Bool
     let drift: [DriftAction]
@@ -753,6 +774,8 @@ private struct StatusToolData: Decodable {
     let services: [Service]?
 
     private enum CodingKeys: String, CodingKey {
+        case engine
+        case workers
         case verified
         case inSync
         case drift
@@ -765,8 +788,21 @@ private struct StatusToolData: Decodable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        verified = try container.decode(Bool.self, forKey: .verified)
-        inSync = try container.decode(Bool.self, forKey: .inSync)
+        engine = try container.decodeIfPresent(String.self, forKey: .engine)
+        if engine == "opentofu" {
+            verified = false
+            inSync = false
+            if let marker = try? container.decode(String.self, forKey: .workers), marker == "not read" {
+                workers = nil
+            } else {
+                workers = try container.decode([Worker].self, forKey: .workers)
+            }
+        } else {
+            // Missing lifecycle evidence is still malformed, not implicit success.
+            verified = try container.decode(Bool.self, forKey: .verified)
+            inSync = try container.decode(Bool.self, forKey: .inSync)
+            workers = nil
+        }
         drift = try container.decodeIfPresent([DriftAction].self, forKey: .drift) ?? []
         unmanaged = try container.decodeIfPresent(
             CountedItems.self,
@@ -783,6 +819,20 @@ private struct StatusToolData: Decodable {
 
     struct Block: Decodable {
         let provider: String
+    }
+
+    struct Worker: Decodable {
+        let service: String
+        let mode: String
+        let instances: Int?
+        let waker: Waker?
+
+        struct Waker: Decodable {
+            let state: String?
+            let lastRunAt: String?
+            let pendingWork: Int?
+            let readError: String?
+        }
     }
 
     struct DriftAction: Decodable {

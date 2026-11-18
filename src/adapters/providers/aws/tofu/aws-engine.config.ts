@@ -261,7 +261,9 @@ export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfig
   const version = input.database.engineVersion;
   if (!/^\d+\.\d+$/.test(version)) throw new Error(`Aurora PostgreSQL version ${version} is invalid.`);
   const major = version.split('.')[0];
-  const mapping: EngineResourceMapping = { actionId: 'shared:database', kind: 'database', name: 'postgres', dataBearing: true, billable: true };
+  const mapping: EngineResourceMapping = { actionId: 'shared:database', kind: 'database', name: 'postgres', dataBearing: true, billable: true,
+    costAttributes: ['serverlessv2_scaling_configuration.*.min_capacity', 'serverlessv2_scaling_configuration.*.max_capacity',
+      'serverlessv2_scaling_configuration.*.seconds_until_auto_pause', 'instance_class'] };
   for (const address of ['aws_rds_cluster.postgres', 'aws_rds_cluster_instance.postgres', 'aws_rds_cluster_parameter_group.postgres', 'aws_db_subnet_group.postgres', 'aws_security_group.postgres']) {
     resources[address] = mapping;
   }
@@ -288,7 +290,8 @@ export function buildAwsSharedConfiguration(input: AwsSharedInput): EngineConfig
         deletion_protection: false, skip_final_snapshot: false, final_snapshot_identifier: `${input.prefix}-postgres-final`,
         serverlessv2_scaling_configuration: [{ min_capacity: input.database.minCapacity, max_capacity: input.database.maxCapacity,
           ...(input.database.minCapacity === 0 ? { seconds_until_auto_pause: input.database.pauseAfterSeconds ?? 600 } : {}) }],
-        lifecycle: [{ ignore_changes: ['engine_version'] }],
+        // Native backup retention is managed only by separately reviewed backup work.
+        lifecycle: [{ ignore_changes: ['engine_version', 'backup_retention_period'] }],
       } },
       aws_rds_cluster_instance: { postgres: {
         identifier: `${input.prefix}-postgres-1`, cluster_identifier: '${aws_rds_cluster.postgres.id}', instance_class: 'db.serverless',

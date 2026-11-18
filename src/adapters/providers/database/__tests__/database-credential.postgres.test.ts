@@ -16,6 +16,11 @@ import { ConnectionRepository } from '../../../db/repositories/connection.reposi
 import { getSecretStore } from '../../../secrets/secret-store.js';
 import { acquireEngineDatabaseAccess } from '../../../../domain/services/engine-database-access.service.js';
 import { analyzeSqlQuery } from '../../../../domain/services/sql-query-analysis.js';
+import { CommandRegistry } from '../../../../application/commands.js';
+import { createCommandContext } from '../../../../application/context.js';
+import { registerHvDbTools } from '../../../../tools/hv-db.tools.js';
+import { adapterFactory } from '../../../../domain/services/adapter.factory.js';
+import { acquireExistingDatabaseAccess, databaseAccessLeaseCoordinator } from '../../../../domain/services/database-access.service.js';
 import { createPostgresCredentialLifecycle } from '../database-credential.js';
 import type { IDatabaseAdapter } from '../../../../domain/ports/database.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
@@ -62,7 +67,95 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
     if (directory) await rm(directory, { recursive: true, force: true });
   });
 
-  it('authenticates Aurora diagnostics as the environment login so one readonly SELECT cannot restore control-plane authority', async () => {
+  describe('public PostgreSQL mutation outcomes', () => {
+    let url: string;
+    let observer: pg.Client;
+    beforeAll(async () => {
+      await admin.query("CREATE ROLE query_outcome_owner LOGIN PASSWORD 'synthetic-query-password'");
+      await admin.query('CREATE DATABASE query_outcomes OWNER query_outcome_owner');
+      url = `postgresql://query_outcome_owner:synthetic-query-password@${encodeURIComponent(join(directory, 'socket'))}:5432/query_outcomes`;
+      observer = new pg.Client({ connectionString: url }); await observer.connect();
+      await observer.query('CREATE TABLE mutation_outcomes (id int PRIMARY KEY, updates int NOT NULL DEFAULT 0)');
+      await observer.query('INSERT INTO mutation_outcomes (id) SELECT generate_series(1, 501)');
+    });
+    afterAll(async () => { await observer?.end(); });
+
+    // The SQL engine and command are real. Cloud access capabilities alone are
+    // replaced with disposable local leases; no cloud compatibility is claimed.
+    async function command(route: 'direct' | 'gcp' | 'azure', input: Record<string, unknown>) {
+      SqliteAdapter.resetInstance(); databaseAccessLeaseCoordinator.resetForTests();
+      SqliteAdapter.getInstance(join(directory, `outcomes-${route}.sqlite`)).migrate();
+      const registry = new CommandRegistry(); registerHvDbTools(registry, createCommandContext());
+      let target: Record<string, unknown> = { connectionUrl: url };
+      if (route !== 'direct') {
+        const ctx = createCommandContext();
+        const project = ctx.repos.projects.findByName(`outcomes-${route}`) ?? ctx.repos.projects.create({ name: `outcomes-${route}` });
+        const environment = ctx.repos.environments.findByProjectAndName(project.id, 'testing') ?? ctx.repos.environments.create({ projectId: project.id, name: 'testing', platformBindings: route === 'gcp'
+          ? { provider: 'cloudrun', projectId: 'local-fixture', region: 'local', engine: { database: { instanceName: 'local-fixture' } } }
+          : { provider: 'azure', azure: { kind: 'opentofu' } } });
+        target = { project: project.name, env: environment.name };
+        if (route === 'gcp') vi.spyOn(adapterFactory, 'getDatabaseOperations').mockResolvedValue({ success: true, adapter: {
+          capabilities: { supportsTemporaryDatabaseAccess: true, prefersTemporaryDatabaseAccess: true },
+          acquireTemporaryDatabaseAccess: async () => ({ connectionUrl: url, temporary: true, source: 'private_connector' }),
+          releaseTemporaryDatabaseAccess: async () => {},
+        } } as never);
+        else vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: {
+          acquireManagedDatabaseAccess: async () => ({ ok: true, lease: { ...acquireExistingDatabaseAccess(url), provider: 'azure' } }),
+          observeManagedDatabase: async () => ({}), recoverManagedDatabaseBinding: async () => ({}),
+        } } as never);
+      }
+      try { return await registry.execute('hv_db_query', { ...target, ...input }); }
+      finally { vi.restoreAllMocks(); databaseAccessLeaseCoordinator.resetForTests(); SqliteAdapter.resetInstance(); }
+    }
+
+    for (const route of ['direct', 'gcp', 'azure'] as const) {
+      it.each(['rows', 'bytes'] as const)(`${route} reports the actual committed write when returned %s exceed the limit`, async limit => {
+        await observer.query('UPDATE mutation_outcomes SET updates = 0');
+        const result = await command(route, { allowMutations: true, sql: limit === 'rows'
+          ? 'UPDATE mutation_outcomes SET updates = updates + 1 RETURNING id'
+          : "UPDATE mutation_outcomes SET updates = updates + 1 WHERE id = 1 RETURNING repeat('x', 524288) AS payload" });
+        // Independent session sees the implicit COMMIT before checking the error.
+        expect((await observer.query('SELECT sum(updates)::int AS total FROM mutation_outcomes')).rows).toEqual([{ total: limit === 'rows' ? 501 : 1 }]);
+        expect(result).toMatchObject({ ok: false, error: { details: { mutationOutcome: 'committed' } } });
+        expect(result.error?.message).toMatch(/mutation committed/i);
+        expect(JSON.stringify(result)).not.toMatch(/narrower WHERE|Select fewer|rolled back/);
+        expect(JSON.stringify(result)).not.toContain('x'.repeat(100));
+      });
+    }
+
+    it('preserves authorization, normal commits, and database-enforced readonly queries', async () => {
+      await observer.query('UPDATE mutation_outcomes SET updates = 0');
+      const blocked = await command('direct', { sql: 'UPDATE mutation_outcomes SET updates = 1' });
+      expect(blocked).toMatchObject({ ok: false, error: { code: 'CONFIRM_REQUIRED' } });
+      expect((await observer.query('SELECT sum(updates)::int AS total FROM mutation_outcomes')).rows).toEqual([{ total: 0 }]);
+      const success = await command('direct', { sql: 'UPDATE mutation_outcomes SET updates = 1 WHERE id = 1', allowMutations: true });
+      expect(success).toMatchObject({ ok: true, data: { rowCount: 1, mutationOutcome: 'committed' } });
+      await observer.query('CREATE FUNCTION hidden_mutation() RETURNS int LANGUAGE sql AS $$ UPDATE mutation_outcomes SET updates = 2 WHERE id = 1 RETURNING updates $$');
+      const readonly = await command('direct', { sql: 'SELECT hidden_mutation()', allowMutations: true });
+      expect(readonly.ok).toBe(false);
+      expect((await observer.query('SELECT updates FROM mutation_outcomes WHERE id = 1')).rows).toEqual([{ updates: 1 }]);
+    });
+
+    it('reports unknown after a lost acknowledgment even when an independent session sees the write committed', async () => {
+      await observer.query('UPDATE mutation_outcomes SET updates = 0');
+      const sql = 'UPDATE mutation_outcomes SET updates = updates + 1 WHERE id = 1 RETURNING id';
+      const original = pg.Client.prototype.query;
+      // Inject loss after the real server commits but before the adapter receives
+      // the result. This is fault injection, not a live network-loss observation.
+      vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: any[]) {
+        const result = (original as any).apply(this, args);
+        return args[0] === sql ? result.then(() => { throw new Error('Lost query acknowledgment'); }) : result;
+      } as any);
+      const result = await command('direct', { sql, allowMutations: true });
+      expect((await observer.query('SELECT updates FROM mutation_outcomes WHERE id = 1')).rows).toEqual([{ updates: 1 }]);
+      expect(result).toMatchObject({ ok: false, error: { details: { mutationOutcome: 'unknown' } } });
+      expect(result.error?.message).toMatch(/mutation outcome is unknown/i);
+      expect(result.hint).toContain('read-only query');
+      expect(JSON.stringify(result)).not.toMatch(/mutation committed|rolled back/);
+    });
+  });
+
+  it('enforces Aurora application login and rolls back oversized mutations in real PostgreSQL', async () => {
     // PostgreSQL checks SET ROLE against session_user, not current_user:
     // https://www.postgresql.org/docs/17/sql-set-role.html
     // The HTTP peer below only translates real SDK Data API messages to real SQL.
@@ -83,6 +176,11 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
       await setup.query("INSERT INTO admin_only VALUES ('synthetic-outside-environment')");
       await setup.query(`ALTER TABLE admin_only OWNER TO ${control}`);
     } finally { await setup.end(); }
+    const owned = await open(app);
+    try {
+      await owned.query('CREATE TABLE aurora_outcomes (id int PRIMARY KEY, updates int NOT NULL DEFAULT 0)');
+      await owned.query('INSERT INTO aurora_outcomes (id) SELECT generate_series(1, 501)');
+    } finally { await owned.end(); }
     const exploit = "WITH elevate AS MATERIALIZED (SELECT set_config('role','none',true)) SELECT current_user, query_to_xml('SELECT secret FROM admin_only',false,true,'') FROM elevate";
     expect(analyzeSqlQuery(exploit)).toMatchObject({ isMutation: false, multiStatement: false });
     const counterexample = await open(control);
@@ -106,6 +204,7 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
     const querySecretArn = `arn:aws:secretsmanager:us-west-2:111122223333:secret:${querySecretName}-AbCd12`;
     environment.platformBindings = { provider: 'aws', aws: { kind: 'opentofu', databaseLoginAt: '2026-01-01T00:00:00Z', sharedDatabase: true,
       database: { clusterArn, accountId: '111122223333', region: 'us-west-2', name: database, owner: app, querySecretArn } } };
+    environments.updatePlatformBindings(environment.id, environment.platformBindings);
     const connections = new ConnectionRepository();
     const connection = connections.create({ provider: 'aws', credentialsEncrypted: getSecretStore().encryptObject({ accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'synthetic-local-secret-value-32-characters', roleArn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-deploy', accountId: '111122223333', region: 'us-west-2' }) });
     connections.updateStatus(connection.id, 'verified');
@@ -148,6 +247,18 @@ describe('native credential lifecycle (real PostgreSQL)', () => {
       expect(result.success).toBe(false);
       expect(requests.find(request => request.path === '/BeginTransaction')?.body.secretArn).toBe(querySecretArn);
       expect(JSON.stringify(result)).not.toContain('synthetic-outside-environment');
+
+      const registry = new CommandRegistry(); registerHvDbTools(registry, createCommandContext());
+      const observer = await open(app);
+      try {
+        for (const sql of ['UPDATE aurora_outcomes SET updates = updates + 1 RETURNING id',
+          "UPDATE aurora_outcomes SET updates = updates + 1 WHERE id = 1 RETURNING repeat('x', 524288) AS payload"]) {
+          const limited = await registry.execute('hv_db_query', { project: project.name, env: environment.name, sql, allowMutations: true });
+          expect((await observer.query('SELECT sum(updates)::int AS total FROM aurora_outcomes')).rows).toEqual([{ total: 0 }]);
+          expect(limited).toMatchObject({ ok: false, error: { details: { mutationOutcome: 'rolled_back' } } });
+          expect(limited.error?.message).toContain('mutation was rolled back');
+        }
+      } finally { await observer.end(); }
     } finally {
       if (access?.ok) await access.lease.release();
       for (const client of transactions.values()) await client.end();

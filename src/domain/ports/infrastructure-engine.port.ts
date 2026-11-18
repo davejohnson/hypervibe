@@ -50,6 +50,8 @@ export interface EngineResourceChange {
   action: EngineChangeAction;
   /** Top-level attribute paths whose planned values differ (never values). */
   changedAttributes: string[];
+  /** Changed/unknown leaf paths for precise approval checks. Numeric steps index lists; an unknown ancestor covers all its descendants. Never includes values. */
+  changedAttributePaths: Array<Array<string | number>>;
   /** True when the engine marked any planned attribute as sensitive. */
   hasSensitiveValues: boolean;
 }
@@ -63,7 +65,7 @@ export interface EngineResourceMapping {
   dataBearing?: boolean;
   /** Creating or replacing this resource can charge the provider account. */
   billable?: boolean;
-  /** Top-level attributes whose in-place change alters what this resource costs (for example its size). Such an update is billable and needs exact confirmation. */
+  /** Dot-separated cost attribute paths; `*` matches a list element (for example `settings.*.tier`). Changed or unknown paths require exact confirmation. */
   costAttributes?: readonly string[];
   /** Permission/trust changes require review even when they have no usage charge. */
   requiresConfirm?: boolean;

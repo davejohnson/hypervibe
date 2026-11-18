@@ -1,0 +1,215 @@
+{
+  "gcp": {
+    "ok": true,
+    "data": {
+      "environment": "testing",
+      "specRevision": 1,
+      "engine": "opentofu",
+      "workers": [
+        {
+          "service": "queue-worker",
+          "mode": "on-demand",
+          "instances": 0,
+          "waker": {
+            "state": "SUCCEEDED",
+            "lastRunAt": "2026-11-17T11:59:00.000Z",
+            "pendingWork": 0
+          }
+        },
+        {
+          "service": "always-worker",
+          "mode": "always-on",
+          "instances": 2
+        },
+        {
+          "service": "unobserved-worker",
+          "mode": "always-on"
+        },
+        {
+          "service": "blocked-worker",
+          "mode": "on-demand",
+          "instances": 1,
+          "waker": {
+            "state": "FAILED",
+            "readError": "access denied"
+          }
+        }
+      ]
+    },
+    "hint": "Fix the warnings above, then check hv_status again.",
+    "warnings": [
+      "Worker blocked-worker cannot read pending work."
+    ],
+    "next": [
+      "hv_plan"
+    ]
+  },
+  "gcpNoWorkers": {
+    "ok": true,
+    "data": {
+      "environment": "testing",
+      "specRevision": 1,
+      "engine": "opentofu",
+      "workers": []
+    },
+    "hint": "Run hv_plan scope=\"infrastructure\" to check infrastructure drift.",
+    "next": [
+      "hv_plan",
+      "hv_health"
+    ]
+  },
+  "aws": {
+    "ok": true,
+    "data": {
+      "environment": "testing",
+      "specRevision": 1,
+      "engine": "opentofu",
+      "workers": "not read"
+    },
+    "hint": "Run hv_health for the web service and hv_plan scope=\"infrastructure\" for drift.",
+    "warnings": [
+      "hv_status does not read live worker state on AWS yet."
+    ],
+    "next": [
+      "hv_health",
+      "hv_plan"
+    ]
+  },
+  "azure": {
+    "ok": true,
+    "data": {
+      "environment": "testing",
+      "specRevision": 1,
+      "engine": "opentofu",
+      "workers": "not read"
+    },
+    "hint": "Run hv_health for the web service and hv_plan scope=\"infrastructure\" for drift.",
+    "warnings": [
+      "hv_status does not read live worker state on Azure yet."
+    ],
+    "next": [
+      "hv_health",
+      "hv_plan"
+    ]
+  },
+  "railway": {
+    "ok": true,
+    "data": {
+      "environment": "testing",
+      "specRevision": 1,
+      "specSource": {
+        "kind": "local"
+      },
+      "verified": true,
+      "observedAt": "2026-11-17T12:00:00.000Z",
+      "services": [],
+      "inSync": true,
+      "backupCoverage": {
+        "policy": {
+          "mode": "disabled",
+          "source": "default",
+          "reason": "No backup policy is requested; existing provider schedules are unchanged.",
+          "resources": []
+        },
+        "resources": [],
+        "complete": true,
+        "backupObserved": "not-applicable",
+        "restoreTested": "not-applicable"
+      },
+      "backupHealth": {
+        "observedAt": "2026-11-17T12:00:00.000Z",
+        "resources": []
+      },
+      "backupReadiness": {
+        "ready": true,
+        "policyReady": true,
+        "recoveryPointReady": true,
+        "restoreReady": true,
+        "resources": [],
+        "gaps": []
+      },
+      "restartRequired": false,
+      "runtimeConfiguration": {
+        "status": "current"
+      },
+      "runtimeHealth": {
+        "status": "unverified",
+        "reason": "hv_status verifies desired infrastructure and managed variable attachment, not application behavior. Use hv_health for HTTP services and hv_logs source=\"service\" errorsOnly=true for workers."
+      },
+      "summary": {},
+      "drift": [],
+      "unmanaged": [],
+      "blocked": [
+        {
+          "provider": "railway",
+          "requiredCredentialKeys": [
+            "apiToken"
+          ],
+          "reason": "No verified railway connection. Confirm the Railway credential type and permissions. Token/credential type: Railway Account API token (create with \"No workspace\" selected). Create or review it here: https://railway.com/account/tokens. Required permissions: Account tokens act with your access across workspaces; Hypervibe needs one that can create projects, services, environments, variables, databases, domains, and deployments in the target workspace. Notes: Create the token at https://railway.com/account/tokens and select \"No workspace\" so it is an account token. Hypervibe verifies with the GraphQL me query, which Railway documents as unusable with workspace or project tokens — workspace-scoped tokens fail verification. Do NOT use a Project token (from a project's settings page): project tokens are scoped to one environment, use a different auth header, and cannot call the account-level API Hypervibe needs. If multiple workspaces are visible, include workspaceId: credentialsMap={\"apiToken\":\"HYPERVIBE_RAILWAY_TOKEN\",\"workspaceId\":\"RAILWAY_WORKSPACE_ID\"} so projects are created in the right workspace. Connect with: hv_connections provider=\"railway\" credentialsRef=\"dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN\".",
+          "policy": "hard"
+        }
+      ],
+      "connectionSetup": [
+        {
+          "provider": "railway",
+          "project": "companion-railway",
+          "displayName": "Railway",
+          "tokenType": "Railway Account API token (create with \"No workspace\" selected)",
+          "recommendedSetupUrl": "https://railway.com/account/tokens",
+          "setupUrls": [
+            "https://railway.com/account/tokens"
+          ],
+          "requiredPermissions": [
+            "Account tokens act with your access across workspaces; Hypervibe needs one that can create projects, services, environments, variables, databases, domains, and deployments in the target workspace."
+          ],
+          "credentialExample": "hv_connections project=\"companion-railway\" provider=\"railway\" credentialsRef=\"dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN\"",
+          "notes": [
+            "Create the token at https://railway.com/account/tokens and select \"No workspace\" so it is an account token. Hypervibe verifies with the GraphQL me query, which Railway documents as unusable with workspace or project tokens — workspace-scoped tokens fail verification.",
+            "Do NOT use a Project token (from a project's settings page): project tokens are scoped to one environment, use a different auth header, and cannot call the account-level API Hypervibe needs.",
+            "If multiple workspaces are visible, include workspaceId: credentialsMap={\"apiToken\":\"HYPERVIBE_RAILWAY_TOKEN\",\"workspaceId\":\"RAILWAY_WORKSPACE_ID\"} so projects are created in the right workspace."
+          ],
+          "localEnvInputs": [
+            {
+              "envKey": "HYPERVIBE_RAILWAY_TOKEN",
+              "credentialKeys": [
+                "apiToken"
+              ],
+              "comment": "Railway API token for the selected workspace and project infrastructure"
+            }
+          ]
+        }
+      ],
+      "deploySource": {
+        "strategy": "manual",
+        "observed": {},
+        "pushToDeploy": false
+      }
+    },
+    "agentInstruction": {
+      "action": "ask_user",
+      "message": "Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Preserve the complete query string, including the name and description; Hypervibe has prepared the supported known fields. Never replace a pre-filled form link with a dashboard URL or a click-by-click navigation checklist, and do not invent or rewrite query parameters. Explain only the remaining manual fields, review, or consent from the guidance; never put secrets in URLs. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague \"Hypervibe credential flow\" or ask the user to paste a token into chat."
+    },
+    "hint": "This task needs provider access that is not connected on this Mac (railway). Recommended credential page(s): railway: https://railway.com/account/tokens. Save the credential outside chat in an exported environment variable, a gitignored dotenv file, or a local JSON file, then use the exact connection command shown in connectionSetup: hv_connections project=\"companion-railway\" provider=\"railway\" credentialsRef=\"dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN\". Replace /absolute/path with the real local path. Do not call this an abstract \"Hypervibe credential flow\"; show these concrete links and commands. If the credential is not controlled by this user, prepare a value-free handoff naming the provider, scope, and blocked task. Do not bypass Hypervibe with provider CLIs or rerun plan/apply/deploy before the connection verifies. After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.",
+    "next": [
+      "hv_connections"
+    ]
+  },
+  "plannedProvider": {
+    "ok": false,
+    "error": {
+      "code": "VALIDATION",
+      "message": "fixture-planned-hosting hosting is planned and is not enabled for lifecycle mutation in environment \"testing\".",
+      "details": {
+        "path": "environments.testing.hosting.provider",
+        "capability": "hosting",
+        "maturityStatus": "planned",
+        "maturityReason": "Synthetic planned provider for interface compatibility."
+      }
+    },
+    "agentInstruction": {
+      "action": "stop_and_report",
+      "message": "Stop here. Summarize what worked and what failed, include the actionable error details, and ask the user before retrying or trying an alternate approach."
+    },
+    "hint": "Synthetic planned provider for interface compatibility. Ready lifecycle providers: railway. You may still connect the provider and use hv_inspect for read-only forensics."
+  }
+}

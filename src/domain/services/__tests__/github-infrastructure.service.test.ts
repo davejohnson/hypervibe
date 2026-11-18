@@ -49,6 +49,33 @@ function githubSpec() {
 }
 
 describe('GitHub infrastructure compiler', () => {
+  it('compiles macOS checks from desired state and keeps Linux as the default', () => {
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: 'companion-contract',
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
+      github: {
+        actions: {
+          companion: {
+            kind: 'check', category: 'test', runner: 'macos-latest', changeScope: 'all',
+            runtime: { kind: 'node' }, triggers: { pullRequest: true },
+            commands: ['swift test --package-path apps/macos'],
+          },
+          linux: { kind: 'check', category: 'test', commands: ['npm test'], runtime: { kind: 'node' } },
+        },
+      },
+      environments: {},
+    });
+    const files = compileManagedGitHubFiles(spec.github!, spec.runtime);
+    const mac = files.find(file => file.path.endsWith('hypervibe-companion.yml'))!.content;
+    expect(mac).toContain('runs-on: macos-latest');
+    expect(mac).toContain('pull_request:');
+    expect(mac).toContain('swift test --package-path apps/macos');
+    expect(mac).not.toContain('Classify pull request changes');
+    expect(files.find(file => file.path.endsWith('hypervibe-linux.yml'))!.content)
+      .toContain('runs-on: ubuntu-latest');
+  });
+
   it('compiles stable owned files and a manifest', () => {
     const files = compileManagedGitHubFiles(githubSpec());
     expect(files.map((file) => file.path)).toEqual([

@@ -1,12 +1,15 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { generateKeyPairSync, verify } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { AuditRepository } from '../../../adapters/db/repositories/audit.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { getSecretStore, SecretStore } from '../../../adapters/secrets/secret-store.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import {
   GcpBootstrapClient,
   GcpBootstrapKeyCleanupRequiredError,
@@ -137,6 +140,7 @@ function makeDependencies(
     prepareCloud: vi.fn(async () => ({ success: true })),
     setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', actions: [] })),
     verifyPreparation: vi.fn(async () => {}),
+    sleep: vi.fn(async (_milliseconds: number) => {}),
     verifyProvider: vi.fn(async (_provider, credentials) => ({
       success: true,
       email: SERVICE_ACCOUNT_EMAIL,
@@ -647,6 +651,140 @@ describe('runGcpBootstrap', () => {
     expect(dependencies.prepareCloud).not.toHaveBeenCalled();
     expect(new ConnectionRepository().findAll()).toHaveLength(2);
     expect(JSON.stringify(result)).not.toContain(PRIVATE_KEY);
+  });
+
+  // Reconstructed OAuth responses from Google's error contract, through the real
+  // registry/adapters and serialized token requests. Creation/setup remain test doubles.
+  // https://docs.cloud.google.com/iam/docs/keys-create-delete#creating
+  // https://developers.google.com/identity/protocols/oauth2/service-account#error-codes
+  describe('new service account key propagation', () => {
+    const { privateKey: key, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    const json = serviceAccountJson({ private_key: key });
+    const signatureFailure = { error: 'invalid_grant', error_description: 'Invalid JWT Signature.' };
+    const parameters = () => ({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT, confirm: true });
+    const transport = (fail: (attempt: number) => unknown | undefined, errorStatus = 400) => {
+      let attempts = 0;
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url === 'https://oauth2.googleapis.com/token') {
+          expect(init?.method).toBe('POST');
+          const form = new URLSearchParams(String(init?.body));
+          expect(form.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:jwt-bearer');
+          const [header, claims, signature] = form.get('assertion')!.split('.');
+          expect(JSON.parse(Buffer.from(header!, 'base64url').toString())).toMatchObject({ alg: 'RS256' });
+          expect(verify('RSA-SHA256', Buffer.from(`${header}.${claims}`), publicKey, Buffer.from(signature!, 'base64url'))).toBe(true);
+          expect(JSON.parse(Buffer.from(claims!, 'base64url').toString())).toMatchObject({ iss: SERVICE_ACCOUNT_EMAIL, aud: url });
+          const error = fail(++attempts);
+          return error === undefined
+            ? Response.json({ access_token: 'bootstrap-verification-token', expires_in: 3600 })
+            : Response.json(error, { status: errorStatus });
+        }
+        if (url === `https://run.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/us-central1/services?pageSize=1`) return Response.json({ services: [] });
+        if (url === `https://sqladmin.googleapis.com/v1/projects/${GCP_PROJECT_ID}/instances?maxResults=1`) return Response.json({ items: [] });
+        if (url === 'https://logging.googleapis.com/v2/entries:list') return Response.json({ entries: [] });
+        throw new Error('Unexpected verification endpoint');
+      });
+    };
+    const fresh = () => {
+      const client = makeClient({ createServiceAccountKey: vi.fn(async () => ({ name: KEY_NAME, privateKeyData: Buffer.from(json).toString('base64') })) });
+      const { verifyProvider: _verificationDouble, ...dependencies } = makeDependencies(client);
+      return { client, dependencies };
+    };
+
+    it('retries only verification of one new key, then stores both exact verified connections', async () => {
+      const fetch = transport(attempt => [1, 2, 4].includes(attempt) ? signatureFailure : undefined);
+      const { client, dependencies } = fresh();
+      const result = await runGcpBootstrap(parameters(), dependencies);
+      expect(result).toMatchObject({ success: true, partialProgress: { credential: 'created', connections: 'stored', providerVerification: { cloudrun: 'verified', cloudsql: 'verified' } } });
+      expect(vi.mocked(dependencies.sleep).mock.calls.map(call => call[0])).toEqual([2000, 4000, 8000]);
+      expect(client.createServiceAccountKey).toHaveBeenCalledTimes(1);
+      expect(client.deleteServiceAccountKey).not.toHaveBeenCalled();
+      expect(dependencies.setupProject).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls.filter(([url]) => String(url) === 'https://oauth2.googleapis.com/token')).toHaveLength(5);
+      const connections = new ConnectionRepository().findAll();
+      expect(connections).toHaveLength(2);
+      for (const connection of connections) expect(getSecretStore().decryptObject<{ credentials: string }>(connection.credentialsEncrypted).credentials).toBe(json);
+      expect(JSON.stringify(result)).not.toContain(key);
+    });
+
+    it('exhausts one bounded wait budget, cleans up the exact new key and stores nothing', async () => {
+      const fetch = transport(() => signatureFailure);
+      const { client, dependencies } = fresh();
+      const result = await runGcpBootstrap(parameters(), dependencies);
+      expect(vi.mocked(dependencies.sleep).mock.calls.map(call => call[0])).toEqual([2000, 4000, 8000, 16000, 30000]);
+      expect(fetch.mock.calls.filter(([url]) => String(url) === 'https://oauth2.googleapis.com/token')).toHaveLength(6);
+      expect(client.createServiceAccountKey).toHaveBeenCalledTimes(1);
+      expect(client.deleteServiceAccountKey).toHaveBeenCalledExactlyOnceWith(KEY_NAME);
+      expect(new ConnectionRepository().findAll()).toEqual([]);
+      expect(result).toMatchObject({ success: false, partialProgress: { credential: 'cleaned-up', connections: 'not-stored', providerVerification: { cloudrun: 'failed', cloudsql: 'not-started' } } });
+      expect(result.error).toContain('Token exchange failed: 400');
+      expect(result.error).toContain('Invalid JWT Signature.');
+    });
+
+    it('shares the retry budget across both consumers of the same new key', async () => {
+      const fetch = transport(attempt => attempt === 4 ? undefined : signatureFailure);
+      const { client, dependencies } = fresh();
+      const result = await runGcpBootstrap(parameters(), dependencies);
+      expect(vi.mocked(dependencies.sleep).mock.calls.map(call => call[0])).toEqual([2000, 4000, 8000, 16000, 30000]);
+      expect(fetch.mock.calls.filter(([url]) => String(url) === 'https://oauth2.googleapis.com/token')).toHaveLength(7);
+      expect(result).toMatchObject({ success: false, partialProgress: { providerVerification: { cloudrun: 'verified', cloudsql: 'failed' }, connections: 'not-stored' } });
+      expect(client.deleteServiceAccountKey).toHaveBeenCalledExactlyOnceWith(KEY_NAME);
+      expect(new ConnectionRepository().findAll()).toEqual([]);
+    });
+
+    it.each([
+      { error: 'invalid_grant', error_description: 'Invalid JWT: Token must be a short-lived token and in a reasonable timeframe.' },
+      { error: 'invalid_scope', error_description: 'Invalid OAuth scope or ID token audience provided.' },
+      { error: 'disabled_client', error_description: 'The OAuth client was disabled.' },
+      { error: 'permission_denied', error_description: 'Invalid JWT Signature.' },
+      { error: 'invalid_grant' },
+      'invalid_grant Invalid JWT Signature.',
+    ])('does not retry a different token failure: %j', error => {
+      transport(() => error);
+      const { client, dependencies } = fresh();
+      return runGcpBootstrap(parameters(), dependencies).then(result => {
+        expect(result.success).toBe(false);
+        expect(dependencies.sleep).not.toHaveBeenCalled();
+        expect(client.deleteServiceAccountKey).toHaveBeenCalledExactlyOnceWith(KEY_NAME);
+      });
+    });
+
+    it.each([401, 403])('does not treat token status %s as new-key propagation', async status => {
+      const fetch = transport(() => signatureFailure, status);
+      const { client, dependencies } = fresh();
+      const result = await runGcpBootstrap(parameters(), dependencies);
+      expect(result.error).toContain(`Token exchange failed: ${status}`);
+      expect(dependencies.sleep).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(client.deleteServiceAccountKey).toHaveBeenCalledExactlyOnceWith(KEY_NAME);
+    });
+
+    it('does not retry a provider authorization failure after a successful token exchange', async () => {
+      const fetch = transport(() => undefined);
+      const tokenTransport = fetch.getMockImplementation()!;
+      fetch.mockImplementation(async (input, init) => String(input).startsWith('https://run.googleapis.com/')
+        ? Response.json(signatureFailure, { status: 403 }) : tokenTransport(input, init));
+      const { client, dependencies } = fresh();
+      const result = await runGcpBootstrap(parameters(), dependencies);
+      expect(result.error).toContain('Cloud Run Admin API probe failed with 403');
+      expect(dependencies.sleep).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(client.deleteServiceAccountKey).toHaveBeenCalledExactlyOnceWith(KEY_NAME);
+    });
+
+    it('does not retry or delete a rejected credential retained from earlier setup', async () => {
+      transport(() => signatureFailure);
+      const connectionRepo = new ConnectionRepository();
+      connectionRepo.upsertVerifiedBatch([{ provider: 'cloudsql', scope: SCOPE, credentialsEncrypted: getSecretStore().encryptObject({ projectId: GCP_PROJECT_ID, credentials: json, region: 'us-central1' }) }]);
+      const before = connectionRepo.findAll();
+      const { client, dependencies } = fresh();
+      const result = await runGcpBootstrap(parameters(), dependencies);
+      expect(result).toMatchObject({ success: false, partialProgress: { credential: 'reused', connections: 'not-stored' } });
+      expect(dependencies.sleep).not.toHaveBeenCalled();
+      expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+      expect(client.deleteServiceAccountKey).not.toHaveBeenCalled();
+      expect(connectionRepo.findAll()).toEqual(before);
+    });
   });
 
   it('reports IAM as already enabled when observed before the saved apply', async () => {
