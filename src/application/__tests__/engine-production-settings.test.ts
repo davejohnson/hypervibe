@@ -102,15 +102,13 @@ describe('production settings on Google Cloud', () => {
     }
   });
 
-  it('admits these settings on Google Cloud and refuses them by name on the other clouds', () => {
+  it('accepts storage protection and browser upload intent on all three clouds', () => {
     expect(engineEnvironmentProblems(specFor('cloudrun'), 'staging')).toEqual([]);
     for (const [provider, cloud] of [['aws', 'AWS'], ['azure', 'Azure']] as const) {
       expect(engineEnvironmentProblems(specFor(provider), 'staging')).toEqual([
         `Service web: alwaysOn is not yet supported on ${cloud}.`,
         `database.size is not yet supported on ${cloud}.`,
         `database.deletionProtection is not yet supported on ${cloud}.`,
-        `Storage media: versioning is not yet supported on ${cloud}.`,
-        `Storage media: browserUploads is not yet supported on ${cloud}.`,
       ]);
     }
   });

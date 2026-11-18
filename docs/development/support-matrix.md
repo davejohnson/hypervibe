@@ -41,7 +41,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Production-shaped environments | yes: dedicated database, deletion protection; new databases start with 14 daily backups and 7 days point-in-time recovery; existing backup policy is preserved | blocked (#625) | blocked (#625) |
 | Database size (`database.size`), deletion protection | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
-| File versioning (30 days), browser uploads straight to storage | yes | blocked (#664) | blocked (#664) |
+| File versioning (30 days), browser uploads straight to storage | yes | S3 versioning, 30-day noncurrent expiry and signed uploads | Blob soft delete (30 days) and SAS uploads. All containers in an environment share these account settings. |
 | Always-on web service (`alwaysOn`) | yes | blocked (#625) | blocked (#625) |
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |

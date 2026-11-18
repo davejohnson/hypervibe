@@ -65,10 +65,6 @@ function googleOnlyProblems(environment: EnvironmentSpec): string[] {
   }
   if (environment.database?.size) problems.push(`database.size is not yet supported on ${cloud}.`);
   if (environment.database?.deletionProtection !== undefined) problems.push(`database.deletionProtection is not yet supported on ${cloud}.`);
-  for (const [name, storage] of Object.entries(environment.storage ?? {})) {
-    if (storage.versioning) problems.push(`Storage ${name}: versioning is not yet supported on ${cloud}.`);
-    if (storage.browserUploads) problems.push(`Storage ${name}: browserUploads is not yet supported on ${cloud}.`);
-  }
   return problems;
 }
 
