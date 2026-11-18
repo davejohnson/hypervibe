@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { createRequire } from 'module';
 import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
+import { readGitHubSourceArchive } from './github-source.js';
 import { githubPackageReadCredentialUpdate } from './github-credential-update.js';
 import {
   providerRegistry,
@@ -110,6 +111,11 @@ export class GitHubAdapter {
 
   connect(credentials: unknown): void {
     this.credentials = credentials as GitHubCredentials;
+  }
+
+  readSourceArchive(repository: string, revision: string) {
+    if (!this.credentials) throw new Error('The GitHub repository connection is unavailable.');
+    return readGitHubSourceArchive(this.credentials.apiToken, repository, revision);
   }
 
   async inspectRepositoryVariables(scope: string, name: string | undefined, limit: number): Promise<Record<string, unknown>> {

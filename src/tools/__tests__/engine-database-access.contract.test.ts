@@ -255,6 +255,7 @@ it.each(['rows', 'bytes'] as const)('reports confirmed rollback when mutation re
   const result = await query({ project: project.name, env: environment.name, sql: 'UPDATE notes SET label = $1 RETURNING label', params: ['changed'], allowMutations: true });
   expect(result.ok).toBe(false);
   expect(JSON.stringify(result)).toMatch(/mutation was rolled back/i);
+  expect(result.error.details.mutationOutcome).toBe('rolled_back');
   expect(calls.some(call => call.path === '/CommitTransaction')).toBe(false);
   expect(calls.filter(call => call.path === '/RollbackTransaction')).toHaveLength(1);
 });
@@ -263,6 +264,7 @@ it('does not promise rollback when the oversized mutation cleanup cannot be conf
   const result = await query({ project: project.name, env: environment.name, sql: 'UPDATE notes SET label = $1 RETURNING label', params: ['changed'], allowMutations: true });
   expect(result.ok).toBe(false);
   expect(JSON.stringify(result)).not.toMatch(/mutation was rolled back/i);
+  expect(result.error.details.mutationOutcome).toBe('unknown');
   expect(JSON.stringify(result)).toMatch(/rollback could not be verified/i);
   expect(calls.some(call => call.path === '/CommitTransaction')).toBe(false);
   expect(calls.filter(call => call.path === '/RollbackTransaction')).toHaveLength(2);

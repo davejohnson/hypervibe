@@ -373,7 +373,7 @@ function buildCheckWorkflow(
     'jobs:',
     '  check:',
     `    name: ${yamlString(githubWorkflowName(id))}`,
-    '    runs-on: ubuntu-latest',
+    `    runs-on: ${automation.runner ?? 'ubuntu-latest'}`,
     '    timeout-minutes: 30',
     '    steps:',
     ...(applicationScoped ? pullRequestChangeClassifier() : []),

@@ -78,14 +78,15 @@ export function readReleaseArtifactZip(bytes: Buffer, filename: string): unknown
   } catch { throw new Error('Invalid release artifact: expected one bounded JSON file in a valid ZIP.'); }
 }
 
-export async function readBoundedArtifactBody(response: Response, signal: AbortSignal): Promise<Buffer> {
+export async function readBoundedArtifactBody(response: Response, signal: AbortSignal,
+  options = { maxBytes: RELEASE_ARTIFACT_ARCHIVE_LIMIT, name: 'Release artifact' }): Promise<Buffer> {
   const reader = response.body?.getReader();
-  if (!reader) throw new Error('Release artifact has no response body.');
+  if (!reader) throw new Error(`${options.name} has no response body.`);
   const chunks: Buffer[] = [];
   let size = 0;
   let onAbort!: () => void;
   const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(new Error('Release artifact download timed out.'));
+    onAbort = () => reject(new Error(`${options.name} download timed out.`));
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) onAbort();
   });
@@ -94,7 +95,7 @@ export async function readBoundedArtifactBody(response: Response, signal: AbortS
       const { done, value } = await Promise.race([reader.read(), aborted]);
       if (done) break;
       size += value.byteLength;
-      if (size > RELEASE_ARTIFACT_ARCHIVE_LIMIT) throw new Error('Release artifact exceeds the bounded archive limit.');
+      if (size > options.maxBytes) throw new Error(`${options.name} exceeds the bounded archive limit.`);
       chunks.push(Buffer.from(value));
     }
     return Buffer.concat(chunks);

@@ -226,6 +226,7 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       const durationMs = Date.now() - startedAt;
+      const mutationOutcome = analysis.isMutation ? result?.mutationOutcome ?? 'unknown' : undefined;
       const access = {
         mode: lease.mode,
         provider: lease.provider,
@@ -246,6 +247,7 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
             environment: target.environment ?? env ?? null,
             provider: lease.provider,
             queryType: analysis.isMutation ? 'mutation' : 'select',
+            ...(mutationOutcome ? { mutationOutcome } : {}),
             sqlFingerprint: sqlFingerprint(sql),
             durationMs,
             rowCount: result?.rowCount,
@@ -263,9 +265,11 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
       const responseWarnings = [cleanup.warning, auditWarning].filter((value): value is string => Boolean(value));
       if (queryError) {
         return commandError('PROVIDER_ERROR', queryError instanceof Error ? queryError.message : String(queryError), {
-          details: { source: target.source, durationMs, access },
+          details: { source: target.source, durationMs, access, ...(mutationOutcome ? { mutationOutcome } : {}) },
           warnings: responseWarnings,
-          hint: cleanup.status === 'failed'
+          hint: analysis.isMutation
+            ? 'The mutation outcome is unknown. Inspect the database with a read-only query before considering another write.'
+            : cleanup.status === 'failed'
             ? 'The query and cleanup both failed. Inspect the managed database with hv_inspect before retrying.'
             : 'Check the database connection and SQL, then retry the diagnostic query.',
         });
@@ -275,9 +279,13 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
       }
       if (!result.success) {
         return commandError('PROVIDER_ERROR', result.error ?? 'Query failed', {
-          details: { source: target.source, durationMs, access },
+          details: { source: target.source, durationMs, access, ...(mutationOutcome ? { mutationOutcome } : {}) },
           warnings: responseWarnings,
-          hint: cleanup.status === 'failed'
+          hint: mutationOutcome === 'committed'
+            ? 'The mutation committed. Inspect the database with a read-only query; do not repeat the write.'
+            : mutationOutcome === 'unknown'
+              ? 'The mutation outcome is unknown. Inspect the database with a read-only query before considering another write.'
+              : cleanup.status === 'failed'
             ? 'The query failed and temporary access cleanup is pending. Inspect with hv_inspect before retrying.'
             : undefined,
         });
@@ -287,6 +295,7 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
         {
           source: target.source,
           queryType: analysis.isMutation ? 'mutation' : 'select',
+          ...(mutationOutcome ? { mutationOutcome } : {}),
           rowCount: result.rowCount,
           durationMs,
           access,

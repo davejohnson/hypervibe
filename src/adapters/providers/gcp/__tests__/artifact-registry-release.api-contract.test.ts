@@ -124,4 +124,29 @@ describe('Artifact Registry release prerequisite', () => {
     // Reading the secret needs an identity Hypervibe controls, not the project default.
     expect(submitted.serviceAccount).toMatch(/serviceAccounts\/.+@/);
   });
+
+  it('builds an uploaded GitHub archive inside its validated wrapper directory', async () => {
+    // Cloud Build documents a relative BuildStep.dir as /workspace/<dir>:
+    // https://docs.cloud.google.com/build/docs/build-config-file-schema#dir
+    const subject = await adapter();
+    let submitted: Record<string, any> = {};
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const location = String(url);
+      if (location.includes('cloudbuild.googleapis.com')) {
+        submitted = JSON.parse(String(init?.body));
+        return Response.json({ id: 'build-archive', status: 'SUCCESS', results: { images: [{ name: submitted.images[0], digest: `sha256:${'d'.repeat(64)}` }] } });
+      }
+      return Response.json(location.includes('artifactregistry') ? { name: repositoryName, format: 'DOCKER' } : {});
+    });
+    vi.stubGlobal('fetch', fetch);
+    const result = await subject.buildReleaseImageFromArchive(service, environment, { archive: Buffer.from('source-bytes'), commitSha,
+      bucket: 'gcp-project-build-source', sourceDirectory: 'owner-repo-aaaaaaa' });
+    expect(result.success, result.error).toBe(true);
+    expect(submitted.source).toEqual({ storageSource: { bucket: 'gcp-project-build-source', object: expect.stringContaining(commitSha) } });
+    expect(submitted.steps[0].dir).toBe('owner-repo-aaaaaaa');
+    expect(JSON.stringify(submitted)).not.toMatch(/gitSource|codeload|github\.com/);
+    expect((await subject.buildReleaseImageFromArchive(service, environment, { archive: Buffer.from('source-bytes'), commitSha,
+      bucket: 'gcp-project-build-source', sourceDirectory: '../outside' })).success).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
 });

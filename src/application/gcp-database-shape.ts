@@ -4,7 +4,8 @@ import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 /**
  * What a Google Cloud database looks like for an environment. Production and
  * staging share one shape (dedicated cores, deletion protection, two weeks of
- * backups); every other environment gets the cheapest instance.
+ * backups on creation); every other environment gets the cheapest instance.
+ * Existing native backup policy and PITR are preserved by the engine lifecycle.
  *
  * Prices are Cloud SQL Enterprise list prices for the instance alone in a US
  * region, rounded up; storage and backups are billed on top by the gigabyte.
@@ -34,7 +35,7 @@ export function gcpDatabaseShape(environmentName: string, database: NonNullable<
   return {
     tier: size.tier, deletionProtection, retainedBackups, transactionLogDays,
     summary: `Database: ${size.label}, about US$${size.monthlyUsd} a month plus storage. `
-      + `${retainedBackups} daily backups and ${transactionLogDays} days of point-in-time recovery. `
+      + `New databases start with ${retainedBackups} daily backups and ${transactionLogDays} days of point-in-time recovery; existing backup and recovery settings are preserved. `
       + `Deletion protection is ${deletionProtection ? 'on' : 'off'}.`,
   };
 }

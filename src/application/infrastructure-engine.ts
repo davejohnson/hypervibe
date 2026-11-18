@@ -1,6 +1,6 @@
 import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
 import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
-import { pickRemoteCommit, sourceBuildProblem } from './release-source.js';
+import { repositorySourceArchive } from './repository-source.js';
 import { healthCheckFailed, strictHealthCheck } from '../domain/services/release-health.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
@@ -51,7 +51,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
-import { normalizeGitRemoteForBuild, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import {
@@ -1460,7 +1460,7 @@ export async function releaseGcpEngineServices(ctx: CommandContext, params: {
   const environmentSpec = spec.environments[environmentName];
   const context = await resolveEngineContext(ctx, params.project, spec, environmentName);
   if ('blocked' in context) return { blocked: context.blocked };
-  const source = await resolveReleaseSource(params);
+  const source = await resolveReleaseSource({ ...params, revision: params.revision ?? environmentSpec?.deploy?.branch ?? 'main' });
   if ('blocked' in source) return source;
   // The engine runs every background worker as a worker pool; repair a binding recorded as a service.
   const stale = boundWorkloads(context.environment).filter((workload) => workload.kind === 'services' && environmentSpec!.services[workload.name]?.workloadKind === 'worker');
@@ -1494,7 +1494,7 @@ export async function releaseGcpEngineServices(ctx: CommandContext, params: {
     type: 'update',
     resource: { kind: 'service', name, provider: 'gcp' },
     verified: true,
-    reason: `Build ${params.revision ?? 'main'} and release it to ${name}; only the running image changes.`,
+    reason: `Build ${source.summary.revision} (${source.summary.commitSha}) and release it to ${name}; only the running image changes.`,
     metadata: { operation: ENGINE_RELEASE_OPERATION, gcpProjectId: context.gcpProjectId, resource: workloads.get(name)!.resource, workloadKind: workloads.get(name)!.kind },
     ...(releaseCommand ? { dependsOn: ['release-command:migrations'] } : {}),
   }))];
@@ -1542,15 +1542,16 @@ export async function releaseGcpEngineServices(ctx: CommandContext, params: {
 }
 
 interface ReleaseSource {
-  archive?: Buffer;
-  repoUrl?: string;
+  archive: Buffer;
+  sourceDirectory?: string;
   summary: { kind: 'local-commit' | 'git-remote'; revision: string; commitSha?: string; uncommittedChangesExcluded?: boolean };
 }
 
 /**
  * Prefers the user's local repository: the exact HEAD commit is archived and
  * uploaded, so private repositories and unpushed commits deploy without any
- * git credentials. Falls back to cloning a public remote.
+ * git credentials. Without a checkout, a verified repository connection fetches
+ * the exact commit archive; the cloud build never receives repository credentials.
  */
 async function resolveReleaseSource(params: { project: Project; spec: ProjectSpec; revision?: string; sourceDirectory?: string }): Promise<ReleaseSource | { blocked: string }> {
   if (params.sourceDirectory) {
@@ -1566,22 +1567,11 @@ async function resolveReleaseSource(params: { project: Project; spec: ProjectSpe
       // Not a usable git checkout; fall back to the remote.
     }
   }
-  const repoUrl = normalizeGitRemoteForBuild(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
-  if (!repoUrl) return { blocked: 'Hypervibe needs either this project\'s local git repository or a git remote to build from.' };
-  // Freeze the branch to one exact commit now: every service builds that commit, and a branch that moves later changes nothing.
   const revision = params.revision ?? 'main';
-  let commitSha: string | undefined = /^[0-9a-f]{40}$/i.test(revision) ? revision.toLowerCase() : undefined;
-  if (!commitSha) {
-    try {
-      const listed = await execFileAsync('git', ['ls-remote', repoUrl, revision, `${revision}^{}`, `refs/heads/${revision}`, `refs/tags/${revision}`, `refs/tags/${revision}^{}`],
-        { timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
-      commitSha = pickRemoteCommit(String(listed.stdout), revision);
-    } catch {
-      return { blocked: `Hypervibe could not read ${revision} from the git remote to pin the exact commit. Run this from the project's local git repository, or check the remote is reachable. Nothing was built.` };
-    }
-  }
-  if (!commitSha) return { blocked: `The git remote has no branch or tag named ${revision}. Nothing was built.` };
-  return { repoUrl, summary: { kind: 'git-remote', revision, commitSha } };
+  const remote = await repositorySourceArchive({ projectRemote: params.project.gitRemoteUrl, specRemote: params.spec.gitRemoteUrl, revision });
+  if ('blocked' in remote) return remote;
+  return { archive: remote.archive, sourceDirectory: remote.sourceDirectory,
+    summary: { kind: 'git-remote', revision, commitSha: remote.commitSha } };
 }
 
 /** Builds (or reuses) the digest-pinned image for one service from the release source. */
@@ -1611,16 +1601,14 @@ async function buildServiceImage(
       packageTokenVersion = `projects/${context.gcpProjectId}/secrets/${secretId}/versions/${observed.value.latestVersion}`;
     }
   }
-  const build = source.archive
-    ? await context.adapter.buildReleaseImageFromArchive(service, context.environment, { archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId),
-      ...(packageTokenVersion ? { packageTokenVersion } : {}) })
-    : await context.adapter.buildReleaseImage(service, context.environment, { repoUrl: source.repoUrl!, revision: source.summary.commitSha!, ...(packageTokenVersion ? { packageTokenVersion } : {}) });
+  const build = await context.adapter.buildReleaseImageFromArchive(service, context.environment, {
+    archive: source.archive, commitSha: source.summary.commitSha!, bucket: buildSourceBucketName(context.gcpProjectId),
+    ...(source.sourceDirectory ? { sourceDirectory: source.sourceDirectory } : {}),
+    ...(packageTokenVersion ? { packageTokenVersion } : {}),
+  });
   if (!build.success || !build.imageUri || !/@sha256:[0-9a-f]{64}$/.test(build.imageUri)) {
     return { success: false, error: build.error ?? 'The build did not produce a digest-pinned image.', ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   }
-  // A remote build fetched the source itself: it must report the exact frozen commit before anything is released.
-  const mismatch = source.archive ? undefined : sourceBuildProblem(source.summary.commitSha!, build.resolvedCommitSha);
-  if (mismatch) return { success: false, error: mismatch, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   const built = { imageUri: build.imageUri, ...(build.logsUrl ? { logsUrl: build.logsUrl } : {}) };
   builtImages.set(name, built);
   return { success: true, ...built };

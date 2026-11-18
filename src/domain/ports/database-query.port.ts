@@ -23,6 +23,8 @@ export interface DatabaseQueryOptions {
 
 export interface DatabaseQueryResult {
   success: boolean;
+  /** Mutation completion is separate from whether its diagnostic result was usable. */
+  mutationOutcome?: 'committed' | 'rolled_back' | 'unknown';
   rows?: Record<string, unknown>[];
   rowCount?: number;
   fields?: Array<{ name: string; dataType: string }>;

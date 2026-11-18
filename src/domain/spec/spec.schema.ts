@@ -521,6 +521,8 @@ export const githubCheckAutomationSpecSchema = z.object({
   ]),
   triggers: githubAutomationTriggersSchema,
   runtime: githubAutomationRuntimeSchema,
+  /** Hosted operating system for this check; Linux remains the default. */
+  runner: z.enum(['ubuntu-latest', 'macos-latest']).optional(),
   /**
    * Application checks skip expensive steps for Hypervibe-only PRs while
    * retaining a successful required check. Use "all" for infrastructure

@@ -47,14 +47,24 @@ function containsSensitive(value: unknown): boolean {
   return false;
 }
 
-function changedTopLevel(before: unknown, after: unknown, afterUnknown: unknown): string[] {
-  const left = (before && typeof before === 'object' ? before : {}) as Record<string, unknown>;
-  const right = (after && typeof after === 'object' ? after : {}) as Record<string, unknown>;
-  const unknown = (afterUnknown && typeof afterUnknown === 'object' ? afterUnknown : {}) as Record<string, unknown>;
-  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
-  return [...keys]
-    .filter((key) => JSON.stringify(left[key]) !== JSON.stringify(right[key]) || containsSensitive(unknown[key]))
-    .sort();
+function changedPaths(before: unknown, after: unknown, afterUnknown: unknown, path: Array<string | number> = []): Array<Array<string | number>> {
+  // OpenTofu omits unknown values from `after`. A true marker may cover an
+  // entire block, so keep the ancestor and require approval for any cost below it.
+  if (afterUnknown === true) return [path];
+  const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const left = object(before); const right = object(after); const unknown = object(afterUnknown);
+  const keys = new Set([...Object.keys(left), ...Object.keys(right), ...Object.keys(unknown)]);
+  if (!keys.size) return Object.is(before, after) || JSON.stringify(before) === JSON.stringify(after) ? [] : [path];
+  const list = Array.isArray(before) || Array.isArray(after) || Array.isArray(afterUnknown);
+  return [...keys].flatMap(key => changedPaths(left[key], right[key], unknown[key], [...path, list ? Number(key) : key]));
+}
+
+function overlapsCostPath(changed: Array<string | number>, attribute: string): boolean {
+  const cost = attribute.split('.');
+  // A changed/unknown parent includes the configured cost leaf. A configured
+  // parent likewise includes all its changed leaves. Siblings do not overlap.
+  return changed.slice(0, cost.length).every((step, index) => cost[index] === '*'
+    ? typeof step === 'number' : cost[index] === step);
 }
 
 export interface ParsedEnginePlan {
@@ -80,13 +90,13 @@ export function parseEnginePlan(json: string): ParsedEnginePlan {
       continue;
     }
     if (raw.mode === 'data' || action === 'read') continue;
+    const paths = action === 'noop' ? [] : changedPaths(raw.change?.before, raw.change?.after, raw.change?.after_unknown);
     changes.push({
       address: raw.address,
       type: raw.type,
       action,
-      changedAttributes: action === 'noop'
-        ? []
-        : changedTopLevel(raw.change?.before, raw.change?.after, raw.change?.after_unknown),
+      changedAttributes: [...new Set(paths.map(path => String(path[0] ?? '*')))].sort(),
+      changedAttributePaths: paths,
       hasSensitiveValues: containsSensitive(raw.change?.before_sensitive) || containsSensitive(raw.change?.after_sensitive),
     });
   }
@@ -146,7 +156,8 @@ export function translateEnginePlan(params: {
     // A database major-version change is irreversible and needs its own explicit approval.
     // Resizing in place changes the bill without creating anything.
     const costChange = changes.some((change) => change.action === 'update'
-      && change.changedAttributes.some((attribute) => params.configuration.resources[change.address]?.costAttributes?.includes(attribute)));
+      && params.configuration.resources[change.address]?.costAttributes?.some(attribute =>
+        change.changedAttributePaths.some(path => overlapsCostPath(path, attribute))));
     const majorUpgrade = changes.some((change) => change.action === 'update' && change.changedAttributes.includes('database_version'));
     // Field lists help review changes to existing resources; for creates and deletes they are noise.
     const diff: PlanFieldDiff[] = changes
@@ -164,7 +175,7 @@ export function translateEnginePlan(params: {
           ? `adopt the explicitly selected existing ${c.address}` : `${c.action} ${c.address}`).join(', ')}.`,
       ...(diff.length ? { diff } : {}),
       ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
-      ...(mapping.billable && (dominant.action === 'create' || dominant.action === 'replace' || costChange) ? { billable: true } : {}),
+      ...(costChange || (mapping.billable && (dominant.action === 'create' || dominant.action === 'replace')) ? { billable: true } : {}),
       // Replacing, deleting or adopting anything is never implied by approving the plan as a whole.
       ...(destructive || adopting || majorUpgrade || costChange || (type !== 'noop' && mapping.requiresConfirm) ? { requiresConfirm: true } : {}),
       ...(type === 'noop' ? {} : {

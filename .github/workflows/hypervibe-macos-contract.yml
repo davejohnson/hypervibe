@@ -1,0 +1,55 @@
+# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.
+name: "Hypervibe / macos-contract"
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: "Hypervibe / macos-contract"
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          # Inherited project desired state; major/minor selectors track their latest compatible patch.
+          node-version: "24"
+          check-latest: true
+          cache: npm
+      - name: Install dependencies
+        run: |
+          npm install --global npm@11.19.0 && npm ci
+      - name: Prepare failure evidence
+        run: mkdir -p hypervibe-failure-evidence
+      - name: "test 1"
+        shell: bash
+        run: |
+          set -o pipefail
+          (
+            npm test -- src/tools/__tests__/macos-status.contract.test.ts
+          ) 2>&1 | tee hypervibe-failure-evidence/1.log
+      - name: "test 2"
+        shell: bash
+        run: |
+          set -o pipefail
+          (
+            swift test --package-path apps/macos --filter CurrentCoreStatusContractTests
+          ) 2>&1 | tee hypervibe-failure-evidence/2.log
+      - name: Upload non-secret failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: "macos-contract-failure-evidence"
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            hypervibe-failure-evidence/**

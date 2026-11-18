@@ -148,6 +148,33 @@ public struct DriftedResource: Codable, Equatable, Sendable {
     }
 }
 
+/// Configured replicas and wake-up observations are not application health.
+public struct WorkerObservation: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { service }
+    public let service: String
+    public let mode: String
+    public let instances: Int?
+    public let wakerState: String?
+    public let lastWakeAt: Date?
+    public let pendingWork: Int?
+    public let pendingWorkReadFailed: Bool
+
+    public var needsAttention: Bool { pendingWorkReadFailed || wakerState == "FAILED" }
+
+    public var configurationSummary: String {
+        let modeLabel = mode == "on-demand" ? "On demand" : mode == "always-on" ? "Always on" : "Unknown mode"
+        let replicas = instances.map { "\($0) configured \($0 == 1 ? "instance" : "instances")" } ?? "Instance count not observed"
+        return "\(modeLabel) · \(replicas)"
+    }
+
+    public var activitySummary: String? {
+        if pendingWorkReadFailed { return "Wake-up check cannot read pending work" }
+        if wakerState == "FAILED" { return "Wake-up check failed" }
+        if let pendingWork { return "\(pendingWork) pending \(pendingWork == 1 ? "task" : "tasks")" }
+        return wakerState.map { "Wake-up check: \($0.lowercased())" }
+    }
+}
+
 public struct ObservationSummary: Codable, Equatable, Sendable {
     public let health: EnvironmentHealth
     public let verified: Bool
@@ -159,6 +186,15 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
     // Optional so snapshots cached by older companion builds still decode.
     public let services: [ServiceObservation]?
     public let driftedResources: [DriftedResource]?
+    public let engine: String?
+    /// nil means workers were not read; an empty array means none configured.
+    public let workers: [WorkerObservation]?
+
+    public var infrastructureStatus: String? {
+        engine == "opentofu"
+            ? "Drift not observed here. Ask chat to run hv_plan scope=\"infrastructure\"."
+            : nil
+    }
 
     public init(
         health: EnvironmentHealth,
@@ -169,7 +205,9 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         latestAttemptAt: Date,
         latestSuccessfulAt: Date?,
         services: [ServiceObservation]? = nil,
-        driftedResources: [DriftedResource]? = nil
+        driftedResources: [DriftedResource]? = nil,
+        engine: String? = nil,
+        workers: [WorkerObservation]? = nil
     ) {
         self.health = health
         self.verified = verified
@@ -180,6 +218,8 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         self.latestSuccessfulAt = latestSuccessfulAt
         self.services = services
         self.driftedResources = driftedResources
+        self.engine = engine
+        self.workers = workers
     }
 
     public func service(named name: String) -> ServiceObservation? {
@@ -378,7 +418,9 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
                         latestAttemptAt: observation.latestAttemptAt,
                         latestSuccessfulAt: observation.latestSuccessfulAt,
                         services: observation.services,
-                        driftedResources: observation.driftedResources
+                        driftedResources: observation.driftedResources,
+                        engine: observation.engine,
+                        workers: observation.workers
                     ),
                     publicEndpointHealth: environment.publicEndpointHealth
                 )

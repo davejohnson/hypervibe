@@ -38,7 +38,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Scheduled jobs | yes | yes | yes, UTC schedules only |
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
 | Managed database query and inspection | Cloud SQL connector; retained regression coverage, live query unverified here | Aurora Data API with environment app login; offline contracts and local SQL isolation regression, live unverified | Shared Flexible Server, exact environment database and private credential; offline contracts, live unverified |
-| Production-shaped environments | yes: dedicated database, deletion protection, 14 daily backups, 7 days point-in-time recovery | blocked (#625) | blocked (#625) |
+| Production-shaped environments | yes: dedicated database, deletion protection; new databases start with 14 daily backups and 7 days point-in-time recovery; existing backup policy is preserved | blocked (#625) | blocked (#625) |
 | Database size (`database.size`), deletion protection | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
 | File versioning (30 days), browser uploads straight to storage | yes | blocked (#664) | blocked (#664) |
@@ -50,6 +50,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Generated and outside secrets | yes | yes | yes |
 | Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
+| Manual release without a local checkout | implemented for a verified GitHub repository connection; exact-commit archive and build request checked offline, live unverified | unavailable; local checkout required | unavailable; local checkout required |
 | Migrations as a release step | yes (`releaseCommand` mode) | blocked in spec and planning | blocked in spec and planning |
 | Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
 | Promotion and promotion tests | blocked (#252) | blocked (#252) | blocked (#252) |

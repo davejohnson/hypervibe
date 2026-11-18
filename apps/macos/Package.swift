@@ -55,7 +55,8 @@ let package = Package(
         ),
         .testTarget(
             name: "HypervibeCompanionCoreTests",
-            dependencies: ["HypervibeCompanionCore"]
+            dependencies: ["HypervibeCompanionCore"],
+            resources: [.process("Fixtures")]
         ),
     ]
 )

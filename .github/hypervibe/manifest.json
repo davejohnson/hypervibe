@@ -5,6 +5,7 @@
     ".github/dependabot.yml",
     ".github/pull_request_template.md",
     ".github/workflows/hypervibe-acceptance.yml",
+    ".github/workflows/hypervibe-macos-contract.yml",
     ".github/workflows/hypervibe-provider-conformance.yml"
   ]
 }

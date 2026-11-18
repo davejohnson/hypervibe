@@ -241,7 +241,8 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
   // nobody (state included) holds it. Hypervibe administers it as the deploy identity with Entra tokens.
   if (input.database) {
     if (!Number.isInteger(input.database.version) || input.database.version < 13 || input.database.version > 18) throw new Error(`PostgreSQL ${input.database.version} is not supported.`);
-    const server: EngineResourceMapping = { actionId: 'shared:database', kind: 'database', name: 'shared database server', dataBearing: true, billable: true };
+    const server: EngineResourceMapping = { actionId: 'shared:database', kind: 'database', name: 'shared database server', dataBearing: true, billable: true,
+      costAttributes: ['sku_name', 'storage_mb', 'storage_tier'] };
     for (const address of ['azurerm_postgresql_flexible_server.postgres', 'azurerm_postgresql_flexible_server_active_directory_administrator.deploy',
       'azurerm_private_dns_zone.postgres', 'azurerm_private_dns_zone_virtual_network_link.postgres', 'azurerm_private_endpoint.postgres',
       // Retired: the rule that let every address reach the server. Mapping it lets the plan remove it from older projects.
@@ -257,8 +258,8 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
           public_network_access_enabled: false,
           administrator_login: 'hvadmin', administrator_password_wo: '${ephemeral.random_password.postgres_admin.result}', administrator_password_wo_version: 1,
           authentication: [{ active_directory_auth_enabled: true, password_auth_enabled: true, tenant_id: input.tenantId }],
-          // Azure picks the availability zone; it is not drift.
-          lifecycle: [{ ignore_changes: ['zone'] }],
+          // Azure picks the zone; ordinary infrastructure also preserves native backup policy.
+          lifecycle: [{ ignore_changes: ['zone', 'backup_retention_days', 'geo_redundant_backup_enabled'] }],
         } },
         azurerm_postgresql_flexible_server_active_directory_administrator: { deploy: {
           server_name: '${azurerm_postgresql_flexible_server.postgres.name}', resource_group_name: input.resourceGroup, tenant_id: input.tenantId,
@@ -401,7 +402,8 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   for (const service of input.services ?? []) {
     checkName(service.resourceName);
     const key = azureKey(service.logicalName);
-    resources[`azurerm_container_app.${key}`] = { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true };
+    resources[`azurerm_container_app.${key}`] = { actionId: `service:${service.logicalName}`, kind: 'service', name: service.logicalName, billable: true,
+      costAttributes: ['template.*.container.*.cpu', 'template.*.container.*.memory', 'template.*.min_replicas', 'template.*.max_replicas'] };
     const probe = service.healthCheckPath ? { path: service.healthCheckPath, port: service.targetPort, transport: 'HTTP' } : undefined;
     apps[key] = {
       name: service.resourceName, revision_mode: 'Single', ...shared,
@@ -419,7 +421,8 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   for (const worker of workers) {
     checkName(worker.resourceName);
     const key = azureKey(worker.logicalName);
-    resources[`azurerm_container_app.${key}`] = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true };
+    resources[`azurerm_container_app.${key}`] = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true,
+      costAttributes: ['template.*.container.*.cpu', 'template.*.container.*.memory', 'template.*.min_replicas', 'template.*.max_replicas'] };
     apps[key] = {
       name: worker.resourceName, revision_mode: 'Single', ...shared,
       template: [{
@@ -443,7 +446,8 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   for (const job of input.jobs ?? []) {
     checkName(job.resourceName);
     const key = azureKey(job.logicalName);
-    resources[`azurerm_container_app_job.${key}`] = { actionId: `service:${job.logicalName}`, kind: 'service', name: job.logicalName, billable: true };
+    resources[`azurerm_container_app_job.${key}`] = { actionId: `service:${job.logicalName}`, kind: 'service', name: job.logicalName, billable: true,
+      costAttributes: ['template.*.container.*.cpu', 'template.*.container.*.memory'] };
     const { container_app_environment_id, ...rest } = shared;
     jobs[key] = {
       name: job.resourceName, location: input.location, container_app_environment_id, ...rest,

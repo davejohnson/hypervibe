@@ -101,4 +101,21 @@ describe('DatabaseAdapter query execution', () => {
     expect(result.rows).toBeUndefined();
     expect(pgMocks.client.query).toHaveBeenLastCalledWith('ROLLBACK');
   });
+
+  it('retains a confirmed mutation outcome if result serialization fails after the query completed', async () => {
+    pgMocks.client.query.mockResolvedValueOnce({ rows: [{ value: 1n }], rowCount: 1, fields: [] });
+    const result = await connectedAdapter().query('UPDATE counters SET value = value + 1 RETURNING value', [], { readOnly: false });
+    expect(result).toMatchObject({ success: false, mutationOutcome: 'committed' });
+    expect(result.error).toContain('mutation committed');
+    expect(result.error).toContain('Do not repeat the write');
+    expect(pgMocks.client.query).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a transport failure uncertain and never retries or claims a rollback', async () => {
+    pgMocks.client.query.mockRejectedValueOnce(new Error('Connection terminated'));
+    const result = await connectedAdapter().query('UPDATE counters SET value = value + 1', [], { readOnly: false });
+    expect(result).toMatchObject({ success: false, mutationOutcome: 'unknown' });
+    expect(result.error).toContain('mutation outcome is unknown');
+    expect(pgMocks.client.query).toHaveBeenCalledOnce();
+  });
 });

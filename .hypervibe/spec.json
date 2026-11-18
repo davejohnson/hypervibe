@@ -27,7 +27,8 @@
         "requireCodeOwnerReviews": false,
         "requireStatusChecks": true,
         "statusChecks": [
-          "Hypervibe / acceptance"
+          "Hypervibe / acceptance",
+          "Hypervibe / macos-contract"
         ],
         "strictStatusChecks": false,
         "enforceAdmins": false
@@ -127,6 +128,28 @@
         "commands": [
           "npm run typecheck",
           "npm test"
+        ],
+        "failureArtifacts": []
+      },
+      "macos-contract": {
+        "kind": "check",
+        "enabled": true,
+        "category": "test",
+        "triggers": {
+          "pullRequest": true,
+          "push": [
+            "main"
+          ],
+          "manual": true
+        },
+        "runtime": {
+          "kind": "node"
+        },
+        "runner": "macos-latest",
+        "changeScope": "all",
+        "commands": [
+          "npm test -- src/tools/__tests__/macos-status.contract.test.ts",
+          "swift test --package-path apps/macos --filter CurrentCoreStatusContractTests"
         ],
         "failureArtifacts": []
       }

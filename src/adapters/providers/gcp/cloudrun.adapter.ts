@@ -500,17 +500,20 @@ export class CloudRunAdapter implements
   }
 
   /**
-   * Builds from an archive of the user's local repository (an exact commit),
-   * so private repositories need no git credentials. The archive is uploaded
+   * Builds from an exact commit archive, packaged locally or fetched through a
+   * verified repository connection. Builds need no git credentials. It uploads
    * to the project's private build-source bucket prepared during GCP setup.
    */
   async buildReleaseImageFromArchive(
     service: Service,
     environment: Environment,
     /** packageTokenVersion: full Secret Manager version name of a private-package token, mounted only during the build. */
-    source: { archive: Buffer; commitSha: string; bucket: string; packageTokenVersion?: string }
+    source: { archive: Buffer; commitSha: string; bucket: string; packageTokenVersion?: string; sourceDirectory?: string }
   ): Promise<CloudBuildResult> {
     if (!this.credentials) return { success: false, error: 'Not connected. Call connect() first.' };
+    if (source.sourceDirectory && (!/^[A-Za-z0-9_.-]+$/.test(source.sourceDirectory) || ['.', '..'].includes(source.sourceDirectory))) {
+      return { success: false, error: 'The source archive has an invalid build directory.' };
+    }
     try {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
@@ -531,6 +534,7 @@ export class CloudRunAdapter implements
       const build = await this.submitCloudBuild({
         token, service, sourceRepoUrl: '', revision: source.commitSha, imageUri,
         storageSource: { bucket: source.bucket, object },
+        ...(source.sourceDirectory ? { sourceDirectory: source.sourceDirectory } : {}),
         ...(source.packageTokenVersion ? { packageTokenVersion: source.packageTokenVersion } : {}),
       });
       return { success: true, imageUri: build.imageUri, buildId: build.id, logsUrl: build.logsUrl, resolvedCommitSha: source.commitSha };
@@ -2436,6 +2440,8 @@ export class CloudRunAdapter implements
     imageUri: string;
     /** Build from an uploaded archive instead of cloning a git URL. */
     storageSource?: { bucket: string; object: string };
+    /** Single validated wrapper directory in repository-hosted archives. */
+    sourceDirectory?: string;
     packageTokenVersion?: string;
   }): Promise<{
     id?: string;
@@ -2467,6 +2473,7 @@ export class CloudRunAdapter implements
           name: 'gcr.io/cloud-builders/docker',
           entrypoint: 'bash',
           args: ['-lc', this.cloudBuildScript(params.service, params.imageUri, Boolean(params.packageTokenVersion))],
+          ...(params.sourceDirectory ? { dir: params.sourceDirectory } : {}),
           ...(params.packageTokenVersion ? { secretEnv: ['NPM_TOKEN'] } : {}),
         }],
         // The token stays in Secret Manager; the build reads it and Docker mounts it for the install step only.

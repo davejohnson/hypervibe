@@ -91,6 +91,22 @@ provider. Existing stronger protection must not be replaced by a smaller
 Hypervibe default. Policy operations do not restore data, change the source
 image, redeploy workloads, or create a one-time checkpoint.
 
+The managed engine treats native database backup defaults as creation-only.
+Ordinary GCP plans preserve the whole Cloud SQL backup configuration and its
+edition (Enterprise Plus supports longer PITR windows); AWS plans preserve
+Aurora retention; Azure plans preserve retention and geo-redundant backups.
+Missing retention fields do not authorize filling them with environment defaults.
+Changing this protection requires a separately reviewed backup action with exact
+confirmation. Such policy changes remain unavailable on these engine paths;
+declaring retention intent does not enable an ordinary infrastructure reduction.
+Ordinary sizing that conflicts with a retained Cloud SQL Enterprise Plus edition
+is blocked at planning; supported Enterprise size changes remain available.
+The real pinned-engine regression in
+[`database-backup-preservation.test.ts`](../src/adapters/engine/opentofu/__tests__/database-backup-preservation.test.ts)
+uses mocked cloud operations to cover existing protection, incomplete settings,
+and creation defaults in ordinary CI. This establishes plan behavior, not live
+backup availability or successful recovery.
+
 Policy changes are separate reviewed, billable actions with exact confirmation.
 A durable reservation records each attempted write before contacting the
 provider. An uncertain result permits observation and reconciliation, but never
