@@ -33,7 +33,7 @@ export interface AwsReleaseTarget {
 export const RDS_CA_BUNDLE_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem';
 const RDS_CA_PATH = '/opt/hypervibe/rds-ca.pem';
 /** What Hypervibe adds to the image is part of its identity, even when the repository commit is unchanged. */
-export const awsImageTag = (commitSha: string): string => `${commitSha}-hv3`;
+export const awsImageTag = (commitSha: string): string => `${commitSha}-hv4`;
 export const AWS_DOCKERFILE = '.hypervibe-aws.Dockerfile';
 
 /**
@@ -74,7 +74,9 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
   const started = await codebuild.send(new StartBuildCommand({
     projectName: target.buildProjectArn ?? `${target.prefix}-images`, sourceTypeOverride: 'S3', sourceLocationOverride: `${bucket}/${key}`,
     environmentVariablesOverride: [
-      { name: 'IMAGE_TAG', value: awsImageTag(source.commitSha), type: 'PLAINTEXT' },
+      // A pre-upgrade build project can publish only the intermediate tag. It cannot populate the release cache.
+      { name: 'IMAGE_TAG', value: `${awsImageTag(source.commitSha)}-source`, type: 'PLAINTEXT' },
+      { name: 'RELEASE_TAG', value: awsImageTag(source.commitSha), type: 'PLAINTEXT' },
       { name: 'DOCKERFILE', value: AWS_DOCKERFILE, type: 'PLAINTEXT' },
       { name: 'DOCKER_BUILDKIT', value: '1', type: 'PLAINTEXT' },
       ...(target.packageTokenParameter ? [{ name: 'NPM_TOKEN', value: target.packageTokenParameter, type: 'PARAMETER_STORE' as const }] : []),
@@ -92,7 +94,7 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
   if (status === 'IN_PROGRESS') return { error: 'The image build is still running.', logsUrl, unknown: true };
   if (status !== 'SUCCEEDED') return { error: `The image build ${String(status ?? 'failed').toLowerCase()}; see its log.`, logsUrl };
   const imageUri = await imageFor(ecr, target, awsImageTag(source.commitSha));
-  if (!imageUri) return { error: 'The build finished without an image digest; refusing to release a mutable tag.', logsUrl };
+  if (!imageUri) return { error: 'The build did not publish the expected ECS launch image. Review and apply the current build infrastructure before retrying.', logsUrl };
   return { imageUri, logsUrl };
 }
 
@@ -126,11 +128,16 @@ const ROLLED_BACK = new Set(['ROLLBACK_REQUESTED', 'ROLLBACK_IN_PROGRESS', 'ROLL
  * checks, and rolls the release back by itself if they fail. The release is
  * reported only when AWS confirms the rollout finished on the new image.
  */
-export async function releaseWebService(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false, pollMs = 10_000): Promise<EngineReleaseResult> {
+export async function releaseWebService(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false, pollMs = 10_000, startCommand?: string): Promise<EngineReleaseResult> {
   const ecs = ecsClient(target);
   const serviceArn = awsWebServiceArn(target, resource);
   const read = async () => (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
-  const running = (service: ECSExpressGatewayService | undefined) => (service?.activeConfigurations ?? []).length === 1 && service!.activeConfigurations![0]!.primaryContainer?.image === imageUri;
+  const command = startCommand ? ['sh', '-c', startCommand] : [];
+  const running = (service: ECSExpressGatewayService | undefined) => {
+    const configurations = service?.activeConfigurations ?? [];
+    const container = configurations[0]?.primaryContainer;
+    return configurations.length === 1 && container?.image === imageUri && JSON.stringify(container.command ?? []) === JSON.stringify(command);
+  };
   let current = await read();
   if (current?.serviceArn !== serviceArn || current.status?.statusCode !== 'ACTIVE') return { service: name, status: 'unknown', message: 'AWS did not confirm the exact active web service before release.' };
   const deadline = target.deadlineMs ?? Date.now() + 20 * 60_000;
@@ -139,7 +146,7 @@ export async function releaseWebService(target: AwsReleaseTarget, name: string, 
     if (configurations.length !== 1 || !configurations[0]!.primaryContainer) return { service: name, status: 'unknown', message: `${name} is still rolling out an earlier release; try again when it finishes.` };
     if (Date.now() + 30_000 >= deadline) return { service: name, status: 'unknown', message: 'The release deadline elapsed before updating the web service.' };
     const before = current.currentDeployment;
-    await ecs.send(new UpdateExpressGatewayServiceCommand({ serviceArn, primaryContainer: { ...configurations[0]!.primaryContainer, image: imageUri } }));
+    await ecs.send(new UpdateExpressGatewayServiceCommand({ serviceArn, primaryContainer: { ...configurations[0]!.primaryContainer, image: imageUri, command } }));
     let deployment: string | undefined;
     let finished = false;
     for (let attempt = 0; !finished && Date.now() < deadline; attempt += 1) {
@@ -175,14 +182,19 @@ export async function releaseWebService(target: AwsReleaseTarget, name: string, 
  * engine-managed settings of the latest revision) and moves the worker to it.
  * Scheduled jobs reference the family, so their next run uses the new revision.
  */
-export async function releaseTask(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, worker: boolean, exact?: { clusterArn: string; taskDefinitionArn: string; serviceArn?: string }): Promise<EngineReleaseResult> {
+export async function releaseTask(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, worker: boolean, exact?: { clusterArn: string; taskDefinitionArn: string; serviceArn?: string }, web?: { startCommand?: string }): Promise<EngineReleaseResult> {
   const ecs = ecsClient(target);
   const described = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: exact?.taskDefinitionArn ?? resource, include: ['TAGS'] }));
   const latest = described.taskDefinition;
   if (exact && latest?.taskDefinitionArn !== exact.taskDefinitionArn) return { service: name, status: 'unknown', message: 'AWS did not confirm the exact bound task definition before release.' };
   if (!latest?.containerDefinitions?.length) return { service: name, status: 'failed', message: `Task family ${resource} was not found. Run hv_plan scope="infrastructure" and hv_apply.` };
+  const app = latest.containerDefinitions.find(container => container.name === 'app');
+  if (!app) return { service: name, status: 'unknown', message: 'AWS did not confirm the application container in the task definition.' };
+  const { entryPoint: _entryPoint, command: _command, ...imageDefaults } = app;
+  const releasedApp = web ? { ...imageDefaults, image: imageUri, ...(web.startCommand ? { command: ['sh', '-c', web.startCommand] } : {}) }
+    : { ...app, image: imageUri };
   const input: RegisterTaskDefinitionCommandInput = {
-    family: latest.family!, containerDefinitions: latest.containerDefinitions.map((container) => container.name === 'app' ? { ...container, image: imageUri } : container),
+    family: latest.family!, containerDefinitions: latest.containerDefinitions.map((container) => container.name === 'app' ? releasedApp : container),
     ...(latest.taskRoleArn ? { taskRoleArn: latest.taskRoleArn } : {}), ...(latest.executionRoleArn ? { executionRoleArn: latest.executionRoleArn } : {}),
     ...(latest.networkMode ? { networkMode: latest.networkMode } : {}), ...(latest.requiresCompatibilities ? { requiresCompatibilities: latest.requiresCompatibilities } : {}),
     ...(latest.cpu ? { cpu: latest.cpu } : {}), ...(latest.memory ? { memory: latest.memory } : {}), ...(latest.runtimePlatform ? { runtimePlatform: latest.runtimePlatform } : {}),

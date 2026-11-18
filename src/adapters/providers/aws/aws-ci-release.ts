@@ -54,7 +54,7 @@ export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context
     releaseWorkload: async ({ name, image }) => {
       await inspect(name); const w = binding.services[name]!;
       const result = await (w.resourceType === 'ecs-express'
-        ? releaseWebService(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/', strictHealthCheck(spec.environments[binding.environmentName]!.services[name]!))
+        ? releaseWebService(target, name, w.serviceId, image, spec.environments[binding.environmentName]!.services[name]!.healthCheckPath ?? '/', strictHealthCheck(spec.environments[binding.environmentName]!.services[name]!), undefined, spec.environments[binding.environmentName]!.services[name]!.startCommand)
         : releaseTask(target, name, w.serviceId, image, w.resourceType === 'ecs-service', { clusterArn: w.clusterArn!, taskDefinitionArn: taskDefinitions.get(name)!, ...(w.resourceType === 'ecs-service' ? { serviceArn: w.serviceId } : {}) }));
       if (result.status !== 'released') return result;
       if (w.resourceType === 'ecs-express') return result.health && result.health.status >= 200 && result.health.status < 400 ? result
