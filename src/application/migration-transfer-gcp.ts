@@ -1,10 +1,11 @@
 import crypto from 'crypto';
 import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
-import { deleteSecret } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { cloudRunJobRequest, readCloudRunOperation } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { listLogEntries } from '../adapters/providers/gcp/gcp-data.client.js';
-export { signedObjectUrl } from '../adapters/providers/gcp/gcp-data.client.js';
-import { observeSecret, writeSecretVersion } from './infrastructure-engine.js';
+import { listLogEntries, readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
+import type { TransferResources } from '../adapters/providers/gcp/gcp-data.client.js';
+export { signedObjectUrl, type TransferResources } from '../adapters/providers/gcp/gcp-data.client.js';
+import { observeSecret } from './infrastructure-engine.js';
 
 /**
  * Data transfer that runs inside the target cloud, next to the target data.
@@ -12,9 +13,8 @@ import { observeSecret, writeSecretVersion } from './infrastructure-engine.js';
  * A temporary Cloud Run job does the copy, so nothing depends on the user's
  * machine, its installed PostgreSQL tools or its internet connection. The job
  * runs as the app's runtime identity (which already reaches the target
- * database and bucket). Source credentials travel through a short-lived
- * Secret Manager secret that is deleted with the job. The job prints one
- * result line with counts only; data and credentials never leave the cloud.
+ * database and bucket). Cloud Run receives reviewed Secret Manager references.
+ * The job emits transfer evidence and is removed after its execution.
  */
 export interface TransferContext {
   token: () => Promise<string>;
@@ -22,7 +22,10 @@ export interface TransferContext {
   region: string;
   runtimeServiceAccountEmail: string;
   environmentLabel: string;
+  recordTransferResources?: (resources: TransferResources | null) => void | Promise<void>;
 }
+
+type TransferScope = Pick<TransferContext, 'gcpProjectId' | 'region' | 'token'>;
 
 export interface DatabaseManifest {
   tables: Record<string, string>;
@@ -40,6 +43,7 @@ export interface DatabaseTransferResult {
 
 export interface StorageTransferResult {
   ok: boolean;
+  comparison?: 'download';
   source?: { count: number; bytes: number };
   target?: { count: number; bytes: number };
   differences?: number;
@@ -79,17 +83,24 @@ export function databaseManifestScript(): string {
   ].join('\n');
 }
 
-/** Verify-only file check (no copy): compares every object, by hash where both stores provide one. */
+/** rclone --download compares bytes even when the two stores have no common hash. */
 export function storageCheckScript(): string {
   return [
     'set -eu',
-    'set +e',
-    'rclone check "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --one-way 2> /tmp/check.log',
-    'set -e',
-    'DIFFS=$(grep -cE "ERROR|not in" /tmp/check.log || true)',
+    'reports=$(mktemp -d)',
+    'trap \'rm -rf "$reports"\' EXIT',
+    'differences=0',
+    'if ! rclone check "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --download --differ "$reports/changed" --missing-on-src "$reports/extra" --missing-on-dst "$reports/missing" --error "$reports/errors" 2>"$reports/log"; then',
+    // Only rclone's difference reports establish a mismatch. An interrupted or failed check is unknown.
+    '  differences=$(cat "$reports/changed" "$reports/extra" "$reports/missing" | wc -l)',
+    '  if [ -s "$reports/errors" ] || [ "$differences" -eq 0 ]; then',
+    `    printf '${RESULT_MARKER}{"ok":false,"error":"The file comparison did not finish."}\\n'`,
+    '    exit 0',
+    '  fi',
+    'fi',
     'S=$(rclone size --json "src:$SOURCE_BUCKET")',
     'T=$(rclone size --json "dst:$TARGET_BUCKET")',
-    `printf '${RESULT_MARKER}{"ok":true,"source":%s,"target":%s,"differences":%s}\\n' "$S" "$T" "\${DIFFS:-0}"`,
+    `printf '${RESULT_MARKER}{"ok":true,"comparison":"download","source":%s,"target":%s,"differences":%d}\\n' "$S" "$T" "$differences"`,
   ].join('\n');
 }
 
@@ -223,18 +234,12 @@ export function databaseTransferScript(): string {
   ].join('\n');
 }
 
-/** File copy script (runs in the rclone image): sync, then an independent one-way check. */
+/** Replace every file, then independently compare both inventories and their bytes. */
 export function storageTransferScript(): string {
   return [
     'set -eu',
-    'rclone sync "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --transfers 16 --checkers 16 --s3-no-check-bucket --stats-one-line --stats 30s',
-    'set +e',
-    'rclone check "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --one-way 2> /tmp/check.log',
-    'set -e',
-    'DIFFS=$(grep -cE "ERROR|not in" /tmp/check.log || true)',
-    'S=$(rclone size --json "src:$SOURCE_BUCKET")',
-    'T=$(rclone size --json "dst:$TARGET_BUCKET")',
-    `printf '${RESULT_MARKER}{"ok":true,"source":%s,"target":%s,"differences":%s}\\n' "$S" "$T" "\${DIFFS:-0}"`,
+    'rclone sync "src:$SOURCE_BUCKET" "dst:$TARGET_BUCKET" --ignore-times --transfers 16 --checkers 16 --s3-no-check-bucket --stats-one-line --stats 30s',
+    storageCheckScript(),
   ].join('\n');
 }
 
@@ -243,7 +248,7 @@ interface TransferJob {
   image: string;
   script: string;
   env: Record<string, string>;
-  /** env name -> value, stored in one temporary secret per value. */
+  /** Private handoff input. Requires an engine-managed credential slot. */
   sourceSecrets: Record<string, string>;
   /** env name -> existing secret reference (for example the target DATABASE_URL). */
   secretRefs?: Record<string, { secretId: string; version: string }>;
@@ -251,22 +256,30 @@ interface TransferJob {
   timeoutSeconds: number;
 }
 
+/** OpenTofu owns secret containers. The worker cannot receive private source values
+ * until it has a reviewed migration-only container and pinned version for them. */
+export function transferCredentialHandoffProblem(needsSourceValue: boolean): string | undefined {
+  return needsSourceValue
+    ? 'This transfer needs an OpenTofu-managed credential handoff. Hypervibe cannot yet pass the private source data location or access keys to this Google Cloud job.'
+    : undefined;
+}
+
 /** Runs one transfer job to completion and returns its parsed result line. */
 export async function runTransferJob<T extends { ok: boolean; error?: string }>(context: TransferContext, job: TransferJob): Promise<T> {
-  const id = `hv-migrate-${job.purpose}-${crypto.randomBytes(3).toString('hex')}`;
-  const temporarySecrets: string[] = [];
+  const handoff = transferCredentialHandoffProblem(Object.keys(job.sourceSecrets).length > 0);
+  if (handoff) return { ok: false, error: handoff } as T;
+  const id = `hv-migrate-${job.purpose}-${crypto.randomBytes(8).toString('hex')}`;
+  const ownershipToken = crypto.randomUUID();
+  let resources: TransferResources = { gcpProjectId: context.gcpProjectId, region: context.region, jobId: id, secretIds: [], ownershipToken };
+  if (!await verifyTransferResourcesAbsent(context, resources)) {
+    return { ok: false, error: 'The temporary transfer job name could not be confirmed unused in the target project and region.' } as T;
+  }
+  await context.recordTransferResources?.(resources);
   let outcome: T | undefined;
   let thrown: unknown;
+  let executionMayBeRunning = false;
   try {
     const secretEnv: Array<Record<string, unknown>> = [];
-    for (const [name, value] of Object.entries(job.sourceSecrets)) {
-      const secretId = `${id}-${name.toLowerCase().replace(/_/g, '-')}`;
-      const failure = await writeSecretVersion(await context.token(), context.gcpProjectId, secretId,
-        { 'managed-by': 'hypervibe', 'hv-environment': context.environmentLabel, 'hv-temporary': 'true' }, value);
-      temporarySecrets.push(secretId);
-      if (failure) throw new Error(failure.message);
-      secretEnv.push({ name, valueSource: { secretKeyRef: { secret: secretId, version: 'latest' } } });
-    }
     for (const [name, ref] of Object.entries(job.secretRefs ?? {})) {
       secretEnv.push({ name, valueSource: { secretKeyRef: { secret: ref.secretId, version: ref.version } } });
     }
@@ -281,7 +294,7 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
     const created = await cloudRunJobRequest(await context.token(), context, `?jobId=${id}`, {
       method: 'POST',
       body: JSON.stringify({
-        labels: { 'managed-by': 'hypervibe', 'hv-temporary': 'true' },
+        labels: { 'managed-by': 'hypervibe', 'hv-temporary': 'true', 'hv-transfer': ownershipToken },
         template: { template: {
           serviceAccount: context.runtimeServiceAccountEmail,
           maxRetries: 0,
@@ -292,69 +305,219 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
       }),
     });
     if (!created.ok) throw new Error(`Creating the ${job.purpose} copy job failed (HTTP ${created.status}).`);
-    await waitOperation(context, await created.json() as { name?: string; done?: boolean });
-    const started = await cloudRunJobRequest(await context.token(), context, `/${id}:run`, { method: 'POST', body: '{}' });
-    if (!started.ok) throw new Error(`Starting the ${job.purpose} copy failed (HTTP ${started.status}).`);
-    const operation = await waitOperation(context, await started.json() as { name?: string; done?: boolean }, job.timeoutSeconds + 300);
-    const executionName = (operation.response as { name?: string } | undefined)?.name ?? (operation.metadata as { name?: string } | undefined)?.name;
+    const creation = await waitOperation(context, await created.json());
+    if (creation.error) throw new Error('The transfer job could not be created.');
+    const createdJob = creation.response as { name?: string; uid?: string } | undefined;
+    if (typeof createdJob?.uid !== 'string' || !createdJob.uid || !await scopedCloudRunName(context, createdJob.name, new RegExp(`^jobs/${id}$`))) {
+      throw new Error('The created transfer job could not be identified.');
+    }
+    resources = { ...resources, jobUid: createdJob.uid };
+    await context.recordTransferResources?.(resources);
+    const observedJob = await ownedJob(context, resources);
+    if (!observedJob) throw new Error('The created job identity could not be verified.');
+    const runToken = await context.token();
+    executionMayBeRunning = true;
+    const started = await cloudRunJobRequest(runToken, context, `/${id}:run`, { method: 'POST', body: JSON.stringify({ etag: observedJob.etag }) });
+    if (!started.ok) {
+      if ([400, 401, 403, 404, 412].includes(started.status)) executionMayBeRunning = false;
+      throw new Error(`Starting the ${job.purpose} copy failed (HTTP ${started.status}).`);
+    }
+    const operation = await waitOperation(context, await started.json(), job.timeoutSeconds + 300);
+    const executionPath = new RegExp(`^jobs/${id}/executions/[a-z0-9][a-z0-9-]*$`);
+    if (operation.error) {
+      const status = operation.error as { code?: number };
+      const metadata = operation.metadata as ExecutionInventoryEntry | undefined;
+      // A terminal Google RPC error for the submitted operation ends the run.
+      // A contradictory execution identity still prevents cleanup.
+      if (typeof status.code === 'number' && Number.isInteger(status.code) && status.code > 0 && status.code <= 16
+          && !metadata?.reconciling && (metadata?.runningCount ?? 0) === 0
+          && (!metadata?.name || await scopedCloudRunName(context, metadata.name, executionPath))) {
+        executionMayBeRunning = false;
+      }
+      throw new Error('The transfer execution failed.');
+    }
+    const execution = operation.response as ExecutionInventoryEntry | undefined;
+    const executionName = execution?.name;
+    if (!executionName || !executionCompleted(execution) || !await scopedCloudRunName(context, executionName, executionPath)) {
+      throw new Error('A completed transfer execution could not be verified for this job.');
+    }
+    executionMayBeRunning = false;
     const result = await readResultLine(context, id, executionName);
     outcome = result ? result as T : { ok: false, error: `The ${job.purpose} copy finished without a result. Check hv_logs for job ${id}.` } as T;
   } catch (error) {
     thrown = error ?? new Error('The copy failed.');
   }
-  const leftovers = await removeTransferLeftovers({
-    jobId: id, secretIds: temporarySecrets,
-    deleteJob: async () => cloudRunJobRequest(await context.token(), context, `/${id}`, { method: 'DELETE' }),
-    deleteSecret: async (secretId) => deleteSecret(await context.token(), context.gcpProjectId, secretId),
-  });
-  if (leftovers.some((item) => item.startsWith('secret '))) {
-    // A leftover secret holds source credentials: the copy does not count, so nothing builds on it.
-    return { ok: false, error: `The ${job.purpose} copy's temporary source credentials could not be removed from Google Cloud (${leftovers.join(', ')}). Delete them in the Google Cloud console, then run the migration again.` } as T;
+  if (executionMayBeRunning) {
+    return { ok: false, error: `Completion of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its job identity is retained for recovery.` } as T;
   }
+  if (!await removeTransferLeftovers(context, resources)) {
+    return { ok: false, error: `Cleanup of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its recorded identity must be resolved before another copy.` } as T;
+  }
+  await context.recordTransferResources?.(null);
   if (thrown) throw thrown;
   return outcome!;
 }
 
-/**
- * Deletes a copy job and its temporary secrets, retrying, and returns what could not be
- * confirmed deleted ("secret <id>", "job <id>"). Already gone (404) counts as deleted.
- */
-export async function removeTransferLeftovers(deps: {
-  deleteJob(): Promise<Response>; deleteSecret(secretId: string): Promise<Response>; secretIds: string[]; jobId?: string; attempts?: number; retryMs?: number;
-}): Promise<string[]> {
-  const removed = async (attempt: () => Promise<Response>): Promise<boolean> => {
-    for (let tries = 0; tries < (deps.attempts ?? 3); tries++) {
-      if (tries > 0) await new Promise((resolve) => setTimeout(resolve, deps.retryMs ?? 2000));
-      const response = await attempt().catch(() => undefined);
-      if (response && (response.ok || response.status === 404)) return true;
-    }
-    return false;
-  };
-  const left: string[] = [];
-  for (const secretId of deps.secretIds) if (!await removed(() => deps.deleteSecret(secretId))) left.push(`secret ${secretId}`);
-  if (!await removed(deps.deleteJob)) left.push(`job ${deps.jobId ?? ''}`.trim());
-  return left;
+function validTransferScope(context: TransferScope, resources: TransferResources): boolean {
+  return !!resources && resources.gcpProjectId === context.gcpProjectId && resources.region === context.region
+    && /^(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]+)$/.test(resources.gcpProjectId)
+    && /^[a-z]+(?:-[a-z0-9]+)+$/.test(resources.region)
+    && /^hv-migrate-(?:database|storage)-(?:[a-f0-9]{6}|[a-f0-9]{16})$/.test(resources.jobId)
+    && Array.isArray(resources.secretIds) && resources.secretIds.every(id => typeof id === 'string'
+      && id.startsWith(`${resources.jobId}-`) && /^[a-z0-9][a-z0-9-]*$/.test(id.slice(resources.jobId.length + 1)));
 }
 
-async function waitOperation(context: TransferContext, operation: { name?: string; done?: boolean; response?: unknown; metadata?: unknown; error?: { message?: string } }, timeoutSeconds = 300): Promise<{ response?: unknown; metadata?: unknown }> {
+/** Read-only recovery. An access failure, malformed receipt or existing resource cannot certify absence. */
+export async function verifyTransferResourcesAbsent(context: TransferScope, resources: TransferResources): Promise<boolean> {
+  if (!validTransferScope(context, resources)) return false;
+  try {
+    const job = await cloudRunJobRequest(await context.token(), context, `/${resources.jobId}`);
+    if (job.status !== 404) return false;
+    for (const id of resources.secretIds) {
+      if ((await readSecretContainer(await context.token(), context.gcpProjectId, id)).state !== 'absent') return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+/** Resource names can use either the project ID or its Google-assigned project number. */
+async function scopedCloudRunName(context: TransferScope, name: unknown, resource: RegExp): Promise<boolean> {
+  if (typeof name !== 'string') return false;
+  const [, project, region, tail] = /^projects\/([^/]+)\/locations\/([^/]+)\/(.+)$/.exec(name) ?? [];
+  if (!project || region !== context.region || !tail || !resource.test(tail)) return false;
+  if (project === context.gcpProjectId) return true;
+  if (!/^[0-9]+$/.test(project)) return false;
+  const response = await readGcpProject(await context.token(), context.gcpProjectId);
+  if (!response.ok) return false;
+  const identity = await response.json() as { name?: string; projectId?: string };
+  return identity.projectId === context.gcpProjectId && identity.name === `projects/${project}`;
+}
+
+interface NativeJob {
+  name: string; uid: string; etag: string; labels?: Record<string, string>;
+  executionCount?: number; latestCreatedExecution?: { name?: string }; reconciling?: boolean;
+}
+
+async function ownedJob(context: TransferScope, resources: TransferResources): Promise<NativeJob | undefined> {
+  const observed = await cloudRunJobRequest(await context.token(), context, `/${resources.jobId}`);
+  if (observed.status === 404) return undefined;
+  if (!observed.ok) throw new Error('The temporary job identity could not be read.');
+  const job = await observed.json() as NativeJob;
+  if (!await scopedCloudRunName(context, job.name, new RegExp(`^jobs/${resources.jobId}$`))
+      || typeof job.uid !== 'string' || !job.uid || (resources.jobUid !== undefined && job.uid !== resources.jobUid)
+      || typeof job.etag !== 'string' || !job.etag || !resources.ownershipToken
+      || job.labels?.['managed-by'] !== 'hypervibe' || job.labels['hv-temporary'] !== 'true'
+      || job.labels['hv-transfer'] !== resources.ownershipToken) throw new Error('The temporary job belongs to a different transfer.');
+  return job;
+}
+
+/** jobs.delete cancels its executions and returns a long-running operation. Fence the delete to the observed revision. */
+async function removeTransferLeftovers(context: TransferScope, resources: TransferResources, terminalJob?: NativeJob): Promise<boolean> {
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 2000));
+      const job = await ownedJob(context, resources);
+      if (!job) return verifyTransferResourcesAbsent(context, resources);
+      if (terminalJob && (job.etag !== terminalJob.etag || job.executionCount !== terminalJob.executionCount
+          || job.latestCreatedExecution?.name !== terminalJob.latestCreatedExecution?.name || job.reconciling)) return false;
+      const response = await cloudRunJobRequest(await context.token(), context, `/${resources.jobId}?etag=${encodeURIComponent(job.etag)}`, { method: 'DELETE' }).catch(() => undefined);
+      if (response?.ok) {
+        const deletion = await waitOperation(context, await response.json());
+        if (deletion.error) return false;
+        return verifyTransferResourcesAbsent(context, resources);
+      }
+      if (response?.status === 404) return verifyTransferResourcesAbsent(context, resources);
+      if (response && response.status < 500 && ![409, 412, 429].includes(response.status)) return false;
+      // A network failure can follow an accepted delete. Observe the precise
+      // resource and test its revision again before any repeat request.
+    }
+    return verifyTransferResourcesAbsent(context, resources);
+  } catch { return false; }
+}
+
+interface ExecutionInventoryEntry {
+  name?: string; uid?: string; job?: string; completionTime?: string; runningCount?: number; reconciling?: boolean;
+}
+
+function executionCompleted(execution: ExecutionInventoryEntry): boolean {
+  return !execution.reconciling && (execution.runningCount ?? 0) === 0
+    && typeof execution.completionTime === 'string' && Number.isFinite(Date.parse(execution.completionTime));
+}
+
+/** Explicit refresh only. Never terminate an unobserved or unfinished execution to recover a copy. */
+export async function recoverTerminalTransferResources(context: TransferScope, resources: TransferResources): Promise<boolean> {
+  if (!validTransferScope(context, resources) || !resources.jobUid || !resources.ownershipToken) return false;
+  try {
+    const job = await ownedJob(context, resources);
+    if (!job) return verifyTransferResourcesAbsent(context, resources);
+    if (resources.secretIds.length || job.reconciling || !Number.isSafeInteger(job.executionCount) || !job.executionCount
+        || !job.latestCreatedExecution?.name) return false;
+    // Until at least one execution materializes a previously unacknowledged
+    // :run could still be starting. A missing inventory is never terminal.
+    const names = new Set<string>();
+    const uids = new Set<string>();
+    const tokens = new Set<string>();
+    let token = '';
+    for (let page = 0; page < 100; page++) {
+      const query = new URLSearchParams({ pageSize: '100', showDeleted: 'true' });
+      if (token) query.set('pageToken', token);
+      const response = await cloudRunJobRequest(await context.token(), context, `/${resources.jobId}/executions?${query}`);
+      if (!response.ok) return false;
+      const inventory = await response.json() as { executions?: ExecutionInventoryEntry[]; nextPageToken?: string };
+      if (!Array.isArray(inventory.executions)) return false;
+      for (const execution of inventory.executions) {
+        const prefix = job.name + '/executions/';
+        if (!execution.name?.startsWith(prefix) || !/^[a-z0-9][a-z0-9-]*$/.test(execution.name.slice(prefix.length))
+            || (execution.job !== job.name && execution.job !== resources.jobId) || !execution.uid
+            || names.has(execution.name) || uids.has(execution.uid) || !executionCompleted(execution)) return false;
+        names.add(execution.name);
+        uids.add(execution.uid);
+      }
+      if (inventory.nextPageToken === undefined || inventory.nextPageToken === '') {
+        const latest = job.latestCreatedExecution.name;
+        if (names.size !== job.executionCount || !(names.has(latest) || names.has(job.name + '/executions/' + latest))) return false;
+        return removeTransferLeftovers(context, resources, job);
+      }
+      if (typeof inventory.nextPageToken !== 'string' || tokens.has(inventory.nextPageToken)) return false;
+      token = inventory.nextPageToken;
+      tokens.add(token);
+    }
+    return false;
+  } catch { return false; }
+}
+
+interface TransferOperation { name?: string; done?: boolean; response?: unknown; metadata?: unknown; error?: unknown }
+async function waitOperation(context: TransferScope, value: unknown, timeoutSeconds = 300): Promise<TransferOperation> {
+  const operation = value as TransferOperation | null;
+  const name = operation?.name;
+  if (!operation || !name || !await scopedCloudRunName(context, name, /^operations\/[a-zA-Z0-9_-]+$/)) throw new Error('The transfer operation scope could not be verified.');
   const deadline = Date.now() + timeoutSeconds * 1000;
   let current = operation;
-  while (!current.done && current.name && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    const polled = await readCloudRunOperation(await context.token(), current.name);
-    if (polled.ok) current = await polled.json() as typeof current;
+  while (!current.done && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(5000, deadline - Date.now())));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    // Only the read is retried. A transport interruption gives no evidence
+    // that the submitted job has finished or that another run is needed.
+    const polled = await readCloudRunOperation(await context.token(), name, AbortSignal.timeout(remaining)).catch(() => undefined);
+    if (!polled || polled.status === 408 || polled.status === 429 || polled.status >= 500) continue;
+    if (!polled.ok) throw new Error(`The transfer operation could not be observed (HTTP ${polled.status}).`);
+    const next = await polled.json().catch(() => undefined) as TransferOperation | undefined;
+    if (!next) continue;
+    if (next.name !== name) throw new Error('The transfer operation identity changed.');
+    current = next;
   }
-  if (!current.done) throw new Error('A copy job did not finish in time.');
-  if (current.error) throw new Error(`A copy job failed: ${current.error.message ?? 'unknown error'}`);
+  if (current.done !== true) throw new Error('Completion of the transfer operation could not be verified.');
   return current;
 }
 
 /** Reads the single result line the job printed; logs can lag the execution by a few seconds. */
-async function readResultLine(context: TransferContext, jobName: string, executionName?: string): Promise<Record<string, unknown> | undefined> {
+async function readResultLine(context: TransferContext, jobName: string, executionName: string): Promise<Record<string, unknown> | undefined> {
   const filter = [
     'resource.type="cloud_run_job"',
     `resource.labels.job_name="${jobName}"`,
-    ...(executionName ? [`labels."run.googleapis.com/execution_name"="${executionName.split('/').pop()}"`] : []),
+    `resource.labels.location="${context.region}"`,
+    `labels."run.googleapis.com/execution_name"="${executionName.split('/').pop()}"`,
     `textPayload:"${RESULT_MARKER.trim()}"`,
   ].join(' AND ');
   for (let attempt = 0; attempt < 12; attempt++) {

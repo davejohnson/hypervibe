@@ -4,6 +4,34 @@ Choose how the data will move before pausing the app. Application maintenance
 pauses the app while you copy data yourself. Automated data migration copies
 whole databases and buckets through a separate reviewed Hypervibe plan.
 
+## Railway to Google Cloud
+
+Prepare a separate Cloud Run environment and check the app on its temporary
+hostname. A working target does not establish that the production data can move.
+The guided GCP transfer currently lacks a saved OpenTofu plan for the temporary
+job and a private handoff for the database dump URL and bucket credentials.
+Railway PostgreSQL and Railway bucket copies that need this handoff are blocked.
+A fresh comparison of private Railway and Cloud SQL databases also needs
+reviewed native jobs. A historical receipt only describes the earlier copy.
+The application pause and forwarding flow below is a separate capability.
+Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
+and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
+
+For a production rehearsal, include files with known contents and eligible
+queued work. Check every referenced object, run one worker against the target,
+then write a new record there and verify that a restored copy contains it.
+Measure the interval from pausing source writers through reopening the original
+hostname. A local restore duration does not measure this interval.
+
+GCP copy verification reads the bytes of every selected file at both endpoints.
+A refresh can transfer the full selected object set again and incur provider
+transfer charges. Older file-count receipts need a fresh approved copy before
+they can authorize release. Controllers sharing one Hypervibe state directory
+serialize migration work per destination environment. A refresh can reconcile
+a recorded, completed Cloud Run execution after an interruption. If its
+ownership, completion, or cleanup is uncertain, the next copy remains blocked.
+Independent installations do not share this local execution lock.
+
 ## Pause the app for a manual move
 
 Use `maintenance.mode: "application"` when you want to copy a private database

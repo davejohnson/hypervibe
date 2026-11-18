@@ -1,3 +1,4 @@
+import { acquireMigrationTargetLease, type MigrationTargetLease } from '../adapters/db/migration-target-lease.js';
 import { cloudEngineFor } from './cloud-engines.js';
 import { engineSecretStore } from './engine-secrets.js';
 import { ConvergeExecutor } from '../domain/plan/converge.executor.js';
@@ -12,24 +13,29 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
+import { isDeepStrictEqual } from 'node:util';
+import { finalCopyReceipt, migrationCutoverReadiness, protectForwardingTarget, targetWriteRecovery } from './migration-cutover-readiness.js';
+import { desiredDomainServiceName } from '../domain/services/domain-attach-policy.js';
 import { migrationDatabaseBindingConflict } from './migration-database-binding.js';
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
-import { parseStorageBindings } from '../domain/services/storage-plan.service.js';
+import { bucketSummaries, compareMigrationBucket, hasVerifiedBuckets, missingDeployedBucket, prepareMigrationBuckets, selectMigrationBuckets } from './migration-storage.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
 import {
   ENGINE_DATABASE_URL_KEY,
-  engineBucketName,
   engineSecretId,
   observeSecret,
   resolveEngineContext,
   writeSecretVersion,
   type EngineBinding,
+  type MigrationCopyEvidence,
 } from './infrastructure-engine.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import {
   databaseExportScript,
+  verifyTransferResourcesAbsent,
+  recoverTerminalTransferResources,
   databaseManifestScript,
   storageCheckScript,
   databaseRestoreScript,
@@ -38,7 +44,7 @@ import {
   type DatabaseManifest,
   manifestsMatch,
   runTransferJob,
-  s3SourceRemote,
+  transferCredentialHandoffProblem,
   databaseTransferScript,
   storageTransferScript,
   type DatabaseTransferResult,
@@ -79,7 +85,7 @@ export type MigrateResult =
       target: string;
       /** Same tables, row counts and per-table content checksums. */
       database?: { tables: number; rows: string; match: boolean; differences: string[] };
-      /** Same objects, compared by hash where both stores provide one, otherwise by size. */
+      /** Same keys and file contents, verified by reading both copies. */
       storage: Array<{ name: string; files: number; bytes: number; match: boolean; differences: number }>;
       dataCopiedAt?: string;
       message: string;
@@ -225,7 +231,7 @@ async function migrateSettingsOnly(ctx: CommandContext, params: {
   return { status: 'blocked', message: `${imported.length} runtime setting(s) are in ${store.name} for ${params.to}. Run hv_plan scope="infrastructure" and hv_apply so the services read them, then hv_deploy. Copying data to this cloud is not available yet.` };
 }
 
-export async function migrateEnvironment(ctx: CommandContext, params: {
+interface MigrateParams {
   project: Project;
   from: string;
   to: string;
@@ -239,7 +245,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   copyData?: boolean;
   /** Copy the data again even though a verified copy exists (refresh before cutover). */
   refreshData?: boolean;
-  /** Read-only: compare the source and target data (row counts and content checksums, file hashes) without copying. */
+  /** Read-only: compare the source and target data (row counts and content checksums, downloaded file contents) without copying. */
   verifyOnly?: boolean;
   /**
    * Final move: pause the source behind its maintenance page, copy the data
@@ -249,7 +255,19 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   cutover?: boolean;
   confirmCutover?: boolean;
   sourceDirectory?: string;
-}): Promise<MigrateResult> {
+}
+
+export async function migrateEnvironment(ctx: CommandContext, params: MigrateParams): Promise<MigrateResult> {
+  const lease = acquireMigrationTargetLease(params.project.id, params.to.trim());
+  if (!lease) return { status: 'blocked', message: `A migration to ${params.to} is already running. Wait for it to finish before retrying.` };
+  try {
+    return await runMigration(ctx, params, lease);
+  } finally {
+    lease.close();
+  }
+}
+
+async function runMigration(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease): Promise<MigrateResult> {
   // Reject before even proposing or preparing a target. This applies equally
   // to every provider and to copy, refresh, verification and cutover resumes.
   if (params.from.trim() === params.to.trim()) {
@@ -262,17 +280,28 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   if (!sourceSpec) return { status: 'blocked', message: `The spec has no source environment "${params.from}".` };
   const sourceEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.from);
   if (!sourceEnvironment) return { status: 'blocked', message: `Environment ${params.from} has never been deployed by Hypervibe.` };
+  const liveTarget = await protectForwardingTarget(params.project, specResult.spec, sourceEnvironment,
+    ctx.repos.environments.findByProjectAndName(params.project.id, params.to), params.to, params);
+  if (store.get(params.project)?.revision !== specResult.revision) return { status: 'blocked', message: `The routing configuration changed during the migration check. Verify the current route first. ${targetWriteRecovery}` };
+  if (liveTarget) return liveTarget;
   const bindingConflict = () => migrationDatabaseBindingConflict(ctx, params.project, specResult!.spec,
     ctx.repos.environments.findById(sourceEnvironment.id) ?? sourceEnvironment,
     ctx.repos.environments.findByProjectAndName(params.project.id, params.to) ?? undefined);
   const initialConflict = bindingConflict();
   if (initialConflict) return { status: 'blocked', message: initialConflict };
+  const declaredTarget = specResult.spec.environments[params.to];
+  if (params.verifyOnly && sourceSpec.database?.provider === 'railway'
+    && (!declaredTarget || declaredTarget.hosting.provider === 'cloudrun')) {
+    return { status: 'blocked', message: 'Comparing private Railway PostgreSQL with Cloud SQL requires reviewed verification tasks on both providers. Hypervibe does not yet plan these tasks. Any saved copy receipt records the comparison at copy time.' };
+  }
+
 
   // 1. Target: proposed from the source when it does not exist yet.
   if (!specResult.spec.environments[params.to]) {
     const proposed = proposeTargetEnvironment(sourceSpec, { region: params.region, domain: params.domain });
     specResult = store.merge(params.project, { environments: { [params.to]: proposed } });
   }
+  const pendingTransfer = lease.pending();
   let sourcePlanApproval = false;
   if (params.planId) {
     const loaded = new ConvergeExecutor().loadPlan(params.planId);
@@ -284,7 +313,10 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     if (sourcePlanApproval && !params.cutover) return { status: 'blocked', message: 'A source-environment plan can be confirmed only during the reviewed cutover.' };
   }
   let spec = specResult.spec;
-  if (cloudEngineFor(spec, params.to)?.migration === 'settings') return migrateSettingsOnly(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
+  if (cloudEngineFor(spec, params.to)?.migration === 'settings') {
+    if (pendingTransfer) return { status: 'blocked', message: 'The previous Google Cloud transfer must finish cleanup before changing destinations.' };
+    return migrateSettingsOnly(ctx, { ...params, spec, sourceSpec, sourceEnvironment });
+  }
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
@@ -301,8 +333,27 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
   if ('blocked' in context) return { status: 'blocked', message: context.blocked };
   const environmentLabel = context.environment.id.toLowerCase();
 
+  const targetSpec = spec.environments[params.to]!;
+  if (sourceSpec.database && targetSpec.database?.provider !== 'cloudsql') {
+    return { status: 'blocked', message: 'The source database needs a matching Cloud SQL database in the target environment.' };
+  }
+  const selected = selectMigrationBuckets(sourceSpec, targetSpec, sourceEnvironment, context.gcpProjectId, params.to);
+  if (!selected.buckets) return { status: 'blocked', message: selected.blocked };
+  const buckets = selected.buckets;
+
   // 3. Review runtime-secret names. Containers are prepared through the engine before values move.
   let pendingSecretValues: Record<string, string> | undefined;
+  if (pendingTransfer) {
+    const scope = { gcpProjectId: context.gcpProjectId, region: context.region,
+      token: () => context.adapter.engineAccessToken() };
+    const retry = params.copyData && params.refreshData && !params.verifyOnly && !params.cutover;
+    const cleared = await verifyTransferResourcesAbsent(scope, pendingTransfer)
+      || (retry && await recoverTerminalTransferResources(scope, pendingTransfer));
+    if (!cleared) {
+      return { status: 'blocked', message: `Cleanup of the previous transfer into ${params.to} is unverified for job ${pendingTransfer.jobId}. A reviewed refresh can finish cleanup once its recorded execution is terminal. No replacement copy was started.` };
+    }
+    lease.record(null);
+  }
   const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const recorded = (environment().platformBindings as { engine?: EngineBinding }).engine;
   if (recorded?.importedSecrets?.some((key) => scopedToEnvironment(key, params.from))) {
@@ -341,35 +392,78 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     ctx.repos.environments.syncRepoBindingsForId(expected.id);
     return true;
   };
+  const deployedBuckets = () => (environment().platformBindings as { engine?: EngineBinding }).engine?.storage;
+  const selectionProblem = () => {
+    const latest = store.get(params.project)?.spec.environments;
+    const sourceNow = ctx.repos.environments.findById(sourceEnvironment.id);
+    const currentSource = latest?.[params.from];
+    const currentTarget = latest?.[params.to];
+    if (!sourceNow || !currentSource || !currentTarget || currentSource.database?.provider !== sourceSpec.database?.provider
+      || (currentSource.database && currentTarget.database?.provider !== 'cloudsql')) return 'The migration environments or database selection changed. Review the migration again.';
+    const selectedNow = selectMigrationBuckets(currentSource, currentTarget, sourceNow, context.gcpProjectId, params.to);
+    if (!selectedNow.buckets) return selectedNow.blocked;
+    const current = selectedNow.buckets;
+    if (current.length !== buckets.length || !buckets.every(bucket => current.some(other => other.name === bucket.name && other.identity === bucket.identity))) {
+      return 'The selected file buckets changed during migration. Review the migration again.';
+    }
+    return missingDeployedBucket(current, deployedBuckets());
+  };
+  const evidenceMatchesSelection = (evidence: MigrationCopyEvidence) => !selectionProblem()
+    && (!sourceSpec.database || evidence.database?.match === true) && hasVerifiedBuckets(evidence, buckets);
+  const sameAttempt = (copy: NonNullable<EngineBinding['migration']>, current = migration()) => Boolean(
+    copy.copiedAt && current?.copiedAt === copy.copiedAt && current.copyAttempt?.id === copy.copyAttempt?.id
+    && (!current.copyAttempt || current.copyAttempt.status === 'complete'));
   const copyIsCurrent = (copy: NonNullable<EngineBinding['migration']>) => {
     const current = migration();
-    return Boolean(copy.copiedAt && current?.copiedAt === copy.copiedAt
-      && current.copyAttempt?.id === copy.copyAttempt?.id
-      && (!current.copyAttempt || current.copyAttempt.status === 'complete'));
+    return !!current && sameAttempt(copy, current) && evidenceMatchesSelection(current);
   };
   const supersededResult = { status: 'blocked' as const, message: 'Another copy attempt changed this migration. This attempt cannot authorize release; review the latest copy state before retrying.' };
   const incomplete = migration()?.copyAttempt && migration()?.copyAttempt?.status !== 'complete';
   if (incomplete && (params.cutover || params.verifyOnly || !params.copyData || !params.refreshData)) {
+    if (sourceSpec.domainTarget?.environment === params.to) return { status: 'blocked', message: `The current copy is incomplete and traffic may reach ${params.to}. ${targetWriteRecovery}` };
     return { status: 'blocked', message: `The latest copy into ${params.to} did not complete. Earlier copy evidence is historical and cannot authorize release or cutover. Run hv_migrate with copyData=true and refreshData=true to replace the target data with a fresh verified copy. If a cutover paused ${params.from}, it remains paused.` };
   }
   const completedCopy = Boolean(migration()?.copiedAt) && !incomplete;
   const reuseCopy = completedCopy && !params.refreshData;
 
+  if (completedCopy && !params.verifyOnly && (params.cutover || reuseCopy) && !evidenceMatchesSelection(migration()!)) {
+    if (sourceSpec.domainTarget?.environment === params.to) return { status: 'blocked', message: `Current transfer evidence for the routed target is incomplete. ${targetWriteRecovery}` };
+    return { status: 'blocked', message: 'The saved copy does not prove that every requested database and file bucket matched. Run hv_migrate with copyData=true and refreshData=true to make a verified copy before releasing or moving traffic.' };
+  }
+
+  // A Railway export needs its signed download URL, other databases need their
+  // source URL, and bucket transfers need source access keys inside the target job.
+  const copyHandoff = transferCredentialHandoffProblem(!!sourceSpec.database || buckets.length > 0);
   if (params.cutover) {
     if (!completedCopy) return { status: 'blocked', message: `Migrate ${params.from} to ${params.to} and check the app there before the cutover.` };
-    return cutoverEnvironment(ctx, params);
+    return cutoverEnvironment(ctx, params, lease, copyHandoff);
   }
 
   if (params.verifyOnly) {
     if (!completedCopy) return { status: 'blocked', message: `Nothing has been copied from ${params.from} to ${params.to} yet; run hv_migrate first.` };
-    return verifyMigratedCopy(ctx, { project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
-      instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName, copiedAt: migration()!.copiedAt });
+    const copy = migration()!;
+    const missing = selectionProblem();
+    if (missing) return { status: 'blocked', message: missing };
+    if (copyHandoff) return { status: 'blocked', message: copyHandoff };
+    const prepared = await prepareMigrationBuckets(params.project, sourceEnvironment, buckets);
+    if (!prepared.prepared) return { status: 'blocked', message: prepared.blocked };
+    const result = await verifyMigratedCopy({ lease, buckets: prepared.prepared, project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
+      instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName, copiedAt: copy.copiedAt });
+    if (!sameAttempt(copy)) return supersededResult;
+    const change = selectionProblem();
+    return change ? { status: 'blocked', message: change } : result;
   }
 
   // 3b. The target database runs at least the source's PostgreSQL major version.
   if (sourceSpec.database && spec.environments[params.to]!.database) {
-    const known = reuseCopy ? migration()?.sourceMajor : undefined;
-    const sourceMajor = known ? { major: known } : await sourceDatabaseMajor(ctx, params.project, sourceEnvironment, sourceSpec);
+    // An earlier observation can size an independently prepared target while data
+    // transfer is unavailable. It cannot establish the source version for a new copy.
+    const known = reuseCopy || (sourceSpec.database.provider === 'railway' && copyHandoff) ? migration()?.sourceMajor : undefined;
+    const hasKnownMajor = typeof known === 'number' && Number.isSafeInteger(known) && known > 0;
+    if (!hasKnownMajor && sourceSpec.database.provider === 'railway') {
+      return { status: 'blocked', message: `Checking the private Railway PostgreSQL version requires a reviewed task that Hypervibe does not yet plan. Use hv_launch for ${params.to} to prepare and test the empty target with its configured database version.` };
+    }
+    const sourceMajor = hasKnownMajor ? { major: known } : await sourceDatabaseMajor(params.project, sourceEnvironment);
     if ('blocked' in sourceMajor) return { status: 'blocked', message: sourceMajor.blocked };
     recordMigration({ sourceMajor: sourceMajor.major });
     const targetMajor = spec.environments[params.to]!.database!.version ?? 16;
@@ -406,8 +500,9 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
 
 
   // 5. Copy the data inside the target cloud, after the user approves replacing target data.
-  const targetSpec = spec.environments[params.to]!;
-  const storageNames = Object.keys(targetSpec.storage ?? {}).filter((name) => parseStorageBindings(sourceEnvironment)[name]);
+  const missing = selectionProblem();
+  if (missing) return { status: 'blocked', message: missing };
+  const storageNames = buckets.map(({ name }) => name);
   // Railway databases are private: export from inside Railway rather than opening a public port.
   const privateRailwaySource = sourceSpec.database?.provider === 'railway';
   if (reuseCopy) {
@@ -419,10 +514,11 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     return {
       status: 'migrated', target: params.to, urls: released.urls,
       secretsImported: ((environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets ?? []).length,
-      ...(copy.database ? { database: copy.database } : {}), storage: copy.storage ?? [], dataCopiedAt: copy.copiedAt,
+      ...(copy.database ? { database: copy.database } : {}), storage: bucketSummaries(copy.storage ?? []), dataCopiedAt: copy.copiedAt,
       next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. The data was copied at ${copy.copiedAt}; run hv_migrate again with refreshData=true to copy it again before the final cutover.`,
     };
   }
+  if (copyHandoff) return { status: 'blocked', message: copyHandoff };
   const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
@@ -439,9 +535,14 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       };
     }
     const transfer: TransferContext = {
+      recordTransferResources: lease.record,
       token: () => context.adapter.engineAccessToken(), gcpProjectId: context.gcpProjectId, region: context.region,
       runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, environmentLabel,
     };
+    const prepared = await prepareMigrationBuckets(params.project, sourceEnvironment, buckets);
+    if (!prepared.prepared) return { status: 'blocked', message: prepared.blocked };
+    const change = selectionProblem();
+    if (change) return { status: 'blocked', message: change };
     const expected = environment();
     const prior = migration();
     const previousCopy = prior?.copiedAt
@@ -449,10 +550,10 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       : prior?.previousCopy;
     const copyAttempt = { id: randomUUID(), startedAt: new Date().toISOString(), status: 'incomplete' as const };
     if (!persistCopy(expected, { ...prior, from: params.from, copyAttempt,
-      copiedAt: undefined, database: undefined, storage: undefined, ...(previousCopy ? { previousCopy } : {}) })) {
+      copiedAt: undefined, finalCopy: undefined, database: undefined, storage: undefined, ...(previousCopy ? { previousCopy } : {}) })) {
       return { status: 'blocked', message: 'Migration state changed before copying started. Review the latest migration state before retrying.' };
     }
-    const superseded = () => migration()?.copyAttempt?.id !== copyAttempt.id || migration()?.copyAttempt?.status !== 'incomplete';
+    const superseded = () => migration()?.copyAttempt?.id !== copyAttempt.id || migration()?.copyAttempt?.status !== 'incomplete' || !!selectionProblem();
     let database: Extract<MigrateResult, { status: 'migrated' }>['database'];
     if (privateRailwaySource) {
       const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer, instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName });
@@ -474,25 +575,17 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       database = { tables: Object.keys(result.source?.tables ?? {}).length, rows: result.source?.totalRows ?? '0', match: compared.match, differences: compared.differences, restoreWarnings: result.restoreWarnings ?? 0 };
       if (!compared.match) return { status: 'blocked', message: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}`, details: database };
     }
-    const storage: Extract<MigrateResult, { status: 'migrated' }>['storage'] = [];
-    for (const name of storageNames) {
+    const storage: NonNullable<MigrationCopyEvidence['storage']> = [];
+    for (const bucket of prepared.prepared) {
       if (superseded()) return supersededResult;
-      const binding = parseStorageBindings(sourceEnvironment)[name]!;
-      const adapter = await adapterFactory.getStorageAdapter(binding.provider, params.project);
-      if (!adapter.success || !adapter.adapter?.getCredentials || !binding.instanceScope) {
-        return { status: 'blocked', message: `Copying files out of ${binding.provider} storage is not supported yet.` };
-      }
-      const credentials = await adapter.adapter.getCredentials(sourceEnvironment, binding.instanceScope, binding.externalId);
-      const remote = s3SourceRemote(credentials);
       const result = await runTransferJob<StorageTransferResult>(transfer, {
         purpose: 'storage', image: 'rclone/rclone:1.68.2', script: storageTransferScript(),
-        env: { ...remote.env, SOURCE_BUCKET: credentials.bucket, TARGET_BUCKET: engineBucketName(context.gcpProjectId, params.to, name) },
-        sourceSecrets: remote.secrets, timeoutSeconds: 3600,
+        env: bucket.env, sourceSecrets: bucket.sourceSecrets, timeoutSeconds: 3600,
       });
-      if (!result.ok) return { status: 'blocked', message: result.error ?? `Copying ${name} failed.` };
-      const match = (result.differences ?? 1) === 0 && result.source?.count === result.target?.count;
-      storage.push({ name, files: result.source?.count ?? 0, bytes: result.source?.bytes ?? 0, match });
-      if (!match) return { status: 'blocked', message: `The copied files in ${name} do not match the source (${result.differences} difference(s)).`, details: result };
+      const checked = compareMigrationBucket(bucket.name, result);
+      if (checked.blocked !== undefined) return { status: 'blocked', message: checked.blocked };
+      if (!checked.match) return { status: 'blocked', message: `The copied files in ${bucket.name} do not match the source.`, details: checked };
+      storage.push({ name: bucket.name, files: checked.files, bytes: checked.bytes, match: true, downloadVerifiedFor: bucket.identity });
     }
 
     const current = environment();
@@ -501,7 +594,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
       || currentMigration.copyAttempt.status !== 'incomplete') return supersededResult;
     const completed = { ...currentMigration, copyAttempt: { ...copyAttempt, status: 'complete' as const },
       copiedAt: new Date().toISOString(), ...(database ? { database } : {}), storage };
-    if (!persistCopy(current, completed) || !copyIsCurrent(completed)) return supersededResult;
+    if (!evidenceMatchesSelection(completed) || !persistCopy(current, completed) || !copyIsCurrent(completed)) return supersededResult;
 
     // 6. Release the app on the target and verify it.
     const released = await launchEnvironment(ctx, launchParams);
@@ -510,7 +603,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: {
     return {
       status: 'migrated', target: params.to, urls: released.urls,
       secretsImported: ((environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets ?? []).length,
-      ...(database ? { database } : {}), storage,
+      ...(database ? { database } : {}), storage: bucketSummaries(storage),
       next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. Run hv_migrate again with refreshData=true to copy the data again before the final cutover.`,
     };
   } finally {
@@ -627,28 +720,49 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
  * The final move. The source shows its maintenance page and its workloads are
  * suspended, so nothing writes while the data is copied again and verified;
  * then its existing domain forwards to the target. The source's resources and
- * DNS stay in place, so pointing the domain back is one more reviewed change.
+ * DNS stay in place. Recovery after target writes needs the newer data.
  */
-async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof migrateEnvironment>[1]): Promise<MigrateResult> {
+async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease, copyHandoff?: string): Promise<MigrateResult> {
   const store = new SpecStore();
-  const spec = store.get(params.project)!.spec;
+  const { spec, revision } = store.get(params.project)!;
   const source = spec.environments[params.from]!;
   const target = spec.environments[params.to]!;
-  const domain = source.domain?.trim();
-  if (!domain) return { status: 'blocked', message: `${params.from} has no custom domain to move.` };
-  const web = Object.entries(target.services).find(([, service]) => service.workloadKind === 'web' && service.public !== false)?.[0];
-  if (!web) return { status: 'blocked', message: `${params.to} has no public web service to receive ${domain}.` };
+  const web = source.domainTarget?.environment === params.to ? source.domainTarget.service : desiredDomainServiceName(target);
+  const environment = (name: string) => ctx.repos.environments.findByProjectAndName(params.project.id, name)!;
+  const readiness = await migrationCutoverReadiness(params.project, environment(params.from), source, params.to, target, web);
+  if (store.get(params.project)?.revision !== revision) return { status: 'blocked', message: 'The cutover configuration changed during the source check. Review the current cutover again.' };
+  const recovery = targetWriteRecovery;
+  const { domain } = readiness;
+  if (domain && readiness.alreadyForwarding && readiness.problems.length) {
+    return { status: 'cut_over', domain, target: params.to, message: `${domain} already forwards to ${params.to}. ${readiness.problems.join(' ')} ${recovery}` };
+  }
+  if (readiness.problems.length || !domain || !web) return { status: 'blocked', message: readiness.problems.join(' ') };
   // Settings that name the target's own public URL move to the source domain, which visitors keep using.
   const sourceOrigin = `https://${domain}`;
   const targetOrigin = target.domain ? `https://${target.domain.trim()}` : undefined;
   const retarget = Object.fromEntries(Object.entries(target.envVars ?? {})
     .filter(([, value]) => targetOrigin && value.replace(/\/$/, '') === targetOrigin).map(([key]) => [key, sourceOrigin]));
   const routed = source.domainTarget?.environment === params.to && source.maintenance?.page === 'off';
+  const observeTrafficMove = async (): Promise<MigrateResult> => {
+    const latest = store.get(params.project)!.spec;
+    const observed = await migrationCutoverReadiness(params.project, environment(params.from), latest.environments[params.from]!,
+      params.to, latest.environments[params.to]!, web);
+    if (!observed.alreadyForwarding || observed.domain !== domain) return { status: 'pending', receipts: [],
+      message: `Forwarding ${domain} to ${params.to} has not been verified. Keep the source paused and check the current route before another move. ${observed.problems.join(' ')}`.trim() };
+    return { status: 'cut_over', domain, target: params.to, message: [`${domain} now forwards to ${params.to}.`, ...observed.problems, recovery].join(' ') };
+  };
   if (routed) {
+    const destination = environment(params.to);
+    const migration = (destination.platformBindings.engine as EngineBinding | undefined)?.migration;
+    const expected = finalCopyReceipt(environment(params.from), destination, domain, web, readiness.pauseFingerprint);
+    if (!readiness.alreadyForwarding && (!expected || !isDeepStrictEqual(expected, migration?.finalCopy))) {
+      return { status: 'blocked', message: `Traffic to ${params.to} needs a verified final copy made during the current source pause. Keep the source paused. Reconcile any writes accepted on the target before reviewing a new final copy under the maintenance page.` };
+    }
     const done = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'traffic move', params.planId);
     if (done !== 'done') return done;
-    return { status: 'cut_over', domain, target: params.to, message: `${domain} now forwards to ${params.to}. ${params.from} stays paused with its data and DNS in place; to send visitors back, set its domainTarget away and maintenance.page to "active", then resume.` };
+    return observeTrafficMove();
   }
+  if (copyHandoff) return { status: 'blocked', message: copyHandoff };
   if (!params.confirmCutover) {
     return {
       status: 'needs_cutover_approval', domain,
@@ -656,9 +770,9 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
         `Pause ${params.from}: ${domain} shows a maintenance page (HTTP 503) and its web and worker services are suspended. Let running jobs and uploads finish first.`,
         `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.`,
         ...(Object.keys(retarget).length ? [`Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin}, so links and logins use ${domain}.`] : []),
-        `Send ${domain} to ${params.to} (${web}). ${params.from} stays paused with its data, so moving back is one more reviewed step.`,
+        `Send ${domain} to ${params.to} (${web}). ${params.from} stays paused with its data. ${recovery}`,
       ],
-      message: `${domain} is unavailable from the pause until the traffic move, usually a few minutes plus the copy time.`,
+      message: `${domain} is unavailable from the pause until the traffic move, including time for the final copy, verification, and any outstanding approvals.`,
     };
   }
   // 1. Pause the source so nothing writes during the final copy.
@@ -667,25 +781,47 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
   }
   const paused = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'pause', params.planId);
   if (paused !== 'done') return paused;
+  const pausedSpec = store.get(params.project)!.spec;
+  const pausedReadiness = await migrationCutoverReadiness(params.project, environment(params.from), pausedSpec.environments[params.from]!,
+    params.to, pausedSpec.environments[params.to]!, web);
+  if (pausedReadiness.problems.length || !pausedReadiness.pauseFingerprint) return {
+    status: 'blocked', message: [`The final copy requires a verified pause for ${domain} and every source workload.`, ...pausedReadiness.problems].join(' '),
+  };
+  const previousAttempt = (environment(params.to).platformBindings.engine as EngineBinding)?.migration?.copyAttempt?.id;
   // 2. Point the target at the source domain (released with the copy), copy again and prove it matches.
   if (Object.keys(retarget).length) store.merge(params.project, { environments: { [params.to]: { envVars: retarget } } });
   const prior = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined;
   const sourceApprovalConsumed = prior && !('error' in prior) && prior.document.environmentName === params.from;
-  const copied = await migrateEnvironment(ctx, { ...params, ...(sourceApprovalConsumed ? { planId: undefined, confirmActions: undefined } : {}), cutover: false, confirmCutover: false, copyData: true, refreshData: true });
+  const copied = await runMigration(ctx, { ...params, ...(sourceApprovalConsumed ? { planId: undefined, confirmActions: undefined } : {}), cutover: false, confirmCutover: false, copyData: true, refreshData: true }, lease);
   if (copied.status !== 'migrated') return copied;
   // The copy is proven by its own check: the paused source's checksums against the restored
   // target, taken before the target app can write. A later comparison would race the live target.
   if (copied.database && !copied.database.match) {
     return { status: 'blocked', message: `The final copy does not match the paused source (${copied.database.differences.slice(0, 3).join('; ')}), so ${domain} keeps showing the maintenance page.` };
   }
+  // A long final copy may span a source or target policy change.
+  const current = store.get(params.project)!;
+  const currentSource = current.spec.environments[params.from];
+  const currentTarget = current.spec.environments[params.to];
+  if (!currentSource || !currentTarget || currentSource.domain !== source.domain
+    || desiredDomainServiceName(currentTarget) !== web) return { status: 'blocked', message: 'The cutover domain or target service changed during the copy. Review the current cutover again.' };
+  const finalReadiness = await migrationCutoverReadiness(params.project, environment(params.from), currentSource, params.to, currentTarget, web);
+  if (finalReadiness.problems.length) return { status: 'blocked', message: finalReadiness.problems.join(' ') };
+  if (store.get(params.project)?.revision !== current.revision) return { status: 'blocked', message: 'The cutover configuration changed before traffic moved. Review the current cutover again.' };
+  const destination = environment(params.to);
+  const engine = destination.platformBindings.engine as EngineBinding;
+  const receipt = finalCopyReceipt(environment(params.from), destination, domain, web, finalReadiness.pauseFingerprint);
+  if (!receipt || receipt.copyAttemptId === previousAttempt || receipt.pauseFingerprint !== pausedReadiness.pauseFingerprint || !engine.migration
+    || !ctx.repos.environments.replacePlatformBindingsIfUnchanged(destination, {
+      ...destination.platformBindings, engine: { ...engine, migration: { ...engine.migration, finalCopy: receipt } },
+    })) return { status: 'blocked', message: 'The final copy or source pause changed before traffic moved. Keep the source paused and verify the current copy.' };
+  ctx.repos.environments.syncRepoBindingsForId(destination.id);
   // 3. Send the domain to the target.
   store.merge(params.project, { environments: { [params.from]: { domainTarget: { environment: params.to, service: web }, maintenance: { enabled: true, mode: 'application', page: 'off' } } } });
   const moved = await applySourceStage(ctx, params.project, params.from, undefined, 'traffic move');
   if (moved !== 'done') return moved;
-  return {
-    status: 'cut_over', domain, target: params.to, ...(copied.database ? { database: copied.database } : {}),
-    message: `${domain} now forwards to ${params.to}; the final copy matched the paused source. ${params.from} stays paused with its data and DNS in place.`,
-  };
+  const observed = await observeTrafficMove();
+  return observed.status === 'cut_over' && copied.database ? { ...observed, database: copied.database } : observed;
 }
 
 /**
@@ -694,13 +830,16 @@ async function cutoverEnvironment(ctx: CommandContext, params: Parameters<typeof
  * from where its data lives, and file stores are compared object by object.
  * A target app that has been used since the copy differs by design.
  */
-async function verifyMigratedCopy(ctx: CommandContext, params: {
+async function verifyMigratedCopy(params: {
+  lease: MigrationTargetLease;
   project: Project; from: string; to: string; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment; spec: ProjectSpec;
+  buckets: NonNullable<Awaited<ReturnType<typeof prepareMigrationBuckets>>['prepared']>;
   context: Awaited<ReturnType<typeof resolveEngineContext>> & { gcpProjectId: string }; environmentLabel: string; instance?: string; copiedAt?: string;
 }): Promise<MigrateResult> {
   const { context } = params;
   if (!('adapter' in context)) return { status: 'blocked', message: 'The target environment is not ready.' };
   const transfer: TransferContext = {
+    recordTransferResources: params.lease.record,
     token: () => context.adapter.engineAccessToken(), gcpProjectId: context.gcpProjectId, region: context.region,
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, environmentLabel: params.environmentLabel,
   };
@@ -708,63 +847,32 @@ async function verifyMigratedCopy(ctx: CommandContext, params: {
   if (params.sourceSpec.database && params.spec.environments[params.to]!.database) {
     const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
     if (!params.instance || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready.' };
-    const targetJob = (sourceSecrets: Record<string, string>) => runTransferJob<{ ok: boolean; error?: string; source?: DatabaseManifest; target?: DatabaseManifest }>(transfer, {
-      purpose: 'database', image: 'postgres:18-alpine', script: databaseManifestScript(), env: {}, sourceSecrets,
-      secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
-      cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 1800,
-    });
-    let source: DatabaseManifest | undefined;
-    let target: DatabaseManifest | undefined;
-    if (params.sourceSpec.database.provider === 'railway') {
-      const component = ctx.repos.components.findByEnvironmentAndType(params.sourceEnvironment.id, 'postgres');
-      const bindings = params.sourceEnvironment.platformBindings as { projectId?: string; environmentId?: string };
-      const railway = await adapterFactory.getProviderAdapter('railway', params.project);
-      if (!component?.externalId || !bindings.projectId || !bindings.environmentId || !railway.success || !(railway.adapter instanceof RailwayAdapter)) {
-        return { status: 'blocked', message: 'Hypervibe needs its Railway connection and the tracked source database to compare the data.' };
-      }
-      const databaseServiceName = await railway.adapter.serviceName(component.externalId);
-      if (!databaseServiceName) return { status: 'blocked', message: 'The source Railway database service could not be found.' };
-      const read = await railway.adapter.runPrivateTask({
-        projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:18-alpine', command: databaseManifestScript(),
-        variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}` }, timeoutMs: 20 * 60 * 1000,
-      });
-      const parsed = parseTransferResult(read.output) as { ok?: boolean; source?: DatabaseManifest } | undefined;
-      if (read.exitCode !== 0 || !parsed?.ok || !parsed.source) return { status: 'blocked', message: `Reading the source database inside Railway did not complete (${read.error ?? `exit ${read.exitCode ?? 'unknown'}`}).` };
-      source = parsed.source;
-      const checked = await targetJob({});
-      if (!checked.ok) return { status: 'blocked', message: checked.error ?? 'Reading the target database failed.' };
-      target = checked.target;
-    } else {
-      const access = await acquireManagedDatabaseAccess(params.project, params.sourceEnvironment);
-      if (!access.ok) return { status: 'blocked', message: `Could not open the source database: ${access.error}` };
-      try {
-        const checked = await access.lease.withConnection((sourceUrl) => targetJob({ SOURCE_DATABASE_URL: sourceUrl }));
-        if (!checked.ok) return { status: 'blocked', message: checked.error ?? 'Comparing the databases failed.' };
-        source = checked.source;
-        target = checked.target;
-      } finally {
-        await access.lease.release().catch(() => undefined);
-      }
+    const access = await acquireManagedDatabaseAccess(params.project, params.sourceEnvironment);
+    if (!access.ok) return { status: 'blocked', message: `Could not open the source database: ${access.error}` };
+    let checked: DatabaseTransferResult;
+    try {
+      checked = await access.lease.withConnection((sourceUrl) => runTransferJob<DatabaseTransferResult>(transfer, {
+        purpose: 'database', image: 'postgres:18-alpine', script: databaseManifestScript(), env: {}, sourceSecrets: { SOURCE_DATABASE_URL: sourceUrl },
+        secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
+        cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 1800,
+      }));
+    } finally {
+      await access.lease.release().catch(() => undefined);
     }
+    if (!checked.ok) return { status: 'blocked', message: checked.error ?? 'Comparing the databases failed.' };
+    const { source, target } = checked;
     const compared = manifestsMatch(source, target);
     database = { tables: Object.keys(source?.tables ?? {}).length, rows: source?.totalRows ?? '0', match: compared.match, differences: compared.differences };
   }
   const storage: Extract<MigrateResult, { status: 'verified' | 'differs' }>['storage'] = [];
-  for (const name of Object.keys(params.spec.environments[params.to]!.storage ?? {})) {
-    const binding = parseStorageBindings(params.sourceEnvironment)[name];
-    if (!binding) continue;
-    const adapter = await adapterFactory.getStorageAdapter(binding.provider, params.project);
-    if (!adapter.success || !adapter.adapter?.getCredentials || !binding.instanceScope) return { status: 'blocked', message: `Reading ${binding.provider} storage is not supported yet.` };
-    const credentials = await adapter.adapter.getCredentials(params.sourceEnvironment, binding.instanceScope, binding.externalId);
-    const remote = s3SourceRemote(credentials);
+  for (const bucket of params.buckets) {
     const result = await runTransferJob<StorageTransferResult>(transfer, {
       purpose: 'storage', image: 'rclone/rclone:1.68.2', script: storageCheckScript(),
-      env: { ...remote.env, SOURCE_BUCKET: credentials.bucket, TARGET_BUCKET: engineBucketName(context.gcpProjectId, params.to, name) },
-      sourceSecrets: remote.secrets, timeoutSeconds: 1800,
+      env: bucket.env, sourceSecrets: bucket.sourceSecrets, timeoutSeconds: 1800,
     });
-    if (!result.ok) return { status: 'blocked', message: result.error ?? `Comparing ${name} failed.` };
-    const differences = result.differences ?? 1;
-    storage.push({ name, files: result.source?.count ?? 0, bytes: result.source?.bytes ?? 0, match: differences === 0 && result.source?.count === result.target?.count, differences });
+    const checked = compareMigrationBucket(bucket.name, result);
+    if (checked.blocked !== undefined) return { status: 'blocked', message: checked.blocked };
+    storage.push(checked);
   }
   const same = (database?.match ?? true) && storage.every((entry) => entry.match);
   return {
@@ -776,28 +884,8 @@ async function verifyMigratedCopy(ctx: CommandContext, params: {
   };
 }
 
-/** The source database's PostgreSQL major version, read privately when the source is Railway. */
-async function sourceDatabaseMajor(ctx: CommandContext, project: Project, sourceEnvironment: Environment, sourceSpec: EnvironmentSpec): Promise<{ major: number } | { blocked: string }> {
-  if (sourceSpec.database?.provider === 'railway') {
-    const component = ctx.repos.components.findByEnvironmentAndType(sourceEnvironment.id, 'postgres');
-    const bindings = sourceEnvironment.platformBindings as { projectId?: string; environmentId?: string };
-    const railway = await adapterFactory.getProviderAdapter('railway', project);
-    if (!component?.externalId || !bindings.projectId || !bindings.environmentId || !railway.success || !(railway.adapter instanceof RailwayAdapter)) {
-      return { blocked: 'The source Railway database is not reachable through Hypervibe.' };
-    }
-    const name = await railway.adapter.serviceName(component.externalId);
-    const runProbe = () => (railway.adapter as RailwayAdapter).runPrivateTask({
-      projectId: bindings.projectId!, environmentId: bindings.environmentId!, image: 'postgres:18-alpine', timeoutMs: 6 * 60 * 1000,
-      command: 'echo "HV_SERVER_VERSION $(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")"',
-      variables: { SOURCE_DATABASE_URL: `\${{${name}.DATABASE_URL}}` },
-    });
-    // A read-only probe; one retry absorbs Railway's occasional late logs.
-    let probe = await runProbe();
-    if (probe.exitCode === undefined) probe = await runProbe();
-    const version = probe.output.match(/HV_SERVER_VERSION (\d+)/)?.[1];
-    if (probe.exitCode !== 0 || !version) return { blocked: `Could not read the source database version (${probe.error ?? 'no output'}).` };
-    return { major: Math.floor(Number(version) / 10000) };
-  }
+/** Inspect the PostgreSQL major through the source's managed database connection. */
+async function sourceDatabaseMajor(project: Project, sourceEnvironment: Environment): Promise<{ major: number } | { blocked: string }> {
   const access = await acquireManagedDatabaseAccess(project, sourceEnvironment);
   if (!access.ok) return { blocked: `Could not open the source database: ${access.error}` };
   try {

@@ -248,8 +248,8 @@ export async function runCloudRunJobOnce(
 }
 
 /** Reads a long-running operation by its full name. */
-export function readCloudRunOperation(token: string, operationName: string): Promise<Response> {
-  return fetchWithRetry(`${API}/${operationName}`, { headers: { Authorization: `Bearer ${token}` } });
+export function readCloudRunOperation(token: string, operationName: string, signal?: AbortSignal): Promise<Response> {
+  return fetchWithRetry(`${API}/${operationName}`, { signal, headers: { Authorization: `Bearer ${token}` } });
 }
 
 /** The most recent run of an on-demand worker's waker workflow. */

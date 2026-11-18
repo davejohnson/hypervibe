@@ -84,3 +84,13 @@ export function signedObjectUrl(params: { clientEmail: string; privateKey: strin
   const signature = crypto.createSign('RSA-SHA256').update(toSign).sign(params.privateKey, 'hex');
   return `https://storage.googleapis.com${path}?${query}&X-Goog-Signature=${signature}`;
 }
+
+/** Native identities retained until the temporary transfer job and its credentials are confirmed gone. */
+export interface TransferResources {
+  gcpProjectId: string;
+  region: string;
+  jobId: string;
+  secretIds: string[];
+  ownershipToken?: string;
+  jobUid?: string;
+}
