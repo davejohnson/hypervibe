@@ -42,7 +42,7 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-function seedConnection(options: { promotion?: boolean; api?: boolean; newerServer?: boolean; expectedInfoPlist?: Record<string, string>; reorderPromotionExpectations?: boolean } = {}) {
+function seedConnection(options: { promotion?: boolean; api?: boolean; newerServer?: boolean; expectedInfoPlist?: Record<string, string>; reorderPromotionExpectations?: boolean; stagingBranch?: string; automaticBetaDefaultBranch?: string } = {}) {
   const appStore = new ConnectionRepository().create({
     provider: 'appstoreconnect',
     credentialsEncrypted: getSecretStore().encryptObject({
@@ -98,6 +98,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
   }
   if (options.promotion) {
     configured.environments.staging = structuredClone(configured.environments.production);
+    if (options.stagingBranch) configured.environments.staging.deploy!.branch = options.stagingBranch;
     configured.environments.staging.ios!.release!.trigger = 'after-server-deploy';
     configured.environments.production.ios!.release!.promoteFrom = 'staging';
     configured.environments.production.ios!.release!.trigger = 'manual';
@@ -126,7 +127,9 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
     path: id === 101 ? contract.workflow.path : id === 103 ? sourceContract.workflow.path : `.github/workflows/hypervibe-ios-release-${sourceEnvironment}.yml`,
     created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:10:00Z', run_started_at: '2026-07-01T00:00:00Z',
     // The dispatched program is newer than its deliberately selected release.
-    head_sha: 'b'.repeat(40), head_branch: 'main', event: 'workflow_dispatch', run_attempt: 1,
+    head_sha: 'b'.repeat(40), head_branch: id === 101 ? 'main' : id === 102 && options.automaticBetaDefaultBranch
+      ? options.automaticBetaDefaultBranch : sourceContract.workflow.branch,
+    event: id === 102 && options.automaticBetaDefaultBranch ? 'workflow_run' : 'workflow_dispatch', run_attempt: 1,
     repository: { full_name: 'davejohnson/example' }, head_repository: { full_name: 'davejohnson/example' },
     html_url: `https://github.com/davejohnson/example/actions/runs/${id}`,
   });
@@ -170,7 +173,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
     id: id + 100,
     name: id === 102 ? `hypervibe-ios-release-${sourceEnvironment}-` + releaseSha : managedCiReleaseArtifactPrefix(id === 101 ? 'production' : sourceEnvironment) + (id === 101 ? server.source.sha : releaseSha),
     expired: false, created_at: '2026-07-01T00:05:00Z', updated_at: '2026-07-01T00:05:00Z',
-    workflow_run: { id, repository_id: 1, head_repository_id: 1, head_branch: 'main', head_sha: 'b'.repeat(40) },
+    workflow_run: { id, repository_id: 1, head_repository_id: 1, head_branch: run(id).head_branch, head_sha: 'b'.repeat(40) },
   });
   // Reconstructed GitHub attempt-job response; only this new lookup uses HTTP.
   // Endpoint scope establishes the attempt when optional job.run_attempt is absent.
@@ -192,6 +195,9 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
   });
   vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockImplementation(async (_owner, _repo, workflow) => ({ total_count: 1, workflow_runs: [run(String(workflow).includes('ios-release') ? 102 : 101)] }));
   vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async (_owner, _repo, id) => run(id));
+  if (options.automaticBetaDefaultBranch) vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({
+    full_name: 'davejohnson/example', default_branch: options.automaticBetaDefaultBranch,
+  });
   vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, id) => {
     const artifacts = [artifact(Number(id))];
     if (options.api && Number(id) !== 102) artifacts.push({
@@ -442,6 +448,99 @@ describe('hv_appstore_submit', () => {
     const t = await makeClient();
     const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
     expect(result.error?.code).toBe('CONFIRM_REQUIRED');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  // GitHub executes workflow_run on the default branch. A dispatch runs on its selected ref.
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+  it.each([
+    ['workflow_run', 'selection'], ['workflow_dispatch', 'selection'], ['workflow_run', 'final recheck'],
+  ] as const)('accepts equivalent workflow paths for %s at %s', async (event, phase) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true, stagingBranch: 'release/staging',
+      automaticBetaDefaultBranch: event === 'workflow_run' ? 'trunk' : undefined });
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    let qualifyPath = phase === 'selection';
+    const reads = new Map<number, number>();
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => {
+      const run = fixture.run(id);
+      const read = (reads.get(id) ?? 0) + 1;
+      reads.set(id, read);
+      const branch = id === 101 ? 'main' : id === 102 && event === 'workflow_run' ? 'trunk' : 'release/staging';
+      return { ...run, path: qualifyPath && read % 2 === 1 ? run.path + '@refs/heads/' + branch : run.path };
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code, JSON.stringify(preview)).toBe('CONFIRM_REQUIRED');
+    expect(submit).not.toHaveBeenCalled();
+    vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockImplementation(async () => {
+      qualifyPath = true;
+      return { id: 'build-1', version: '42' };
+    });
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(1);
+    await t.close();
+  });
+
+  it.each([
+    [101, '@refs/tags/main'], [102, '@refs/heads/release/staging'], [103, '@refs/heads/trunk'],
+    [102, '@@refs/heads/trunk'], [103, '.wrong.yml@refs/heads/release/staging'],
+  ] as const)('rejects a changed workflow path on run %i with %s before submission', async (changedId, suffix) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true, stagingBranch: 'release/staging',
+      automaticBetaDefaultBranch: 'trunk' });
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview');
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(AppStoreConnectAdapter.prototype.getAppStoreVersionBuild).mockImplementation(async () => {
+      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => {
+        const run = fixture.run(id);
+        return { ...run, path: id === changedId ? run.path + suffix : run.path };
+      });
+      return { id: 'build-1', version: '42' };
+    });
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([
+    [101, { head_branch: 'other' }], [102, { head_branch: 'release/staging' }],
+    [103, { event: 'workflow_run' }], [102, { event: 'push' }],
+  ] as const)('rejects a different producer for run %i even with a bare path', async (changedId, changedProducer) => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true, stagingBranch: 'release/staging',
+      automaticBetaDefaultBranch: 'trunk' });
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), ...(id === changedId ? changedProducer : {}),
+    }));
+    stubSubmittableVersion();
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('VALIDATION');
+    expect(AppStoreConnectAdapter.prototype.findAppByBundleId).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('requires a new preview if the beta producer changes to another allowed ref and event', async () => {
+    const fixture = seedConnection({ promotion: true, stagingBranch: 'release/staging', automaticBetaDefaultBranch: 'trunk' });
+    stubSubmittableVersion();
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitForReview').mockResolvedValue({
+      reviewSubmission: { id: 'review-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }, reusedExistingSubmission: false,
+    });
+    const t = await makeClient();
+    const preview = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(preview.error?.code).toBe('CONFIRM_REQUIRED');
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...fixture.run(id), ...(id === 102 ? { event: 'workflow_dispatch', head_branch: 'release/staging' } : {}),
+    }));
+    const result = await t.call('hv_appstore_submit', { ...SUBMIT_INPUT, ...preview.confirmation.retryInput });
+    expect(result.error?.message).toContain('selection changed');
     expect(submit).not.toHaveBeenCalled();
     await t.close();
   });
@@ -731,8 +830,12 @@ describe('hv_appstore_submit', () => {
           : { total_count: 1, workflow_runs: [fixture.run(101)] }
       ));
       let latestReads = 0;
-      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => id === 104
-        ? { ...latestRun, run_attempt: race && ++latestReads > 1 ? 2 : 1 } : fixture.run(id));
+      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => {
+        if (id !== 104) return fixture.run(id);
+        latestReads++;
+        return { ...latestRun, path: latestReads === 1 ? latestRun.path : latestRun.path + '@refs/heads/main',
+          run_attempt: race && latestReads > 1 ? 2 : 1 };
+      });
       vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, id) => (
         Number(id) === 104 ? { total_count: 0, artifacts: [] } : { total_count: 1, artifacts: [fixture.artifact(Number(id))] }
       ));

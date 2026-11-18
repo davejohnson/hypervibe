@@ -302,6 +302,12 @@ Prepare App Store metadata and attach that exact processed build first; Hypervib
 does not substitute whichever build happens to be attached. Apple review and
 store rollout remain separate from GitHub approvals and TestFlight beta review.
 
+Submission checks server runs and manually dispatched beta runs against the
+reviewed workflow branch for their own environment. For an automatic beta
+triggered by a server workflow, it checks the repository default branch.
+GitHub may report the workflow path alone or with its matching branch ref.
+Changing the producing workflow, branch, event or attempt requires a new preview.
+
 The server release must still be the latest proven target deployment, including
 retries of older runs. History is bounded; incomplete observation blocks. An older
 beta can accompany a newer server SHA only with matching versioned API evidence;
