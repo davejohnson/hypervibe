@@ -33,7 +33,8 @@ describe('provider conformance matrix', () => {
       commands: ['npm run typecheck', 'npm test'],
     });
     expect(repositorySpec.github?.collaboration.pullRequests).toMatchObject({
-      requirePr: true, requireStatusChecks: true, statusChecks: ['Hypervibe / acceptance'],
+      requirePr: true, requireStatusChecks: true,
+      statusChecks: ['Hypervibe / acceptance', 'Hypervibe / macos-contract'],
     });
     for (const id of ['acceptance', 'provider-conformance']) {
       const committed = readFileSync(path.resolve(`.github/workflows/hypervibe-${id}.yml`), 'utf8');
