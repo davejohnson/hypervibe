@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parse as parseYaml } from 'yaml';
 import { createHash } from 'node:crypto';
 import type { CommandContext } from './context.js';
 import { commandError, commandSuccess, HvError, type CommandEnvelope } from './results.js';
@@ -90,6 +91,23 @@ function validateRun(run: Run, expected: RunIdentity, previous?: Run): void {
   }
 }
 
+function validateDeclaredTrigger(program: string, run: Run): void {
+  // Trigger declarations belong to the workflow at the program SHA, which may differ from the deployed SHA.
+  let workflow: unknown;
+  try { workflow = parseYaml(program); }
+  catch { invalid('The selected workflow trigger configuration could not be read.'); }
+  const triggers = z.object({ on: z.record(z.string(), z.unknown()) }).safeParse(workflow);
+  if (!triggers.success || !Object.hasOwn(triggers.data.on, run.event)) {
+    invalid('The selected workflow does not declare the reported release event.');
+  }
+  if (run.event === 'push') {
+    const push = z.object({ branches: z.tuple([z.string()]) }).safeParse(triggers.data.on.push);
+    if (!push.success || push.data.branches[0] !== run.head_branch) {
+      invalid('The selected server workflow does not declare push deployment on this branch.');
+    }
+  }
+}
+
 async function verifyCurrentServerRun(github: GitHubAdapter, owner: string, repo: string, workflow: string, selectedId: number): Promise<void> {
   try {
     const runs = await completeReleaseRuns(github, owner, repo, workflow);
@@ -158,6 +176,22 @@ async function selectEvidence(params: {
     }
     const identity: RunIdentity = { id, repository: params.repository, workflow: params.workflow, ref: `refs/heads/${branch}`, event: run.event };
     validateRun(run, identity);
+    // The run head proves which program executed, not which commit that program deployed.
+    const desiredFiles = workflowFiles(params.contract.workflow);
+    const executedFile = desiredFiles.find((file) => file.path === params.workflow);
+    const executedContent = await github.getFileContent(owner, repo, params.workflow, run.head_sha);
+    if (!executedFile || executedContent === null) invalid('The selected run has no observable managed workflow program.');
+    const binding = params.contract.binding;
+    if (!params.originalBetaServer && executedContent !== executedFile.content) {
+      // A historical accepted renderer can be proven by its aggregate lock.
+      // Current exact file matches do not depend on unrelated companion files.
+      if (binding?.inputHash !== params.contract.inputHash) invalid('The selected release did not run the currently reviewed managed workflow program.');
+      const files = await Promise.all(desiredFiles.map(async (file) => ({
+        path: file.path, content: await github.getFileContent(owner, repo, file.path, run.head_sha) ?? '',
+      })));
+      if (workflowFilesContentHash(files) !== binding.contentHash) invalid('The selected release did not run the currently reviewed managed workflow program.');
+    }
+    validateDeclaredTrigger(executedContent, run);
     const listed = await github.listWorkflowRunArtifacts(owner, repo, id);
     if (!Array.isArray(listed.artifacts) || listed.total_count !== listed.artifacts.length) {
       invalid('Release artifact listing is incomplete. Select a run with complete observable evidence.');
@@ -183,21 +217,6 @@ async function selectEvidence(params: {
     try { assertCurrentReleaseAttempt(run, artifact, jobs, params.jobName); }
     catch { invalid('Release evidence must come from the successful job in the current workflow attempt.'); }
 
-    // The run head proves which program executed, not which commit that program deployed.
-    const desiredFiles = workflowFiles(params.contract.workflow);
-    const executedFile = desiredFiles.find((file) => file.path === params.workflow);
-    const executedContent = await github.getFileContent(owner, repo, params.workflow, run.head_sha);
-    if (!executedFile || executedContent === null) invalid('The selected run has no observable managed workflow program.');
-    const binding = params.contract.binding;
-    if (!params.originalBetaServer && executedContent !== executedFile.content) {
-      // A historical accepted renderer can be proven by its aggregate lock.
-      // Current exact file matches do not depend on unrelated companion files.
-      if (binding?.inputHash !== params.contract.inputHash) invalid('The selected release did not run the currently reviewed managed workflow program.');
-      const files = await Promise.all(desiredFiles.map(async (file) => ({
-        path: file.path, content: await github.getFileContent(owner, repo, file.path, run.head_sha) ?? '',
-      })));
-      if (workflowFilesContentHash(files) !== binding.contentHash) invalid('The selected release did not run the currently reviewed managed workflow program.');
-    }
     const files = await github.readArtifactFiles(owner, repo, artifact.id);
     const content = files[params.filename];
     if (Object.keys(files).length !== 1 || typeof content !== 'string') invalid('The release artifact must contain exactly its named manifest.');

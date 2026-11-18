@@ -305,6 +305,8 @@ store rollout remain separate from GitHub approvals and TestFlight beta review.
 Submission checks server runs and manually dispatched beta runs against the
 reviewed workflow branch for their own environment. For an automatic beta
 triggered by a server workflow, it checks the repository default branch.
+The workflow at the producing run's commit must declare the reported trigger.
+This also applies to a skipped beta and to the beta's original server run.
 GitHub may report the workflow path alone or with its matching branch ref.
 Changing the producing workflow, branch, event or attempt requires a new preview.
 

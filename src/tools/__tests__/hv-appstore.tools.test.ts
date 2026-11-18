@@ -23,6 +23,7 @@ import { registerHvAppstoreTools } from '../hv-appstore.tools.js';
 import '../../adapters/providers/railway/railway.adapter.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { resolveManagedWorkflowContract, workflowFiles } from '../../domain/services/ci-deploy.service.js';
+import { buildBranchDeployWorkflow } from '../../domain/services/github-ops.service.js';
 import { iosBuildContractFingerprint } from '../../domain/services/ios-release-evidence.js';
 import { environmentDeploymentContractHash } from '../../domain/services/deployment-contract.service.js';
 import { MANAGED_CI_RELEASE_EVIDENCE_VERSION, managedCiReleaseArtifactPrefix } from '../../domain/services/managed-ci-evidence.js';
@@ -42,7 +43,11 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-function seedConnection(options: { promotion?: boolean; api?: boolean; newerServer?: boolean; expectedInfoPlist?: Record<string, string>; reorderPromotionExpectations?: boolean; stagingBranch?: string; automaticBetaDefaultBranch?: string } = {}) {
+function seedConnection(options: {
+  promotion?: boolean; api?: boolean; newerServer?: boolean; expectedInfoPlist?: Record<string, string>;
+  reorderPromotionExpectations?: boolean; stagingBranch?: string; automaticBetaDefaultBranch?: string;
+  manualBeta?: boolean; stagingAutoDeploy?: boolean;
+} = {}) {
   const appStore = new ConnectionRepository().create({
     provider: 'appstoreconnect',
     credentialsEncrypted: getSecretStore().encryptObject({
@@ -85,6 +90,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
     },
   } as never);
   const configured = new SpecStore().get(project)!.spec;
+  if (options.manualBeta) configured.environments.production.ios!.release!.trigger = 'manual';
   if (options.expectedInfoPlist) {
     configured.environments.production.ios!.release!.build.expectedInfoPlist = options.expectedInfoPlist;
   }
@@ -99,6 +105,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
   if (options.promotion) {
     configured.environments.staging = structuredClone(configured.environments.production);
     if (options.stagingBranch) configured.environments.staging.deploy!.branch = options.stagingBranch;
+    if (options.stagingAutoDeploy !== undefined) configured.environments.staging.deploy!.autoDeploy = options.stagingAutoDeploy;
     configured.environments.staging.ios!.release!.trigger = 'after-server-deploy';
     configured.environments.production.ios!.release!.promoteFrom = 'staging';
     configured.environments.production.ios!.release!.trigger = 'manual';
@@ -210,7 +217,7 @@ function seedConnection(options: { promotion?: boolean; api?: boolean; newerServ
   vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockImplementation(async (_owner, _repo, id) => id >= 300 ? {
     'hypervibe-api-release.json': encode(id === 301 ? targetApi : sourceApi), 'contracts/v1.json': snapshot,
   } : { [id === 202 ? 'hypervibe-ios-release.json' : 'hypervibe-server-release.json']: encode(id === 202 ? mobile : id === 201 ? server : sourceServer) });
-  return { project, spec, contract, mobile, server, sourceServer, sourceApi, targetApi, snapshot, run, artifact, workflows, jobs };
+  return { project, spec, contract, sourceContract, mobile, server, sourceServer, sourceApi, targetApi, snapshot, run, artifact, workflows, jobs };
 
 }
 
@@ -545,6 +552,37 @@ describe('hv_appstore_submit', () => {
     await t.close();
   });
 
+  it.each([[101, 'push'], [102, 'workflow_run']] as const)('rejects undeclared trigger %i %s in a manual-only workflow', async (id, event) => {
+    const fixture = seedConnection({ manualBeta: true });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, selected) => ({
+      ...fixture.run(selected), ...(selected === id ? { event } : {}),
+    }));
+    stubSubmittableVersion();
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code).toBe('VALIDATION');
+    expect(AppStoreConnectAdapter.prototype.findAppByBundleId).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([false, true])('uses the original server workflow trigger at the program SHA (historical push enabled: %s)', async historicalPush => {
+    const fixture = seedConnection({ promotion: true, api: true, newerServer: true, stagingAutoDeploy: !historicalPush });
+    const historical = buildBranchDeployWorkflow('railway', { ...fixture.sourceContract.target, autoDeployOnPush: historicalPush },
+      { includeStep: false }, fixture.spec.environments.staging.ios);
+    const fileRead = vi.mocked(GitHubAdapter.prototype.getFileContent).getMockImplementation()!;
+    vi.mocked(GitHubAdapter.prototype.getFileContent).mockImplementation(async (owner, repo, file, ref) =>
+      file === historical.path && ref === fixture.run(103).head_sha ? historical.content : fileRead(owner, repo, file, ref));
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, selected) => ({
+      ...fixture.run(selected), ...(selected === 103 ? { event: 'push' } : {}),
+    }));
+    stubSubmittableVersion();
+    const t = await makeClient();
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+    expect(result.error?.code, JSON.stringify(result)).toBe(historicalPush ? 'CONFIRM_REQUIRED' : 'VALIDATION');
+    await t.close();
+  });
+
   it.each([
     ['target server', 101], ['beta release', 102], ['original beta server', 103],
   ] as const)('rejects a previous-attempt artifact for the %s', async (_role, id) => {
@@ -818,11 +856,13 @@ describe('hv_appstore_submit', () => {
     await t.close();
   });
 
-  it.each([['successful release with deleted artifact', false, false], ['proven relevance skip', true, false], ['skip attempt changes during observation', true, true]] as const)(
-    'handles latest beta run with no artifact: %s', async (_label, relevanceSkip, race) => {
-      const fixture = seedConnection();
+  it.each([['successful release with deleted artifact', false, false, false], ['proven relevance skip', true, false, false],
+    ['skip attempt changes during observation', true, true, false], ['undeclared automatic trigger', true, false, true]] as const)(
+    'handles latest beta run with no artifact: %s', async (_label, relevanceSkip, race, undeclaredTrigger) => {
+      const fixture = seedConnection({ manualBeta: undeclaredTrigger });
+      vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
       stubSubmittableVersion();
-      const latestRun = { ...fixture.run(104), created_at: '2026-07-02T00:00:00Z', updated_at: '2026-07-02T00:10:00Z',
+      const latestRun = { ...fixture.run(104), ...(undeclaredTrigger ? { event: 'workflow_run' } : {}), created_at: '2026-07-02T00:00:00Z', updated_at: '2026-07-02T00:10:00Z',
         run_started_at: '2026-07-02T00:00:00Z' };
       vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, workflow) => (
         String(workflow).includes('ios-release')
@@ -846,7 +886,7 @@ describe('hv_appstore_submit', () => {
       })) });
       const t = await makeClient();
       const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
-      expect(result.error?.code).toBe(relevanceSkip && !race ? 'CONFIRM_REQUIRED' : 'VALIDATION');
+      expect(result.error?.code).toBe(relevanceSkip && !race && !undeclaredTrigger ? 'CONFIRM_REQUIRED' : 'VALIDATION');
       await t.close();
     },
   );
