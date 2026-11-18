@@ -26,6 +26,8 @@ export async function executeRollback(params: {
   /** Legacy compatibility selector. Direct-provider rollback fails closed. */
   toRunId?: string;
   toSha?: string;
+  /** Redeploy the newest verified release instead of restoring an earlier one. */
+  redeployCurrent?: boolean;
   /** Managed rollback is release-wide; direct-provider rollback is unsupported. */
   services?: string[];
 }): Promise<CiRollbackFailure | CiRollbackResult> {
@@ -69,5 +71,8 @@ export async function executeRollback(params: {
       error: `Managed rollback is not available for ${ciProvider ?? 'the selected CI provider'}. Inspect the exact release with hv_ci_status; Hypervibe will not dispatch an unverified rollback.`,
     };
   }
-  return registration.rollback({ project, environment, toSha: params.toSha });
+  if (params.redeployCurrent && params.toSha) {
+    return { ok: false, reason: 'invalid_target', error: 'redeployCurrent selects the release already running; do not also pass toSha.' };
+  }
+  return registration.rollback({ project, environment, toSha: params.toSha, ...(params.redeployCurrent ? { redeployCurrent: true } : {}) });
 }

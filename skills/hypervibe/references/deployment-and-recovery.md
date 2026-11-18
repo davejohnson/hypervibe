@@ -42,14 +42,13 @@ Save the value first, then apply it. Non-secret values go in the environment's
   is already running. It never releases new commits, and no deploy is needed.
 - Managed-CI environments (existing Railway branch deploys): the value is saved,
   but running services keep the old one until the next deployment. `hv_status`
-  reports `restartRequired`. To activate it without new commits, read the current
-  release SHA from the newest successful deploy run in
-  `hv_ci_status include=["runs"]`, then deploy that exact commit again:
-  `hv_ci_trigger definition=<deploy workflow path> ref=<deploy branch>
-  inputs={"commit_sha":"<sha>"}`. Follow the run with `hv_ci_status`, then
-  `hv_health`. A promoted environment still needs an unexpired successful release
-  of that commit in its source environment; if the run reports that it is missing,
-  say so instead of deploying something newer.
+  reports `restartRequired`. To activate it without new commits, run
+  `hv_deploy env=<env> redeployCurrent=true`. It redeploys the exact verified
+  image already running through the reviewed workflow, with no build and no new
+  commits. The run is labelled as a rollback in the CI provider because it uses
+  the same verified restore. Follow it with `hv_ci_status`, then `hv_health`.
+  Do not dispatch an older `commit_sha` through `hv_ci_trigger` for this: a
+  forward deploy is blocked whenever the spec changed after that commit.
 
 `hv_rollback` is not a restart. It only restores an earlier release and refuses
 the one already running. Do not push a commit, re-run a provider deployment or use

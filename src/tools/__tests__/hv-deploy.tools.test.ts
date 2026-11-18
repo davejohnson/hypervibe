@@ -1278,8 +1278,52 @@ describe('hv_rollback', () => {
     expect(result.error.code).toBe('VALIDATION');
     expect(result.error.message).toContain(`already at verified release ${currentSha}`);
     expect(result.error.message).toContain('does not restart or redeploy');
-    expect(result.hint).toContain(`hv_ci_trigger definition="${workflow.path}" ref="main" inputs={"commit_sha":"${currentSha}"}`);
-    expect(result.next).toEqual(['hv_ci_trigger', 'hv_ci_status', 'hv_health']);
+    expect(result.hint).toContain('hv_deploy env="production" redeployCurrent=true');
+    expect(result.next).toEqual(['hv_deploy', 'hv_ci_status', 'hv_health']);
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([
+    ['the latest run verified it', 'success', 20],
+    ['a later run failed without replacing it', 'failure', 10],
+  ])('redeploys the exact running release when %s', async (_label, latestConclusion, sourceRun) => {
+    const { project, workflow } = seedManagedCiRollbackProject(`redeploy-current-${latestConclusion}-app`);
+    const currentSha = 'c'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, currentSha);
+    vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockResolvedValue({
+      total_count: 2,
+      workflow_runs: [
+        workflowRun(20, 'completed', latestConclusion, '2026-07-20T00:00:00Z'),
+        workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+      ],
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', { project: project.name, env: 'production', redeployCurrent: true, confirm: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ status: 'pending', rollbackToSha: currentSha, selection: 'current' });
+    expect(trigger).toHaveBeenCalledWith('davejohnson', project.name, workflow.path, 'main', {
+      commit_sha: currentSha,
+      rollback: 'true',
+      expected_latest_run_id: '20',
+      source_artifact_id: String(sourceRun * 10),
+      source_workflow_run_id: String(sourceRun),
+    });
+    await t.close();
+  });
+
+  it('does not combine a redeploy of the running release with deploy inputs', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('redeploy-current-inputs-app');
+    const trigger = mockPreviousSuccessfulRelease(workflow, 'c'.repeat(40), 'b'.repeat(40));
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', { project: project.name, env: 'production', redeployCurrent: true, envVars: { A: 'b' }, confirm: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
     expect(trigger).not.toHaveBeenCalled();
     await t.close();
   });
