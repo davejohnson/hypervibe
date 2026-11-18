@@ -1,3 +1,4 @@
+import { SpecStore } from '../spec/spec.store.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import type { Project } from '../entities/project.entity.js';
@@ -107,7 +108,12 @@ export async function resolveEnvironmentDatabaseUrl(
   const componentBindings = component?.bindings as Record<string, unknown> | undefined;
   const componentProvider = typeof componentBindings?.provider === 'string' ? componentBindings.provider : undefined;
   if (component && componentProvider && componentProvider !== 'railway') {
-    const adapterResult = await adapterFactory.getDatabaseOperations(componentProvider, project);
+    const adapterResult = await adapterFactory.getDatabaseOperations(componentProvider, project, { environment: env });
+    if (!adapterResult.success && componentProvider === 'cloudsql') {
+      // A cached URL cannot establish access to a different or unverified Google project.
+      const bound = env.platformBindings.provider === 'cloudrun' && env.platformBindings.projectId;
+      if (bound || new SpecStore().getForInspection(project)?.spec.environments[env.name]?.hosting.gcpProjectId) return null;
+    }
     if (adapterResult.success && adapterResult.adapter) {
       const adapterUrl = await adapterResult.adapter.getConnectionUrl(component);
       if (adapterUrl) {

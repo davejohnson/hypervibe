@@ -17,6 +17,7 @@ import { parseGitHubDelegatedBindings } from '../domain/services/github-infrastr
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { managedCiCredentialSources } from '../domain/services/ci-deploy.service.js';
 import { isProviderOnlyDeployEnvKey, loadDeployEnvFile } from '../domain/services/deploy-env-file.js';
+import { gcpConnectionScope } from '../domain/services/gcp-environment-target.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { githubActionsCanonicalEnvironment, resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
@@ -28,7 +29,7 @@ import { credentialManagement } from '../domain/registry/credential-validation.r
 import { credentialRuntimeServices } from '../domain/services/credential-runtime-consumers.js';
 import { importedCredentialProvenance } from './cloud-secret-import.js';
 import { credentialOperationEvidence, type CredentialOperationResult } from './credential-operation-verification.js';
-import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { adapterFactory, usesGcpEnvironmentConnection } from '../domain/services/adapter.factory.js';
 
 type Presence = 'present' | 'absent' | 'unknown';
 type Comparison = 'match' | 'different' | 'unknown';
@@ -324,7 +325,7 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
         let presence: Presence = 'unknown';
         if (component?.externalId && component.environmentId === environment.id && nativeProvider === desired?.database?.provider) {
           try {
-            const connection = await adapterFactory.getDatabaseOperations(nativeProvider, project);
+            const connection = await adapterFactory.getDatabaseOperations(nativeProvider, project, { environment });
             if (connection.success && connection.adapter && typeof connection.adapter.observeDatabase === 'function') {
               const native = await connection.adapter.observeDatabase(environment, component);
               if (native === null) presence = 'absent';
@@ -433,7 +434,10 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
   const workflowBindings = Object.values(record(record(environment?.platformBindings.ci).deployBranch)).map(record);
   for (const definition of [...providerRegistry.all(), ...secretManagerRegistry.all()]) {
     const metadata = definition.metadata;
-    const best = ctx.repos.connections.findBestMatchFromHints(metadata.name, getProjectScopeHints(project));
+    const gcpTarget = usesGcpEnvironmentConnection(metadata.name) ? desired?.hosting.gcpProjectId : undefined;
+    const best = gcpTarget
+      ? (repository ? ctx.repos.connections.findByProviderAndScope(metadata.name, gcpConnectionScope(repository, gcpTarget)) : null)
+      : ctx.repos.connections.findBestMatchFromHints(metadata.name, getProjectScopeHints(project));
     const selectedIds = new Set([best?.id, ...ciTargets.flatMap(target => target.sources.map(source => source.connectionId))]);
     for (const connection of ctx.repos.connections.findAllByProvider(metadata.name).filter(connection => selectedIds.has(connection.id))) {
       const acquisitions = ctx.repos.audit.findByResource('connection', connection.id, 100);

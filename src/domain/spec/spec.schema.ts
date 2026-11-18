@@ -1,6 +1,7 @@
 import { credentialTrackingSchema } from './credential.schema.js';
 import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
+import { GCP_PROJECT_ID_PATTERN } from '../services/gcp-environment-target.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
@@ -1593,7 +1594,11 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
-  }).strict(),
+    /** A dedicated Google Cloud project for this environment. Omit to use the repository connection. */
+    gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN, 'Invalid Google Cloud project ID').optional(),
+  }).strict().refine(hosting => !hosting.gcpProjectId || hosting.provider === 'cloudrun', {
+    path: ['gcpProjectId'], message: 'gcpProjectId requires Cloud Run hosting',
+  }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
   /** Optional backup intent. Ordinary deployments never require this policy or recovery evidence. */

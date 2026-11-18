@@ -62,6 +62,8 @@ import {
   shouldPlanGitHubInfrastructure,
   unresolvedGitHubCheckRuntimeIssues,
 } from '../domain/services/github-infrastructure.service.js';
+import { usesGcpEnvironmentConnection } from '../domain/services/adapter.factory.js';
+import { gcpCredentialsMatchProject, gcpConnectionScope } from '../domain/services/gcp-environment-target.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
   findRepoRoot,
@@ -404,15 +406,19 @@ function ensureProjectLocalEnv(params: {
   return mergeLocalEnvWrites(environmentLocalEnv, baseLocalEnv);
 }
 
-function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
-  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
+function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec, gitRemoteUrl?: string) {
+  const repository = parseGitHubRepoFromRemote(gitRemoteUrl ?? spec.gitRemoteUrl);
+  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string>; gcpProjectId?: string }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
-    const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
+    const gcpProjectId = usesGcpEnvironmentConnection(provider) ? spec.environments[environment]?.hosting.gcpProjectId : undefined;
+    if (repository && gcpProjectId) scopeHints = [gcpConnectionScope(repository, gcpProjectId)];
+    const key = `${provider}:${gcpProjectId ?? ''}:${scopeHints.join('|')}`;
     const existing = required.get(key) ?? {
       provider,
       environments: new Set<string>(),
       reasons: new Set<string>(),
       scopeHints: new Set<string>(),
+      gcpProjectId,
     };
     existing.environments.add(environment);
     existing.reasons.add(reason);
@@ -462,16 +468,22 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
     .sort((a, b) => a.provider.localeCompare(b.provider))
     .map((entry) => {
       const connectionProviders = providerRegistry.connectionProviders(entry.provider);
-      const connections = connectionProviders.flatMap((connectionProvider) =>
-        ctx.repos.connections.findAllByProvider(connectionProvider)
-      );
+      const connections = connectionProviders.flatMap((connectionProvider) => ctx.repos.connections.findAllByProvider(connectionProvider))
+        .filter(connection => entry.gcpProjectId ? repository && connection.scope === gcpConnectionScope(repository, entry.gcpProjectId)
+          : !usesGcpEnvironmentConnection(entry.provider) || !connection.scope?.includes('#gcp:'));
       const scopeHints = Array.from(entry.scopeHints);
-      const scopedConnection = scopeHints.length > 0
+      const scopedConnection = entry.gcpProjectId ? connections[0] : scopeHints.length > 0
         ? connectionProviders
           .map((connectionProvider) => ctx.repos.connections.findBestMatchFromHints(connectionProvider, scopeHints))
           .find((candidate) => candidate !== null) ?? null
         : null;
-      const verifiedScopedConnection = scopeHints.length > 0
+      const verifiedScopedConnection = entry.gcpProjectId ? connections.find(connection => {
+        if (connection.status !== 'verified') return false;
+        try {
+          const credentials = ctx.secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+          return gcpCredentialsMatchProject(credentials, entry.gcpProjectId!);
+        } catch { return false; }
+      }) : scopeHints.length > 0
         ? connectionProviders
           .map((connectionProvider) => ctx.repos.connections.findBestVerifiedMatchFromHints(connectionProvider, scopeHints))
           .find((candidate) => candidate !== null) ?? null
@@ -606,7 +618,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
-          connections: requiredConnectionChecklist(ctx, result.spec),
+          connections: requiredConnectionChecklist(ctx, result.spec, project.gitRemoteUrl),
         }, { warnings });
       }
 
@@ -706,7 +718,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         throw new Error('Project initialization completed without a project record.');
       }
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
-      const connections = requiredConnectionChecklist(ctx, result.spec);
+      const connections = requiredConnectionChecklist(ctx, result.spec, project.gitRemoteUrl);
       const localEnv = mergeLocalEnvWrites(
         result.localEnv,
         ensureProjectLocalEnv({

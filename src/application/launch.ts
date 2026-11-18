@@ -25,11 +25,13 @@ import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import { parseEngineCiBinding } from '../domain/spec/engine-ci-binding.js';
 import { environmentDeploymentContractHashForApply } from '../domain/services/deployment-contract.service.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
+import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
+  gcpUnboundStateConflict,
   ENGINE_PLAN_SCOPE,
   type InfrastructurePlanResult,
   isEngineManaged,
@@ -346,13 +348,28 @@ async function runLaunch(ctx: CommandContext, params: {
 async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec,
   approvedAccess: Set<string>, resourceAccess: Array<{ id: string; label: string }>): Promise<LaunchResult | undefined> {
   // 1. Select billing, then review and approve the exact project setup plan.
-  // Only a connection scoped to this repository counts; global ones point at other projects.
-  if (!await engineGcpAdapter(params.project)) {
-    const preview = await runGcpBootstrap({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project });
+  const environmentProjectId = environmentSpec.hosting.gcpProjectId;
+  const region = environmentSpec.hosting.region ?? 'us-central1';
+  const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+  const binding = environment?.platformBindings;
+  const boundConflict = gcpEnvironmentBindingConflict(binding, environmentProjectId, region)
+    ?? gcpUnboundStateConflict(environment, environmentProjectId);
+  if (boundConflict) return { status: 'blocked', message: boundConflict };
+  const bootstrapTarget = environmentProjectId ? { environment: params.environmentName, environmentProjectId } : {};
+  const preparationTarget = environmentProjectId ? { environmentName: params.environmentName, environmentProjectId } : {};
+  const adapter = await engineGcpAdapter(params.project, environmentProjectId);
+  if (binding?.projectId && adapter && !environmentProjectId) {
+    const conflict = gcpEnvironmentBindingConflict(binding, adapter.engineConnection().projectId, region);
+    if (conflict) return { status: 'blocked', message: conflict };
+  }
+  if (!adapter) {
+    const preview = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'GCP setup preview failed.'), details: preview };
     const target = (preview as { target?: { projectId?: string } }).target?.projectId;
     const accounts = ((preview as { openBillingAccounts?: Array<{ name: string; displayName?: string }> }).openBillingAccounts ?? []);
     if (!target) return { status: 'blocked', message: 'GCP setup could not choose a project id.', details: preview };
+    const conflict = gcpEnvironmentBindingConflict(binding, target, region);
+    if (conflict) return { status: 'blocked', message: conflict };
     if (!params.billingAccountName) {
       if (accounts.length === 0) {
         return { status: 'blocked', message: 'Your Google login cannot see any open billing account. Open https://console.cloud.google.com/billing to create one or get access, then run hv_launch again.' };
@@ -365,7 +382,7 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       };
     }
     const setupApproved = approvedAccess.has('gcp-setup');
-    const setup = await runGcpBootstrap({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved });
+    const setup = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved });
     if (!setup.success) return { status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup };
     if (!setupApproved) return {
       status: 'needs_access', accessId: 'gcp-setup',
@@ -376,11 +393,10 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
 
   // A connected project can host several environments in different regions.
   // Each regional repository belongs to retained project-shared engine state.
-  const region = environmentSpec.hosting.region ?? 'us-central1';
-  if (!isCloudPreparedForRegion(ctx.repos.projects.findById(params.project.id) ?? params.project, region)) {
+  if (!isCloudPreparedForRegion(ctx.repos.projects.findById(params.project.id) ?? params.project, region, environmentProjectId)) {
     const confirm = approvedAccess.has('gcp-region');
-    const prepared = await runCloudPrepare({ project: params.project, provider: 'cloudrun',
-      gcpProjectId: await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm });
+    const prepared = await runCloudPrepare({ ...preparationTarget, project: params.project, provider: 'cloudrun',
+      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm });
     if (!prepared.success) return { status: 'blocked', message: String(prepared.error ?? 'Regional Google Cloud setup failed.'), details: prepared };
     if (!confirm) return { status: 'needs_access', accessId: 'gcp-region',
       access: `Prepare build resources in ${region} using this saved OpenTofu plan. Shared resources in other regions are retained.`, grants: prepared };
@@ -419,14 +435,14 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       ready: isCloudPreparedForWorkerWake, options: { workerAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage the scheduled checks and permissions for workers that run only while they have work.' },
     { id: 'queues' as const, needed: Object.keys(environmentSpec.queues ?? {}).length > 0,
-      ready: (project: Project) => isCloudPreparedForQueues(project, 'cloudrun'), options: { queueAccess: 'lifecycle' as const },
+      ready: (project: Project, projectId?: string) => isCloudPreparedForQueues(project, 'cloudrun', projectId), options: { queueAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage Pub/Sub queues and let the app send and receive messages.' },
   ];
   for (const request of accessRequests) {
-    if (!request.needed || request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project)) continue;
+    if (!request.needed || request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project, environmentProjectId)) continue;
     const confirm = approvedAccess.has(request.id);
-    const result = await runCloudPrepare({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project, provider: 'cloudrun',
-      gcpProjectId: await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
+    const result = await runCloudPrepare({ ...preparationTarget, region, project: params.project, provider: 'cloudrun',
+      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
     if (!result.success) return { status: 'blocked', message: String(result.error ?? 'Google Cloud access setup failed.'), details: result };
     if (!confirm) return { status: 'needs_access', accessId: request.id, access: request.description, grants: result };
   }

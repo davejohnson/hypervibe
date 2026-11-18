@@ -9,7 +9,8 @@ import {
 } from '../domain/registry/provider.registry.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
-import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
+import { existingRepositoryGcpProjectId, runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
+import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { connectCloudflareInBrowser } from '../application/local-connect-page.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
@@ -30,6 +31,54 @@ import { detectGitRemoteUrl, normalizeGitRemoteIdentity } from '../lib/git-remot
 import { currentWorkspaceDirectories, primaryWorkspaceDirectory, runWithWorkspaceDirectories } from '../lib/workspace-context.js';
 
 const CONTEXTUAL_SETUP_HINT = 'Provider-owned bootstrap takes precedence. When the provider is known and a human form is needed, call hv_connections with action="describe", provider and the known non-secret scope before presenting a credential form; include project only if already known, and omit unknown optional fields. Do not supply credentials, credentialsRef or confirmation to describe; the read-only contextual call returns connectionSetup guidance. Copy the returned recommendedSetupUrl verbatim with its complete query string; do not construct or edit credential URLs yourself. Do not repeat a generic provider list as a substitute. Do not initialize a project solely to obtain setup guidance.';
+
+/** Resolve an environment's declared GCP target before admin secrets or provider operations. */
+function gcpSetupSelection(ctx: CommandContext, project: Project, input: {
+  environment?: string; gcpProjectId?: string; scope?: string; region?: string; planningOrConfirming?: boolean;
+}): { environmentProjectId?: string; region?: string } {
+  const { environment, gcpProjectId, planningOrConfirming } = input;
+  if (environment === undefined && !(planningOrConfirming && gcpProjectId !== undefined)) {
+    return input.region ? { region: input.region } : {};
+  }
+  const environments = new SpecStore().get(project)?.spec.environments ?? {};
+  if (environment !== undefined && !Object.hasOwn(environments, environment)) {
+    throw new HvError('VALIDATION', 'The selected environment is missing from this project’s spec. Choose an existing environment.');
+  }
+  const hosting = environment === undefined ? undefined : environments[environment].hosting;
+  if (hosting && hosting.provider !== 'cloudrun') {
+    throw new HvError('VALIDATION', 'Choose a Cloud Run environment for Google Cloud setup.');
+  }
+  if (hosting?.gcpProjectId && input.region && input.region !== (hosting.region ?? 'us-central1')) {
+    throw new HvError('VALIDATION', 'The requested Google Cloud region differs from the region declared for the selected environment.');
+  }
+  const region = input.region ?? hosting?.region;
+  const placement = region ? { region } : {};
+  const environmentProjectId = hosting?.gcpProjectId;
+  if (environment !== undefined && environmentProjectId !== undefined) {
+    if (gcpProjectId !== undefined && gcpProjectId !== environmentProjectId) {
+      throw new HvError('VALIDATION', 'The requested gcpProjectId differs from hosting.gcpProjectId for the selected environment.');
+    }
+    const bindings = ctx.repos.environments.findByProjectAndName(project.id, environment)?.platformBindings;
+    const conflict = gcpEnvironmentBindingConflict(bindings, environmentProjectId, region ?? 'us-central1');
+    if (conflict) throw new HvError('VALIDATION', conflict);
+    return { environmentProjectId, ...placement };
+  }
+
+  // Preserve repository access when one environment uses a dedicated project and another uses the legacy scope.
+  const dedicated = Object.values(environments).filter(env => env.hosting.gcpProjectId !== undefined);
+  if (gcpProjectId === undefined || !dedicated.length) return placement;
+  if (dedicated.some(env => env.hosting.gcpProjectId === gcpProjectId.trim())) {
+    throw new HvError('VALIDATION', 'Select the environment that declares this hosting.gcpProjectId to set up its dedicated project.');
+  }
+  if (planningOrConfirming) {
+    const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl) ?? input.scope?.trim();
+    const existing = repository ? existingRepositoryGcpProjectId(repository) : undefined;
+    if (existing && (!existing.success || existing.value !== gcpProjectId.trim())) {
+      throw new HvError('VALIDATION', 'This setup would replace existing repository GCP access. Declare hosting.gcpProjectId on the intended environment and select that environment.');
+    }
+  }
+  return placement;
+}
 
 function refKind(ref: string): string {
   const trimmed = ref.trim();
@@ -105,7 +154,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
+    [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. For GCP bootstrap and prepare, select the environment to use its declared project. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat.'),
@@ -114,9 +163,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. GitHub packageReadToken alone updates an existing verified exact-scope connection while preserving its primary API credential. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string(), z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global except action="bootstrap", which derives an exact repository scope from the selected project when omitted and never creates global GCP access.'),
-      project: projectField.describe('Hypervibe project name/id for validated context. Required explicitly for action="bootstrap". With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
+      project: projectField.describe('Hypervibe project name/id for validated context. Required explicitly for action="bootstrap". With no provider, project-only still lists. Omit for an unscoped list. For GCP bootstrap or prepare, specify environment to select its declared GCP project.'),
       repositoryContext: z.boolean().optional().describe('Read-only discovery/describe only: resolve the current client repository without importing its spec or bindings. Do not combine with project. A fresh repository may supply Git-remote context for form labels and owner prefill, but remains unscoped. Ambiguous or unrecorded committed identities remain blocked.'),
-      gcpProjectId: z.string().optional().describe('Exact GCP project ID. Bootstrap preview reuses verified repository-scoped access or derives a stable name when omitted; confirmation requires the exact ID returned by that preview. Prepare defaults to the Cloud Run connection projectId.'),
+      gcpProjectId: z.string().optional().describe('Exact GCP project ID. An environment with hosting.gcpProjectId uses its declared project. Otherwise bootstrap preview reuses repository-scoped access or derives a stable name, and prepare defaults to the Cloud Run connection projectId. Confirm bootstrap using the exact ID returned by preview.'),
       region: z.string().trim().min(1).optional().describe('GCP bootstrap/prepare target region for shared build resources; defaults to us-central1. Each region is reviewed and retained independently.'),
       billingAccountName: z.string().optional().describe('action="bootstrap": exact open billing account name chosen from discovery. Preview again with this account, then confirm the saved infrastructure plan separately.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
@@ -124,7 +173,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
-      environment: z.string().optional().describe('action="connect": the environment this access is for, shown on the connect page.'),
+      environment: z.string().optional().describe('For GCP bootstrap and prepare, select an environment from the project spec to use its declared hosting.gcpProjectId and default region. For connect, this names the environment shown on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
       azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
       azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
@@ -403,7 +452,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const targetProject = project!;
         const payload = await runGcpBootstrap({
           project: targetProject,
-          ...(region ? { region } : {}),
+          ...gcpSetupSelection(ctx, targetProject, { environment, gcpProjectId, scope, region, planningOrConfirming: Boolean(billingAccountName || confirm) }),
+          ...(environment !== undefined ? { environment } : {}),
           gcpProjectId,
           scope,
           billingAccountName,
@@ -449,6 +499,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
       if (requestedAction === 'prepare') {
         const targetProject = project ?? ctx.resolveProjectOrThrow();
+        const selection = gcpSetupSelection(ctx, targetProject, { environment, gcpProjectId, region, planningOrConfirming: true });
         const resolvedAdminCredentialsJson = adminCredentialsJsonRef
           ? resolveLocalSecretRef(adminCredentialsJsonRef)
           : adminCredentialsJson;
@@ -457,7 +508,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           : adminAccessToken;
         const payload = await runCloudPrepare({
           project: targetProject,
-          ...(region ? { region } : {}),
+          ...selection,
+          ...(environment !== undefined ? { environmentName: environment } : {}),
           provider,
           gcpProjectId,
           deployServiceAccountEmail,

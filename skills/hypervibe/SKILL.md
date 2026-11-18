@@ -57,6 +57,11 @@ replace them with remembered permission tables or dashboard procedures.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
 
+For a dedicated Google Cloud project, set `hosting.gcpProjectId` on the target
+environment or pass `gcpProjectId` when `hv_migrate` proposes it. Use that
+environment name on setup and preparation calls. Other environments can keep
+their existing repository connection.
+
 Google Cloud uses OpenTofu as its only infrastructure engine. Select
 `hosting.provider: "cloudrun"`; Hypervibe chooses the engine automatically. Do
 not ask the user to choose an engine or offer a legacy GCP path. `hv_launch` connects GCP, creates or updates the Cloud Run services, Cloud

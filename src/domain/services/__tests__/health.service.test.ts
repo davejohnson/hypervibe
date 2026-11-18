@@ -272,8 +272,8 @@ describe('health.service', () => {
       provider: 'fixture-hosting',
       state: 'healthy',
     }));
-    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('railway', project);
-    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('fixture-hosting', project);
+    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('railway', project, undefined, { environment: environments[0] });
+    expect(adapterFactory.getProviderAdapter).toHaveBeenCalledWith('fixture-hosting', project, undefined, { environment: environments[1] });
   });
 
   it('checks only services in current desired state when bindings contain a renamed service', async () => {

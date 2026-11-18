@@ -64,7 +64,7 @@ export async function syncHostingEnvVars(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,
@@ -168,7 +168,7 @@ export async function removeHostingEnvVars(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,
@@ -222,7 +222,7 @@ export async function readHostingEnvVars(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,

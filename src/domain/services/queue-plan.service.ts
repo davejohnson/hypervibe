@@ -158,7 +158,7 @@ export async function planQueues(params: {
   }
 
   const provider = params.environmentSpec.hosting.provider;
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment, hosting: params.environmentSpec.hosting });
   if (!adapterResult.success || !adapterResult.adapter) {
     const reason = `Cannot plan queues: ${adapterResult.error ?? `no ${provider} adapter`}`;
     return {
@@ -188,7 +188,7 @@ export async function planQueues(params: {
   }
 
   // Pub/Sub backend.
-  if (!isCloudPreparedForQueues(params.project, provider)) {
+  if (!isCloudPreparedForQueues(params.project, provider, params.environmentSpec.hosting.gcpProjectId)) {
     warnings.push(
       'Pub/Sub queues need cloud preparation: preview hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle", then explicitly confirm that same preparation (adds pubsub.googleapis.com and roles/pubsub.editor). Queue actions will fail until then.'
     );
@@ -507,7 +507,7 @@ export async function applyQueueAction(params: {
     return { success: false, message: 'Environment not found locally', error: `No local environment "${params.envName}"` };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment, hosting: params.environmentSpec.hosting });
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
   }
@@ -556,7 +556,7 @@ export async function applyQueueAction(params: {
   }
 
   // Pub/Sub backend.
-  if (!isCloudPreparedForQueues(params.project, provider)) {
+  if (!isCloudPreparedForQueues(params.project, provider, params.environmentSpec.hosting.gcpProjectId)) {
     return {
       success: false,
       message: 'Pub/Sub is not prepared for queues',

@@ -42,7 +42,7 @@ export async function setupCustomDomain(params: {
   if (!serviceName || !service?.serviceId || !bindings.projectId || !bindings.environmentId) {
     return failed(customDomainAttachBindingMissingMessage(provider, domain));
   }
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
   if (!adapterResult.success || !supportsCustomDomainAttach(adapter)) {
     return failed(adapterResult.error ?? customDomainAttachUnsupportedMessage(provider, domain));
@@ -97,7 +97,7 @@ export async function teardownCustomDomain(params: {
     return { success: false, error: `Preserve the hosting claim for ${domain} until its owned DNS is removed by a reviewed OpenTofu plan. Existing records need explicit engine adoption before teardown.` };
   }
   const provider = hostingProviderForEnvironment(params.project, params.environment);
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
   if (!adapterResult.success || !supportsCustomDomainDetach(adapter)) {
     return { success: false, error: adapterResult.error ?? `${provider} does not implement verified custom-domain detachment for ${domain}.` };

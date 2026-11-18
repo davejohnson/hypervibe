@@ -68,11 +68,13 @@ export function getCloudPrepareProfile(provider: string): CloudPrepareProfile | 
 
 export function getCloudPreparation(
   project: Pick<Project, 'policies'>,
-  provider: CloudPrepareProvider
+  provider: CloudPrepareProvider,
+  environmentProjectId?: string,
 ): CloudPreparationRecord | null {
-  const root = asRecord(project.policies.cloudPreparation);
-  const record = asRecord(root?.[provider]);
-  if (!record) return null;
+  const record = environmentProjectId === undefined
+    ? asRecord(asRecord(project.policies.cloudPreparation)?.[provider])
+    : asRecord(asRecord(project.policies.gcpProjectPreparations)?.[environmentProjectId]);
+  if (!record || (environmentProjectId !== undefined && record.gcpProjectId !== environmentProjectId)) return null;
 
   const requiredApis = asStringArray(record.requiredApis);
   const requiredRoles = asStringArray(record.requiredRoles);
@@ -104,9 +106,9 @@ export const CLOUD_RUN_RUNTIME_BASE_ROLES = [
   'roles/secretmanager.secretAccessor',
 ] as const;
 
-export function isCloudPreparedForRegion(project: Pick<Project, 'policies'> | null | undefined, region: string): boolean {
-  return Boolean(project && isCloudPrepared(project, 'cloudrun')
-    && getCloudPreparation(project, 'cloudrun')?.artifactRepositoryRegions?.includes(region));
+export function isCloudPreparedForRegion(project: Pick<Project, 'policies'> | null | undefined, region: string, environmentProjectId?: string): boolean {
+  return Boolean(project && isCloudPrepared(project, 'cloudrun', environmentProjectId)
+    && getCloudPreparation(project, 'cloudrun', environmentProjectId)?.artifactRepositoryRegions?.includes(region));
 }
 
 export const CLOUD_RUN_RUNTIME_QUEUE_ROLES = [
@@ -131,12 +133,13 @@ export const CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES = [
 
 export function isCloudPrepared(
   project: Pick<Project, 'policies'> | null | undefined,
-  provider: string
+  provider: string,
+  environmentProjectId?: string,
 ): boolean {
   if (!project) return false;
   const profile = getCloudPrepareProfile(provider);
   if (!profile) return true;
-  const record = getCloudPreparation(project, profile.provider);
+  const record = getCloudPreparation(project, profile.provider, environmentProjectId);
   if (!record || record.version !== profile.version) return false;
   const projectRoles = new Set(record.requiredRoles);
   const runtimeRoles = new Set(record.runtimeRequiredRoles ?? []);
@@ -196,9 +199,9 @@ export const CLOUD_RUN_RUNTIME_WORKER_WAKE_SELF_ROLES = ['roles/iam.serviceAccou
 export type WorkerPrepareAccess = 'lifecycle';
 
 /** Whether GCP setup granted on-demand worker access (the workerAccess="lifecycle" add-on). */
-export function isCloudPreparedForWorkerWake(project: Pick<Project, 'policies'> | null | undefined): boolean {
+export function isCloudPreparedForWorkerWake(project: Pick<Project, 'policies'> | null | undefined, environmentProjectId?: string): boolean {
   if (!project) return false;
-  const record = getCloudPreparation(project, 'cloudrun');
+  const record = getCloudPreparation(project, 'cloudrun', environmentProjectId);
   return Boolean(record
     && WORKER_WAKE_PREPARE_ADDON.requiredApis.every((api) => record.requiredApis.includes(api))
     && WORKER_WAKE_PREPARE_ADDON.requiredRoles.every((role) => record.requiredRoles.includes(role))
@@ -240,12 +243,13 @@ export type MemorystorePrepareAccess = keyof typeof MEMORYSTORE_PREPARE_ADDONS;
 
 export function isCloudPreparedForQueues(
   project: Pick<Project, 'policies'> | null | undefined,
-  provider: string
+  provider: string,
+  environmentProjectId?: string,
 ): boolean {
-  if (!isCloudPrepared(project, provider)) return false;
+  if (!isCloudPrepared(project, provider, environmentProjectId)) return false;
   const profile = getCloudPrepareProfile(provider);
   if (!profile || !project) return true;
-  const record = getCloudPreparation(project, profile.provider);
+  const record = getCloudPreparation(project, profile.provider, environmentProjectId);
   if (!record) return false;
   return (
     QUEUE_PREPARE_ADDON.requiredApis.every((api) => record.requiredApis.includes(api))
@@ -256,31 +260,39 @@ export function isCloudPreparedForQueues(
 }
 
 /** Whether GCP setup granted bucket lifecycle access (the explicit gcsAccess="lifecycle" add-on). */
-export function isCloudPreparedForStorage(project: Pick<Project, 'policies'> | null | undefined): boolean {
+export function isCloudPreparedForStorage(project: Pick<Project, 'policies'> | null | undefined, environmentProjectId?: string): boolean {
   if (!project) return false;
-  const record = getCloudPreparation(project, 'cloudrun');
+  const record = getCloudPreparation(project, 'cloudrun', environmentProjectId);
   return Boolean(record && GCS_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
 /** Whether GCP setup granted Memorystore lifecycle access (the memorystoreAccess="lifecycle" add-on). */
-export function isCloudPreparedForCache(project: Pick<Project, 'policies'> | null | undefined): boolean {
+export function isCloudPreparedForCache(project: Pick<Project, 'policies'> | null | undefined, environmentProjectId?: string): boolean {
   if (!project) return false;
-  const record = getCloudPreparation(project, 'cloudrun');
+  const record = getCloudPreparation(project, 'cloudrun', environmentProjectId);
   return Boolean(record && MEMORYSTORE_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
 /** Whether GCP setup granted S3-compatible key management (the gcsAccess="s3" add-on). */
-export function isCloudPreparedForStorageS3(project: Pick<Project, 'policies'> | null | undefined): boolean {
+export function isCloudPreparedForStorageS3(project: Pick<Project, 'policies'> | null | undefined, environmentProjectId?: string): boolean {
   if (!project) return false;
-  const record = getCloudPreparation(project, 'cloudrun');
+  const record = getCloudPreparation(project, 'cloudrun', environmentProjectId);
   return Boolean(record && GCS_PREPARE_ADDONS.s3.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
 export function withCloudPreparationRecord(
   policies: Record<string, unknown>,
   provider: CloudPrepareProvider,
-  record: CloudPreparationRecord
+  record: CloudPreparationRecord,
+  environmentProjectId?: string,
 ): Record<string, unknown> {
+  if (environmentProjectId !== undefined) {
+    if (record.gcpProjectId !== environmentProjectId) throw new Error('Verified preparation belongs to a different GCP project.');
+    return {
+      ...policies,
+      gcpProjectPreparations: { ...asRecord(policies.gcpProjectPreparations), [environmentProjectId]: record },
+    };
+  }
   const cloudPreparation = {
     ...asRecord(policies.cloudPreparation),
     [provider]: record,

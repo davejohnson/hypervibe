@@ -11,6 +11,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
@@ -30,6 +31,7 @@ vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
 });
 
 import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
+import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
 
@@ -421,6 +423,49 @@ describe('hv_connections', () => {
       expect(result.ok).toBe(true);
       expect(result.data.planId).toBe('saved-project-plan');
       expect(runGcpBootstrap).toHaveBeenCalledWith(expect.objectContaining({ region: 'europe-west1', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', confirm: undefined }));
+    } finally { await t.close(); }
+  });
+
+  it('binds bootstrap and prepare to the declared environment project and rejects conflicting or missing selections', async () => {
+    const project = new ProjectRepository().create({ name: 'scoped-gcp', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/owner/repo.git' });
+    new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
+      staging: { hosting: { provider: 'cloudrun' }, services: {} },
+      railway: { hosting: { provider: 'railway' }, services: {} },
+      production: { hosting: { provider: 'cloudrun', region: 'us-central1', gcpProjectId: 'dedicated-production' }, services: {} },
+    } });
+    const selected = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new ConnectionRepository().upsertVerifiedBatch([{ provider: 'cloudrun', scope: 'owner/repo',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'staging-project' }) }]);
+    vi.mocked(runGcpBootstrap).mockResolvedValue({ success: true, mode: 'preview' });
+    const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview' });
+    const t = await makeClient();
+    try {
+      for (const action of ['bootstrap', 'prepare']) {
+        const params = { provider: 'cloudrun', project: project.name, action, ...(action === 'bootstrap' ? { adminAuth: 'default' } : {}) };
+        const run = action === 'bootstrap' ? vi.mocked(runGcpBootstrap) : prepare;
+        const preview = await t.call('hv_connections', { ...params, environment: 'production' });
+        expect(preview.ok).toBe(true);
+        expect(run).toHaveBeenCalledWith(expect.objectContaining({ environmentProjectId: 'dedicated-production' }));
+        run.mockClear();
+        for (const selection of [{ environment: 'production', gcpProjectId: 'staging-project' },
+          { environment: 'railway' }, { environment: 'production', region: 'us-west1' },
+          { environment: 'unknown', gcpProjectId: 'staging-project' }, { environment: 'staging', gcpProjectId: 'dedicated-production' },
+          { gcpProjectId: 'dedicated-production' }, { gcpProjectId: 'some-other-project' }]) {
+          const refused = await t.call('hv_connections', { ...params, ...selection, confirm: true, adminAuth: 'default',
+            ...(action === 'bootstrap' ? { billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' } : {}) });
+          expect(refused.error?.code).toBe('VALIDATION');
+        }
+        for (const binding of [{ projectId: 'staging-project' }, { projectId: 'dedicated-production', region: 'europe-west1' }]) {
+          new EnvironmentRepository().update(selected.id, { platformBindings: binding });
+          const refused = await t.call('hv_connections', { ...params, environment: 'production' });
+          expect(refused.error?.code).toBe('VALIDATION');
+        }
+        new EnvironmentRepository().update(selected.id, { platformBindings: {} });
+        expect(run).not.toHaveBeenCalled();
+        const legacy = await t.call('hv_connections', { ...params, environment: 'staging' });
+        expect(legacy.ok).toBe(true);
+        expect(run.mock.lastCall?.[0].environmentProjectId).toBeUndefined();
+      }
     } finally { await t.close(); }
   });
 
