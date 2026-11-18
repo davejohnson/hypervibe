@@ -441,12 +441,17 @@ async function storedVersionHolding(token: string, gcpProjectId: string, secretI
 }
 
 /** Writes a version only after the approved engine has created the owned container. */
-export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
+export async function writeSecretVersion(
+  token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string,
+  beforeWrite?: () => ActionResult | undefined,
+): Promise<ActionResult | undefined> {
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') {
     // An earlier write may have been stored without Hypervibe hearing back. If the stored value is
     // the one being written now, record that version instead of adding another.
     const held = await storedVersionHolding(token, gcpProjectId, secretId, labels, value);
+    const blocked = beforeWrite?.();
+    if (blocked) return blocked;
     if (held.state === 'stored' && recordSecretVersionMetadata(gcpProjectId, secretId, held.version, labels)) return undefined;
     return { success: false, status: 'blocked', message: observed.reason };
   }
@@ -456,6 +461,8 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   }
   const environment = new EnvironmentRepository().findById(labels['hv-environment'] ?? '');
   if (!environment) return { success: false, status: 'blocked', message: 'The secret environment cannot be verified locally.' };
+  const blocked = beforeWrite?.();
+  if (blocked) return blocked;
   // A lost addVersion acknowledgement must not let an old generation describe a new value.
   const currentBinding = (environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
   new EnvironmentRepository().updatePlatformBindings(environment.id, { engine: { ...currentBinding, secretMetadata: {

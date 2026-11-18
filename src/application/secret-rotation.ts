@@ -38,6 +38,7 @@ export function looksSecret(key: string): boolean {
 export interface SecretAge {
   key: string;
   kind: SecretKind;
+  replacementPolicy?: 'immutable';
   createdAt?: string;
   ageDays?: number;
   /** known: Hypervibe created the value. at-least: only when it was stored here is known; the credential may be older. unknown: it could not be read. */
@@ -69,7 +70,7 @@ export function describeSecretAge(kind: SecretKind, storedAt: string | undefined
 
 /** The sentences hv_status and hv_secrets show about secret ages. */
 export function secretAgeNotes(ages: { secrets: SecretAge[]; everyDays: number }): { overdue?: string; unreadable?: string; minimumOnly?: string; summary: string } {
-  const rotatable = ages.secrets.filter((secret) => ROTATABLE.includes(secret.kind));
+  const rotatable = ages.secrets.filter((secret) => ROTATABLE.includes(secret.kind) && secret.replacementPolicy !== 'immutable');
   const overdue = rotatable.filter((secret) => secret.overdue);
   const unreadable = rotatable.filter((secret) => secret.age === 'unknown');
   const minimumOnly = rotatable.filter((secret) => secret.age === 'at-least' && !secret.overdue);
@@ -79,13 +80,21 @@ export function secretAgeNotes(ages: { secrets: SecretAge[]; everyDays: number }
     ...(minimumOnly.length ? { minimumOnly: `${minimumOnly.length} key(s) from outside services show only when they were saved here, not when they were issued (${minimumOnly.map((secret) => secret.key).join(', ')}); they may be older.` } : {}),
   };
   const parts = [notes.overdue, notes.unreadable, notes.minimumOnly].filter(Boolean);
-  return { ...notes, summary: parts.length ? parts.join(' ') : `Every secret is newer than ${ages.everyDays} days.` };
+  const upToDate = ages.secrets.some((secret) => secret.replacementPolicy === 'immutable')
+    ? 'No rotatable secret is overdue.'
+    : `Every secret is newer than ${ages.everyDays} days.`;
+  return { ...notes, summary: parts.length ? parts.join(' ') : upToDate };
 }
 
 type Engine = Exclude<Awaited<ReturnType<typeof resolveEngineContext>>, { blocked: string }>;
 
 function binding(engine: Engine): EngineBinding {
   return (engine.environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
+}
+
+function immutableInEnvironment(spec: ProjectSpec, environment: string, key: string): boolean {
+  const secret = spec.secrets[key];
+  return secret?.ownership === 'hypervibe' && secret.replacementPolicy === 'immutable' && secret.environments.includes(environment);
 }
 
 /** Every runtime secret of the environment with its kind and age (read-only). */
@@ -108,6 +117,7 @@ export async function secretAges(ctx: CommandContext, project: Project, spec: Pr
   for (const [key, kind] of kinds) {
     const storedAt = await latestCreated(token, engine.gcpProjectId, engineSecretId(environmentName, key));
     secrets.push({ key, kind, ...describeSecretAge(kind, storedAt, everyDays),
+      ...(immutableInEnvironment(spec, environmentName, key) ? { replacementPolicy: 'immutable' as const, overdue: false } : {}),
       ...(KNOWN_SECRETS[key] ? { service: KNOWN_SECRETS[key]!.service } : {}) });
   }
   return { secrets, everyDays };
@@ -151,31 +161,69 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   const current = () => (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
   const save = (rotation: EngineBinding['rotation']) => ctx.repos.environments.updatePlatformBindings(engine.environment.id, { engine: { ...current(), kind: 'opentofu', rotation } });
 
-  const rotatable = ages.secrets.filter((secret) => secret.kind === 'generated' || secret.kind === 'database' || secret.kind === 'third-party');
+  const rotatable = ages.secrets.filter((secret) => ROTATABLE.includes(secret.kind));
   // Settings issued with a key (a reCAPTCHA site key) are replaced on the same page as it.
   const companionsOf = (key: string) => (KNOWN_SECRETS[key]?.companions ?? [])
     .filter((companion) => ages.secrets.some((secret) => secret.key === companion.key));
-  const parentOf = (key: string) => rotatable.find((secret) => companionsOf(secret.key).some((companion) => companion.key === key))?.key;
+  const parentOf = (key: string) => rotatable.find((secret) => secret.kind === 'third-party' && companionsOf(secret.key).some((companion) => companion.key === key))?.key;
   const unknown = (params.keys ?? []).filter((key) => !rotatable.some((secret) => secret.key === key) && !parentOf(key));
   if (unknown.length) return { status: 'blocked', message: `Not rotatable here: ${unknown.join(', ')}.` };
+  // External credentials and their companion settings are replaced together.
+  const members = (keys: string[]) => [...new Set(keys.flatMap((key) => {
+    const external = rotatable.some((secret) => secret.key === key && secret.kind === 'third-party');
+    return external ? [key, ...companionsOf(key).map((companion) => companion.key)] : [key];
+  }))];
+  const protectedKeys = (spec: ProjectSpec, keys: string[]) =>
+    members(keys).filter((key) => immutableInEnvironment(spec, params.environmentName, key));
+  const blockedByPolicy = (keys: string[]) => ({
+    status: 'blocked' as const, message: `Ordinary rotation cannot replace immutable secrets in ${params.environmentName}: ${keys.join(', ')}.`,
+  });
+  // Inventory and access checks may have waited on the provider. Use the current
+  // declaration before recording any new rotation.
+  specResult = store.get(params.project);
+  if (!specResult) return { status: 'blocked', message: `Project "${params.project.name}" has no spec.` };
+  const selectionSpec = specResult.spec;
+  const requested = (params.keys ?? []).map((key) => parentOf(key) ?? key);
   let rotation = current().rotation;
+  const defaultSelection = !rotation && !requested.length;
+  const skipped = defaultSelection ? protectedKeys(selectionSpec, rotatable.map((secret) => secret.key)) : [];
+  const defaultKeys = rotatable.map((secret) => secret.key).filter((key) => !immutableInEnvironment(selectionSpec, params.environmentName, key));
+  const keys = rotation?.keys ?? (requested.length ? requested : defaultKeys);
+  // An older rotation record can contain a key protected since the last attempt.
+  // Preserve its recovery evidence and stop before writing or rolling out any member.
+  const blocked = protectedKeys(specResult.spec, [...(params.keys ?? []), ...requested, ...keys]);
+  if (blocked.length) return blockedByPolicy(blocked);
+  if (!keys.length && skipped.length) return blockedByPolicy(skipped);
   if (!rotation) {
-    const requested = params.keys?.length ? params.keys.map((key) => parentOf(key) ?? key) : rotatable.map((secret) => secret.key);
-    rotation = { startedAt: new Date().toISOString(), keys: [...new Set(requested)] };
+    rotation = { startedAt: new Date().toISOString(), keys: [...new Set(keys)] };
     save(rotation);
   }
+  const policyBlocker = () => {
+    const latest = store.get(params.project);
+    if (!latest) return { status: 'blocked' as const, message: `Project "${params.project.name}" has no spec.` };
+    const protectedNow = protectedKeys(latest.spec, keys);
+    return protectedNow.length ? blockedByPolicy(protectedNow) : undefined;
+  };
+  const beforeWrite = () => {
+    const blocked = policyBlocker();
+    return blocked ? { ...blocked, success: false } : undefined;
+  };
   const selected = rotatable.filter((secret) => rotation!.keys.includes(secret.key));
   const replaced = (secret: SecretAge) => Boolean(secret.createdAt && secret.createdAt >= rotation!.startedAt);
   const labels = { 'managed-by': 'hypervibe', 'hv-environment': engine.environment.id.toLowerCase() };
 
   // 1a. Hypervibe-owned values: new random ones.
   for (const secret of selected.filter((entry) => entry.kind === 'generated' && !replaced(entry))) {
-    const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, secret.key), labels, crypto.randomBytes(32).toString('base64url'));
+    const blocked = policyBlocker();
+    if (blocked) return blocked;
+    const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, secret.key), labels, crypto.randomBytes(32).toString('base64url'), beforeWrite);
     if (failure) return { status: 'blocked', message: failure.message };
   }
   // 1b. The database login: the next infrastructure round moves to the idle login with no downtime.
   const database = selected.find((entry) => entry.kind === 'database');
   if (database && rotation.databaseGeneration === undefined) {
+    const blocked = policyBlocker();
+    if (blocked) return blocked;
     const next = (specResult.spec.environments[params.environmentName]!.database?.passwordGeneration ?? 1) + 1;
     specResult = store.merge(params.project, { environments: { [params.environmentName]: { database: { passwordGeneration: next } } } });
     rotation = { ...rotation, databaseGeneration: next };
@@ -212,7 +260,9 @@ export async function rotateSecrets(ctx: CommandContext, params: {
         const known = KNOWN_SECRETS[key];
         const rejected = known ? await checkKnownSecret(known, value) : undefined;
         if (rejected) return { ok: false, error: rejected };
-        const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, key), { ...labels, 'hv-imported': 'true' }, value);
+        const blocked = policyBlocker();
+        if (blocked) return { ok: false, error: blocked.message };
+        const failure = await writeSecretVersion(token, engine.gcpProjectId, engineSecretId(params.environmentName, key), { ...labels, 'hv-imported': 'true' }, value, beforeWrite);
         if (failure) return { ok: false, error: failure.status === 'pending' ? 'The save may not have gone through. Paste the same value again: Hypervibe checks what is stored first and never saves it twice.' : 'Hypervibe could not save it to Google Secret Manager. Try again.' };
         return { ok: true, message: known?.check ? `saved, ${known.service} accepted it` : 'saved' };
       },
@@ -225,11 +275,15 @@ export async function rotateSecrets(ctx: CommandContext, params: {
       },
     });
     if (collected.status !== 'connected') {
+      const blocked = policyBlocker();
+      if (blocked) return blocked;
       return { status: 'needs_input', ...(collected.url ? { url: collected.url } : {}), keys: pending.map((secret) => secret.key), message: collected.message };
     }
   }
 
   // 2. Move every workload onto the new values (the database rotation takes two rounds).
+  const beforeRollout = policyBlocker();
+  if (beforeRollout) return beforeRollout;
   specResult = store.get(params.project)!;
   const rolled = await launchEnvironment(ctx, {
     project: params.project, spec: specResult.spec, specRevision: specResult.revision, environmentName: params.environmentName, stopAfter: 'infrastructure',
@@ -250,6 +304,8 @@ export async function rotateSecrets(ctx: CommandContext, params: {
     return [{ name, kind, resource, ...(kind === 'services' && service.workloadKind !== 'worker' && service.public !== false ? { healthPath: service.healthCheckPath ?? '/', strictHealth: strictHealthCheck(service) } : {}) }];
   });
   if (current().releaseJob) workloads.push({ name: 'release command', kind: 'jobs', resource: current().releaseJob! });
+  let retirementBlock = policyBlocker();
+  if (retirementBlock) return retirementBlock;
   const retired = await retireSupersededSecretVersions({
     secretIds: selected.filter((entry) => entry.kind !== 'database').map((entry) => engineSecretId(params.environmentName, entry.key)),
     workloads,
@@ -261,9 +317,21 @@ export async function rotateSecrets(ctx: CommandContext, params: {
       // A truncated list is not the whole set; retire nothing from it.
       return body.nextPageToken ? undefined : (body.versions ?? []).map((version) => version.name);
     },
-    disable: async (name) => (await disableSecretVersion(await engine.adapter.engineAccessToken(), name).catch(() => undefined))?.ok === true,
+    disable: async (name) => {
+      const accessToken = await engine.adapter.engineAccessToken();
+      retirementBlock ??= policyBlocker();
+      if (retirementBlock) return false;
+      return (await disableSecretVersion(accessToken, name).catch(() => undefined))?.ok === true;
+    },
     checkHealth: async (url) => fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000) }).then((response) => response.status, () => 0),
   });
+  retirementBlock ??= policyBlocker();
+  if (retirementBlock) {
+    if (retired.verified && retired.disabled) {
+      retirementBlock.message += ` ${retired.disabled} old version${retired.disabled === 1 ? ' was' : 's were'} disabled before rotation stopped.`;
+    }
+    return retirementBlock;
+  }
   if (!retired.verified) {
     // The rotation record stays, so the next call resumes here without asking for the keys again.
     return {
@@ -278,6 +346,7 @@ export async function rotateSecrets(ctx: CommandContext, params: {
   return {
     status: 'rotated', rotated: selected.map((entry) => entry.key), disabledVersions, revokeAtProvider,
     message: `${params.environmentName} now runs on new values for ${selected.length} secret${selected.length === 1 ? '' : 's'}; ${disabledVersions} old version${disabledVersions === 1 ? '' : 's'} disabled.`
+      + (skipped.length ? ` Skipped immutable secrets: ${skipped.join(', ')}.` : '')
       + (revokeAtProvider.length ? ` Delete the old keys at: ${revokeAtProvider.map((entry) => `${entry.service} (${entry.url})`).join(', ')}.` : ''),
   };
 }
