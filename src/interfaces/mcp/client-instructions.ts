@@ -77,7 +77,7 @@ export function withClientInstructions(transport: Transport, fullInstructions: s
         initialization = undefined;
         if ('result' in message) message = { ...message, result: { ...message.result, instructions } };
       }
-      if ('id' in message && ('result' in message || 'error' in message)) {
+      if ('id' in message && message.id !== undefined && ('result' in message || 'error' in message)) {
         const call = calls.get(message.id);
         if (call) {
           calls.delete(message.id);
