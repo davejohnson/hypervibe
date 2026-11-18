@@ -5,6 +5,11 @@
       "environment": "testing",
       "specRevision": 1,
       "engine": "opentofu",
+      "coverage": {
+        "runtimeWorkers": "included",
+        "infrastructure": "hv_plan",
+        "repositoryFiles": "outside infrastructure status"
+      },
       "workers": [
         {
           "service": "queue-worker",
@@ -50,6 +55,11 @@
       "environment": "testing",
       "specRevision": 1,
       "engine": "opentofu",
+      "coverage": {
+        "runtimeWorkers": "included",
+        "infrastructure": "hv_plan",
+        "repositoryFiles": "outside infrastructure status"
+      },
       "workers": []
     },
     "hint": "Run hv_plan scope=\"infrastructure\" to check infrastructure drift.",
@@ -64,6 +74,11 @@
       "environment": "testing",
       "specRevision": 1,
       "engine": "opentofu",
+      "coverage": {
+        "runtimeWorkers": "included",
+        "infrastructure": "hv_plan",
+        "repositoryFiles": "outside infrastructure status"
+      },
       "workers": [],
       "workloads": []
     },
@@ -79,6 +94,11 @@
       "environment": "testing",
       "specRevision": 1,
       "engine": "opentofu",
+      "coverage": {
+        "runtimeWorkers": "included",
+        "infrastructure": "hv_plan",
+        "repositoryFiles": "outside infrastructure status"
+      },
       "workers": [],
       "workloads": []
     },
@@ -92,6 +112,10 @@
     "ok": true,
     "data": {
       "environment": "testing",
+      "coverage": {
+        "runtime": "included",
+        "repositoryFiles": "review declared repository changes with hv_plan in the canonical environment"
+      },
       "specRevision": 1,
       "specSource": {
         "kind": "local"
@@ -200,6 +224,9 @@
         "capability": "hosting",
         "maturityStatus": "planned",
         "maturityReason": "Synthetic planned provider for interface compatibility."
+      },
+      "build": {
+        "version": "0.1.52"
       }
     },
     "agentInstruction": {

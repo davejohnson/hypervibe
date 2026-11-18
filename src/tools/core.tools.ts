@@ -1074,6 +1074,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       if (lifecycleFailure && envSpec) {
+        if (!retainedDatabases.length && !envSpec.backups) validateInstalledProviders(specResult.spec, envName);
         const evidence = await explicitBackupEvidence(ctx, project, retainedEnvironment, envSpec);
         return commandSuccess({ environment: envName, partial: true, verified: false, ...retained, ...evidence },
           { warnings: [lifecycleFailure.message, 'Full infrastructure drift is unavailable. Only the listed operations were observed.'] });

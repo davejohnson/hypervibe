@@ -92,7 +92,7 @@ struct CurrentCoreStatusContractTests {
         let failed = HypervibeResponseMapper.failedObservation(attemptedAt: Date(timeIntervalSince1970: 900), previous: observation)
         #expect(failed.health == .failed)
         #expect(failed.engine == "opentofu")
-        #expect(failed.workers == nil)
+        #expect(failed.workers == observation.workers)
         #expect(failed.latestSuccessfulAt == nil)
         #expect(try JSONDecoder().decode(ObservationSummary.self, from: JSONEncoder().encode(failed)) == failed)
     }

@@ -1746,7 +1746,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
       github: {actions: {tests: {kind: 'check', category: 'test', runtime: {kind: 'node'}, commands: ['npm test']}}}}});
     expect(setup.ok).toBe(true);
     verifyConnection('github', {apiToken: 'fixture', login: 'davejohnson'});
-    const files = compileManagedGitHubFiles(setup.data.spec.github, setup.data.spec.runtime);
+    const current = await t.call('hv_spec', { project: name });
+    const files = compileManagedGitHubFiles(current.data.spec.github, current.data.spec.runtime);
     const workflow = files.find(f => f.path.startsWith('.github/workflows/'))!;
     let live: string | Error = workflow.content.replace('hv_spec;', 'hv_spec_set;');
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, filePath) => {
@@ -2365,6 +2366,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(create).toHaveBeenCalledWith('acct-1', {
       domainName: 'pending-example.com',
       autoRenew: true,
+      privacyMode: 'redaction',
       years: 1,
     });
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
