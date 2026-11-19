@@ -239,6 +239,7 @@ interface MigrateParams {
   region?: string;
   domain?: string;
   billingAccountName?: string;
+  gcpSetupPlanId?: string;
   approveAccess?: string[];
   confirmActions?: string[];
   planId?: string;
@@ -324,6 +325,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
+    ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
     ...(params.approveAccess ? { approveAccess: params.approveAccess } : {}),
     ...(!sourcePlanApproval && params.planId ? { planId: params.planId } : {}),
     ...(!sourcePlanApproval && params.confirmActions ? { confirmActions: params.confirmActions } : {}),

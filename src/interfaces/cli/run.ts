@@ -60,8 +60,7 @@ export async function runCli(
     !invocation.json
     && !invocation.nonInteractive
     && io.stdinIsTTY
-    && !result.ok
-    && result.error?.code === 'CONFIRM_REQUIRED'
+    && (result.error?.code === 'CONFIRM_REQUIRED' || (result.ok && result.confirmation?.completeInput))
     && result.confirmation
   );
 
@@ -72,10 +71,9 @@ export async function runCli(
       io.writeErr(`Hypervibe ${HYPERVIBE_VERSION}: Confirmation declined; no confirmed action was executed.\n`);
       return 1;
     }
-    result = await registry.execute(invocation.command.id, {
-      ...invocation.input,
-      ...result.confirmation.retryInput,
-    });
+    const nextInput = result.confirmation.completeInput ? result.confirmation.retryInput
+      : { ...invocation.input, ...result.confirmation.retryInput };
+    result = await registry.execute(invocation.command.id, nextInput);
   }
 
   io.writeOut(renderResult(invocation.command.id, result, invocation.json));

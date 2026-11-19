@@ -34,6 +34,7 @@ import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js'
 import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
+import { runCli } from '../../interfaces/cli/run.js';
 
 let tempDir: string;
 const githubTokenEnvironmentNames = [
@@ -437,6 +438,67 @@ describe('hv_connections', () => {
     await t.close();
   });
 
+  it('offers only a local project repair when a bootstrap preview needs recovery', async () => {
+    const project = new ProjectRepository().create({ name: 'recovery-app', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const input = { provider: 'cloudrun', action: 'bootstrap', project: project.name, gcpProjectId: 'example-project',
+      region: 'europe-west1', adminAuth: 'default', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' };
+    const recoverProjectState = 'repair-verified-project';
+    const retryCall = { ...input, recoverProjectState };
+    const failedPreview = { success: false, mode: 'preview' as const, error: 'Project setup requires local recovery.',
+      projectRecovery: { projectId: input.gcpProjectId, projectNumber: '123456', previousPlanId: 'setup-prior', recoverProjectState, retryCall } };
+    vi.mocked(runGcpBootstrap).mockResolvedValueOnce(failedPreview);
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', input);
+      expect(result.error.code).toBe('CONFIRM_REQUIRED');
+      expect(result.confirmation.retryInput).toEqual(retryCall);
+      expect(result.error.details.projectRecovery.recoverProjectState).toBe(recoverProjectState);
+      expect(result.hint).toContain('--recover-project-state');
+      expect(result.agentInstruction.action).toBe('ask_user');
+      const confirmCall = { ...input, gcpSetupPlanId: 'fresh-preview', confirm: true as const };
+      const freshPreview = { success: true, mode: 'preview' as const, planId: 'fresh-preview', requiresPlanId: true as const, confirmCall, requiresConfirmation: true };
+      vi.mocked(runGcpBootstrap).mockResolvedValue(freshPreview);
+      const preview = await t.call('hv_connections', retryCall);
+      expect(preview.data.planId).toBe('fresh-preview');
+      expect(runGcpBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ recoverProjectState, confirm: undefined }));
+      expect(preview.hint).toContain('omit recoverProjectState');
+      expect(preview.hint).toContain('--gcp-setup-plan-id fresh-preview');
+      expect(preview.confirmation.retryInput).toEqual(confirmCall);
+      expect(preview.agentInstruction.message).toContain('fresh-preview');
+      vi.mocked(runGcpBootstrap).mockResolvedValueOnce(failedPreview);
+      const output: string[] = [];
+      const cli = await runCli(['connections', '--project', project.name, '--provider', 'cloudrun', '--action', 'bootstrap',
+        '--gcp-project-id', input.gcpProjectId, '--billing-account-name', input.billingAccountName, '--region', input.region, '--admin-auth', 'default'], {
+        initialize: false, io: { stdinIsTTY: true, confirm: async () => true, readStdin: async () => '',
+          writeErr: line => output.push(line), writeOut: line => output.push(line) },
+      });
+      expect(cli).toBe(0);
+      expect(output.join(' ')).toContain('--recover-project-state ' + recoverProjectState);
+      expect(runGcpBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ gcpProjectId: input.gcpProjectId, recoverProjectState, confirm: undefined }));
+      vi.mocked(runGcpBootstrap).mockResolvedValueOnce(freshPreview).mockResolvedValueOnce({ success: true, mode: 'confirm' });
+      const prompt = vi.fn(async () => true);
+      const reviewed = await runCli(['connections', '--input', '-'], {
+        initialize: false, io: { stdinIsTTY: true, confirm: prompt, readStdin: async () => JSON.stringify(retryCall),
+          writeErr: line => output.push(line), writeOut: line => output.push(line) },
+      });
+      expect(reviewed).toBe(0);
+      expect(prompt).toHaveBeenCalledWith(expect.stringContaining('fresh-preview'));
+      const last = vi.mocked(runGcpBootstrap).mock.lastCall![0];
+      expect(last).toMatchObject({ gcpSetupPlanId: 'fresh-preview', confirm: true, gcpProjectId: input.gcpProjectId });
+      expect(last).not.toHaveProperty('recoverProjectState');
+      vi.mocked(runGcpBootstrap).mockClear().mockResolvedValue(freshPreview);
+      prompt.mockClear();
+      const noninteractive = await runCli(['connections', '--input', '-', '--json'], {
+        initialize: false, io: { stdinIsTTY: true, confirm: prompt, readStdin: async () => JSON.stringify(retryCall),
+          writeOut: line => output.push(line), writeErr: line => output.push(line) },
+      });
+      expect(noninteractive).toBe(0);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(runGcpBootstrap).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(output.at(-1)!).confirmation.retryInput).toEqual(confirmCall);
+    } finally { await t.close(); }
+  });
+
   it('previews the exact setup plan after billing selection without applying it', async () => {
     const project = new ProjectRepository().create({ name: 'gcp-selected-billing', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
     vi.mocked(runGcpBootstrap).mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-project-plan', actions: [],
@@ -532,6 +594,16 @@ describe('hv_connections', () => {
   it('rejects incomplete or unsafe GCP bootstrap calls before provider access', async () => {
     const t = await makeClient();
     const cases = [
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', gcpSetupPlanId: 'cloud-plan' },
+      { provider: 'cloudrun', action: 'prepare', project: 'app', confirm: true, gcpSetupPlanId: 'cloud-plan' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', gcpProjectId: 'vibe-project', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+        confirm: true, recoverProjectState: 'repair', gcpSetupPlanId: 'cloud-plan' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', recoverProjectState: 'repair', gcpProjectId: 'vibe-project',
+        billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', confirm: true },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', recoverProjectState: 'repair', gcpProjectId: 'vibe-project' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', recoverProjectState: 'repair',
+        billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
+      { provider: 'cloudflare', action: 'connect', scope: 'app.example', recoverProjectState: 'repair' },
       { provider: 'railway', action: 'bootstrap', gcpProjectId: 'vibe-project' },
       { provider: 'cloudrun', action: 'bootstrap' },
       { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', confirm: true, billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },

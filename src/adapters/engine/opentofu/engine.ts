@@ -9,7 +9,7 @@ import type {
   InfrastructureEngineBackend,
 } from '../../../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../../../domain/plan/plan.types.js';
-import { getDataDir, PRIVATE_FILE_MODE } from '../../storage/paths.js';
+import { getDataDir, hardenPrivateFile, PRIVATE_FILE_MODE } from '../../storage/paths.js';
 import { interpretApplyEvents, parseEnginePlan, translateEnginePlan } from './plan-mapping.js';
 import { redactSensitiveString } from '../../../utils/redact-sensitive-string.js';
 import { runTofu, verifyEngineVersion, type TofuCommand, type TofuRunResult } from './runner.js';
@@ -37,6 +37,7 @@ export interface OpenTofuEngineOptions {
 }
 
 export type EngineStepFailure = { ok: false; stage: string; error: string };
+type PreparedWorkspace = { directory: string; env: Record<string, string>; redact: string[] };
 
 export interface EnginePlanResult {
   ok: true;
@@ -96,7 +97,7 @@ export class OpenTofuEngine {
     auth: EngineAuthentication;
     state?: EngineStateIdentity;
   }): Promise<
-    | { ok: true; directory: string; env: Record<string, string>; redact: string[] }
+    | ({ ok: true } & PreparedWorkspace)
     | EngineStepFailure
   > {
     const engineRoot = path.join(this.options.dataDir ?? getDataDir(), 'engine');
@@ -138,6 +139,20 @@ export class OpenTofuEngine {
     });
   }
 
+  private async projectState<T>(prepared: PreparedWorkspace, project: (state: unknown) => T):
+    Promise<{ ok: true; present: true; value: T } | EngineStepFailure> {
+    const observed = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
+    if (observed.exitCode !== 0) return failure('state inspection', observed);
+    try {
+      if (observed.interrupted || observed.truncated) throw new Error();
+      const state = JSON.parse(observed.stdout) as { format_version?: unknown };
+      if (typeof state?.format_version !== 'string' || !state.format_version.startsWith('1.')) throw new Error();
+      return { ok: true, present: true, value: project(state) };
+    } catch {
+      return { ok: false, stage: 'state inspection', error: 'Engine state could not be projected safely. Preserve it and resolve the observation failure before continuing.' };
+    }
+  }
+
   /** Project private state without exporting the raw document or its secret values. */
   async inspectState<T>(params: {
     backend: InfrastructureEngineBackend; configuration: EngineConfiguration;
@@ -150,17 +165,60 @@ export class OpenTofuEngine {
     const prepared = await this.prepare(params);
     if (!prepared.ok) return prepared;
     try {
-      const observed = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);
-      if (observed.exitCode !== 0) return failure('state inspection', observed);
-      try {
-        const state = JSON.parse(observed.stdout) as { format_version?: unknown };
-        if (!state || typeof state !== 'object' || typeof state.format_version !== 'string') throw new Error();
-        return { ok: true, present: true, value: params.project(state) };
-      } catch {
-        return { ok: false, stage: 'state inspection', error: 'Engine state could not be projected safely. Preserve it and resolve the observation failure before continuing.' };
-      }
+      return await this.projectState(prepared, params.project);
     } finally {
       fs.rmSync(prepared.directory, { recursive: true, force: true });
+    }
+  }
+
+  /** Clear a failed-create marker on one reviewed root resource. The caller holds the setup lock
+   * and supplies its provider-specific identity check for both state reads. No cloud apply runs. */
+  async recoverTaintedResource(params: {
+    backend: InfrastructureEngineBackend; configuration: EngineConfiguration;
+    auth: EngineAuthentication; state: EngineStateIdentity;
+    address: string; stateDigest: string; verifyResource: (state: unknown, expectedTainted: boolean) => boolean;
+  }): Promise<{ ok: true } | EngineStepFailure> {
+    const fail = (error: string): EngineStepFailure => ({ ok: false, stage: 'state recovery', error });
+    if (!/^[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*$/.test(params.address) || !Object.hasOwn(params.configuration.resources, params.address)) {
+      return fail('The approved recovery address must be a declared root resource.');
+    }
+    const paths = engineStatePaths(params.state, this.options.dataDir);
+    const matchesReview = () => hardenPrivateFile(paths.statePath) && fileDigest(paths.statePath) === params.stateDigest;
+    const changed = 'The local state no longer matches the recovery preview. Preview the current state again.';
+    const resourceId = (state: unknown, expectedTainted: boolean): string | undefined => {
+      type Resource = { address: string; mode?: string; tainted?: boolean; deposed_key?: string; values?: { id?: unknown } };
+      const root = (state as { values?: { root_module?: { resources?: Resource[] } } }).values?.root_module;
+      const matches = root?.resources?.filter(row => row.address === params.address);
+      const row = matches?.length === 1 ? matches[0] : undefined;
+      const id = row?.values?.id;
+      if (row?.mode === 'managed' && row.deposed_key === undefined && (row.tainted ?? false) === expectedTainted
+          && typeof id === 'string' && id && params.verifyResource(state, expectedTainted)) return id;
+      return undefined;
+    };
+    try {
+      if (!matchesReview()) return fail(changed);
+      const prepared = await this.prepare(params);
+      if (!prepared.ok) return prepared;
+      try {
+        const before = await this.projectState(prepared, state => resourceId(state, true));
+        if (!before.ok || !before.value) return fail('The approved resource and its failed-create marker could not be verified.');
+        if (!matchesReview()) return fail(changed);
+        const backup = backupState(paths, 'resource-recovery');
+        if (!backup || fileDigest(backup) !== params.stateDigest || !matchesReview()) return fail(changed);
+        // A lost response can follow a successful state write. Settle from the durable state.
+        const cleared = await this.run({ kind: 'untaint', address: params.address }, prepared.directory, prepared.env, prepared.redact).catch(() => undefined);
+        if (!hardenPrivateFile(paths.statePath)) return fail('The private state is missing after the recovery attempt. Restore it before continuing.');
+        const after = await this.projectState(prepared, state => resourceId(state, false));
+        if (!after.ok || after.value !== before.value) {
+          const reason = cleared && cleared.exitCode !== 0 ? failure('state recovery', cleared).error + ' ' : '';
+          return fail(reason + 'The recovered resource could not be verified. Preview its current state before retrying.');
+        }
+        return { ok: true };
+      } finally {
+        fs.rmSync(prepared.directory, { recursive: true, force: true });
+      }
+    } catch {
+      return fail('The private state recovery could not be verified. Preview its current state before retrying.');
     }
   }
 
@@ -223,6 +281,8 @@ export class OpenTofuEngine {
     state: EngineStateIdentity;
     planId: string;
     destroy?: boolean;
+    /** Inspect the complete private plan in memory before any review artifact is saved. */
+    verifyPlannedChanges?: (shownPlan: unknown) => boolean;
   }): Promise<EnginePlanResult | EngineStepFailure> {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(params.planId)) {
       return { ok: false, stage: 'plan', error: 'Engine plan id contains unsupported characters.' };
@@ -234,6 +294,21 @@ export class OpenTofuEngine {
       if (plan.exitCode !== 0 && plan.exitCode !== 2) return failure('plan', plan);
       const shown = await this.run({ kind: 'show-plan', planFile: 'saved.tfplan' }, prepared.directory, prepared.env, prepared.redact);
       if (shown.exitCode !== 0) return failure('plan inspection', shown);
+      if (shown.truncated || shown.interrupted) {
+        return { ok: false, stage: 'plan inspection', error: 'OpenTofu did not return a complete plan for review.' };
+      }
+      if (params.verifyPlannedChanges) {
+        try {
+          // Output from the runner has the supplied secrets redacted. Neither values nor
+          // errors from a private review may cross the engine result boundary.
+          const document = JSON.parse(shown.stdout) as { format_version?: unknown };
+          if (typeof document?.format_version !== 'string' || !document.format_version.startsWith('1.')
+              || params.verifyPlannedChanges(document) !== true) throw new Error();
+        } catch {
+          return { ok: false, stage: 'plan review', error: 'The saved engine plan does not match the reviewed change.' };
+        }
+      }
+      const parsed = parseEnginePlan(shown.stdout);
 
       const paths = engineStatePaths(params.state, this.options.dataDir);
       const planFile = path.join(paths.plans, `${params.planId}.tfplan`);
@@ -253,7 +328,7 @@ export class OpenTofuEngine {
       };
       const translation = translateEnginePlan({
         provider: params.backend.provider,
-        parsed: parseEnginePlan(shown.stdout),
+        parsed,
         configuration: params.configuration,
         segment,
       });
