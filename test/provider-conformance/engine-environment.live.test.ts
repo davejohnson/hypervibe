@@ -164,7 +164,8 @@ live('AWS and Azure engine disposable environment fixture', () => {
         return spec;
       };
       // A second, smaller environment that joins the first one's shared pieces for part of the run.
-      const siblingName = `${environmentName}b`;
+      // A different start, not a longer name: Azure and AWS cut long names short, so `<name>b` would land on the same cloud names (see the issue on shared name prefixes).
+      const siblingName = environmentName.replace(/^fx-/, 'fs-');
       const region = process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined;
       const inSpec = (name = environmentName) => Boolean(savedSpec().environments[name]);
       const setSpecEnvironment = async (name: string, environment: Record<string, unknown> | undefined) => {
