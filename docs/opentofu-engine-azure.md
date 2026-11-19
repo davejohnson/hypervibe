@@ -31,7 +31,7 @@ testing environments, production profiles or subsequent revisions.
 | Outside keys, `needs_secrets` and `hv_secrets action="collect"` (Key Vault store) | Built; generated secrets verified live, outside keys not yet |
 | Testing environments: `hv_plan scope="infrastructure"` → `hv_apply` → `hv_deploy` for web, on-demand worker, cron, database, storage and secrets | Built; verified live on the demo app (westus2): web over HTTPS, database over verified TLS with the environment's own login, a Key Vault secret, Blob storage with the managed identity, the on-demand worker (jobs done 0.3–1.9 s after due), cron on time, two releases with an empty plan after |
 | Shared server and registry for testing environments (one database and login each) | Built; verified live with one environment |
-| Shared private network and Container Apps environment; database behind a private endpoint with public access off; login created through a one-address window | Built 2026-11-17; offline tests and `tofu validate` against the pinned provider only, no live run |
+| Shared private network and Container Apps environment; database behind a private endpoint with public access off; login created through a one-address window | Built 2026-11-17; verified live 2026-11-18 (West US 2) by the `azure-engine` [live profile](provider-conformance.md): web service, worker and database created in one apply, both workloads writing to the database, the server refusing a connection from outside, a release, an update and a teardown that left the resource group as it was |
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
@@ -242,12 +242,11 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     the server. To create or drop a login, `withAzureSetupAccess` turns public
     access on, learns this computer's address, allows it alone in the rule
     `hypervibe-setup`, runs the SQL, then deletes the rule and turns public
-    access off. With public access on and no rule, Azure drops connections
-    without an answer (observed live 2026-11-18), so the rule first holds an
-    address nobody can use (`192.0.2.1`) in case Azure then names the address it
-    refuses; if it still does not, Hypervibe asks `checkip.amazonaws.com`. That
-    request carries nothing but itself, and a wrong answer cannot connect. The
-    step's result says which source was used. It closes whatever happened in between, and a
+    access off. Azure never says which address it turned away: with or without a
+    rule it drops the connection (observed live 2026-11-18), so Hypervibe asks
+    `checkip.amazonaws.com` for this computer's public address. That request
+    carries nothing but itself, and a wrong answer cannot connect.
+    It closes whatever happened in between, and a
     failure to close is reported as an error; the next plan also shows public
     access as a change to turn off. The plan step says it does this. It happens
     when an environment's database is first created, when a worker's counting
@@ -260,13 +259,19 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     closes before the apps move) and get new addresses. Connections made before
     2026-11-17 never turned on `Microsoft.Network`; the plan says to run
     `hv_connections provider="azure" action="connect"` once.
-  - **Verified live 2026-11-18 (West US 2):** the shared network, app environment,
-    registry and server are created, and public access can be switched on a
-    running server.
-  - **Not verified live:** whether Azure names the refused address once a rule
-    exists, the address-service fallback, a login created through the window,
-    the private endpoint and DNS resolution from the apps, the KEDA scale rule
-    reaching the private address, and moving an older project.
+  - **Verified live 2026-11-18 (West US 2), one passing run of the `azure-engine`
+    live profile at d4cf72a0:** one apply creates the shared network, app
+    environment, registry and server, builds the image, creates the login
+    through the window (address from the address service) and creates the web
+    service and worker. Both reach the database through the private endpoint.
+    Afterwards the server reports public access `Disabled` with no firewall
+    rule, and a connection from the test computer does not reach a password
+    check. An unchanged plan is a noop, an environment-variable change and a
+    release update in place, and teardown leaves the resource group as it was
+    (the log workspace sometimes needs a second teardown pass).
+  - **Not verified live:** the KEDA scale rule reaching the private address (the
+    run's worker is always on), storage, scheduled jobs, a second environment
+    joining the shared pieces, and moving an older project.
 - **On-demand worker.** KEDA's PostgreSQL scaler counts `onDemand.pendingWorkQuery`
   once a minute with the read-only login and starts one replica while the count is
   above zero; it scales back to zero after 5 idle minutes.
