@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { DescribeNatGatewaysCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { DescribeRepositoriesCommand, ECRClient } from '@aws-sdk/client-ecr';
-import { ECSClient, ListClustersCommand } from '@aws-sdk/client-ecs';
+import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { DescribeServicesCommand, DescribeTasksCommand, ECSClient, ListClustersCommand, ListServicesCommand, ListTasksCommand } from '@aws-sdk/client-ecs';
 import { DescribeDBClusterSnapshotsCommand, DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient } from '@aws-sdk/client-rds';
 import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3';
 import type { AwsAccess } from '../../src/adapters/providers/aws/aws-engine.client.js';
@@ -169,4 +170,35 @@ export async function readAwsDatabaseExposure(access: AwsAccess, created: Native
     const instances = (await rds.send(new DescribeDBInstancesCommand({ Filters: [{ Name: 'db-cluster-id', Values: [cluster.DBClusterIdentifier] }] }))).DBInstances ?? [];
     return { host: cluster.Endpoint, problems: instances.filter((instance) => instance.PubliclyAccessible).map((instance) => `instance ${instance.DBInstanceIdentifier} is publicly accessible`) };
   } finally { rds.destroy(); }
+}
+
+/**
+ * Why AWS containers are not running, read while they still exist: each service's
+ * latest events, why its stopped containers stopped, and the newest log lines.
+ * Teardown deletes all of it, so a failed apply reads this first. Read-only; a
+ * failed read is reported as text, never thrown, because this runs on the failure path.
+ */
+export async function readAwsContainerTrouble(access: AwsAccess, logGroupPrefix: string): Promise<string> {
+  const config = { region: access.region, credentials: access.credentials };
+  const ecs = new ECSClient(config); const logs = new CloudWatchLogsClient(config);
+  const lines: string[] = [];
+  try {
+    for (const cluster of (await ecs.send(new ListClustersCommand({}))).clusterArns ?? []) {
+      const services = (await ecs.send(new ListServicesCommand({ cluster }))).serviceArns ?? [];
+      for (const service of services.length ? (await ecs.send(new DescribeServicesCommand({ cluster, services }))).services ?? [] : []) {
+        lines.push(`service ${service.serviceName}: ${service.status}, ${service.runningCount}/${service.desiredCount} running`);
+        for (const event of (service.events ?? []).slice(0, 6)) lines.push(`  event: ${event.message}`);
+      }
+      const stopped = (await ecs.send(new ListTasksCommand({ cluster, desiredStatus: 'STOPPED' }))).taskArns ?? [];
+      for (const task of stopped.length ? (await ecs.send(new DescribeTasksCommand({ cluster, tasks: stopped.slice(0, 10) }))).tasks ?? [] : []) {
+        lines.push(`stopped ${task.group}: ${task.stopCode} ${task.stoppedReason}`);
+        for (const container of task.containers ?? []) lines.push(`  container ${container.name}: exit ${container.exitCode ?? 'none'} ${container.reason ?? ''}`);
+      }
+    }
+    const events = (await logs.send(new FilterLogEventsCommand({ logGroupName: logGroupPrefix, limit: 40, startTime: Date.now() - 30 * 60_000 }))).events ?? [];
+    // The fixture never logs its settings, but a crash can echo a connection address.
+    for (const event of events) lines.push(`  log ${event.logStreamName}: ${(event.message ?? '').slice(0, 300).replace(/postgres(ql)?:\/\/\S+/g, '[database address]')}`);
+  } catch (error) { lines.push(`could not read further: ${error instanceof Error ? error.message : String(error)}`); }
+  finally { ecs.destroy(); logs.destroy(); }
+  return lines.join('\n') || 'AWS reported no services, stopped containers or log lines.';
 }
