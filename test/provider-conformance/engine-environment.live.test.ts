@@ -232,9 +232,11 @@ live('AWS and Azure engine disposable environment fixture', () => {
           throw new Error('Fixture convergence exceeded its bounded apply steps.');
         },
         verifyRunning: async (revision) => {
-          const status = await cli(['status'], { project: projectName, env: environmentName });
-          const url = (status.data?.services ?? []).find((entry: Json) => entry.name === 'web')?.url;
-          if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('The fixture has no HTTPS address for its web service.');
+          // The address Hypervibe recorded for the web service when it applied. `status` on these engines reports workers only.
+          const row = db.prepare('SELECT platform_bindings FROM environments WHERE project_id = ? AND name = ?').get(project.id, environmentName) as { platform_bindings: string } | undefined;
+          const bindings = row ? JSON.parse(row.platform_bindings) as Json : {};
+          const url = bindings.services?.web?.url ?? bindings[cloud]?.services?.web?.url;
+          if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('Hypervibe recorded no HTTPS address for the web service.');
           // A new revision and the worker's first write take a few minutes to show.
           let problem: string | undefined = 'the web service did not answer';
           for (let attempt = 0; attempt < 30 && problem; attempt++) {
