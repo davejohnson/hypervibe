@@ -71,6 +71,18 @@ function googleOnlyProblems(environment: EnvironmentSpec): string[] {
   return problems;
 }
 
+/** Use the account that owns the declared primary Cloudflare zone. */
+export function gcpRegistrarSpec(spec: EnvironmentSpec): EnvironmentSpec | string {
+  const registration = spec.domainRegistration;
+  const dns = spec.dns;
+  if (spec.hosting.provider !== 'cloudrun' || !registration?.register || !spec.domain || dns?.provider !== 'cloudflare'
+    || dns.zone.name !== spec.domain.trim().toLowerCase().replace(/\.$/, '')
+    || registration.accountId && registration.accountId !== dns.zone.accountId) {
+    return 'Cloud Run domainRegistration needs the primary domain’s Cloudflare DNS zone and the same account for registration and DNS.';
+  }
+  return { ...spec, domainRegistration: { ...registration, accountId: dns.zone.accountId } };
+}
+
 /** Unsupported desired state must block planning instead of falling back to another engine. */
 export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName];
@@ -80,6 +92,10 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   const problems: string[] = [];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   problems.push(...commonEngineProblems(environment));
+  if (environment.domainRegistration?.register) {
+    const registrar = gcpRegistrarSpec(environment);
+    if (typeof registrar === 'string') problems.push(registrar);
+  }
   // Cloud Run cannot switch traffic to another environment yet; AWS and Azure can.
   if (present(environment.domainTarget)) problems.push('domainTarget is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.');
   if (environment.migrations?.mode === 'releaseCommand' && !environment.migrations.command?.trim()) problems.push('migrations.mode="releaseCommand" needs a command.');

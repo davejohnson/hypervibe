@@ -91,7 +91,7 @@ export function gcpDomainDnsOwner(environment: Environment, domain: string, prim
   // Older mappings had one implicit primary owner, even before the first DNS receipt was written.
   const reserved = new Set([...(legacy ? [legacy] : []),
     ...Object.entries(claims?.domainClaims ?? {}).filter(([, claim]) => !claim.owner || claim.owner === 'gcp-domain').map(([hostname]) => hostname),
-    ...(claims?.domains ?? []).filter(hostname => !claims?.domainClaims?.[hostname] && !binding(environment, domainOwner(hostname))),
+    ...(claims?.domains ?? []).filter(hostname => !claims?.domainClaims?.[hostname] && !binding(environment, additionalGcpDomainDnsOwner(hostname))),
   ]);
   if (savedOwner === 'gcp-domain' || reserved.has(domain)) return 'gcp-domain';
   if (!reserved.size && normalized(primary ?? '') === domain) return 'gcp-domain';

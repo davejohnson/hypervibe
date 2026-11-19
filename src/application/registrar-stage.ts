@@ -5,19 +5,10 @@ import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import { applyCloudflareDomainRegistration, planCloudflareDomainRegistration } from '../domain/services/domain-registration.service.js';
 import { ConvergeExecutor, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 
-function registrarSpec(spec: EnvironmentSpec): EnvironmentSpec | string {
-  const registration = spec.domainRegistration;
-  const dns = spec.dns;
-  if (spec.hosting.provider !== 'cloudrun' || !registration?.register || !spec.domain || dns?.provider !== 'cloudflare'
-    || dns.zone.name !== spec.domain.trim().toLowerCase().replace(/\.$/, '')
-    || registration.accountId && registration.accountId !== dns.zone.accountId) {
-    return 'To register this domain for Cloud Run, declare its Cloudflare DNS zone and use the same account for registration and DNS.';
-  }
-  return { ...spec, domainRegistration: { ...registration, accountId: dns.zone.accountId } };
-}
+import { gcpRegistrarSpec } from '../domain/services/infrastructure-engine-selection.js';
 
 export async function planRegistrarStage(ctx: CommandContext, project: Project, environment: Environment, environmentSpec: EnvironmentSpec, specRevision: number) {
-  const spec = registrarSpec(environmentSpec);
+  const spec = gcpRegistrarSpec(environmentSpec);
   if (typeof spec === 'string') return { blocked: [spec] };
   const { action, warnings } = await planCloudflareDomainRegistration({ environment, environmentSpec: spec });
   if (warnings.length) return { blocked: warnings };
@@ -35,7 +26,7 @@ export async function applyRegistrarStage(ctx: CommandContext, executor: Converg
   environmentSpec: EnvironmentSpec | undefined, specRevision: number, confirmActions: string[]) {
   const envName = loaded.document.environmentName;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  const spec = environmentSpec && registrarSpec(environmentSpec);
+  const spec = environmentSpec && gcpRegistrarSpec(environmentSpec);
   const action = loaded.document.actions[0]!;
   if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id
     || !spec || typeof spec === 'string' || action.resource.name !== spec.dns!.zone.name
