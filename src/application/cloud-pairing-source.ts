@@ -25,7 +25,15 @@ export function localPairingSource(directory: string, repository: string): Local
     const revision = git('rev-parse', '--verify', 'HEAD^{commit}').toString().trim();
     if (!/^[a-f0-9]{40}$/.test(revision)) return receipt;
     receipt.revision = revision;
-  } catch { return { ...receipt, state: 'no-commit' }; }
+  } catch {
+    try {
+      const branch = git('symbolic-ref', '--quiet', 'HEAD').toString().trim();
+      const status = git('status', '--porcelain=v2', '--branch', '--untracked-files=no').toString().split('\n');
+      if (branch.startsWith('refs/heads/') && status.includes('# branch.oid (initial)')
+          && status.includes('# branch.head ' + branch.slice('refs/heads/'.length))) return { ...receipt, state: 'no-commit' };
+    } catch { /* Broken refs, inaccessible objects and timeouts leave the revision unknown. */ }
+    return receipt;
+  }
   try {
     const entry = git('ls-tree', '-l', receipt.revision, '--', `:(top,literal)${COMMITTED_SPEC_PATH}`).toString();
     if (!entry) return { ...receipt, state: 'no-spec' };

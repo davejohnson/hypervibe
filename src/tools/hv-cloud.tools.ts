@@ -38,6 +38,15 @@ function publicConnectionSummary(connection: VerifiedHypervibeCloudConnection) {
   };
 }
 
+function publicPendingSummary(connection: PendingHypervibeCloudConnection) {
+  return {
+    status: connection.status, repository: connection.repository, userCode: connection.userCode,
+    verificationUrl: connection.verificationUrl, expiresAt: connection.expiresAt,
+    ...(connection.localSource ? { localSource: connection.localSource } : {}),
+    ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
+  };
+}
+
 function decryptConnection(
   ctx: CommandContext,
   credentialsEncrypted: string
@@ -109,7 +118,7 @@ export function registerHvCloudTools(
           });
         }
         if (new Date(connection.expiresAt).getTime() <= now().getTime()) {
-          ctx.repos.connections.updateStatus(stored.id, 'failed');
+          ctx.repos.connections.expirePendingPairing(stored);
           throw new HvError('VALIDATION', 'The browser pairing expired.', {
             hint: 'Start a new pairing with hypervibe cloud pair.',
             next: ['hv_cloud_pair'],
@@ -120,13 +129,7 @@ export function registerHvCloudTools(
         const result = await createClient(baseUrl).exchange(connection.deviceCode);
         if (result.status === 'pending') {
           return commandSuccess({
-            status: 'pending',
-            repository,
-            userCode: connection.userCode,
-            verificationUrl: connection.verificationUrl,
-            expiresAt: connection.expiresAt,
-            ...(connection.localSource ? { localSource: connection.localSource } : {}),
-            ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
+            ...publicPendingSummary(connection),
             retryAfterSeconds: result.retryAfterSeconds,
           }, {
             hint: 'Approve this repository in the browser, then run hypervibe cloud pair --action status again.',
@@ -166,15 +169,7 @@ export function registerHvCloudTools(
         && new Date(connection.expiresAt).getTime() > now().getTime()
       ) {
         assertPendingSourceBranch(requestedBranch, connection.sourceBranch);
-        return commandSuccess({
-          status: 'pending',
-          repository,
-          userCode: connection.userCode,
-          verificationUrl: connection.verificationUrl,
-          expiresAt: connection.expiresAt,
-          ...(connection.localSource ? { localSource: connection.localSource } : {}),
-          ...(connection.sourceBranch ? { sourceBranch: connection.sourceBranch } : {}),
-        }, {
+        return commandSuccess(publicPendingSummary(connection), {
           hint: 'Open the approval link, then run hypervibe cloud pair --action status.',
           next: ['hv_cloud_pair'],
         });
@@ -194,20 +189,26 @@ export function registerHvCloudTools(
         sourceBranch,
         localSource: localPairingSource(primaryWorkspaceDirectory(), repository),
       };
-      ctx.repos.connections.upsert({
+      const saved = ctx.repos.connections.savePendingPairing(stored, {
         provider: HYPERVIBE_CLOUD_CONNECTION_PROVIDER,
         scope: repository,
         credentialsEncrypted: ctx.secretStore.encryptObject(pending),
       });
-      return commandSuccess({
-        status: 'pending',
-        repository,
-        userCode: pending.userCode,
-        verificationUrl: pending.verificationUrl,
-        expiresAt: pending.expiresAt,
-        localSource: pending.localSource,
-        ...(pending.sourceBranch ? { sourceBranch: pending.sourceBranch } : {}),
-      }, {
+      if (!saved) {
+        const row = ctx.repos.connections.findByProviderAndScope(HYPERVIBE_CLOUD_CONNECTION_PROVIDER, repository);
+        const winner = row && decryptConnection(ctx, row.credentialsEncrypted);
+        if (winner?.baseUrl === baseUrl && winner.repository.toLowerCase() === repository.toLowerCase()) {
+          if (row?.status === 'verified' && winner.status === 'verified') return commandSuccess(publicConnectionSummary(winner));
+          if (row?.status === 'pending' && winner.status === 'pending' && Date.parse(winner.expiresAt) > now().getTime()) {
+            assertPendingSourceBranch(requestedBranch, winner.sourceBranch);
+            return commandSuccess(publicPendingSummary(winner), {
+              hint: 'Open the active approval link, then run hypervibe cloud pair --action status.', next: ['hv_cloud_pair'],
+            });
+          }
+        }
+        throw new HvError('VALIDATION', 'The saved pairing changed while starting browser approval. Check the current pairing status.');
+      }
+      return commandSuccess(publicPendingSummary(pending), {
         hint: 'Open the approval link, then run hypervibe cloud pair --action status.',
         next: ['hv_cloud_pair'],
       });
