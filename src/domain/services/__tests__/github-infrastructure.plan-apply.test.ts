@@ -1,3 +1,4 @@
+import { AuditRepository } from '../../../adapters/db/repositories/audit.repository.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -595,7 +596,7 @@ describe('GitHub infrastructure plan/apply', () => {
         head: {repo: repos, ref: input.head, sha: nextHead}, base: {repo: repos, ref: 'main', sha: base}}));
       throw new Error('Lost response');
     });
-    const proposal = {repository: REPOSITORY, targetBranch: 'main', proposalBranch: branch, requireDefaultTarget: true,
+    const proposal = {repository: REPOSITORY, targetBranch: 'main', proposalBranch: branch, requireDefaultTarget: true, publicationAudit: new AuditRepository(),
       desiredFiles: [{path: '.github/workflows/deploy.yml', content: 'reviewed content', hash: 'a'.repeat(64)}]};
     expect(await proposeGitHubInfrastructureFiles(proposal)).toMatchObject({status: 'pending', data: {pullRequestNumber: 238}});
     pulls[1].title = 'Edited after publication'; pulls[1].body = null;

@@ -1,3 +1,4 @@
+import type { GitHubPullRequestSummary, PublicationAuditPort } from '../ports/github-workflow-publication.port.js';
 import { publishManagedWorkflow } from './managed-workflow-publication.js';
 import { reviewGitHubFile } from './github-file-review.js';
 import { PINNED_ACTIONS } from './pinned-actions.js';
@@ -6,10 +7,7 @@ import { parse as parseYaml } from 'yaml';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import type {
-  GitHubAdapter,
-  GitHubPullRequestSummary,
-} from '../../adapters/providers/github/github.adapter.js';
+import type { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -2617,6 +2615,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   targetBranch?: string;
   proposalBranch?: string;
   requireDefaultTarget?: boolean;
+  publicationAudit?: PublicationAuditPort;
   reconcileManifest?: boolean;
   reviewedFileHashes?: Record<string, string | null>;
   /** Exact previously bound workflow paths this reviewed proposal may retire. */
@@ -2690,7 +2689,10 @@ export async function proposeGitHubInfrastructureFiles(params: {
     message: 'Repository files changed since review. Run hv_plan again to review their current contents and ownership.' };
   if (!await matchesReviewedFiles(baseRef.object.sha, false)) return staleFiles;
   if (params.proposalBranch && params.requireDefaultTarget) {
-    return publishManagedWorkflow({adapter, owner: parts.owner, repo: parts.repo, repository, baseBranch,
+    if (!params.publicationAudit) {
+      return { success: false, status: 'blocked', message: 'Workflow publication receipts are unavailable. Retry the reviewed plan once local state is available.' };
+    }
+    return publishManagedWorkflow({adapter, audit: params.publicationAudit, owner: parts.owner, repo: parts.repo, repository, baseBranch,
       baseSha: baseRef.object.sha, legacyBranch: proposalBranch, desiredFiles, retiredPaths: params.retiredManagedPaths ?? [],
       reviewedFileHashes: params.reviewedFileHashes, title: GITHUB_INFRASTRUCTURE_PR_TITLE,
       body: buildGitHubInfrastructurePullRequestBody});

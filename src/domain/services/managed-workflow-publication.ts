@@ -1,19 +1,17 @@
 import { createHash } from 'node:crypto';
-import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
-import type { GitHubAdapter, GitHubPullRequestSummary } from '../../adapters/providers/github/github.adapter.js';
+import type { GitHubWorkflowPublicationPort, GitHubPullRequestSummary, PublicationAuditPort } from '../ports/github-workflow-publication.port.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { ManagedGitHubFile } from './github-infrastructure.service.js';
 
 type Change = {operation: 'updated' | 'added' | 'removed'; path: string; review?: ManagedGitHubFile['review']};
 
 export async function publishManagedWorkflow(params: {
-  adapter: GitHubAdapter; owner: string; repo: string; repository: string; baseBranch: string; baseSha: string;
+  adapter: GitHubWorkflowPublicationPort; audit: PublicationAuditPort; owner: string; repo: string; repository: string; baseBranch: string; baseSha: string;
   legacyBranch: string; desiredFiles: ManagedGitHubFile[]; retiredPaths: string[]; reviewedFileHashes?: Record<string, string | null>;
   title: string; body: (changes: Change[]) => string;
 }) {
-  const {adapter, owner, repo, repository, baseBranch, baseSha, legacyBranch} = params;
+  const {adapter, audit, owner, repo, repository, baseBranch, baseSha, legacyBranch} = params;
   const blocked = (message: string) => ({success: false, status: 'blocked' as const, message});
-  const audit = new AuditRepository();
   const digest = (value: string) => createHash('sha256').update(value).digest('hex');
   const intent = canonicalJsonSha256({repository, baseBranch, legacyBranch,
     files: params.desiredFiles.map(file => ({path: file.path, hash: digest(file.content)})), retiredPaths: params.retiredPaths});

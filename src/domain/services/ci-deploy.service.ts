@@ -1,3 +1,4 @@
+import type { PublicationAuditPort } from '../ports/github-workflow-publication.port.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { pendingCredentialOperations } from './runtime-rollout.service.js';
 import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../../adapters/providers/github/github-credential-activation.js';
@@ -949,7 +950,7 @@ export async function applyGitHubActionsDeploy(params: {
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
   authority?: 'publication-only' | 'secret-sync';
-}): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+}, publicationAudit: PublicationAuditPort): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
   if (params.action.type === 'noop') {
     return { success: true, message: 'No GitHub Actions workflow or secret changes were requested.', data: { skipped: true, reason: 'noop' } };
   }
@@ -1075,6 +1076,7 @@ export async function applyGitHubActionsDeploy(params: {
       proposalBranch: managedWorkflowPublicationBranch(environmentName),
       reviewedFileHashes: observation.observedHashes,
       requireDefaultTarget: true,
+      publicationAudit,
     });
     return {
       ...proposal,

@@ -1,5 +1,7 @@
 import { localConnectionRoleInputs } from '../../../domain/services/connection-roles.js';
 import { z } from 'zod';
+import type { GitHubPullRequestSummary, GitHubWorkflowPublicationPort } from '../../../domain/ports/github-workflow-publication.port.js';
+export type { GitHubPullRequestSummary } from '../../../domain/ports/github-workflow-publication.port.js';
 import { createRequire } from 'module';
 import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
 import { readGitHubSourceArchive } from './github-source.js';
@@ -72,25 +74,6 @@ export interface GitHubActionsVariable {
   updated_at?: string;
 }
 
-export interface GitHubPullRequestSummary {
-  number: number;
-  html_url: string;
-  title: string;
-  body: string | null;
-  state: 'open' | 'closed';
-  merged_at: string | null;
-  head: {
-    repo?: { full_name: string };
-    ref: string;
-    sha: string;
-  };
-  base: {
-    repo?: { full_name: string };
-    ref: string;
-    sha: string;
-  };
-}
-
 export class GitHubApiError extends Error {
   constructor(
     message: string,
@@ -108,7 +91,7 @@ function isGitHubNotFound(error: unknown): error is GitHubApiError {
 
 const GITHUB_REQUEST_TIMEOUT_MS = 60_000;
 
-export class GitHubAdapter {
+export class GitHubAdapter implements GitHubWorkflowPublicationPort {
   readonly name = 'github';
   private credentials: GitHubCredentials | null = null;
 

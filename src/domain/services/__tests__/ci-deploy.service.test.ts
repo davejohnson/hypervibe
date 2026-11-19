@@ -1,3 +1,4 @@
+import { AuditRepository } from '../../../adapters/db/repositories/audit.repository.js';
 import { mockManagedPublication } from './managed-publication.test-utils.js';
 import '../../../application/providers.js';
 import * as githubCredentialActivation from '../../../adapters/providers/github/github-credential-activation.js';
@@ -25,7 +26,7 @@ import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../github
 import type { Project } from '../../entities/project.entity.js';
 import {
   applyGitHubActionsAppliedSpecHash,
-  applyGitHubActionsDeploy,
+  applyGitHubActionsDeploy as applyDeploy,
   applyGitHubActionsRelease,
   environmentUsesGitHubActionsDeploy,
   githubActionsWorkflowInputHash,
@@ -392,6 +393,9 @@ function configureToolMigrations(project: Project) {
   });
   return environmentSpec;
 }
+
+const applyGitHubActionsDeploy = (params: Parameters<typeof applyDeploy>[0]) =>
+  applyDeploy(params, new AuditRepository());
 
 describe('ci-deploy.service', () => {
   let tempDir: string;
