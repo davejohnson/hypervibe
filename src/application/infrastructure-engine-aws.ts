@@ -491,33 +491,44 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   if (planned.blockers.length) return { blocked: planned.blockers };
 
-  const prerequisites = [...secretActions, ...buildPlanned.actions, ...imageActions].filter((action) => action.type !== 'noop').map((action) => action.id);
-  const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && prerequisites.length
-    ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...prerequisites])] } : action);
   // The app login is created once; each on-demand worker's waker login once its secret exists.
   const wakers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
   const wakerSecrets = wakers.map((worker) => `hypervibe/${context.prefix}/${worker.resourceName}-waker`);
-  const appLogin = !binding.databaseLoginAt;
-  const queryCredential = appLogin || !binding.database?.querySecretArn || engineActions.some(action => action.id === 'database-query:credential' && action.type !== 'noop');
+  const appLogin = Boolean(environmentSpec.database) && !binding.databaseLoginAt;
+  const loginMetadata = { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: context.shared.clusterIdentifier,
+    parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, database: context.database };
+  // A new environment's login comes before anything in the environment's own plan. Containers read DATABASE_URL from
+  // Parameter Store when they start, and AWS waits for the web service's containers before it reports the service created;
+  // with the parameter missing they never start and the apply fails (observed live 2026-11-19).
+  const appLoginActions: PlanAction[] = appLogin ? [{
+    id: 'database-login:postgres', type: 'create', verified: true, resource: { kind: 'secret', name: ENGINE_DATABASE_URL_KEY, provider: 'aws' },
+    reason: `Hypervibe will create ${environmentName}'s database ${context.database.name} on the shared testing cluster with the app's login and store that login in Parameter Store, before any service starts.`,
+    ...(sharedChanging.length ? { dependsOn: sharedChanging } : {}),
+    metadata: { ...loginMetadata, appLogin: true, queryCredential: false, wakerSecrets: [] },
+  }] : [];
+  const prerequisites = [...secretActions, ...buildPlanned.actions, ...imageActions, ...appLoginActions].filter((action) => action.type !== 'noop').map((action) => action.id);
+  const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && prerequisites.length
+    ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...prerequisites])] } : action);
+  // What the environment's own plan creates is filled in after it: the query credential and each waker's secret.
+  const queryCredential = Boolean(environmentSpec.database) && (appLogin || !binding.database?.querySecretArn || engineActions.some(action => action.id === 'database-query:credential' && action.type !== 'noop'));
   const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));
   const loginDependsOn = [
+    ...appLoginActions.map((action) => action.id),
     ...sharedChanging,
     ...engineActions.filter(action => action.id === 'database-query:credential' && action.type !== 'noop').map(action => action.id),
     ...wakers.map((worker) => engineActions.find((action) => action.id === `service:${worker.logicalName}`))
       .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
   ];
-  const loginActions: PlanAction[] = environmentSpec.database && (appLogin || queryCredential || missingWakers.length) ? [{
-    id: appLogin ? 'database-login:postgres' : queryCredential ? 'database-login:query' : 'database-login:waker', type: 'create', verified: true, ...(queryCredential ? { requiresConfirm: true } : {}),
-    resource: { kind: 'secret', name: appLogin ? ENGINE_DATABASE_URL_KEY : queryCredential ? 'database query access' : 'worker waker login', provider: 'aws' },
-    reason: appLogin
-      ? `Hypervibe will create ${environmentName}'s database ${context.database.name} on the shared testing cluster with the app's login${wakerSecrets.length ? ' and a read-only login for the worker waker' : ''}, and store the same application login in Parameter Store and the environment-owned query secret.`
-      : queryCredential ? 'Hypervibe will copy the existing environment application login from Parameter Store into its reviewed query credential. The application password will not change.'
+  const laterLoginActions: PlanAction[] = environmentSpec.database && (queryCredential || missingWakers.length) ? [{
+    id: queryCredential ? 'database-login:query' : 'database-login:waker', type: 'create', verified: true, ...(queryCredential ? { requiresConfirm: true } : {}),
+    resource: { kind: 'secret', name: queryCredential ? 'database query access' : 'worker waker login', provider: 'aws' },
+    reason: queryCredential
+      ? `Hypervibe will copy the environment application login from Parameter Store into its reviewed query credential${wakerSecrets.length ? ' and create the read-only login the worker waker counts pending work with' : ''}. The application password will not change.`
       : 'Hypervibe will create the read-only database login the worker waker counts pending work with. The app login is unchanged.',
-    ...(loginDependsOn.length ? { dependsOn: loginDependsOn } : {}),
-    metadata: { operation: AWS_DATABASE_LOGIN_OPERATION, accountId: context.connection.accountId, clusterIdentifier: context.shared.clusterIdentifier,
-      parameter: `${context.parameterPath}${ENGINE_DATABASE_URL_KEY}`, appLogin, queryCredential, wakerSecrets, database: context.database },
+    ...(loginDependsOn.length ? { dependsOn: [...new Set(loginDependsOn)] } : {}),
+    metadata: { ...loginMetadata, appLogin: false, queryCredential, wakerSecrets },
   }] : [];
-  const actions = [...secretActions, ...sharedActions, ...buildPlanned.actions, ...imageActions, ...engineActions, ...loginActions];
+  const actions = [...secretActions, ...sharedActions, ...buildPlanned.actions, ...imageActions, ...appLoginActions, ...engineActions, ...laterLoginActions];
   const warnings = [
     `AWS ${context.connection.region}, ${awsProfileFor(environmentName)} profile.`,
     ...(environmentSpec.database ? [`Testing environments share one Aurora Serverless cluster (${context.shared.clusterIdentifier}); ${environmentName} gets its own database and logins on it.`] : []),
