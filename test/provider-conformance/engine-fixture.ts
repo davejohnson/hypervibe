@@ -3,7 +3,7 @@ import pg from 'pg';
 import { DescribeNatGatewaysCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { DescribeRepositoriesCommand, ECRClient } from '@aws-sdk/client-ecr';
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { DescribeServicesCommand, DescribeTasksCommand, ECSClient, ListClustersCommand, ListServicesCommand, ListTasksCommand } from '@aws-sdk/client-ecs';
+import { DescribeExpressGatewayServiceCommand, DescribeServiceDeploymentsCommand, DescribeServicesCommand, DescribeTasksCommand, ECSClient, ListClustersCommand, ListServicesCommand, ListTasksCommand } from '@aws-sdk/client-ecs';
 import { DescribeDBClusterSnapshotsCommand, DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient } from '@aws-sdk/client-rds';
 import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3';
 import type { AwsAccess } from '../../src/adapters/providers/aws/aws-engine.client.js';
@@ -201,4 +201,28 @@ export async function readAwsContainerTrouble(access: AwsAccess, logGroupPrefix:
   } catch (error) { lines.push(`could not read further: ${error instanceof Error ? error.message : String(error)}`); }
   finally { ecs.destroy(); logs.destroy(); }
   return lines.join('\n') || 'AWS reported no services, stopped containers or log lines.';
+}
+
+/**
+ * What AWS says about a web service's release, sampled over a few minutes: its
+ * status, the deployment it names as current and each configuration it lists as
+ * active. Read after a release that did not report finished, to see whether AWS
+ * settles later or describes the release differently from what Hypervibe expects.
+ * Read-only; a failed read is reported as text.
+ */
+export async function sampleAwsWebRelease(access: AwsAccess, serviceArn: string, samples = 10, pauseMs = 30_000): Promise<string> {
+  const ecs = new ECSClient({ region: access.region, credentials: access.credentials });
+  const lines: string[] = [];
+  try {
+    for (let sample = 0; sample < samples; sample++) {
+      if (sample) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      const service = (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
+      const deployment = service?.currentDeployment
+        ? (await ecs.send(new DescribeServiceDeploymentsCommand({ serviceDeploymentArns: [service.currentDeployment] }))).serviceDeployments?.[0] : undefined;
+      lines.push(`sample ${sample}: service ${service?.status?.statusCode}; deployment ${service?.currentDeployment?.split('/').pop() ?? 'none'} ${deployment?.status ?? ''}; ${
+        (service?.activeConfigurations ?? []).map((entry) => `[${entry.serviceRevisionArn?.split('/').pop()} ${entry.primaryContainer?.image?.split('/').pop()}]`).join(' ') || 'no active configuration'}`);
+    }
+  } catch (error) { lines.push(`could not read further: ${error instanceof Error ? error.message : String(error)}`); }
+  finally { ecs.destroy(); }
+  return lines.join('\n');
 }
