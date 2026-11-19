@@ -103,8 +103,12 @@ custom hosting domains. Testing environments must share a PostgreSQL version.
       identity cannot give itself or anyone Owner, Contributor or role administration.
 - **Who can run setup:** an Owner (or Contributor plus User Access Administrator) of
   the subscription, in a directory where they may register apps (the default).
-- **Region** follows the app's other environments, otherwise `eastus2`. Hypervibe
-  states the choice; it does not ask.
+- **Region** follows the app's other environments, otherwise `westus2`. Hypervibe
+  states the choice; it does not ask. The default was `eastus2` until 2026-11-18:
+  that region refused a new pay-as-you-go subscription the smallest database in
+  all four live attempts (`SkuNotAvailable`), and `westus2` accepted it. List
+  prices for that database are the same in both. An existing connection keeps
+  the region it was set up with.
 
 ### Why these choices
 

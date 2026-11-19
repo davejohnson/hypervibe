@@ -72,7 +72,9 @@ describe('Azure setup access', () => {
   });
 
   it('picks the region nearest the app\'s other environments', () => {
-    expect(chooseAzureLocation(undefined)).toBe('eastus2');
+    // East US 2 refused a new subscription the default database size in every live attempt; West US 2 did not.
+    expect(chooseAzureLocation(undefined)).toBe('westus2');
+    expect(chooseAzureLocation({ environments: { aws: { hosting: { region: 'us-east-1' } } } } as never)).toBe('westus2');
     expect(chooseAzureLocation({ environments: { gcp: { hosting: { region: 'europe-west1' } } } } as never)).toBe('westeurope');
     expect(chooseAzureLocation({ environments: { aws: { hosting: { region: 'us-west-2' } } } } as never)).toBe('westus2');
   });
