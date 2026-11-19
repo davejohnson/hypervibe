@@ -35,8 +35,8 @@ function fixture(options: { marker?: boolean; path?: string; migrations?: unknow
 function assertion(github: GitHubOidcContext, audience: string, patch: Record<string, unknown> = {}) {
   return `header.${Buffer.from(JSON.stringify({ iss: 'https://token.actions.githubusercontent.com', aud: audience, sub: `repo:${repository}:ref:refs/heads/main`, repository, ref: github.ref, sha: github.sha, event_name: github.eventName, run_id: github.runId, run_attempt: github.runAttempt, exp: Math.floor(Date.now() / 1000) + 300, ...patch })).toString('base64url')}.signature`;
 }
-function transport(github: GitHubOidcContext, options: { wrongIdentity?: boolean; buildFailed?: boolean; alreadyRunning?: boolean; projectStatus?: 403 | 404; extraWebArn?: string; rolledBack?: boolean; privateHealth?: boolean } = {}) {
-  const calls: Array<{ method: string; host: string; path: string; target: string; body: any }> = []; let images = 0; let updated = false; let currentImage = options.alreadyRunning ? `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}` : 'old';
+function transport(github: GitHubOidcContext, options: { wrongIdentity?: boolean; buildFailed?: boolean; alreadyRunning?: boolean; projectStatus?: 403 | 404; extraWebArn?: string; rolledBack?: boolean; privateHealth?: boolean; oldLingers?: number; settlingAtStart?: number } = {}) {
+  const calls: Array<{ method: string; host: string; path: string; target: string; body: any }> = []; let images = 0; let updated = false; let readsAfterUpdate = 0; let startReads = 0; let currentImage = options.alreadyRunning ? `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}` : 'old';
   vi.stubGlobal('fetch', vi.fn(async (raw: string | URL) => {
     const url = new URL(String(raw));
     if (url.hostname.endsWith('actions.githubusercontent.com')) return Response.json({ value: assertion(github, url.searchParams.get('audience')!) });
@@ -58,8 +58,14 @@ function transport(github: GitHubOidcContext, options: { wrongIdentity?: boolean
       else data = { imageDetails: [{ imageDigest: digest }] };
     } else if (target.endsWith('StartBuild')) data = { build: { id: `${prefix}-images:run`, buildStatus: options.buildFailed ? 'FAILED' : 'SUCCEEDED' } };
     else if (target.endsWith('UpdateExpressGatewayService')) { if (!options.rolledBack) currentImage = body.primaryContainer.image; updated = true; data = { service: { serviceArn: body.serviceArn } }; }
-    else if (target.endsWith('DescribeExpressGatewayService')) data = { service: { serviceArn: options.wrongIdentity ? webArn.replace('-web', '-other') : observedWebArn, status: { statusCode: 'ACTIVE' }, ...(updated ? { currentDeployment: deploymentArn } : {}),
-      activeConfigurations: [{ primaryContainer: { image: currentImage, containerPort: 8080, environment: [{ name: 'UNCHANGED', value: 'retained' }] }, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'app.example' }] }] } };
+    else if (target.endsWith('DescribeExpressGatewayService')) {
+      const configuration = (image: string) => ({ primaryContainer: { image, containerPort: 8080, environment: [{ name: 'UNCHANGED', value: 'retained' }] }, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'app.example' }] });
+      // Observed live 2026-11-19: once a deployment succeeds AWS stops naming it as current, and for up to a minute still lists the old configuration after the new one.
+      const lingering = options.oldLingers !== undefined && updated && readsAfterUpdate++ <= options.oldLingers;
+      data = { service: { serviceArn: options.wrongIdentity ? webArn.replace('-web', '-other') : observedWebArn, status: { statusCode: 'ACTIVE' },
+        ...(updated && (options.oldLingers === undefined || readsAfterUpdate === 1) ? { currentDeployment: deploymentArn } : {}),
+        activeConfigurations: [configuration(currentImage), ...(lingering || (!updated && (options.settlingAtStart ?? 0) > startReads++) ? [configuration('old')] : [])] } };
+    }
     else if (target.endsWith('DescribeServiceDeployments')) data = { serviceDeployments: [{ serviceDeploymentArn: deploymentArn, status: options.rolledBack ? 'ROLLBACK_SUCCESSFUL' : 'SUCCESSFUL', ...(options.rolledBack ? { statusReason: 'health checks failed' } : {}) }] };
     return { response: { statusCode, headers: { 'content-type': typeof data === 'string' ? 'text/xml' : 'application/json' }, body: Readable.from([typeof data === 'string' ? data : JSON.stringify(data)]) } };
   });
@@ -209,6 +215,21 @@ it('reports a release AWS rolled back as failed, never as released', async () =>
   const result = await releaseWebService({ region, accountId: account, prefix, credentials: { accessKeyId: 'AKIACI000000000000', secretAccessKey: 'private-cloud-secret', sessionToken: 'private-cloud-session' } }, 'web', webArn, `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}`, '/health');
   expect(result).toMatchObject({ status: 'failed', message: expect.stringContaining('AWS kept the previous one running') });
   expect(fetch).not.toHaveBeenCalled();
+});
+it('waits for AWS to drop the old configuration after a successful deployment', async () => {
+  const { releaseWebService } = await import('../../adapters/providers/aws/aws-release.client.js');
+  const f = fixture(); transport(f.github, { oldLingers: 2 });
+  const image = `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}`;
+  const result = await releaseWebService({ region, accountId: account, prefix, credentials: { accessKeyId: 'AKIACI000000000000', secretAccessKey: 'private-cloud-secret', sessionToken: 'private-cloud-session' } }, 'web', webArn, image, '/health', false, 1);
+  expect(result).toMatchObject({ status: 'released', imageUri: image, url: 'https://app.example' });
+});
+it('waits out a previous change that AWS is still retiring before releasing', async () => {
+  const { releaseWebService } = await import('../../adapters/providers/aws/aws-release.client.js');
+  const f = fixture(); const calls = transport(f.github, { settlingAtStart: 2 });
+  const image = `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}`;
+  const result = await releaseWebService({ region, accountId: account, prefix, credentials: { accessKeyId: 'AKIACI000000000000', secretAccessKey: 'private-cloud-secret', sessionToken: 'private-cloud-session' } }, 'web', webArn, image, '/health', false, 1);
+  expect(result).toMatchObject({ status: 'released', imageUri: image });
+  expect(calls.filter((r) => r.target.endsWith('UpdateExpressGatewayService'))).toHaveLength(1);
 });
 it('releasing an already-running web service digest performs no workload mutation', async () => {
   const { releaseWebService: releaseFunction } = await import('../../adapters/providers/aws/aws-release.client.js');
