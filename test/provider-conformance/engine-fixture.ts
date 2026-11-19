@@ -12,9 +12,10 @@ import { resourceKey, type NativeFixtureResource } from './lifecycle-live-harnes
 export type EngineFixtureCloud = 'aws' | 'azure';
 
 /** The disposable environment: a public web service and a worker that both use the database. */
-export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update'): Record<string, unknown> {
+export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', region?: string): Record<string, unknown> {
   return {
-    hosting: { provider: cloud, engine: 'opentofu' },
+    // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
+    hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
     database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
     services: {
       web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true },

@@ -542,8 +542,11 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
   const metadata = (action.metadata ?? {}) as Record<string, unknown>;
   const store = azureEnvironmentSecretStore(context);
   const sql = (host: string) => (deps.sqlRunner ?? ((c, h) => entraSqlRunner(c.tokens, h, azureDeployAppName(c.project.name))))(context, host);
+  let learned: string | undefined;
   const setupAccess = deps.setupAccess ?? (<T>(c: AzureEngineContext, runner: SqlRunner, work: () => Promise<T>) =>
-    withAzureSetupAccess(c.tokens, c.shared.serverId, () => runner('postgres', async (query) => { await query('SELECT 1'); }), work));
+    withAzureSetupAccess(c.tokens, c.shared.serverId, () => runner('postgres', async (query) => { await query('SELECT 1'); }), work, { onLearned: (how) => { learned = how; } }));
+  /** Says where the one allowed address came from, so a result shows which path ran. */
+  const addressNote = () => learned ? ` This computer's address came from ${learned}.` : '';
   switch (metadata.operation) {
     case AZURE_SECRET_OPERATION: {
       const key = String(metadata.key);
@@ -594,7 +597,7 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
         name: azureDatabaseNames(context.environmentName).database, owner: azureDatabaseNames(context.environmentName).login,
         secretUrl: `${context.vault.uri}secrets/${azureVaultSecretName(context.environmentName, ENGINE_DATABASE_URL_KEY)}`,
       }, databaseLoginAt: now, ...(urls.wakerUrl ? { wakerLoginAt: now } : {}) });
-      return { success: true, message: `Created ${context.environmentName}'s database login and stored ${ENGINE_DATABASE_URL_KEY} in Key Vault.` };
+      return { success: true, message: `Created ${context.environmentName}'s database login and stored ${ENGINE_DATABASE_URL_KEY} in Key Vault.${addressNote()}` };
     }
     case AZURE_STORAGE_EMPTY_OPERATION: {
       const emptied = await emptyContainer(context.tokens, String(metadata.account), String(metadata.container));
