@@ -94,7 +94,7 @@ async function observe(ctx: CommandContext, project: Project, spec: ProjectSpec,
   if (!environment || environment.projectId !== project.id || environment.name !== target.environment) throw new Error('The exact reviewed environment binding is missing.');
   if (target.kind === 'database') return { environment, observed: null, hashes: {}, present: true };
   if (target.kind === 'registry') {
-    const adapter = await adapterFactory.getProviderAdapter(target.provider, project);
+    const adapter = await adapterFactory.getProviderAdapter(target.provider, project, undefined, { environment, hosting: spec.environments[target.environment]?.hosting });
     const port = adapter.success ? registryCredentialLifecycle(adapter.adapter) : undefined;
     if (!port || !isDeepStrictEqual(await port.inspect(environment, target.service), target.identity)) throw new Error('The exact container image or pull-credential target changed.');
     const envSpec = spec.environments[target.environment];
@@ -113,7 +113,7 @@ async function observe(ctx: CommandContext, project: Project, spec: ProjectSpec,
   const envSpec = spec.environments[target.environment];
   if (!envSpec || envSpec.hosting.provider !== target.provider || envSpec.deploy?.strategy !== 'branch' || envSpec.deploy.trigger !== 'ci') throw new Error('Credential updates require an existing managed-CI environment.');
   if (target.activation) {
-    const adapter = await adapterFactory.getProviderAdapter(target.provider, project);
+    const adapter = await adapterFactory.getProviderAdapter(target.provider, project, undefined, { environment, hosting: spec.environments[target.environment]?.hosting });
     if (!adapter.success || adapter.adapter?.capabilities.credentialUpdateActivation !== target.activation
       || (adapter.adapter?.capabilities.credentialValueEvidence ?? 'readback') !== target.valueEvidence) throw new Error('The reviewed credential update or evidence capability changed.');
   }
@@ -166,7 +166,7 @@ export async function planCredentialLifecycle(project: Project, spec: ProjectSpe
       const environment = ctx.repos.environments.findByProjectAndName(project.id, pull.environment);
       const envSpec = spec.environments[pull.environment];
       if (!environment || !envSpec || !envSpec.services[pull.service]) throw new Error('The declared container-pull consumer has no exact existing binding.');
-      const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, project);
+      const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, project, undefined, { environment, hosting: envSpec.hosting });
       const port = adapter.success ? registryCredentialLifecycle(adapter.adapter) : undefined;
       if (!port) {
         const model = adapter.adapter?.capabilities.registryCredentialModel;
@@ -191,7 +191,7 @@ export async function planCredentialLifecycle(project: Project, spec: ProjectSpe
         const services = credentialRuntimeServices(spec, name, key, descriptor);
         if (!services.length) continue;
         const selected = { ...envSpec, services: Object.fromEntries(services.map(service => [service, envSpec.services[service]])) };
-        const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, project);
+        const adapter = await adapterFactory.getProviderAdapter(envSpec.hosting.provider, project, undefined, { environment, hosting: envSpec.hosting });
         const activation = adapter.adapter?.capabilities.credentialUpdateActivation;
         const valueEvidence = adapter.adapter?.capabilities.credentialValueEvidence ?? 'readback';
         if (!adapter.success || !activation) throw new Error(`${envSpec.hosting.provider} has no reviewed credential update capability.`);
@@ -322,7 +322,7 @@ export async function applyCredentialLifecycle(ctx: CommandContext, params: { pr
       }
       if (target.kind === 'registry') {
         if (state.completed.includes(action.id)) return { success: true, message: 'Retained completed container-pull synchronization and its recorded evidence; no write repeated.' };
-        const adapter = await adapterFactory.getProviderAdapter(target.provider, params.project);
+        const adapter = await adapterFactory.getProviderAdapter(target.provider, params.project, undefined, { environment: evidence.environment });
         const port = adapter.success ? registryCredentialLifecycle(adapter.adapter) : undefined;
         if (!port) return { success: false, status: 'blocked', message: 'Container-pull credential capability is unavailable.' };
         const uncertain = state.attempted.includes(action.id);

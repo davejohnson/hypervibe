@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { buildGcpBootstrapConfiguration } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { GCP_PROJECT_ID_PATTERN, gcpConnectionScope } from './gcp-environment-target.js';
 import { hasGcpProjectSetup, runGcpProjectSetup } from './gcp-project-setup.service.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -42,7 +43,6 @@ const DEFAULT_GCP_REGION = 'us-central1';
 const GCP_ADC_SETUP_URL =
   'https://cloud.google.com/docs/authentication/set-up-adc-local-dev-environment';
 const GCP_CLOUD_CLI_INSTALL_URL = 'https://cloud.google.com/sdk/docs/install';
-const GCP_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const BOOTSTRAP_PROVIDERS = ['cloudrun', 'cloudsql'] as const;
 // Google documents new-key propagation of 60 seconds or more. Bound the wait
 // across both consumers; never retry key creation or a retained credential.
@@ -151,6 +151,8 @@ export async function runGcpBootstrap(
   params: {
     project: Project;
     gcpProjectId?: string;
+    environment?: string;
+    environmentProjectId?: string;
     scope?: string;
     billingAccountName?: string;
     region?: string;
@@ -160,10 +162,8 @@ export async function runGcpBootstrap(
 ): Promise<GcpBootstrapResult> {
   const mode = params.confirm === true ? 'confirm' : 'preview';
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
-  const scope = resolveExactRepositoryScope(params.scope, params.project.gitRemoteUrl);
-  const projectId = params.gcpProjectId === undefined && mode === 'preview' && scope.success
-    ? defaultGcpProjectId(params.project, scope.value)
-    : resolveGcpProjectId(params.gcpProjectId);
+  const repository = resolveExactRepositoryScope(params.scope, params.project.gitRemoteUrl);
+  const projectId = resolveBootstrapProjectId(params, repository.success ? repository.value : undefined);
   const progress = initialProgress();
 
   if (!projectId.success) {
@@ -179,7 +179,7 @@ export async function runGcpBootstrap(
       ...(mode === 'confirm' ? { partialProgress: progress } : {}),
     };
   }
-  if (!scope.success) {
+  if (!repository.success) {
     recordBootstrapAudit(params.project, 'gcp.bootstrap.failed', {
       outcome: 'failed',
       stage: 'scope',
@@ -189,11 +189,12 @@ export async function runGcpBootstrap(
     return {
       success: false,
       mode,
-      error: scope.error,
+      error: repository.error,
       ...(mode === 'confirm' ? { partialProgress: progress } : {}),
     };
   }
 
+  const scope = gcpConnectionScope(repository.value, params.environmentProjectId);
   const serviceAccountEmail = gcpBootstrapServiceAccountEmail(projectId.value);
   const runtimeServiceAccountEmail = gcpBootstrapRuntimeServiceAccountEmail(projectId.value);
   const target = bootstrapTarget(
@@ -206,7 +207,7 @@ export async function runGcpBootstrap(
     recordBootstrapAudit(params.project, 'gcp.bootstrap.failed', {
       outcome: 'failed',
       stage: 'billing-selection',
-      scope: scope.value,
+      scope,
       projectId: projectId.value,
       authenticationSource: 'application-default',
       partialProgress: progress,
@@ -214,7 +215,7 @@ export async function runGcpBootstrap(
     return {
       success: false,
       mode,
-      scope: scope.value,
+      scope,
       error,
       partialProgress: progress,
     };
@@ -233,7 +234,7 @@ export async function runGcpBootstrap(
     client = dependencies.createClient(accessToken);
     const observation = await observeBootstrapTarget(
       client,
-      scope.value,
+      scope,
       projectId.value,
       serviceAccountEmail,
       runtimeServiceAccountEmail
@@ -253,8 +254,9 @@ export async function runGcpBootstrap(
       const configuration = buildGcpBootstrapConfiguration({ projectId: projectId.value,
         billingAccountName: params.billingAccountName.trim(), deployServiceAccountEmail: serviceAccountEmail,
         runtimeServiceAccountEmail, region: params.region });
-      infrastructure = await dependencies.setupProject({ projectId: params.project.id, gcpProjectId: projectId.value,
+      infrastructure = await dependencies.setupProject({ projectId: params.project.id, projectName: params.project.name, gcpProjectId: projectId.value,
         auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: accessToken, GOOGLE_PROJECT: projectId.value }, redact: [accessToken] },
+        ...(params.environmentProjectId ? { authenticationScope: scope } : {}),
         contribution: { id: 'bootstrap', configuration }, confirm: mode === 'confirm' });
       if (!infrastructure.success) throw new Error(infrastructure.error ?? 'Google project setup did not converge.');
     }
@@ -263,7 +265,7 @@ export async function runGcpBootstrap(
       const result: GcpBootstrapResult = {
         success: true,
         mode,
-        scope: scope.value,
+        scope,
         target,
         observed: safeObservation(observation),
         openBillingAccounts: observation.billingAccounts
@@ -273,12 +275,12 @@ export async function runGcpBootstrap(
             ...(displayName ? { displayName } : {}),
           })),
         plannedSteps: plannedBootstrapSteps(observation),
-        ...(infrastructure ? { planId: infrastructure.planId, actions: infrastructure.actions } : { needsBillingSelection: true }),
+        ...(infrastructure ? { planId: infrastructure.planId, htmlPath: infrastructure.htmlPath, actions: infrastructure.actions } : { needsBillingSelection: true }),
         requiresConfirmation: true,
       };
       recordBootstrapAudit(params.project, 'gcp.bootstrap.previewed', {
         outcome: 'previewed',
-        scope: scope.value,
+        scope,
         projectId: projectId.value,
         serviceAccountEmail,
         runtimeServiceAccountEmail,
@@ -311,7 +313,7 @@ export async function runGcpBootstrap(
     progress.iamService = observation.iamServiceState === 'ENABLED' ? 'already-enabled' : 'enabled';
     progress.serviceAccount = observation.serviceAccount ? 'reused' : 'created';
     progress.runtimeServiceAccount = observation.runtimeServiceAccount ? 'reused' : 'created';
-    await dependencies.verifyPreparation(params.project, accessToken, projectId.value, serviceAccountEmail, runtimeServiceAccountEmail, params.region);
+    await dependencies.verifyPreparation(params.project, accessToken, projectId.value, serviceAccountEmail, runtimeServiceAccountEmail, params.region, params.environmentProjectId);
     progress.cloudPreparation = 'succeeded';
 
     let credentialJson: string;
@@ -383,14 +385,14 @@ export async function runGcpBootstrap(
     const secretStore = getSecretStore();
     connectionRepo.upsertVerifiedBatch(BOOTSTRAP_PROVIDERS.map((provider) => ({
       provider,
-      scope: scope.value,
+      scope,
       credentialsEncrypted: secretStore.encryptObject(verifiedCredentials[provider]),
     })));
     progress.connections = 'stored';
 
     const auditRecorded = recordBootstrapAudit(params.project, 'gcp.bootstrap.succeeded', {
       outcome: 'succeeded',
-      scope: scope.value,
+      scope,
       projectId: projectId.value,
       billingAccountName,
       serviceAccountEmail,
@@ -405,9 +407,11 @@ export async function runGcpBootstrap(
     return {
       success: true,
       mode,
-      scope: scope.value,
+      scope,
       target,
       message: 'GCP is ready for Hypervibe Cloud Run and Cloud SQL deploys.',
+      planId: infrastructure.planId,
+      htmlPath: infrastructure.htmlPath,
       partialProgress: progress,
       auditRecorded,
     };
@@ -436,7 +440,7 @@ export async function runGcpBootstrap(
       }
     }
 
-    const retry = bootstrapPreviewRetry(params.project.name, projectId.value);
+    const retry = bootstrapPreviewRetry(params.project.name, projectId.value, params);
     const recovery = !adcLoaded && isMissingDefaultCredentialsError(
       error instanceof Error ? error.message : String(error)
     )
@@ -450,7 +454,7 @@ export async function runGcpBootstrap(
         );
     recordBootstrapAudit(params.project, 'gcp.bootstrap.failed', {
       outcome: 'failed',
-      scope: scope.value,
+      scope,
       projectId: projectId.value,
       ...(params.billingAccountName?.trim()
         ? { billingAccountName: params.billingAccountName.trim() }
@@ -463,7 +467,7 @@ export async function runGcpBootstrap(
     return {
       success: false,
       mode,
-      scope: scope.value,
+      scope,
       target,
       error: safeError,
       partialProgress: progress,
@@ -484,13 +488,17 @@ export async function runGcpBootstrap(
 
 function bootstrapPreviewRetry(
   projectName: string,
-  gcpProjectId: string
+  gcpProjectId: string,
+  selection: { environment?: string; scope?: string; region?: string }
 ): {
   retryCall: Record<string, string>;
   retryCommand: string;
 } {
   const retryCall = {
     project: projectName,
+    ...(selection.environment !== undefined ? { environment: selection.environment } : {}),
+    ...(selection.scope ? { scope: selection.scope } : {}),
+    ...(selection.region ? { region: selection.region } : {}),
     provider: 'cloudrun',
     action: 'bootstrap',
     gcpProjectId,
@@ -498,14 +506,7 @@ function bootstrapPreviewRetry(
   };
   return {
     retryCall,
-    retryCommand: [
-      'hv_connections',
-      `project="${projectName}"`,
-      'provider="cloudrun"',
-      'action="bootstrap"',
-      `gcpProjectId="${gcpProjectId}"`,
-      'adminAuth="default"',
-    ].join(' '),
+    retryCommand: ['hv_connections', ...Object.entries(retryCall).map(([key, value]) => `${key}=${JSON.stringify(value)}`)].join(' '),
   };
 }
 
@@ -777,7 +778,25 @@ function assertActiveServiceAccount(
   }
 }
 
-function defaultGcpProjectId(project: Project, scope: string): ReturnType<typeof resolveGcpProjectId> {
+function resolveBootstrapProjectId(
+  params: { project: Project; gcpProjectId?: string; environmentProjectId?: string; confirm?: boolean },
+  repository?: string,
+): ReturnType<typeof resolveGcpProjectId> {
+  const { gcpProjectId, environmentProjectId } = params;
+  if (environmentProjectId !== undefined) {
+    if (environmentProjectId !== environmentProjectId.trim() || !GCP_PROJECT_ID_PATTERN.test(environmentProjectId)) {
+      return { success: false, error: 'The selected environment must declare a valid hosting.gcpProjectId.' };
+    }
+    if (gcpProjectId !== undefined && gcpProjectId !== environmentProjectId) {
+      return { success: false, error: 'The requested gcpProjectId differs from the project declared by the selected environment.' };
+    }
+    return resolveGcpProjectId(params.confirm ? gcpProjectId : environmentProjectId);
+  }
+  if (gcpProjectId === undefined && !params.confirm && repository) return defaultGcpProjectId(params.project, repository);
+  return resolveGcpProjectId(gcpProjectId);
+}
+
+export function existingRepositoryGcpProjectId(scope: string): ReturnType<typeof resolveGcpProjectId> | undefined {
   const connections = BOOTSTRAP_PROVIDERS
     .map((provider) => connectionRepo.findByProviderAndScope(provider, scope))
     .filter((connection) => connection !== null);
@@ -794,6 +813,12 @@ function defaultGcpProjectId(project: Project, scope: string): ReturnType<typeof
     } catch { /* Existing unreadable access is not an empty project. */ }
     return { success: false, error: 'The repository GCP connections are unverified, unreadable, or identify different projects. Verify them or pass the exact intended gcpProjectId; no new project name was selected.' };
   }
+  return undefined;
+}
+
+function defaultGcpProjectId(project: Project, scope: string): ReturnType<typeof resolveGcpProjectId> {
+  const existing = existingRepositoryGcpProjectId(scope);
+  if (existing) return existing;
   const name = project.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 17) || 'app';
   const suffix = createHash('sha256').update(scope.toLowerCase()).digest('hex').slice(0, 8);
   return resolveGcpProjectId(`hv-${name}-${suffix}`);
@@ -825,7 +850,7 @@ function resolveExactRepositoryScope(
     };
   }
   const value = repository || explicit;
-  if (!value || !/^[^/*\s]+\/[^/*\s]+$/.test(value)) {
+  if (!value || !/^[\w.-]+\/[\w.-]+$/.test(value)) {
     return {
       success: false,
       error: 'GCP bootstrap requires one exact GitHub owner/repository scope. Pass scope explicitly or configure a GitHub origin remote.',

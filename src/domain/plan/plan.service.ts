@@ -356,7 +356,7 @@ export class PlanService {
         warnings: [message],
       };
     };
-    const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+    const adapterResult = await adapterFactory.getProviderAdapter(provider, project, undefined, { environment, hosting: environmentSpec.hosting });
     if (!adapterResult.success || !adapterResult.adapter) {
       return unknownObservation(
         `Cannot observe ${provider}: ${adapterResult.error ?? 'no adapter'}. Mutations that require live state are blocked.`
@@ -477,7 +477,7 @@ export class PlanService {
         )
       ) {
         observed.completeness.databases = 'unknown';
-        const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+        const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project, { environment, hosting: environmentSpec.hosting });
         const dbAdapter = dbResult.adapter;
         if (dbResult.success && dbAdapter) {
           try {
@@ -554,7 +554,7 @@ export class PlanService {
           candidate.provider === dbProvider && candidate.externalId === localDatabaseExternalId);
         if (database) {
           try {
-            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project, { environment, hosting: environmentSpec.hosting });
             if (!result.success || !supportsDatabaseCheckpoint(result.adapter)) {
               throw new Error('The database adapter cannot observe recovery checkpoints.');
             }

@@ -305,7 +305,7 @@ export async function acquireDatabaseComponentAccess(
   component: Component,
   provider: string
 ): Promise<DatabaseAccessAcquireResult> {
-  const adapterResult = await adapterFactory.getDatabaseOperations(provider, project);
+  const adapterResult = await adapterFactory.getDatabaseOperations(provider, project, { environment });
   const adapter = adapterResult.adapter;
   if (!adapterResult.success || !adapter) {
     return {
@@ -446,7 +446,7 @@ export async function acquireManagedDatabaseAccess(
   }
 
   const existing = await resolveExternalDatabaseUrl(project, environment, serviceName);
-  const adapterResult = await adapterFactory.getDatabaseOperations(provider, project);
+  const adapterResult = await adapterFactory.getDatabaseOperations(provider, project, { environment });
   const adapter = adapterResult.adapter;
   const supportsTemporaryAccess = Boolean(
     adapterResult.success

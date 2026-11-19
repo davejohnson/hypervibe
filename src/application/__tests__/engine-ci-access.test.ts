@@ -4,7 +4,7 @@ import { grantCiReleaseAccess } from '../infrastructure-engine-ci.js';
 import { runGcpProjectSetup } from '../../domain/services/gcp-project-setup.service.js';
 
 vi.mock('../../domain/services/gcp-project-setup.service.js', () => ({
-  runGcpProjectSetup: vi.fn(async () => ({ success: true, mode: 'preview', planId: 'reviewed-ci-plan', actions: [] })),
+  runGcpProjectSetup: vi.fn(async () => ({ success: true, mode: 'preview', planId: 'reviewed-ci-plan', htmlPath: '/reports/reviewed-ci-plan.html', actions: [] })),
 }));
 
 afterEach(() => vi.unstubAllGlobals());
@@ -18,9 +18,10 @@ describe('GCP CI infrastructure ownership', () => {
       requests.push({ url: String(url), method: init?.method ?? 'GET' });
       return new Response(JSON.stringify({ name: 'projects/123456789', projectId: 'example-project', state: 'ACTIVE' }), { status: 200 });
     }));
-    await grantCiReleaseAccess({ projectId: 'local-project', adminToken: 'synthetic-token', gcpProjectId: 'example-project',
+    const result = await grantCiReleaseAccess({ projectId: 'local-project', adminToken: 'synthetic-token', gcpProjectId: 'example-project',
       repository: 'owner/app', repositoryId: '1234', releases: [{ environmentName: 'production', branch: 'main', autoDeploy: false }], runtimeServiceAccountEmail: 'runtime@example-project.iam.gserviceaccount.com', confirm: false } as Parameters<typeof grantCiReleaseAccess>[0]);
     expect(requests.filter(({ method }) => method !== 'GET')).toEqual([]);
+    expect(result).toMatchObject({ planId: 'reviewed-ci-plan', htmlPath: '/reports/reviewed-ci-plan.html' });
     expect(runGcpProjectSetup).toHaveBeenCalledWith(expect.objectContaining({
       projectId: 'local-project', gcpProjectId: 'example-project', confirm: false,
       contribution: expect.objectContaining({ id: 'ci-release' }),

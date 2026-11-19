@@ -192,6 +192,7 @@ public actor HypervibeMCPClient {
                         name: environment.name,
                         specRevision: topology.specRevision,
                         resources: environment.resources,
+                        deployment: environment.deployment,
                         observation: observation,
                         publicEndpointHealth: endpointHealth
                     )
@@ -315,6 +316,11 @@ public actor HypervibeMCPClient {
         project: CompanionProject,
         environment: EnvironmentSnapshot
     ) async throws -> ProductionDeploymentPreparation {
+        guard environment.deploymentKnown else {
+            throw HypervibeClientError.invalidDeployment(
+                "The deployment settings for \(environment.name) have not been read yet. Refresh the project, then try again."
+            )
+        }
         guard environment.isProductionTarget else {
             throw HypervibeClientError.invalidDeployment(
                 "\(environment.name) is not declared as a production promotion target."
@@ -361,7 +367,8 @@ public actor HypervibeMCPClient {
         definitionID: String? = nil,
         commitSHA: String? = nil
     ) async throws -> ProductionDeploymentResult {
-        guard environment.isProductionTarget,
+        guard environment.deploymentKnown,
+            environment.isProductionTarget,
             preparation.environment == environment.name,
             preparation.specRevision == environment.specRevision else {
             throw HypervibeClientError.invalidDeployment(

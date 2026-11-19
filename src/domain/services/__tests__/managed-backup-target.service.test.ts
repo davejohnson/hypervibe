@@ -128,7 +128,7 @@ describe('managed backup target admission', () => {
     expect(result.state).toBe('blocked');
     if (result.state !== 'blocked') return;
     expect(result.issues).toContain(`${provider} has no reviewed private-worker credential handoff for combined SQL/files recovery.`);
-    expect(f.factory.getStorageOperations).toHaveBeenCalledWith(provider, f.context.project);
+    expect(f.factory.getStorageOperations).toHaveBeenCalledWith(provider, f.context.project, { environment: f.context.environment, hosting: f.spec.hosting });
     expect(f.getCredentials).not.toHaveBeenCalled();
   });
 

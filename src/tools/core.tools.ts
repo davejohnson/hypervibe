@@ -22,7 +22,7 @@ import {
 } from '../domain/spec/spec.schema.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { diffEnvironment } from '../domain/plan/diff.engine.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import { planIos } from '../domain/services/appstore-plan.service.js';
 import { planCache } from '../domain/services/cache-plan.service.js';
 import { planDatabaseResilience } from '../domain/services/database-resilience-plan.service.js';
@@ -491,7 +491,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
-          connections: requiredConnectionChecklist(ctx, result.spec),
+          connections: requiredConnectionChecklist(ctx, result.spec, { gitRemoteUrl: project.gitRemoteUrl }),
         }, { warnings });
       }
 
@@ -612,7 +612,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         throw new Error('Project initialization completed without a project record.');
       }
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
-      const connections = requiredConnectionChecklist(ctx, result.spec, changed.fields.every(key => key === 'environments') ? changed.environments : undefined);
+      const connections = requiredConnectionChecklist(ctx, result.spec, {
+        environments: changed.fields.every(key => key === 'environments') ? changed.environments : undefined,
+        gitRemoteUrl: project.gitRemoteUrl,
+      });
       const localEnv = mergeLocalEnvWrites(
         result.localEnv,
         ensureProjectLocalEnv({
@@ -665,7 +668,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId, the local HTML review path (htmlPath), and a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
@@ -739,6 +742,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const pending = planned.actions.filter((action) => action.type !== 'noop');
         return commandSuccess({
           planId: planned.planRunId,
+          ...ctx.repos.runs.planReport(planned.planRunId),
           scope,
           environment: planned.environmentName,
           specRevision: planned.specRevision,
@@ -806,6 +810,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if ('error' in result) {
         return commandError('VALIDATION', result.error, { next: ['hv_spec'] });
       }
+      let dnsActionsChanged = false;
       if (currentSpec && result.scope === 'full' && (scope === undefined || scope === 'full')
         && ![services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined)) {
         const hosted = await planHostedDns(ctx, { project, spec: currentSpec, environmentName: result.environmentName,
@@ -817,7 +822,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             details: { blocked: dns.blocked }, next: ['hv_spec', 'hv_connections'],
           });
           const pendingDns = dns.actions.filter(action => action.type !== 'noop');
-          return commandSuccess({ planId: dns.planRunId, scope: 'dns-engine', environment: dns.environmentName,
+          return commandSuccess({ planId: dns.planRunId, ...ctx.repos.runs.planReport(dns.planRunId), scope: 'dns-engine', environment: dns.environmentName,
             specRevision: dns.specRevision, actions: pendingDns.map(({ metadata: _metadata, ...action }) => action),
             unchanged: dns.actions.length - pendingDns.length, confirmActions: dns.confirmActions,
           }, { warnings: dns.warnings, hint: 'Review the DNS changes, then apply this saved plan. Run hv_plan again to continue the application workflow.', next: ['hv_apply'] });
@@ -825,13 +830,26 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const readyDnsIds = new Set(result.actions.filter(action => action.metadata?.dnsEngineReady === true || action.metadata?.dnsEngineDeferred === true || action.metadata?.dnsCancellationVerified === true).map(action => action.id));
         if (readyDnsIds.size) {
           result.blocked = result.blocked.filter(block => !block.actionIds?.length || !block.actionIds.every(id => readyDnsIds.has(id)));
-          const saved = ctx.repos.runs.findById(result.planRunId);
-          if (saved?.plan) ctx.repos.runs.updatePlan(result.planRunId, { ...saved.plan, actions: result.actions });
+          dnsActionsChanged = true;
+        }
+      }
+      if (dnsActionsChanged || result.blocked.length) {
+        try {
+          ctx.repos.runs.updatePlanReview(result.planRunId, {
+            ...(dnsActionsChanged ? { actions: result.actions } : {}),
+            reviewBlockers: result.blocked.map(block => block.reason),
+          });
+        } catch (error) {
+          return commandError('INTERNAL', `Plan ${result.planRunId} was saved, but its final review could not be written: ${error instanceof Error ? error.message : String(error)}`, {
+            details: { planId: result.planRunId, persisted: true },
+            hint: 'Restore write access to local Hypervibe storage and run hv_plan again before applying.',
+            next: ['hv_plan'],
+          });
         }
       }
       const plannedEnvironmentSpec = specStore.get(project)?.spec.environments[result.environmentName];
 
-      const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
+      const confirmIds = result.actions.filter(requiresActionConfirmation).map(a => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
       const reviewActions = pending.map(({ metadata: _metadata, ...action }) => action);
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
@@ -955,6 +973,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       return commandSuccess(
         {
           planId: result.planRunId,
+          ...ctx.repos.runs.planReport(result.planRunId),
           ...(result.credentialReview ? { credentialReview: result.credentialReview } : {}),
           ...(result.databaseConsumers ? { databaseConsumers: result.databaseConsumers } : {}),
           ...(result.domainSecurity ? { domainSecurity: result.domainSecurity } : {}),

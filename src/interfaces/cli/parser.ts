@@ -37,7 +37,10 @@ function parseJsonObject(raw: string, source: string): Record<string, unknown> {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(`${source} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    // The parser's message quotes the text it failed on, which can be a credential.
+    // Report only where it failed.
+    const at = /\(line (\d+) column (\d+)\)/.exec(error instanceof Error ? error.message : '');
+    throw new Error(`${source} is not valid JSON${at ? ` (line ${at[1]}, column ${at[2]})` : ''}. Fix the JSON and retry.`);
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`${source} must contain a JSON object.`);

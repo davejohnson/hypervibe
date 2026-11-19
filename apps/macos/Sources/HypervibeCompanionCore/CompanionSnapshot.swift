@@ -161,7 +161,10 @@ public struct WorkerObservation: Codable, Equatable, Identifiable, Sendable {
     public var activity: String? = nil
     public var running: Int? = nil
 
-    public var needsAttention: Bool { pendingWorkReadFailed || wakerState == "FAILED" || activity == "failed" }
+    public var needsAttention: Bool { wakeUpCheckFailed || workloadFailed }
+    /// The wake-up check itself failed. Only on-demand workers have one.
+    public var wakeUpCheckFailed: Bool { pendingWorkReadFailed || wakerState == "FAILED" }
+    public var workloadFailed: Bool { activity == "failed" }
 
     public var configurationSummary: String {
         let modeLabel = mode == "on-demand" ? "On demand" : mode == "always-on" ? "Always on" : "Unknown mode"
@@ -200,6 +203,9 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
     public let engine: String?
     /// nil means workers were not read; an empty array means none configured.
     public let workers: [WorkerObservation]?
+    /// Facts from an incomplete status answer (databases, backups). They are shown
+    /// as returned and never make the environment healthy.
+    public let partialEvidence: [String]?
 
     public var infrastructureStatus: String? {
         engine == "opentofu"
@@ -218,7 +224,8 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         services: [ServiceObservation]? = nil,
         driftedResources: [DriftedResource]? = nil,
         engine: String? = nil,
-        workers: [WorkerObservation]? = nil
+        workers: [WorkerObservation]? = nil,
+        partialEvidence: [String]? = nil
     ) {
         self.health = health
         self.verified = verified
@@ -231,6 +238,7 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         self.driftedResources = driftedResources
         self.engine = engine
         self.workers = workers
+        self.partialEvidence = partialEvidence
     }
 
     public func service(named name: String) -> ServiceObservation? {
@@ -279,6 +287,10 @@ public struct EnvironmentSnapshot: Codable, Equatable, Identifiable, Sendable {
     public let specRevision: Int
     public let resources: [ResourceSummary]
     public let deployment: DeploymentConfiguration?
+    /// False when the deployment settings were never read from the spec, as in a
+    /// snapshot cached by an older build. Unknown is not "no settings": it must
+    /// never be treated as a direct deploy.
+    public let deploymentKnown: Bool
     public let observation: ObservationSummary?
     public let publicEndpointHealth: [PublicEndpointHealth]?
 
@@ -287,6 +299,7 @@ public struct EnvironmentSnapshot: Codable, Equatable, Identifiable, Sendable {
         specRevision: Int,
         resources: [ResourceSummary],
         deployment: DeploymentConfiguration? = nil,
+        deploymentKnown: Bool = true,
         observation: ObservationSummary?,
         publicEndpointHealth: [PublicEndpointHealth]? = nil
     ) {
@@ -294,8 +307,24 @@ public struct EnvironmentSnapshot: Codable, Equatable, Identifiable, Sendable {
         self.specRevision = specRevision
         self.resources = resources
         self.deployment = deployment
+        self.deploymentKnown = deploymentKnown
         self.observation = observation
         self.publicEndpointHealth = publicEndpointHealth
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, specRevision, resources, deployment, deploymentKnown, observation, publicEndpointHealth
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        specRevision = try container.decode(Int.self, forKey: .specRevision)
+        resources = try container.decode([ResourceSummary].self, forKey: .resources)
+        deployment = try container.decodeIfPresent(DeploymentConfiguration.self, forKey: .deployment)
+        deploymentKnown = try container.decodeIfPresent(Bool.self, forKey: .deploymentKnown) ?? (deployment != nil)
+        observation = try container.decodeIfPresent(ObservationSummary.self, forKey: .observation)
+        publicEndpointHealth = try container.decodeIfPresent([PublicEndpointHealth].self, forKey: .publicEndpointHealth)
     }
 
     public var isProductionTarget: Bool {
@@ -420,6 +449,7 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
                     specRevision: environment.specRevision,
                     resources: environment.resources,
                     deployment: environment.deployment,
+                    deploymentKnown: environment.deploymentKnown,
                     observation: ObservationSummary(
                         health: .stale,
                         verified: observation.verified,

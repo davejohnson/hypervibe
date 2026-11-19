@@ -47,7 +47,14 @@ replace them with remembered permission tables or dashboard procedures.
    a possibly misspelled project selector.
 2. Express infrastructure intent through `hv_spec`, then obtain a plan with
    `hv_plan`. Present the chosen resources, practical changes, costs where known,
-   and consequential actions. Ordinary names and reversible defaults do not need
+   and consequential actions. Link the local browser report returned in
+   `htmlPath` when presenting a saved plan. To open an older plan, use
+   `hv_runs action="report" runId=<planId>`. For a Google Cloud setup plan,
+   also supply its Hypervibe `project` and native `gcpProjectId`. Setup
+   previews still pending at upgrade can be opened. Earlier versions discarded
+   the action list when a preview was confirmed or replaced, so setup plans
+   already consumed that way before the upgrade have no browser report.
+   Ordinary names and reversible defaults do not need
    another question; billing, ownership, spending, adoption, and destructive
    changes retain their required decisions and confirmations.
 3. Apply the exact reviewed plan with `hv_apply`, supplying only its required
@@ -56,6 +63,11 @@ replace them with remembered permission tables or dashboard procedures.
 4. Verify with the appropriate Hypervibe status, health, logs, or CI commands.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
+
+For a dedicated Google Cloud project, set `hosting.gcpProjectId` on the target
+environment or pass `gcpProjectId` when `hv_migrate` proposes it. Use that
+environment name on setup and preparation calls. Other environments can keep
+their existing repository connection.
 
 Google Cloud uses OpenTofu as its only infrastructure engine. Select
 `hosting.provider: "cloudrun"`; Hypervibe chooses the engine automatically. Do

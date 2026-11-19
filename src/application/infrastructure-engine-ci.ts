@@ -43,6 +43,7 @@ export function previewCiReleaseAccess(gcpProjectId: string, repository: string,
 /** Plans or applies the exact reviewed CI identity configuration through OpenTofu. */
 export async function grantCiReleaseAccess(params: {
   projectId: string;
+  projectName?: string;
   adminToken: string;
   gcpProjectId: string;
   repository: string;
@@ -60,7 +61,7 @@ export async function grantCiReleaseAccess(params: {
   const projectNumber = body.name!.slice('projects/'.length);
   const configuration = buildCiReleaseConfiguration({ ...params, projectId: params.gcpProjectId, projectNumber });
   const result = await runGcpProjectSetup({
-    projectId: params.projectId, gcpProjectId: params.gcpProjectId,
+    projectId: params.projectId, projectName: params.projectName, gcpProjectId: params.gcpProjectId,
     auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: params.adminToken }, redact: [params.adminToken] },
     contribution: { id: 'ci-release', configuration }, confirm: params.confirm,
   });

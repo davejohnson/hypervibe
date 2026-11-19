@@ -94,7 +94,7 @@ export async function runEnvironmentTask(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,

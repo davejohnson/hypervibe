@@ -8,8 +8,8 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { OpenTofuEngine } from '../../../adapters/engine/opentofu/engine.js';
 import * as install from '../../../adapters/engine/opentofu/install.js';
-import { runCloudPrepare } from '../cloud-prepare.execute.js';
-import { getCloudPrepareProfile } from '../cloud-prepare.js';
+import { runCloudPrepare, verifyAndRecordBootstrapPreparation } from '../cloud-prepare.execute.js';
+import { getCloudPrepareProfile, getCloudPreparation, isCloudPreparedForRegion } from '../cloud-prepare.js';
 import { buildGcpBootstrapConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { engineStatePaths, ensureEngineStateDirectories } from '../../../adapters/engine/opentofu/workspace.js';
 import type { EngineConfiguration } from '../../ports/infrastructure-engine.port.js';
@@ -95,6 +95,26 @@ describe('legacy engine regional setup adoption', () => {
     expect(JSON.stringify(f.configurations[0])).toContain('prevent_destroy');
     expect(f.apply).not.toHaveBeenCalled();
   });
+  it('records the exact bootstrap region for a dedicated project alongside older preparation', async () => {
+    const f = fixture();
+    const projects = new ProjectRepository();
+    const legacyEvidence = { gcpProjectId: 'repository-default', version: 'legacy', preparedAt: '2025-01-01' };
+    projects.update(f.project.id, { policies: { cloudPreparation: { cloudrun: legacyEvidence } } });
+
+    const preview = await runCloudPrepare({ ...f.params, environmentProjectId: gcpProjectId });
+    expect(preview.success, String(preview.error)).toBe(true);
+    expect(Object.keys(f.configurations[0]!.imports ?? {})).toEqual([]);
+    await expect(verifyAndRecordBootstrapPreparation(f.project, 'test-token', gcpProjectId, deploy, runtime,
+      'us-east1', gcpProjectId)).rejects.toThrow(/repository identity/i);
+    expect(getCloudPreparation(projects.findById(f.project.id)!, 'cloudrun', gcpProjectId)).toBeNull();
+    await verifyAndRecordBootstrapPreparation(f.project, 'test-token', gcpProjectId, deploy, runtime, 'us-central1', gcpProjectId);
+
+    const updated = projects.findById(f.project.id)!;
+    expect(isCloudPreparedForRegion(updated, 'us-central1', gcpProjectId)).toBe(true);
+    expect(isCloudPreparedForRegion(updated, 'us-east1', gcpProjectId)).toBe(false);
+    expect(getCloudPreparation(updated, 'cloudrun')).toMatchObject(legacyEvidence);
+  });
+
   it('retains durable release evidence after more than 200 unrelated successful applies', async () => {
     const f = fixture();
     const runs = new RunRepository();
@@ -144,8 +164,12 @@ describe('legacy engine regional setup adoption', () => {
     const preview = await runCloudPrepare(f.params);
     expect(preview.success, String(preview.error)).toBe(true);
     expect(f.configurations[0]?.imports ?? {}).toEqual({});
-    const file = fs.readdirSync(paths.plans).find((name) => name.endsWith('.json'))!;
-    const saved = JSON.parse(fs.readFileSync(path.join(paths.plans, file), 'utf8')) as { manifest: { contributions: Record<string, EngineConfiguration> } };
+    const manifests = fs.readdirSync(paths.plans).filter(name => /^setup-[0-9a-f]{64}\.json$/.test(name));
+    expect(manifests).toHaveLength(1);
+    const saved = JSON.parse(fs.readFileSync(path.join(paths.plans, manifests[0]!), 'utf8')) as {
+      planId: string; manifest: { contributions: Record<string, EngineConfiguration> }
+    };
+    expect(saved.planId).toBe(preview.planId);
     const base = saved.manifest.contributions['prepare-base-us-central1']!;
     expect(base.resources).not.toHaveProperty('google_storage_bucket.build_source');
     expect(base.resources).not.toHaveProperty(repositoryAddress);

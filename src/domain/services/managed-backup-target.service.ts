@@ -95,7 +95,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
         primaryExternalId: components[0].externalId, providerScope: components[0].bindings.providerScope, resourceIdentity: {} });
       if (!bound.success) issues.push('The database binding lacks valid durable recovery scope; re-plan to review independently verifiable legacy scope. Malformed or unverifiable scope requires resolving the exact binding identity.');
       else try {
-        const adapter = await context.adapterFactory.getDatabaseOperations(spec.database.provider, context.project);
+        const adapter = await context.adapterFactory.getDatabaseOperations(spec.database.provider, context.project, { environment: context.environment, hosting: context.spec.hosting });
         if (!adapter.success || adapter.adapter?.name !== bound.data.provider) throw new Error('Database adapter differs.');
         const observed = await adapter.adapter.dailyBackups?.observe({ environment, component: components[0] });
         const source = recoverySourceIdentitySchema.safeParse(observed?.state === 'known' ? observed.source : undefined);
@@ -114,7 +114,7 @@ export async function resolveManagedBackupTarget(context: BackupPolicyContext): 
   const providers = destination ? managedBackupProviderNames({ hosting: spec.hosting, database, destination, objects }) : [];
   if (database) for (const provider of new Set([...objects.map(object => object.identity.provider), ...(destination ? [destination.identity.provider] : [])])) {
     try {
-      const selected = await context.adapterFactory.getStorageOperations(provider, context.project);
+      const selected = await context.adapterFactory.getStorageOperations(provider, context.project, { environment: context.environment, hosting: context.spec.hosting });
       if (!selected.success || selected.adapter?.capabilities?.recoveryCredentialScope !== 'bucket' || !selected.adapter.getCredentials) issues.push(`${provider} has no reviewed private-worker credential handoff for combined SQL/files recovery.`);
     } catch { issues.push(`${provider} private-worker credential handoff could not be resolved.`); }
   }

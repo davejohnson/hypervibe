@@ -138,7 +138,7 @@ function makeDependencies(
     getDefaultAdminAccessToken: vi.fn(async () => ADMIN_TOKEN),
     createClient: vi.fn(() => client),
     prepareCloud: vi.fn(async () => ({ success: true })),
-    setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', actions: [] })),
+    setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [] })),
     verifyPreparation: vi.fn(async () => {}),
     sleep: vi.fn(async (_milliseconds: number) => {}),
     verifyProvider: vi.fn(async (_provider, credentials) => ({
@@ -200,6 +200,58 @@ describe('runGcpBootstrap', () => {
     const result = await runGcpBootstrap({ project: seedProject(), confirm: true }, dependencies);
     expect(result.success).toBe(false);
     expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('previews and confirms a dedicated production project while preserving both repository staging connections', async () => {
+    const project = seedProject();
+    const connections = new ConnectionRepository();
+    const providers = ['cloudrun', 'cloudsql'];
+    const staging = connections.upsertVerifiedBatch(providers.map(provider => ({
+      provider, scope: SCOPE, credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'staging-project' }),
+    })));
+    const dependencies = makeDependencies(makeClient());
+    const selection = { project, environment: 'production', environmentProjectId: GCP_PROJECT_ID };
+    const preview = await runGcpBootstrap(selection, dependencies);
+    expect(preview).toMatchObject({ success: true, target: { projectId: GCP_PROJECT_ID } });
+
+    const confirm = { ...selection, gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT, confirm: true };
+    const result = await runGcpBootstrap(confirm, dependencies);
+    expect(result).toMatchObject({ success: true, partialProgress: { credential: 'created' } });
+    expect(providers.map(provider => connections.findByProviderAndScope(provider, SCOPE))).toEqual(staging);
+    for (const provider of providers) {
+      const dedicated = connections.findByProviderAndScope(provider, SCOPE + '#gcp:' + GCP_PROJECT_ID);
+      expect(dedicated?.status).toBe('verified');
+      expect(getSecretStore().decryptObject(dedicated!.credentialsEncrypted)).toMatchObject({ projectId: GCP_PROJECT_ID });
+    }
+    expect(dependencies.verifyPreparation).toHaveBeenCalledWith(project, ADMIN_TOKEN, GCP_PROJECT_ID,
+      SERVICE_ACCOUNT_EMAIL, RUNTIME_SERVICE_ACCOUNT_EMAIL, undefined, GCP_PROJECT_ID);
+    expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({
+      authenticationScope: SCOPE + '#gcp:' + GCP_PROJECT_ID,
+    }));
+    const retry = await runGcpBootstrap(confirm, dependencies);
+    expect(retry).toMatchObject({ success: true, partialProgress: { credential: 'reused' } });
+    expect(connections.findAll()).toHaveLength(4);
+  });
+
+  it('rejects a requested project that differs from the selected environment before accessing Google', async () => {
+    const dependencies = makeDependencies(makeClient());
+    const result = await runGcpBootstrap({ project: seedProject(), environment: 'production', environmentProjectId: 'production-project',
+      gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT, confirm: true }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+    expect(new ConnectionRepository().findAll()).toHaveLength(0);
+  });
+
+  it('retains the environment and region when ADC recovery directs the user to restart discovery', async () => {
+    const dependencies = makeDependencies(makeClient(), { getDefaultAdminAccessToken: vi.fn(async () => {
+      throw new Error('Could not load the default credentials');
+    }) });
+    const result = await runGcpBootstrap({ project: seedProject(), environment: 'production', region: 'europe-west1',
+      environmentProjectId: GCP_PROJECT_ID }, dependencies);
+    expect(result.recovery).toMatchObject({
+      retryCall: { environment: 'production', gcpProjectId: GCP_PROJECT_ID, region: 'europe-west1' },
+      retryCommand: expect.stringContaining('environment="production"'),
+    });
   });
 
   it.each(['matching', 'conflicting', 'global'] as const)(
@@ -598,9 +650,11 @@ describe('runGcpBootstrap', () => {
   it('verifies exact identities after saved engine setup and never invokes bootstrap infrastructure writes', async () => {
     const client = makeClient();
     const dependencies = makeDependencies(client);
-    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID,
-      billingAccountName: BILLING_ACCOUNT, confirm: true }, dependencies);
-    expect(result.success).toBe(true);
+    const target = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    for (const confirm of [false, true]) {
+      const result = await runGcpBootstrap({ ...target, confirm }, dependencies);
+      expect(result).toMatchObject({ success: true, planId: 'saved-setup', htmlPath: '/reports/saved-setup.html' });
+    }
     expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({ confirm: true,
       contribution: expect.objectContaining({ id: 'bootstrap' }) }));
     expect(client.enableService).not.toHaveBeenCalled();

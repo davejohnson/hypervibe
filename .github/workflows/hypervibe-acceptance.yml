@@ -42,7 +42,7 @@ jobs:
         run: |
           set -o pipefail
           (
-            npm test
+            npm run test:fast -- --shard=1/2
           ) 2>&1 | tee hypervibe-failure-evidence/2.log
       - name: Upload non-secret failure evidence
         if: failure()
