@@ -240,9 +240,14 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     The apps subnet is a /23 delegated to `Microsoft.App/environments`.
   - **The one-address window.** Azure has no way to run SQL except a connection to
     the server. To create or drop a login, `withAzureSetupAccess` turns public
-    access on, reads the address Azure reports refusing (this computer's), adds
-    the single-address rule `hypervibe-setup`, runs the SQL, then deletes the rule
-    and turns public access off. It closes whatever happened in between, and a
+    access on, learns this computer's address, allows it alone in the rule
+    `hypervibe-setup`, runs the SQL, then deletes the rule and turns public
+    access off. With public access on and no rule, Azure drops connections
+    without an answer (observed live 2026-11-18), so the rule first holds an
+    address nobody can use (`192.0.2.1`) in case Azure then names the address it
+    refuses; if it still does not, Hypervibe asks `checkip.amazonaws.com`. That
+    request carries nothing but itself, and a wrong answer cannot connect. The
+    step's result says which source was used. It closes whatever happened in between, and a
     failure to close is reported as an error; the next plan also shows public
     access as a change to turn off. The plan step says it does this. It happens
     when an environment's database is first created, when a worker's counting
@@ -255,8 +260,11 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     closes before the apps move) and get new addresses. Connections made before
     2026-11-17 never turned on `Microsoft.Network`; the plan says to run
     `hv_connections provider="azure" action="connect"` once.
-  - **Not verified live:** switching public access on a running server and how
-    long it takes, the wording of the refusal Hypervibe reads its address from,
+  - **Verified live 2026-11-18 (West US 2):** the shared network, app environment,
+    registry and server are created, and public access can be switched on a
+    running server.
+  - **Not verified live:** whether Azure names the refused address once a rule
+    exists, the address-service fallback, a login created through the window,
     the private endpoint and DNS resolution from the apps, the KEDA scale rule
     reaching the private address, and moving an older project.
 - **On-demand worker.** KEDA's PostgreSQL scaler counts `onDemand.pendingWorkQuery`
