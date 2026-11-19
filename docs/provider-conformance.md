@@ -58,17 +58,22 @@ dedicated account, and after teardown the account must match that record:
 - **Azure:** every resource in the project's resource group, whatever its tags.
 - **AWS:** in the connection's region, networks, their endpoints and NAT gateways,
   database clusters, instances and kept snapshots, container clusters, image
-  repositories and buckets. A network cannot be deleted while anything is attached,
-  so its absence also covers load balancers, tasks and network interfaces. Not
-  covered: log groups, Parameter Store entries, Secrets Manager secrets waiting out
-  their recovery window, and IAM roles (Hypervibe's own teardown checks the roles).
+  repositories and buckets; schedules, state machines and event rules (scheduled
+  jobs and the on-demand worker's waker); Parameter Store entries and log groups.
+  The fixture uses the account's default network, which is always there, so the
+  check also lists network interfaces (held by any load balancer, container or
+  database still attached) and security groups. Not covered: Secrets Manager secrets (the
+  deploy role may not list them) and IAM roles (Hypervibe's own teardown checks the
+  roles). The checks beyond the first sentence were
+  added after the passing run of 2026-11-19; a read with them that day, after eight
+  runs, found only the default network, its default security group and one AWS-managed rule.
 
 This needs an account or subscription that holds nothing else that changes during
 the run; another project created there mid-run reads as a leftover. Neither profile
 proves moving an older project to the current layout, a second environment sharing
 the project's pieces, CI releases, or that an on-demand worker starts only when work
 is queued and stops afterwards: the fixture sees that queued work gets done, not what
-started the worker. The AWS inventory does not yet list schedules.
+started the worker.
 
 Legacy GCP adapter lifecycle registrations are planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
