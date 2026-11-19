@@ -1,3 +1,4 @@
+import type { ReleaseArtifact, ReleaseRun, RollbackHistoryReader, WorkflowAttemptJob, WorkflowHistory } from '../../../domain/ports/github-workflow-history.port.js';
 import { localConnectionRoleInputs } from '../../../domain/services/connection-roles.js';
 import { z } from 'zod';
 import type { GitHubPullRequestSummary, GitHubWorkflowPublicationPort } from '../../../domain/ports/github-workflow-publication.port.js';
@@ -91,7 +92,7 @@ function isGitHubNotFound(error: unknown): error is GitHubApiError {
 
 const GITHUB_REQUEST_TIMEOUT_MS = 60_000;
 
-export class GitHubAdapter implements GitHubWorkflowPublicationPort {
+export class GitHubAdapter implements GitHubWorkflowPublicationPort, RollbackHistoryReader {
   readonly name = 'github';
   private credentials: GitHubCredentials | null = null;
 
@@ -939,71 +940,21 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort {
     repo: string,
     workflowId: string | number,
     options?: { status?: string; per_page?: number; page?: number }
-  ): Promise<{
-    total_count: number;
-    workflow_runs: Array<{
-      id: number;
-      name: string;
-      display_title?: string;
-      run_attempt?: number;
-      run_started_at?: string;
-      status: string;
-      conclusion: string | null;
-      created_at: string;
-      updated_at: string;
-      head_sha: string;
-      head_branch: string;
-      event: string;
-      html_url: string;
-    }>;
-  }> {
+  ): Promise<WorkflowHistory> {
     const params = new URLSearchParams();
     if (options?.status) params.set('status', options.status);
     if (options?.per_page) params.set('per_page', String(options.per_page));
     if (options?.page) params.set('page', String(options.page));
     const query = params.toString() ? `?${params.toString()}` : '';
 
-    return await this.request<{
-      total_count: number;
-      workflow_runs: Array<{
-        id: number;
-        name: string;
-        display_title?: string;
-        run_attempt?: number;
-        run_started_at?: string;
-        status: string;
-        conclusion: string | null;
-        created_at: string;
-        updated_at: string;
-        head_sha: string;
-        head_branch: string;
-        event: string;
-        html_url: string;
-      }>;
-    }>('GET', `/repos/${owner}/${repo}/actions/workflows/${workflowRouteId(workflowId)}/runs${query}`);
+    return this.request<WorkflowHistory>('GET', `/repos/${owner}/${repo}/actions/workflows/${workflowRouteId(workflowId)}/runs${query}`);
   }
 
   /**
    * List artifact metadata. Release authorization additionally validates the
    * exact run's artifact contents; names alone do not prove a released build.
    */
-  async listArtifacts(owner: string, repo: string, perPage = 100): Promise<{
-    total_count: number;
-    artifacts: Array<{
-      id: number;
-      name: string;
-      expired: boolean;
-      created_at: string;
-      updated_at: string;
-      workflow_run: {
-        id: number;
-        repository_id: number;
-        head_repository_id: number;
-        head_branch: string;
-        head_sha: string;
-      } | null;
-    }>;
-  }> {
+  async listArtifacts(owner: string, repo: string, perPage = 100): Promise<{ total_count: number; artifacts: ReleaseArtifact[] }> {
     return this.request(
       'GET',
       `/repos/${owner}/${repo}/actions/artifacts?per_page=${Math.max(1, Math.min(perPage, 100))}`
@@ -1015,47 +966,20 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort {
    * run id lets operational commands prove provenance without trusting a
    * repository-wide artifact name match.
    */
-  async listWorkflowRunArtifacts(owner: string, repo: string, runId: string | number): Promise<{
-    total_count: number;
-    artifacts: Array<{
-      id: number;
-      name: string;
-      expired: boolean;
-      created_at: string;
-      updated_at: string;
-      workflow_run: {
-        id: number;
-        repository_id: number;
-        head_repository_id: number;
-        head_branch: string;
-        head_sha: string;
-      } | null;
-    }>;
-  }> {
+  async listWorkflowRunArtifacts(owner: string, repo: string, runId: string | number): Promise<{ total_count: number; artifacts: ReleaseArtifact[] }> {
     return this.request(
       'GET',
       `/repos/${owner}/${repo}/actions/runs/${runId}/artifacts?per_page=100`
     );
   }
 
-  async getWorkflowRun(owner: string, repo: string, runId: number): Promise<{
-    id: number; path: string; status: string; conclusion: string | null;
-    head_sha: string; head_branch: string; event: string; run_attempt: number; run_started_at?: string;
-    repository: { full_name: string; id?: number }; head_repository: { full_name: string; id?: number };
-  }> {
+  async getWorkflowRun(owner: string, repo: string, runId: number): Promise<ReleaseRun> {
     if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid workflow run id.');
     return this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`);
   }
 
   /** Exact-attempt endpoint; callers must reject incomplete or unsuccessful evidence. */
-  async listWorkflowRunAttemptJobs(owner: string, repo: string, runId: number, attempt: number): Promise<{
-    total_count: number;
-    jobs: Array<{
-      id: number; run_id: number; run_attempt?: number; head_sha: string;
-      name: string; status: string; conclusion: string | null;
-      started_at: string; completed_at: string | null;
-    }>;
-  }> {
+  async listWorkflowRunAttemptJobs(owner: string, repo: string, runId: number, attempt: number): Promise<{ total_count: number; jobs: WorkflowAttemptJob[] }> {
     if (!Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(attempt) || attempt <= 0) {
       throw new Error('Invalid workflow run id or attempt.');
     }
