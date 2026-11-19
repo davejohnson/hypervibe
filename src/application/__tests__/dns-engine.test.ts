@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
-import { executeDnsEngineSegment, executeDnsOwnershipReconciliation, hasOwnedDnsRecords, prepareDnsEnginePlan, readDnsOwnedRecords, type DesiredDnsRecord, type DnsEngineDependencies, type DnsPreparedPlan } from '../dns-engine.js';
+import { executeDnsEngineSegment, executeDnsOwnershipReconciliation, gcpDomainDnsOwner, hasOwnedDnsRecords, prepareDnsEnginePlan, readDnsOwnedRecords, type DesiredDnsRecord, type DnsEngineDependencies, type DnsPreparedPlan } from '../dns-engine.js';
 import type { DnsObservation, DnsObservedRecord, DnsRecordType, DnsZoneIdentity, DnsZoneObservation } from '../../domain/ports/dns.port.js';
 import type { EngineActionSegment, EngineConfiguration, EngineSegmentResult } from '../../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../../domain/ports/infrastructure-engine.port.js';
@@ -98,6 +98,11 @@ describe('DNS shared application authority', () => {
     const address = engineSegmentOf(primary.actions[0])!.addresses[0];
     f.engineState(address, gcpNativeId); f.effects(() => f.observe(desired.values));
     await f.execute(primary);
+    // Changing the primary hostname must not let its plan take over the old hostname's record contribution.
+    expect(gcpDomainDnsOwner(f.fresh(), 'other.example.com', 'other.example.com')).toMatch(/^gcp-domain-[a-f0-9]{20}$/);
+    const beforeDns = { ...f.environment, platformBindings: { engine: { domainClaims: { [name]: { zone: f.identity } } } } };
+    expect(gcpDomainDnsOwner(beforeDns, name, 'other.example.com')).toBe('gcp-domain');
+    expect(gcpDomainDnsOwner(beforeDns, 'other.example.com', 'other.example.com')).not.toBe('gcp-domain');
     expect(hasOwnedDnsRecords(f.fresh(), 'gcp-domain')).toBe(true);
     expect(hasOwnedDnsRecords(f.fresh(), owner)).toBe(false);
     expect((await f.prepare([desired], owner)).blocked).toBeDefined();

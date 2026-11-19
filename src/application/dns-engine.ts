@@ -86,7 +86,15 @@ const domainOwner = (domain: string) => `gcp-domain-${hash(normalized(domain)).s
 export function gcpDomainDnsOwner(environment: Environment, domain: string, primary?: string, savedOwner?: string): string {
   const extra = domainOwner(domain);
   if (savedOwner === extra || binding(environment, extra)) return extra;
-  if (savedOwner === 'gcp-domain' || getDnsOwnedDomain(environment, 'gcp-domain') === domain || normalized(primary ?? '') === domain) return 'gcp-domain';
+  const legacy = getDnsOwnedDomain(environment, 'gcp-domain');
+  const claims = (environment.platformBindings.engine as { domainClaims?: Record<string, { owner?: string }>; domains?: string[] } | undefined);
+  // Older mappings had one implicit primary owner, even before the first DNS receipt was written.
+  const reserved = new Set([...(legacy ? [legacy] : []),
+    ...Object.entries(claims?.domainClaims ?? {}).filter(([, claim]) => !claim.owner || claim.owner === 'gcp-domain').map(([hostname]) => hostname),
+    ...(claims?.domains ?? []).filter(hostname => !claims?.domainClaims?.[hostname] && !binding(environment, domainOwner(hostname))),
+  ]);
+  if (savedOwner === 'gcp-domain' || reserved.has(domain)) return 'gcp-domain';
+  if (!reserved.size && normalized(primary ?? '') === domain) return 'gcp-domain';
   return extra;
 }
 function binding(environment: Environment, owner?: string): DnsBinding | undefined {

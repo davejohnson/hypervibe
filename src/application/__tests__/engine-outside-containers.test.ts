@@ -152,3 +152,21 @@ it('plans separate Cloud Run claims and keeps the exact DNS selection for each h
     'app.other.org': { owner: expect.stringMatching(/^gcp-domain-[a-f0-9]+$/), connectionScope: 'dns/other-zone', zone: { zoneId: 'other-zone' } },
   } } });
 });
+
+it.each(['example.com', 'other.org'])('keeps an existing primary DNS owner when a new primary in %s is selected', async zoneName => {
+  const f = fixture();
+  const old = 'a.example.com'; const next = `b.${zoneName}`;
+  const selection = (name: string) => ({ provider: 'gcp', zone: { id: name.split('.')[0]!, name, projectId: 'dns-project' } });
+  f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { engine: { kind: 'opentofu', domains: [old], domainClaims: {
+    [old]: { zone: { provider: 'gcp', zoneName: 'example.com', zoneId: 'example', scope: { projectId: 'dns-project' } } },
+  } } });
+  const spec = projectSpecSchema.parse({ ...f.spec, secrets: {}, environments: { staging: { ...f.spec.environments.staging,
+    domain: next, dns: selection(zoneName), domains: [{ domain: old, dns: selection('example.com') }] } } });
+  vi.spyOn(domainPlanning, 'planDomain').mockResolvedValue({ before: [], after: [], ownershipPresent: true });
+  const plan = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 2, environmentName: 'staging' });
+  if ('blocked' in plan) throw new Error(plan.blocked.join(' '));
+  expect(f.ctx.repos.runs.findById(plan.planRunId)?.plan).toMatchObject({ engine: { domainClaims: {
+    [old]: { owner: 'gcp-domain', zone: { zoneName: 'example.com' } }, [next]: { owner: expect.stringMatching(/^gcp-domain-[a-f0-9]+$/), zone: { zoneName } },
+  } } });
+  expect(f.configurations.at(-1)!.resources['google_cloud_run_domain_mapping.domain_a_example_com']?.name).toBe(old);
+});
