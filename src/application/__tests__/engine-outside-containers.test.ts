@@ -138,17 +138,17 @@ it('plans separate Cloud Run claims and keeps the exact DNS selection for each h
   const f = fixture();
   const dns = (name: string, id: string) => ({ provider: 'gcp', connectionScope: `dns/${id}`, zone: { id, name, projectId: 'dns-project' } });
   const desired = projectSpecSchema.parse({ ...f.spec, secrets: {}, environments: { staging: { ...f.spec.environments.staging,
-    domain: 'www.example.com', dns: dns('example.com', 'example-zone'),
-    domains: [{ domain: 'app.other.org', dns: dns('other.org', 'other-zone') }] } } });
+    domain: 'api-test.example.com', dns: dns('example.com', 'example-zone'),
+    domains: [{ domain: 'api.test-example.com', dns: dns('test-example.com', 'test-zone') }, { domain: 'app.other.org', dns: dns('other.org', 'other-zone') }] } } });
   vi.spyOn(domainPlanning, 'planDomain').mockResolvedValue({ before: [], after: [], mappingPresent: false, ownershipPresent: true });
   const plan = await planInfrastructureEngine(f.ctx, { project: f.project, spec: desired, specRevision: 1, environmentName: 'staging' });
   if ('blocked' in plan) throw new Error(plan.blocked.join(' '));
   const config = f.configurations.at(-1)!;
   const mappings = (config.files['cloudrun.tf.json'] as any).resource.google_cloud_run_domain_mapping;
-  expect(Object.values(mappings).map((row: any) => row.name).sort()).toEqual(['app.other.org', 'www.example.com']);
+  expect(Object.values(mappings).map((row: any) => row.name).sort()).toEqual(['api-test.example.com', 'api.test-example.com', 'app.other.org']);
   expect(new Set(Object.values(mappings).map((row: any) => row.spec[0].route_name)).size).toBe(1);
   expect(f.ctx.repos.runs.findById(plan.planRunId)?.plan).toMatchObject({ engine: { domainClaims: {
-    'www.example.com': { owner: 'gcp-domain', connectionScope: 'dns/example-zone', zone: { zoneId: 'example-zone' } },
+    'api-test.example.com': { owner: 'gcp-domain', connectionScope: 'dns/example-zone', zone: { zoneId: 'example-zone' } },
     'app.other.org': { owner: expect.stringMatching(/^gcp-domain-[a-f0-9]+$/), connectionScope: 'dns/other-zone', zone: { zoneId: 'other-zone' } },
   } } });
 });

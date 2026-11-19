@@ -866,12 +866,6 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
 
   // DNS and hosting use separate saved engine stages: proof, claim, traffic, readiness.
   const desiredDomains = environmentDomains(environmentSpec!);
-  const addressNames = new Set<string>();
-  for (const domain of new Set([...desiredDomains.map(item => item.domain), ...(engineBinding.domains ?? []), ...Object.keys(engineBinding.domainClaims ?? {})])) {
-    const address = domainEngineKey(domain);
-    if (addressNames.has(address)) return { blocked: ['Two Cloud Run hostnames share a legacy engine address. Preserve the current claims until the addresses are migrated.'] };
-    addressNames.add(address);
-  }
   const domainService = desiredDomains.length ? domainServiceFor(environmentSpec!) : undefined;
   const domainContext = { adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region,
     ...(domainService ? { serviceName: serviceResourceName(context, environmentName, domainService) } : {}) };
@@ -879,6 +873,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const domainClaims = { ...engineBinding.domainClaims };
   const ownerFor = (domain: string) => gcpDomainDnsOwner(context.environment, domain, environmentSpec!.domain,
     domainClaims[domain] && (domainClaims[domain].owner ?? 'gcp-domain'));
+  const addressNames = new Set<string>();
+  for (const domain of new Set([...desiredDomains.map(item => item.domain), ...(engineBinding.domains ?? []), ...Object.keys(engineBinding.domainClaims ?? {})])) {
+    const address = domainEngineKey(domain, ownerFor(domain) !== 'gcp-domain');
+    if (addressNames.has(address)) return { blocked: ['Two Cloud Run hostnames share a legacy engine address. Preserve the current claims until the addresses are migrated.'] };
+    addressNames.add(address);
+  }
   const proofOwners = new Map<string, string>();
   for (const { domain, dns } of desiredDomains) {
     if (!dns || !domainService) return { blocked: [`Select the DNS provider and exact zone for ${domain} and one public web service.`] };
@@ -889,7 +889,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     domainPlans.set(domain, actions);
     if (actions.mappingPresent) {
       const observed = await observeDomainMapping(domainContext, domain);
-      const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed);
+      const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed, owner !== 'gcp-domain');
       if (!ownership.ready) return { blocked: [ownership.reason ?? 'The live domain mapping is not owned by the saved engine state.'] };
     }
     if (!actions.ownershipPresent && actions.verificationDomain) {
@@ -983,6 +983,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     retiredQueues: (engineBinding.queues ?? []).filter((name) => !environmentSpec!.queues?.[name]),
     ...(domainService ? { domains: desiredDomains.map(({ domain }) => ({ domain, service: domainService })) } : {}),
     ...(retiredDomains.length ? { retiredDomains } : {}),
+    extraDomains: [...desiredDomains.map(item => item.domain), ...retiredDomains].filter(domain => ownerFor(domain) !== 'gcp-domain'),
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
@@ -1154,7 +1155,11 @@ export async function verifyGcpDnsSource(ctx: CommandContext, project: Project, 
   if (observed.state === 'unknown') return fail(observed.reason);
   const fingerprint = observed.state === 'present' ? observed.sourceFingerprint : 'absent';
   if (fingerprint !== source.sourceFingerprint) return fail('The Google domain mapping changed after DNS planning. Run hv_plan again.');
-  if (observed.state === 'present') return verifyGcpDomainEngineOwnership(context, source.domain, observed);
+  if (observed.state === 'present') {
+    const saved = (context.environment.platformBindings.engine as EngineBinding | undefined)?.domainClaims?.[source.domain];
+    const owner = gcpDomainDnsOwner(context.environment, source.domain, environmentSpec.domain, saved && (saved.owner ?? 'gcp-domain'));
+    return verifyGcpDomainEngineOwnership(context, source.domain, observed, owner !== 'gcp-domain');
+  }
   return { ready: true };
 }
 
@@ -1318,7 +1323,8 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         if (observed.state === 'unknown') return stop(observed.reason);
         if (member.type === 'create' && observed.state !== 'absent') return stop('A domain mapping appeared after review. No creation or adoption is authorized.');
         if (observed.state === 'present') {
-          const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed);
+          const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed,
+            (reviewed.domainClaims?.[domain]?.owner ?? 'gcp-domain') !== 'gcp-domain');
           if (!ownership.ready) return stop(ownership.reason ?? 'The exact mapping is not owned by this engine state.');
         }
         if (member.type === 'destroy') {
