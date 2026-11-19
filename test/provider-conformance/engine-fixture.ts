@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { DescribeNatGatewaysCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client } from '@aws-sdk/client-ec2';
+import { DescribeNatGatewaysCommand, DescribeNetworkInterfacesCommand, DescribeSecurityGroupsCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { DescribeRepositoriesCommand, ECRClient } from '@aws-sdk/client-ecr';
-import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { EventBridgeClient, ListRulesCommand } from '@aws-sdk/client-eventbridge';
+import { ListSchedulesCommand, SchedulerClient } from '@aws-sdk/client-scheduler';
+import { ListStateMachinesCommand, SFNClient } from '@aws-sdk/client-sfn';
+import { DescribeParametersCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { CloudWatchLogsClient, DescribeLogGroupsCommand, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { DescribeExpressGatewayServiceCommand, DescribeServiceDeploymentsCommand, DescribeServicesCommand, DescribeTasksCommand, ECSClient, ListClustersCommand, ListServicesCommand, ListTasksCommand } from '@aws-sdk/client-ecs';
 import { DescribeDBClusterSnapshotsCommand, DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient } from '@aws-sdk/client-rds';
 import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3';
@@ -126,15 +130,18 @@ async function pages<T>(read: (token?: string) => Promise<{ items: T[]; next?: s
 }
 
 /**
- * What costs money or holds data in the fixture's AWS region: networks, their
+ * What costs money, holds data or keeps running in the fixture's AWS region: networks, their
  * endpoints and NAT gateways, database clusters, instances and kept snapshots,
- * container clusters, image repositories and buckets. A network cannot be
+ * container clusters, image repositories and buckets, plus schedules, state machines,
+ * event rules, parameters and log groups. A network cannot be
  * deleted while anything is attached to it, so a missing network also covers
  * load balancers, tasks and network interfaces. SDK errors throw.
  */
 export async function readAwsInventory(access: AwsAccess): Promise<NativeFixtureResource[]> {
   const config = { region: access.region, credentials: access.credentials };
   const ec2 = new EC2Client(config); const rds = new RDSClient(config); const ecs = new ECSClient(config); const ecr = new ECRClient(config); const s3 = new S3Client(config);
+  const scheduler = new SchedulerClient(config); const sfn = new SFNClient(config); const events = new EventBridgeClient(config);
+  const logs = new CloudWatchLogsClient(config); const ssm = new SSMClient(config);
   const item = (type: string, id: string | undefined): NativeFixtureResource => {
     if (!id) throw new Error(`AWS listed a ${type} without an id.`);
     return { provider: 'aws', type, id, address: `${type}/${id}` };
@@ -155,8 +162,19 @@ export async function readAwsInventory(access: AwsAccess): Promise<NativeFixture
       ...(await pages(async (nextToken) => { const r = await ecr.send(new DescribeRepositoriesCommand({ nextToken })); return { items: r.repositories ?? [], next: r.nextToken }; })).map((r) => item('ecr-repository', r.repositoryArn)),
       ...(await pages(async (ContinuationToken) => { const r = await s3.send(new ListBucketsCommand({ ContinuationToken, BucketRegion: access.region })); return { items: r.Buckets ?? [], next: r.ContinuationToken }; }))
         .map((b) => item('s3-bucket', b.Name)),
+      // The fixture lives in the account's default network, which is always there. Anything still attached to it
+      // (a load balancer, a container, a database) holds a network interface, and its firewall rules a security group.
+      ...(await pages(async (NextToken) => { const r = await ec2.send(new DescribeNetworkInterfacesCommand({ NextToken })); return { items: r.NetworkInterfaces ?? [], next: r.NextToken }; })).map((entry) => item('network-interface', entry.NetworkInterfaceId)),
+      ...(await pages(async (NextToken) => { const r = await ec2.send(new DescribeSecurityGroupsCommand({ NextToken })); return { items: r.SecurityGroups ?? [], next: r.NextToken }; })).map((entry) => item('security-group', entry.GroupId)),
+      // What runs scheduled jobs and wakes on-demand workers, and what holds settings and logs.
+      ...(await pages(async (NextToken) => { const r = await scheduler.send(new ListSchedulesCommand({ NextToken })); return { items: r.Schedules ?? [], next: r.NextToken }; })).map((entry) => item('schedule', entry.Arn)),
+      ...(await pages(async (nextToken) => { const r = await sfn.send(new ListStateMachinesCommand({ nextToken })); return { items: r.stateMachines ?? [], next: r.nextToken }; })).map((entry) => item('state-machine', entry.stateMachineArn)),
+      ...(await pages(async (NextToken) => { const r = await events.send(new ListRulesCommand({ NextToken })); return { items: r.Rules ?? [], next: r.NextToken }; })).map((entry) => item('event-rule', entry.Arn)),
+      // Secrets are not listed: the deploy role may not list them, by design.
+      ...(await pages(async (NextToken) => { const r = await ssm.send(new DescribeParametersCommand({ NextToken })); return { items: r.Parameters ?? [], next: r.NextToken }; })).map((entry) => item('parameter', entry.Name)),
+      ...(await pages(async (nextToken) => { const r = await logs.send(new DescribeLogGroupsCommand({ nextToken })); return { items: r.logGroups ?? [], next: r.nextToken }; })).map((entry) => item('log-group', entry.logGroupName)),
     ];
-  } finally { for (const client of [ec2, rds, ecs, ecr, s3]) client.destroy(); }
+  } finally { for (const client of [ec2, rds, ecs, ecr, s3, scheduler, sfn, events, logs, ssm]) client.destroy(); }
 }
 
 /** The fixture's cluster address, and whether any of its instances asks for a public address. */
