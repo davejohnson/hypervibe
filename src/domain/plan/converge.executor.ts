@@ -19,6 +19,7 @@ import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
 import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
 import { managedBackupFilePaths, parseBackupRetirementFiles } from '../services/backup-workflow.service.js';
+import { additionalGcpDomainDnsOwner } from '../services/domain-scope.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -831,7 +832,12 @@ function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
   }
   if (!domains.size) return undefined;
   const claims = z.object({ domainClaims: z.record(z.string(), z.object({ zone: dnsPlanDescriptorSchema.shape.zone,
-    connectionScope: z.string().min(1).optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+    connectionScope: z.string().min(1).optional(), owner: z.string().optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+  for (const [domain, claim] of Object.entries(claims)) {
+    if (claim.owner !== undefined && claim.owner !== 'gcp-domain' && claim.owner !== additionalGcpDomainDnsOwner(domain)) {
+      throw new Error('The DNS owner does not belong to the saved hostname.');
+    }
+  }
   return [...new Set([...domains].map(domain => {
     const claim = claims[domain];
     if (!claim) throw new Error('The exact domain claim has no saved native DNS zone.');

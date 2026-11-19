@@ -13,6 +13,7 @@ import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { resolveDnsPolicy } from '../domain/services/dns-policy.service.js';
+import { additionalGcpDomainDnsOwner } from '../domain/services/domain-scope.js';
 import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
@@ -80,11 +81,10 @@ function sameZone(left: DnsZoneIdentity, right: DnsZoneIdentity): boolean {
 }
 const extraOwner = (owner?: string) => Boolean(owner && /^gcp-domain-[a-f0-9]{20}$/.test(owner));
 const bindingKey = (owner?: string) => extraOwner(owner) ? `dnsEngine_${owner}` : 'dnsEngine';
-const domainOwner = (domain: string) => `gcp-domain-${hash(normalized(domain)).slice(0, 20)}`;
 
 /** The original primary DNS state also holds email and other integrations. Extra hosts have independent state and recovery. */
 export function gcpDomainDnsOwner(environment: Environment, domain: string, primary?: string, savedOwner?: string): string {
-  const extra = domainOwner(domain);
+  const extra = additionalGcpDomainDnsOwner(domain);
   if (savedOwner === extra || binding(environment, extra)) return extra;
   const legacy = getDnsOwnedDomain(environment, 'gcp-domain');
   const claims = (environment.platformBindings.engine as { domainClaims?: Record<string, { owner?: string }>; domains?: string[] } | undefined);
