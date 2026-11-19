@@ -53,6 +53,29 @@ export function engineFixtureResponseProblem(status: number, value: unknown, rev
   return undefined;
 }
 
+/** A second environment for the same project: a web service and its own database, nothing else. */
+export function engineFixtureSiblingEnvironment(cloud: EngineFixtureCloud, region?: string): Record<string, unknown> {
+  return {
+    hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
+    database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
+    services: { web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true } },
+    email: { enabled: false }, envVars: { CONFORMANCE_APP_REVISION: 'sibling' }, deploy: { strategy: 'manual' },
+  };
+}
+
+/**
+ * The second environment must use a database, and it must not be the first one's: the first environment's
+ * worker writes there every 15 seconds, so seeing a recent worker write here means the two share a database.
+ */
+export function engineFixtureSiblingResponseProblem(status: number, value: unknown): string | undefined {
+  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean } | null;
+  if (status !== 200 || body?.service !== 'hypervibe-provider-conformance') return `the second environment's web service did not answer as the fixture (HTTP ${status})`;
+  if (body.revision !== 'sibling') return "the second environment's web service is not serving its own settings";
+  if (body.database !== true) return "the second environment's web service could not use its database";
+  if (body.worker !== false) return "the second environment sees the first environment's worker writes, so they share a database";
+  return undefined;
+}
+
 /**
  * What a connection attempt with made-up credentials says about exposure. A server
  * that gets as far as checking the password is open to this computer; anything
