@@ -6,7 +6,9 @@ export function gcpConnectionScope(repository: string, gcpProjectId?: string): s
 export const GCP_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 
 /** Verify both the connection's target and the native identity carried by a service-account key. */
-export function gcpCredentialsMatchProject(credentials: Record<string, unknown>, projectId: string): boolean {
+export function gcpCredentialsMatchProject(credentials: Record<string, unknown>, projectId: string,
+  options: { allowLegacyKey?: boolean } = {},
+): boolean {
   if (credentials?.projectId !== projectId || !GCP_PROJECT_ID_PATTERN.test(projectId)) return false;
   const emailPattern = new RegExp(`^[a-z][a-z0-9-]{4,28}[a-z0-9]@${projectId}\\.iam\\.gserviceaccount\\.com$`);
   if (credentials.project_id !== undefined && credentials.project_id !== projectId) return false;
@@ -15,7 +17,14 @@ export function gcpCredentialsMatchProject(credentials: Record<string, unknown>,
   if (typeof credentials.credentials !== 'string') return false;
   try {
     const account = JSON.parse(credentials.credentials);
-    return account?.type === 'service_account' && account.project_id === projectId
+    if (!account || typeof account !== 'object' || Array.isArray(account)) return false;
+    if (account.project_id !== undefined && account.project_id !== projectId) return false;
+    if (options.allowLegacyKey) {
+      // Older repository connections may omit the native project or use another email format.
+      return typeof account.client_email !== 'string' || !account.client_email.endsWith('.iam.gserviceaccount.com')
+        || emailPattern.test(account.client_email);
+    }
+    return account.type === 'service_account' && account.project_id === projectId
       && typeof account.client_email === 'string' && emailPattern.test(account.client_email);
   } catch {
     return false;

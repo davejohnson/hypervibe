@@ -322,7 +322,7 @@ export class AdapterFactory {
     // Decrypt credentials and create adapter
     try {
       const credentials = this.secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
-      if (target && !gcpCredentialsMatchProject(credentials, target.projectId)) {
+      if (target && !gcpCredentialsMatchProject(credentials, target.projectId, { allowLegacyKey: !target.scope })) {
         return { success: false, error: `The selected ${providerName} connection does not identify Google Cloud project ${target.projectId}.` };
       }
       const adapter = await providerRegistry.createAdapter<T>(providerName, credentials);

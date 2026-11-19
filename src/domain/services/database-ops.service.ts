@@ -108,11 +108,15 @@ export async function resolveEnvironmentDatabaseUrl(
   const componentBindings = component?.bindings as Record<string, unknown> | undefined;
   const componentProvider = typeof componentBindings?.provider === 'string' ? componentBindings.provider : undefined;
   if (component && componentProvider && componentProvider !== 'railway') {
+    const selectedProject = componentProvider === 'cloudsql'
+      ? new SpecStore().getForInspection(project)?.spec.environments[env.name]?.hosting.gcpProjectId : undefined;
+    const scope = componentBindings?.providerScope as { projectId?: string } | undefined;
+    if (selectedProject && scope?.projectId !== selectedProject) return null;
     const adapterResult = await adapterFactory.getDatabaseOperations(componentProvider, project, { environment: env });
     if (!adapterResult.success && componentProvider === 'cloudsql') {
       // A cached URL cannot establish access to a different or unverified Google project.
       const bound = env.platformBindings.provider === 'cloudrun' && env.platformBindings.projectId;
-      if (bound || new SpecStore().getForInspection(project)?.spec.environments[env.name]?.hosting.gcpProjectId) return null;
+      if (bound || selectedProject) return null;
     }
     if (adapterResult.success && adapterResult.adapter) {
       const adapterUrl = await adapterResult.adapter.getConnectionUrl(component);
