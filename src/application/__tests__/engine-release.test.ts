@@ -5,6 +5,13 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import * as backend from '../../adapters/providers/aws/tofu/aws-engine.backend.js';
+import * as setup from '../../adapters/providers/aws/aws-setup.client.js';
+import * as shared from '../engine-shared.js';
+import * as awsEngine from '../infrastructure-engine-aws.js';
+import * as awsRelease from '../../adapters/providers/aws/aws-release.client.js';
+import { buildAwsCommitImage, releaseAwsEngineServices } from '../infrastructure-engine-aws-release.js';
 import { createCommandContext } from '../context.js';
 import { packageLocalCommit, runLocalCommitRelease, selectReleaseWorkloads, type LocalCommitReleaseTarget, type LocalCommitSource } from '../engine-release.js';
 
@@ -39,7 +46,7 @@ function fixture(overrides: Partial<LocalCommitReleaseTarget> = {}) {
     ...overrides,
   };
   const run = () => runLocalCommitRelease({ project, spec, environmentName: 'testing', specRevision: 1 }, source, ['web', 'worker'], target);
-  return { target, recorded, run };
+  return { target, recorded, run, ctx, project, environment, spec };
 }
 
 describe('shared engine release', () => {
@@ -55,6 +62,64 @@ describe('shared engine release', () => {
     ]);
     expect(result.results.map(({ service, status }) => [service, status])).toEqual([['web', 'released'], ['worker', 'released']]);
     expect(result.source).toEqual({ kind: 'local-commit', revision: source.commitSha, commitSha: source.commitSha, uncommittedChangesExcluded: true });
+  });
+
+  it.each([{ selected: ['worker'] }, { selected: ['web'] }, { selected: ['web', 'worker'] }])('scopes a local AWS release to its selected workloads ($selected)', async ({ selected }) => {
+    const { ctx, project, environment, spec } = fixture();
+    const existing = ctx.repos.environments.updatePlatformBindings(environment.id, { aws: { imageUri: 'old-image' } })!;
+    const context = { environment: existing, connection: { region: 'us-west-2', accountId: '111122223333' }, prefix: 'hv-test',
+      parameterPath: '/hypervibe/test/', credentials: { accessKeyId: 'test', secretAccessKey: 'test', sessionToken: 'test' } } as awsEngine.AwsEngineContext;
+    vi.spyOn(awsEngine, 'resolveAwsEngineContext').mockResolvedValue(context);
+    vi.spyOn(awsRelease, 'webServiceExists').mockResolvedValue(true);
+    const build = vi.spyOn(awsRelease, 'buildImage').mockImplementation(async target =>
+      ({ imageUri: 'default-digest', ...(target.webCommands ? { webImageUri: 'web-digest' } : {}) }));
+    const web = vi.spyOn(awsRelease, 'releaseWebService').mockResolvedValue({ service: 'web', status: 'released', message: 'released' });
+    const worker = vi.spyOn(awsRelease, 'releaseTask').mockResolvedValue({ service: 'worker', status: 'released', message: 'released' });
+    const git = (...args: string[]) => execFileSync('git', ['-C', directory, ...args], { stdio: 'pipe' });
+    git('init'); writeFileSync(path.join(directory, 'Dockerfile'), 'FROM scratch\nENTRYPOINT ["/init"]\nCMD ["serve"]\n');
+    git('add', 'Dockerfile'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'app');
+
+    const result = await releaseAwsEngineServices(ctx, { project, spec, environmentName: 'testing', specRevision: 1, services: selected, sourceDirectory: directory });
+    if ('blocked' in result) throw new Error(result.blocked);
+    expect(result.results.map(item => item.status)).toEqual(selected.map(() => 'released'));
+    expect(build.mock.calls[0]![0].webCommands).toBe(selected.includes('web'));
+    expect(web.mock.calls.map(call => call[3])).toEqual(selected.includes('web') ? ['web-digest'] : []);
+    expect(worker.mock.calls.map(call => call[3])).toEqual(selected.includes('worker') ? ['default-digest'] : []);
+  });
+
+  it.each([false, true])('blocks a missing generated web default before a local release or first AWS build (override first %s)', async overrideFirst => {
+    const { ctx, project, environment, spec } = fixture();
+    const explicit = spec.environments.testing!.services.web!;
+    const plain = { ...explicit, startCommand: undefined };
+    spec.environments.testing!.services = overrideFirst ? { web: explicit, plain } : { plain, web: explicit };
+    const target = { environmentId: environment.id, region: 'us-west-2', accountId: '111122223333', prefix: 'hv-test',
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test', sessionToken: 'test' } };
+    vi.spyOn(awsEngine, 'resolveAwsEngineContext').mockResolvedValue({ ...target, environment, connection: target } as unknown as awsEngine.AwsEngineContext);
+    const build = vi.spyOn(awsRelease, 'buildImage');
+    const git = (...args: string[]) => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    git('init'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'app');
+    const first = await buildAwsCommitImage(target, spec, 'testing', directory, git('rev-parse', 'HEAD'));
+    const release = await releaseAwsEngineServices(ctx, { project, spec, environmentName: 'testing', specRevision: 1, sourceDirectory: directory });
+    expect(first).toMatchObject({ error: expect.stringMatching(/startCommand.*Dockerfile/) });
+    expect(release).toMatchObject({ blocked: expect.stringMatching(/startCommand.*Dockerfile/) });
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  it('uses the web variant only for declared web overrides at creation and when reconstructing a plan from bindings', () => {
+    const { environment, spec } = fixture();
+    const env = spec.environments.testing!;
+    env.services.private = { ...env.services.web!, public: false };
+    env.services.plain = { ...env.services.web!, startCommand: undefined };
+    env.services.nightly = { ...env.services.worker!, workloadKind: 'cron', cronSchedule: '0 1 * * *' };
+    const context = { environment, connection: { region: 'us-west-2', accountId: '111122223333' }, prefix: 'hv-test', parameterPath: '/hypervibe/test/' } as awsEngine.AwsEngineContext;
+    const first = awsEngine.buildAwsEngineInput(spec, 'testing', context, { secretKeys: [], image: 'original', webImage: 'web-variant' });
+    expect(first.services?.map(service => [service.logicalName, service.initialImageUri, service.command])).toEqual([
+      ['plain', 'original', undefined], ['private', 'web-variant', ['sh', '-c', 'npm start']], ['web', 'web-variant', ['sh', '-c', 'npm start']],
+    ]);
+    expect(first.workers?.[0]).toMatchObject({ initialImageUri: 'original', command: ['sh', '-c', 'npm run worker'] });
+    expect(first.jobs?.[0]).toMatchObject({ initialImageUri: 'original', command: ['sh', '-c', 'npm run worker'] });
+    const released = { ...context, environment: { ...environment, platformBindings: { aws: { imageUri: 'original', webImageUri: 'web-variant' } } } };
+    expect(awsEngine.buildAwsEngineInput(spec, 'testing', released, { secretKeys: [] })).toEqual(first);
   });
 
   it('only builds on the first release and points to the infrastructure plan', async () => {
@@ -115,4 +180,24 @@ describe('shared engine release', () => {
     expect(await packageLocalCommit(path.join(directory, 'missing'), { format: 'zip', dockerfileName: 'D', dockerfileFor: () => '' }))
       .toEqual({ blocked: expect.stringContaining('could not package this repository') });
   });
+});
+
+it.each([{ imageHasDockerfile: undefined, change: 'create' }, { imageHasDockerfile: false, change: 'create' }, { imageHasDockerfile: true, change: 'create' }, { imageHasDockerfile: undefined, change: 'noop' }])('checks Dockerfile evidence when a plan uses an earlier image (proof $imageHasDockerfile, action $change)', async ({ imageHasDockerfile, change }) => {
+  const ctx = createCommandContext();
+  const project = ctx.repos.projects.create({ name: 'image-app', defaultPlatform: 'aws' });
+  ctx.repos.environments.create({ projectId: project.id, name: 'testing', platformBindings: { aws: { imageUri: 'original', webImageUri: 'web-image', imageHasDockerfile }, services: { admin: {} } } });
+  const accountId = '111122223333'; const region = 'us-west-2';
+  const connection = ctx.repos.connections.create({ provider: 'aws', scope: project.name, credentialsEncrypted: getSecretStore().encryptObject({ accountId, region,
+    roleArn: `arn:aws:iam::${accountId}:role/hypervibe/hypervibe-deploy`, accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'private-local-secret-32-characters' }) });
+  ctx.repos.connections.updateStatus(connection.id, 'verified');
+  vi.spyOn(backend, 'awsEngineAuthentication').mockResolvedValue({ env: {}, redact: [] });
+  vi.spyOn(setup, 'awsAccessCurrent').mockResolvedValue('current');
+  const action = { id: 'service:plain', type: change, verified: true, reason: 'New web service', resource: { kind: 'service', name: 'plain', provider: 'aws' } };
+  const plan = vi.fn(async () => ({ ok: true, blockers: [], actions: [action] }));
+  vi.spyOn(shared, 'openTofuEngine').mockResolvedValue({ plan } as never);
+  const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: { testing: { hosting: { provider: 'aws', engine: 'opentofu' },
+    services: { admin: { startCommand: 'node admin.js' }, plain: {} } } } });
+  const result = await awsEngine.planAwsInfrastructureEngine(ctx, { project, spec, specRevision: 1, environmentName: 'testing' });
+  if (imageHasDockerfile || change === 'noop') expect(result).toHaveProperty('actions');
+  else expect(result).toMatchObject({ blocked: [expect.stringMatching(/Dockerfile/)] });
 });

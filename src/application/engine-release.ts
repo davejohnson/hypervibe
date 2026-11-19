@@ -19,24 +19,26 @@ const execFileAsync = promisify(execFile);
 export async function packageLocalCommit(directory: string, options: {
   format: 'zip' | 'tar.gz';
   dockerfileName: string;
+  missingDockerfileMessage?: string;
   dockerfileFor: (repositoryDockerfile?: string) => string;
   /** Extra generated files to add, by path inside the archive. */
   addFiles?: Record<string, string>;
   /** Defaults to HEAD. */
   commitSha?: string;
-}): Promise<LocalCommitSource | { blocked: string }> {
+}): Promise<(LocalCommitSource & { hasDockerfile: boolean }) | { blocked: string }> {
   try {
     const git = async (args: string[]) => String((await execFileAsync('git', ['-C', directory, ...args])).stdout);
     const commitSha = options.commitSha ?? (await git(['rev-parse', 'HEAD'])).trim();
     if (!/^[0-9a-f]{40}$/.test(commitSha)) return { blocked: 'The local repository has no commit to release.' };
     let repositoryDockerfile: string | undefined;
     try { repositoryDockerfile = await git(['show', `${commitSha}:Dockerfile`]); } catch { /* no repository Dockerfile */ }
+    if (!repositoryDockerfile && options.missingDockerfileMessage) return { blocked: options.missingDockerfileMessage };
     const virtualFiles = { [options.dockerfileName]: options.dockerfileFor(repositoryDockerfile), ...(options.addFiles ?? {}) };
     const archive = (await execFileAsync('git', ['-C', directory, 'archive', `--format=${options.format}`,
       ...Object.entries(virtualFiles).map(([name, content]) => `--add-virtual-file=${name}:${content}`), commitSha],
     { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 })).stdout as Buffer;
     const dirty = (await git(['status', '--porcelain', '--untracked-files=no'])).trim().length > 0;
-    return { commitSha, archive, uncommittedChangesExcluded: dirty };
+    return { commitSha, archive, hasDockerfile: Boolean(repositoryDockerfile), uncommittedChangesExcluded: dirty };
   } catch (error) {
     return { blocked: `Hypervibe could not package this repository: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}` };
   }
@@ -67,7 +69,7 @@ export interface LocalCommitReleaseTarget {
   createdNoun: string;
   /** Native identity of a service, recorded on its release action. */
   resourceOf(name: string): string;
-  build(source: LocalCommitSource): Promise<{ image: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }>;
+  build(source: LocalCommitSource): Promise<{ image: string; imagesByService?: Record<string, string>; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }>;
   /** Records the built image before any workload switches, so new workloads are created from it. */
   recordImage(image: string, source: LocalCommitSource): void;
   releaseWorkload(workload: { name: string; kind: string; resource: string; image: string }): Promise<EngineReleaseResult>;
@@ -103,6 +105,7 @@ export async function runLocalCommitRelease(params: {
 
   const results: EngineReleaseResult[] = [];
   let image: string | undefined;
+  let imagesByService: Record<string, string> | undefined;
   const execution = await new ConvergeExecutor().execute({
     planRunId: planRun.id,
     currentSpecRevision: params.specRevision,
@@ -115,6 +118,7 @@ export async function runLocalCommitRelease(params: {
             return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
           }
           image = built.image;
+          imagesByService = built.imagesByService;
           target.recordImage(image, source);
           if (target.firstImage) {
             results.push({ service: 'image', status: 'released', imageUri: image, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}),
@@ -123,7 +127,7 @@ export async function runLocalCommitRelease(params: {
           return { success: true, message: `Built ${image}.`, data: { imageUri: image } };
         }
         const result = await target.releaseWorkload({
-          name: action.resource.name, kind: String(action.metadata?.workloadKind), resource: String(action.metadata?.resource), image: image!,
+          name: action.resource.name, kind: String(action.metadata?.workloadKind), resource: String(action.metadata?.resource), image: imagesByService?.[action.resource.name] ?? image!,
         });
         results.push(result);
         const data = { ...(result.imageUri ? { imageUri: result.imageUri } : {}), ...(result.taskDefinitionArn ? { taskDefinitionArn: result.taskDefinitionArn } : {}), ...(result.url ? { url: result.url } : {}) };

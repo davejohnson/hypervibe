@@ -64,9 +64,11 @@ export async function executeEngineCiRelease(input: EngineCiReleaseInput): Promi
     const provider = cloudEngines.find((entry) => entry.hostingProvider === binding.provider);
     if (!provider?.ciRelease) throw new Error('The selected engine does not implement CI image releases.');
     const target = await provider.ciRelease(binding, { ...input.github, deadlineMs: Date.now() + 35 * 60_000 }, spec);
-    await target.preflight();
-    const source = await packageLocalCommit(directory, { format: target.format, dockerfileName: target.dockerfileName, addFiles: target.addFiles, commitSha: head,
+    const preflight = await target.preflight();
+    if (preflight) return { version: 1, ...context, status: 'blocked', message: preflight.blocked };
+    const source = await packageLocalCommit(directory, { format: target.format, dockerfileName: target.dockerfileName, missingDockerfileMessage: target.missingDockerfileMessage, addFiles: target.addFiles, commitSha: head,
       dockerfileFor: (repositoryDockerfile) => target.dockerfileFor({ repositoryDockerfile, runtime: spec.runtime, startCommand: workloads.startCommand }) });
+    if ('blocked' in source && source.blocked === target.missingDockerfileMessage) return { version: 1, ...context, status: 'blocked', message: target.missingDockerfileMessage };
     if ('blocked' in source || source.commitSha !== head) throw new Error('The exact release source could not be packaged.');
     const dataDir = mkdtempSync(join(tmpdir(), 'hypervibe-ci-release-'));
     const previous = { data: process.env.HYPERVIBE_DATA_DIR, key: process.env.HYPERVIBE_SECRET_KEY, repo: process.env.HYPERVIBE_DISABLE_REPO_SPEC };
@@ -85,8 +87,8 @@ export async function executeEngineCiRelease(input: EngineCiReleaseInput): Promi
           try {
             const built = await target.build(packaged);
             if ('error' in built) { stopped = true; return { error: 'The cloud image build did not finish successfully. Inspect its managed build logs before retrying.', ...(built.unknown ? { unknown: true } : {}) }; }
-            if (!/@sha256:[a-f0-9]{64}$/.test(built.image)) { stopped = true; return { error: 'The cloud did not confirm an immutable image digest.', unknown: true }; }
-            return { image: built.image };
+            if ([built.image, ...Object.values(built.imagesByService ?? {})].some(image => !/@sha256:[a-f0-9]{64}$/.test(image))) { stopped = true; return { error: 'The cloud did not confirm an immutable image digest.', unknown: true }; }
+            return { image: built.image, imagesByService: built.imagesByService };
           } catch { stopped = true; return { error: 'The cloud build outcome could not be verified. Inspect its managed build logs before retrying.', unknown: true }; }
         },
         recordImage: () => undefined,
