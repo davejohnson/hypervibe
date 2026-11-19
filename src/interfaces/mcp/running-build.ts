@@ -49,13 +49,29 @@ export class RunningBuild {
   }
 }
 
-export function buildNotice(build: BuildIdentity): string | undefined {
-  if (build.status === 'stale') return `Hypervibe ${build.version} started ${build.startedAt}. Version ${build.latestVersion} is available. Reconnect Hypervibe (/mcp) before continuing.`;
+const installerForClient = new Map([
+  ['claude-code', 'claude'],
+  ['codex-mcp-client', 'codex'],
+  ['codex', 'codex'],
+  ['opencode', 'opencode'],
+]);
+
+export function buildNotice(build: BuildIdentity, clientName = ''): string | undefined {
+  if (build.status === 'stale') {
+    const installer = installerForClient.get(clientName);
+    const reinstall = installer
+      ? `For an installer-managed connection, run \`npx -y @hypervibe/hypervibe@latest install ${installer}\` and restart your agent. ` : '';
+    return `Hypervibe ${build.version} started ${build.startedAt}. Version ${build.latestVersion} is available. ${reinstall}If your MCP command uses @latest, reconnect it. For other installations, update Hypervibe through the setup that manages this server and reconnect it.`;
+  }
   if (build.status === 'offline') return `Hypervibe ${build.version} started ${build.startedAt}. The npm registry is unavailable. The latest version could not be checked.`;
   return undefined;
 }
 
 export function requiresCurrentServer(name: string, args: Record<string, unknown>): boolean {
+  if (name === 'hv_rollback') {
+    if (args.action === 'preview') return false;
+    return args.confirm !== true || typeof args.toSha !== 'string' || !/^[0-9a-f]{40}$/i.test(args.toSha);
+  }
   if (name === 'hv_apply' || name === 'hv_launch' || (name === 'hv_migrate' && args.verifyOnly !== true)) return true;
   if (name === 'hv_connections' && args.action === 'connect' && (args.awsAccountId || args.azureApproved)) return true;
   return args.confirm === true || args.confirmNativeDeploy === true || args.confirmCutover === true

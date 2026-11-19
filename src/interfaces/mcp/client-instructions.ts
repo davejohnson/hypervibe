@@ -40,6 +40,7 @@ export function instructionsForClient(
 
 /** Adapt only the initialize receipt; SDK negotiation and all tools are intact. */
 export function withClientInstructions(transport: Transport, fullInstructions: string, runningBuild?: RunningBuild): Transport {
+  let clientName: string | undefined;
   const calls = new Map<RequestId, { build: BuildIdentity; name: string }>();
   let initialization: { id: RequestId; instructions: string } | undefined;
   const wrapper: Transport = {
@@ -52,7 +53,7 @@ export function withClientInstructions(transport: Transport, fullInstructions: s
             const { name, arguments: args = {} } = parsed.data.params;
             calls.set(message.id, { name, build });
             if (build.status === 'stale' && requiresCurrentServer(name, args)) {
-              const result = toMcpToolResponse(commandError('STALE_SERVER', 'Reconnect Hypervibe before running this action.'), name);
+              const result = toMcpToolResponse(commandError('STALE_SERVER', 'Update this Hypervibe server and reconnect it before retrying this action.'), name);
               await wrapper.send({ jsonrpc: '2.0', id: message.id, result });
               return;
             }
@@ -60,7 +61,10 @@ export function withClientInstructions(transport: Transport, fullInstructions: s
         }
         if ('method' in message && message.method === 'initialize') {
           const parsed = InitializeRequestSchema.safeParse(message);
-          if (parsed.success) recordMcpClient(parsed.data.params.clientInfo);
+          if (parsed.success) {
+            clientName = parsed.data.params.clientInfo.name.trim().toLowerCase();
+            recordMcpClient(parsed.data.params.clientInfo);
+          }
           if (parsed.success && 'id' in message) {
             initialization = { id: message.id, instructions: instructionsForClient(parsed.data.params.clientInfo, fullInstructions) };
           }
@@ -85,7 +89,7 @@ export function withClientInstructions(transport: Transport, fullInstructions: s
           const envelope = raw && typeof raw === 'object' && 'ok' in raw
             ? raw as CommandEnvelope
             : commandError('VALIDATION', 'The MCP tool request was rejected. Review the tool name and input fields.');
-          const notice = buildNotice(call.build);
+          const notice = buildNotice(call.build, clientName);
           const result = toMcpToolResponse({ ...envelope, build: call.build,
             ...(envelope.error ? { error: { ...envelope.error, build: call.build } } : {}),
             ...(notice ? { warnings: [notice, ...(envelope.warnings ?? [])] } : {}),

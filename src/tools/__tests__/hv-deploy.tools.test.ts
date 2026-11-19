@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createServer } from '../../server.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -242,9 +243,9 @@ function mockRollbackPreview() {
     inputs: { project: project.name, env: 'production', action: 'preview', toSha: sha, sourceWorkflowRunId: '20', sourceArtifactId: '200' } };
 }
 
-async function makeClient() {
-  const server = new McpServer({ name: 'hv-deploy-test', version: '1.0.0' });
-  registerHvDeployTools(createMcpCommandRegistrar(server), createToolContext());
+async function makeClient(latestVersion?: () => Promise<string>) {
+  const server = latestVersion ? createServer({ latestVersion }) : new McpServer({ name: 'hv-deploy-test', version: '1.0.0' });
+  if (!latestVersion) registerHvDeployTools(createMcpCommandRegistrar(server), createToolContext());
   const client = new Client({ name: 'hv-deploy-test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -917,9 +918,10 @@ describe('hv_rollback', () => {
   it('previews the currently running protected release without confirmation, dispatch or persisted mutation plan', async () => {
     const { trigger, inputs, sha } = mockRollbackPreview();
     const plans = vi.spyOn(RunRepository.prototype, 'create');
-    const t = await makeClient();
+    const t = await makeClient(async () => '99.9.9');
     const result = await t.call('hv_rollback', inputs);
     expect(result.ok).toBe(true);
+    expect(result.build.status).toBe('stale');
     expect(result.data).toMatchObject({ mode: 'preview', status: 'evidence-compatible', rollbackToSha: sha,
       evidenceCompatible: true, restoreVerified: false, mutationCounts: { providerWrites: 0, ciDispatches: 0 } });
     expect(result.data.unchecked).toContain('Registry image availability and pull authorization');
@@ -1213,7 +1215,7 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
-  it('restores an explicitly requested previously verified exact SHA', async () => {
+  it.each([false, true])('restores an explicitly confirmed verified exact SHA (stale server: %s)', async stale => {
     const { project, workflow } = seedManagedCiRollbackProject('rollback-explicit-sha-app');
     const currentSha = 'c'.repeat(40);
     const previousSha = 'b'.repeat(40);
@@ -1243,7 +1245,7 @@ describe('hv_rollback', () => {
     }));
     const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
 
-    const t = await makeClient();
+    const t = await makeClient(stale ? async () => '99.9.9' : undefined);
     const result = await t.call('hv_rollback', {
       project: project.name,
       env: 'production',
@@ -1251,7 +1253,11 @@ describe('hv_rollback', () => {
       confirm: true,
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok, result.error?.message).toBe(true);
+    if (stale) {
+      expect(result.build.status).toBe('stale');
+      expect(result.warnings[0]).toContain('99.9.9');
+    }
     expect(result.data).toMatchObject({
       status: 'pending',
       rollbackToSha: requestedSha,
