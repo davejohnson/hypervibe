@@ -1,3 +1,4 @@
+import { localConnectionRoleInputs } from '../../../domain/services/connection-roles.js';
 import { z } from 'zod';
 import { createRequire } from 'module';
 import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
@@ -1426,23 +1427,7 @@ providerRegistry.register({
     setupHelpUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     credentials: {
       defaultScalarKey: 'apiToken',
-      environmentVariableAliases: [[
-        'NODE_AUTH_TOKEN',
-        'HYPERVIBE_GITHUB_TOKEN',
-        'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
-      ]],
-      localEnvInputs: [
-        {
-          envKey: 'HYPERVIBE_GITHUB_TOKEN',
-          credentialKeys: ['apiToken'],
-          comment: 'GitHub API token for repository and workflow management; use repo and workflow permissions',
-        },
-        {
-          envKey: 'NODE_AUTH_TOKEN',
-          credentialKeys: ['packageReadToken'],
-          comment: 'GitHub Packages read token for dependency and image access; npm reads this canonical name',
-        },
-      ],
+      localEnvInputs: localConnectionRoleInputs('github'),
     },
   },
   factory: (credentials) => {

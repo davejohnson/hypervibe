@@ -1,3 +1,5 @@
+import { redactExactValues } from '../utils/redact-exact-values.js';
+import { connectionRoles } from '../domain/services/connection-roles.js';
 import { requiredConnectionChecklist } from '../application/spec-connections.js';
 import { cloudEngineForConnection } from '../application/cloud-engines.js';
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
@@ -108,6 +110,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     'hv_connections',
     [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
+      role: z.string().optional().describe('action="describe": request only the selected connection credential field, such as GitHub packageReadToken.'),
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat.'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
@@ -139,6 +142,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     },
     wrapCommandHandler(async ({
       provider,
+      role,
       action,
       credentials,
       credentialsRef,
@@ -167,6 +171,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       adminAccessTokenRef,
       confirm,
     }) => {
+      if (role && (!provider || action !== 'describe' || !connectionRoles(provider, [role]).length)) {
+        return commandError('VALIDATION', 'Use role with a registered credential field and action="describe".');
+      }
       if (repositoryContext && projectRef !== undefined) {
         return commandError('VALIDATION', 'Choose project or repositoryContext, not both.');
       }
@@ -283,12 +290,13 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const { context: repositoryGuidance } = await resolveGuidanceContext();
         const context: ConnectionGuidanceContext = {
           ...repositoryGuidance,
+          ...(environment ? { environment } : {}),
           ...(scope ? { scope } : {}),
         };
         const metadata = providerRegistry.getMetadata(provider) ?? secretManagerRegistry.getMetadata(provider)!;
         return commandSuccess({
-          provider: providerDiscoveryEntry(metadata, context),
-          connectionSetup: connectionSetupDetails(provider, context),
+          provider: role ? { name: provider, displayName: metadata.displayName } : providerDiscoveryEntry(metadata, context),
+          connectionSetup: connectionSetupDetails(provider, { ...context, ...(role ? { requiredCredentialKeys: [role] } : {}) }),
         }, { hint: 'Setup guidance only; no credential was resolved, connection verified, or setup preview created. Provider-owned bootstrap takes precedence. Preserve the complete returned URL and review the remaining manual fields.' });
       }
       const sharedGcpFields = {
@@ -561,6 +569,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           });
         }
 
+        const roles = connectionRoles(provider, Object.keys(credentialsToSave));
         const data = {
           ...projectContext,
           provider,
@@ -568,6 +577,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           status: 'verified',
           message: verified.message,
           credentialsSource,
+          ...(roles.length ? { configuredRoles: redactExactValues(roles.map(role => {
+            const source = credentialsResolution[role.credentialKey!];
+            const sourceField = source?.sourceField ?? source?.sourceKey;
+            return { issuer: role.issuer, ...(sourceField ? { sourceField } : {}),
+              destinationRole: role.destinationRole, connectionField: role.credentialKey, scope: scope ?? 'global' };
+          }), Object.values(credentialsToSave).filter((value): value is string => typeof value === 'string')) } : {}),
           ...verified.data,
           ...(saved.dependenciesInstalled ? { dependenciesInstalled: saved.dependenciesInstalled } : {}),
           ...(saved.dependencyErrors ? { dependencyErrors: saved.dependencyErrors } : {}),

@@ -1,3 +1,4 @@
+import { connectionRoles, type CredentialRole } from './connection-roles.js';
 import { z } from 'zod';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { redactSensitiveString } from '../../utils/redact-sensitive-string.js';
@@ -46,6 +47,7 @@ export interface ConnectionGuidance {
 
 /** Non-secret context only; repository identity is a label, not an access grant. */
 export interface ConnectionGuidanceContext {
+  environment?: string;
   scope?: string;
   project?: string;
   repositoryUrl?: string;
@@ -54,6 +56,7 @@ export interface ConnectionGuidanceContext {
 }
 
 export interface ConnectionSetupDetails {
+  roles?: Array<CredentialRole & { tokenLabel: string }>;
   provider: string;
   project?: string;
   scope?: string;
@@ -516,9 +519,9 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     notes: [
       'The fine-grained creation link pre-fills the token name, description, 90-day expiry, core repository permissions, and the resource owner when its exact scope is known. Review the owner and select the repositories manually; GitHub does not document a repository-selection URL parameter. For a classic PAT, select expiration manually; its description does not restrict repository access.',
       'Save the repository-management PAT as HYPERVIBE_GITHUB_TOKEN in an existing gitignored .env file, replace /absolute/path in the Connect command with that file\'s directory, and let the agent call hv_connections.',
-      'Keep a read:packages-only NODE_AUTH_TOKEN separate from HYPERVIBE_GITHUB_TOKEN. When both roles are needed, map apiToken to HYPERVIBE_GITHUB_TOKEN and packageReadToken to NODE_AUTH_TOKEN.',
-      'To add or replace only package-read access on an existing verified connection, use that exact scope with credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN" and credentialsKey="packageReadToken". Hypervibe privately preserves its existing API credential and verifies both tokens belong to the same account before saving the package role.',
-      'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN remain accepted as aliases for compatibility when one explicitly referenced value supplies the requested scalar credential.',
+      'Use HYPERVIBE_GITHUB_PACKAGES_TOKEN for private package pulls. Build jobs may receive it as NODE_AUTH_TOKEN. GitHub issues GITHUB_TOKEN separately to each workflow job.',
+      'To add or replace only package-read access on an existing verified connection, use that exact scope with credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_PACKAGES_TOKEN" and credentialsKey="packageReadToken". Hypervibe privately preserves its existing API credential and verifies both tokens belong to the same account before saving the package role.',
+      'Existing names remain usable through an explicit credentialsRef or credentialsMap. A missing source must be supplied for the requested role.',
       'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
@@ -753,8 +756,10 @@ function credentialExample(
       break;
     }
     case 'github':
-      if (options.requiredCredentialKeys?.includes('packageReadToken')) {
-        example = 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}';
+      if (options.requiredCredentialKeys?.length === 1 && options.requiredCredentialKeys[0] === 'packageReadToken') {
+        example = 'hv_connections provider="github" scope="owner/repository" credentialsKey="packageReadToken" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_PACKAGES_TOKEN"';
+      } else if (options.requiredCredentialKeys?.includes('packageReadToken')) {
+        example = 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}';
       }
       if (options.scope) example = example.replace('scope="owner/repository"', `scope="${options.scope}"`);
       break;
@@ -803,25 +808,39 @@ export function connectionSetupDetails(
     ? guidance.setupUrls.map((entry) => `${entry.label}: ${entry.url}`)
     : guidance.setupUrl ? [guidance.setupUrl] : [];
 
-  const recommendedSetupUrl = provider === 'github'
-    ? connectionSetupUrl(options.requiredCredentialKeys?.includes('packageReadToken')
-      ? GITHUB_TOKEN_URLS.combined
-      : GITHUB_TOKEN_URLS.api, options)
-    : guidance.setupUrl ?? guidance.setupUrls?.[0]?.url;
+  const project = formLabel(options.project);
+  const environment = formLabel(options.environment);
+  const prefix = project ? `${project}${environment ? ` / ${environment}` : ''}: ` : '';
+  const roles = connectionRoles(provider, options.requiredCredentialKeys).map(role => {
+    const permissions = [...new Set(role.permissions)].sort();
+    const tokenLabel = `${prefix}${role.sourceVariable}${permissions.length ? ` (${permissions.join(', ')})` : ''}`;
+    const url = new URL(role.creationUrl);
+    if (url.hostname === 'github.com' && url.pathname === '/settings/tokens/new') {
+      url.searchParams.set('description', limitLabel(tokenLabel, 255));
+    }
+    return { ...role, tokenLabel, creationUrl: url.href };
+  });
+  const onlyPackage = provider === 'github' && options.requiredCredentialKeys?.length === 1 && options.requiredCredentialKeys[0] === 'packageReadToken';
+  let recommendedSetupUrl = guidance.setupUrl ?? guidance.setupUrls?.[0]?.url;
+  if (provider === 'github') {
+    const generalForm = options.requiredCredentialKeys?.includes('packageReadToken') ? GITHUB_TOKEN_URLS.combined : GITHUB_TOKEN_URLS.api;
+    recommendedSetupUrl = onlyPackage ? roles[0]?.creationUrl : connectionSetupUrl(generalForm, options);
+  }
 
   return {
     provider,
     ...(options.project ? { project: options.project } : {}),
     ...(options.scope ? { scope: options.scope } : {}),
+    ...(roles.length ? { roles } : {}),
     displayName: guidance.displayName,
     tokenType: guidance.tokenType,
     ...(recommendedSetupUrl
       ? { recommendedSetupUrl }
       : {}),
-    setupUrls,
-    requiredPermissions: guidance.permissions,
+    setupUrls: onlyPackage && recommendedSetupUrl ? [recommendedSetupUrl] : setupUrls,
+    requiredPermissions: onlyPackage ? ['read:packages'] : guidance.permissions,
     credentialExample: credentialExample(guidance, options),
-    ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
+    ...(onlyPackage ? { notes: [roles[0]!.description] } : guidance.notes?.length ? { notes: guidance.notes } : {}),
   };
 }
 

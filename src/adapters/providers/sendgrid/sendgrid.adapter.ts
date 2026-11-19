@@ -1,4 +1,5 @@
 import { sendGridCapabilityEvidence } from './sendgrid-capability-evidence.js';
+import { localConnectionRoleInputs } from '../../../domain/services/connection-roles.js';
 import { z } from 'zod';
 import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -670,6 +671,7 @@ providerRegistry.register({
     setupHelpUrl: 'https://app.sendgrid.com/settings/api_keys',
     credentials: {
       defaultScalarKey: 'apiKey',
+      localEnvInputs: localConnectionRoleInputs('sendgrid'),
     },
   },
   factory: (credentials) => {

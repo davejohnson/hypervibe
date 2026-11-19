@@ -68,7 +68,7 @@ not implemented by the existing adapter’s global API base URL.
 With the key already exported locally, connect without putting it in chat:
 
 ```text
-hv_connections provider="sendgrid" scope="OWNER/REPOSITORY" credentialsRef="env:SENDGRID_API_KEY"
+hv_connections provider="sendgrid" scope="OWNER/REPOSITORY" credentialsRef="env:HYPERVIBE_SENDGRID_API_KEY"
 ```
 
 No documented pre-filled API-key creation template is used. Read/permission

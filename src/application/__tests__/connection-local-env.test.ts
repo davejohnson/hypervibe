@@ -34,7 +34,7 @@ describe('connection local env inputs', () => {
       provider: 'github',
       requiredCredentialKeys: ['packageReadToken'],
     }]).map((input) => input.envKey)).toEqual([
-      'NODE_AUTH_TOKEN',
+      'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
     ]);
 
     expect(connectionLocalEnvInputs([{
@@ -60,13 +60,13 @@ describe('connection local env inputs', () => {
     }], { project: 'example' }).connectionSetup;
 
     expect(setup.localEnvInputs?.map((input) => input.envKey)).toEqual([
+      'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
       'HYPERVIBE_GITHUB_TOKEN',
-      'NODE_AUTH_TOKEN',
     ]);
     expect(setup.credentialExample).toContain(
-      'credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}'
+      'credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}'
     );
-    for (const envKey of ['HYPERVIBE_GITHUB_TOKEN', 'NODE_AUTH_TOKEN']) {
+    for (const envKey of ['HYPERVIBE_GITHUB_TOKEN', 'HYPERVIBE_GITHUB_PACKAGES_TOKEN']) {
       expect(setup.credentialExample).toContain(envKey);
       expect(setup.localEnvInputs?.some((input) => input.envKey === envKey)).toBe(true);
     }
@@ -90,8 +90,8 @@ describe('connection local env inputs', () => {
       requiredCredentialKeys: ['apiToken', 'packageReadToken'],
     }));
     expect(connectionLocalEnvInputs(actionScopedBlocked).map((input) => input.envKey)).toEqual([
+      'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
       'HYPERVIBE_GITHUB_TOKEN',
-      'NODE_AUTH_TOKEN',
     ]);
   });
 
