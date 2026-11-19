@@ -57,11 +57,11 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[]; includedAccess: string[] }
-  | { status: 'needs_access'; accessId: LaunchAccessId; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_access'; accessId: LaunchAccessId; access: string; grants: Record<string, unknown>; confirmationHint?: string }
   | { status: 'needs_subscription'; subscriptions: Array<{ subscriptionId: string; displayName: string }>; message: string }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
   | { status: 'needs_confirmation'; planId: string; htmlPath?: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
-  | { status: 'blocked'; message: string; details?: unknown }
+  | { status: 'blocked'; message: string; details?: unknown; next?: ['hv_connections'] }
   | { status: 'needs_secrets'; keys: string[]; url?: string; message: string }
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
@@ -185,6 +185,7 @@ async function runLaunch(ctx: CommandContext, params: {
   specRevision: number;
   environmentName: string;
   billingAccountName?: string;
+  gcpSetupPlanId?: string;
   /** Azure: the subscription the person chose after needs_subscription. */
   azureSubscriptionId?: string;
   /** AWS: the account a needs_access "aws-setup" result was shown for. */
@@ -396,12 +397,20 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       };
     }
     const setupApproved = approvedAccess.has('gcp-setup');
-    const setup = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved });
-    if (!setup.success) return { status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup };
+    const setup = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved,
+      ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
+    });
+    if (!setup.success) return {
+      status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup,
+      next: setup.projectRecovery ? ['hv_connections'] : undefined,
+    };
     if (!setupApproved) return {
       status: 'needs_access', accessId: 'gcp-setup',
       access: 'Create the Google Cloud project prerequisites and attach the selected billing account through this reviewed OpenTofu plan. Billing selection does not approve infrastructure or permissions.',
       grants: setup,
+      ...(setup.requiresPlanId === true && typeof setup.planId === 'string' ? {
+        confirmationHint: `Review the remaining setup. After approval, pass gcpSetupPlanId ${JSON.stringify(setup.planId)} with approveAccess including "gcp-setup".`,
+      } : {}),
     };
   }
 

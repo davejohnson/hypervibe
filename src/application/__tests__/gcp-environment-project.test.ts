@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import { registerHvMigrateTools } from '../../tools/hv-migrate.tools.js';
+import { registerHvLaunchTools } from '../../tools/hv-launch.tools.js';
 import { CommandRegistry } from '../commands.js';
 import { SecretStore } from '../../adapters/secrets/secret-store.js';
 import * as bootstrap from '../../domain/services/gcp-bootstrap.service.js';
@@ -128,6 +129,47 @@ it('saves the chosen project when migration proposes a target and refuses a diff
   const retry = await commands.execute('hv_migrate', { ...input, gcpProjectId: staging });
   expect(retry).toMatchObject({ ok: false, error: { message: expect.stringContaining(production) } });
   expect(preview).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('directs both guided journeys to the scoped connection repair before any deployment', async () => {
+  const ctx = createCommandContext();
+  const project = ctx.repos.projects.create(projectInput);
+  ctx.repos.environments.create({ projectId: project.id, name: 'source' });
+  const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
+    source: { hosting: { provider: 'railway' }, services: { web: {} } },
+  } });
+  new ProjectSpecRepository().insert(project.id, 1, spec);
+  const commands = new CommandRegistry();
+  registerHvMigrateTools(commands, ctx);
+  registerHvLaunchTools(commands, ctx);
+  const billingAccountName = 'billingAccounts/EXAMPLE';
+  const retryCall = { action: 'bootstrap', provider: 'cloudrun', environment: 'production', recoverProjectState: 'reviewed-token' };
+  const setup = vi.spyOn(bootstrap, 'runGcpBootstrap').mockImplementation(async input => input.billingAccountName
+    ? { success: false, mode: 'preview', error: 'The protected project needs a local state repair.', projectRecovery: {
+        projectId: production, projectNumber: '123', previousPlanId: 'setup-prior', recoverProjectState: 'reviewed-token', retryCall,
+      } }
+    : { success: true, mode: 'preview', target: { projectId: production }, openBillingAccounts: [{ name: billingAccountName }] });
+  const args = { project: project.name, billingAccountName };
+  const migrated = await commands.execute('hv_migrate', { ...args, from: 'source', to: 'production', gcpProjectId: production });
+  const launched = await commands.execute('hv_launch', { ...args, env: 'production' });
+  for (const result of [migrated, launched]) {
+    expect(result).toMatchObject({ ok: false, next: ['hv_connections'], error: { details: { projectRecovery: { retryCall } } } });
+  }
+
+  const remainingId = 'setup-bd747bf4-7b2c-4401-9f36-24cdb02041e6';
+  setup.mockImplementation(async input => {
+    if (!input.billingAccountName) return { success: true, mode: 'preview', target: { projectId: production }, openBillingAccounts: [{ name: billingAccountName }] };
+    if (input.confirm) return { success: false, mode: 'confirm', error: 'Stopped at the saved approval boundary.' };
+    return { success: true, mode: 'preview', planId: remainingId, requiresPlanId: true };
+  });
+  for (const [tool, selector] of [['hv_migrate', { from: 'source', to: 'production' }], ['hv_launch', { env: 'production' }]] as const) {
+    const preview = await commands.execute(tool, { ...args, ...selector });
+    expect(preview).toMatchObject({ ok: true, agentInstruction: { message: expect.stringContaining(remainingId) } });
+    setup.mockClear();
+    await commands.execute(tool, { ...args, ...selector, approveAccess: ['gcp-setup'], gcpSetupPlanId: remainingId });
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ confirm: true, gcpSetupPlanId: remainingId }));
+  }
   expect(fetch).not.toHaveBeenCalled();
 });
 

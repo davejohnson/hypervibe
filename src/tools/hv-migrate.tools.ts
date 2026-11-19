@@ -19,6 +19,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN).optional().describe('Google Cloud project ID for a new target environment. Saved on the target for subsequent calls. Omit to use the repository connection.'),
       region: z.string().min(1).optional().describe('Google Cloud region for a new target (default us-central1).'),
       domain: z.string().min(1).optional().describe('Hostname for the new target, for example gcp.example.com.'),
+      gcpSetupPlanId: z.string().min(1).optional().describe('Exact saved Google project setup plan ID supplied with approval after recovery.'),
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional(),
       approveAccess: z.array(z.enum(['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional(),
       planId: z.string().min(1).optional().describe('Exact saved planId returned by needs_confirmation or pending. Required when supplying infrastructure confirmActions.'),
@@ -30,13 +31,17 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       verifyOnly: z.boolean().optional().describe('Read-only: compare the source and the copy (row counts, per-table content checksums and downloaded file contents) without copying or releasing anything. Returns verified, differs, or blocked when required access or verification jobs are unavailable.'),
       refreshData: z.boolean().optional().describe('true only after the user approved copying the data again over an earlier verified copy. Without it, a re-run releases using the existing copy.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, approveAccess, planId, confirmActions, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
+    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, approveAccess, planId, confirmActions, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
+      if (gcpSetupPlanId && (!approveAccess?.includes('gcp-setup') || !billingAccountName)) {
+        return commandError('VALIDATION', 'Use gcpSetupPlanId with the selected billing account and approval for gcp-setup.');
+      }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
       const result = await migrateEnvironment(ctx, {
         project, from, to, gcpProjectId,
         ...(region ? { region } : {}), ...(domain ? { domain } : {}),
+        ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
         ...(billingAccountName ? { billingAccountName } : {}), ...(approveAccess ? { approveAccess } : {}),
         ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}), ...(refreshData ? { refreshData } : {}), ...(verifyOnly ? { verifyOnly } : {}), ...(cutover ? { cutover } : {}), ...(confirmCutover ? { confirmCutover } : {}),
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
@@ -59,7 +64,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         case 'needs_billing_choice':
           return commandSuccess(result, ask('Ask which billing account should pay for the new environment, then call again with billingAccountName. Billing selection does not approve infrastructure or permissions; review the saved plan at needs_access.'));
         case 'needs_access':
-          return commandSuccess(result, ask(`Explain this Google Cloud access, then call again with approveAccess including "${result.accessId}".`));
+          return commandSuccess(result, ask(result.confirmationHint ?? `Explain this Google Cloud access, then call again with approveAccess including "${result.accessId}".`));
         case 'needs_confirmation':
           return commandSuccess(result, ask(`Show the changes and estimated monthly cost, then call again with planId ${JSON.stringify(result.planId)} and confirmActions ${JSON.stringify(result.confirmActions)}.`));
         case 'needs_connection':
@@ -70,7 +75,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
           return commandError('VALIDATION', result.message, {
             details: result.details,
             agentInstruction: { action: 'stop_and_report', message: 'Explain the blocker in plain language. Do not work around it with provider tools.' },
-            next: ['hv_migrate', 'hv_spec'],
+            next: result.next ?? ['hv_migrate', 'hv_spec'],
           });
         default:
           return commandSuccess(result, { next: ['hv_migrate'] });

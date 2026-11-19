@@ -173,6 +173,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId: z.string().optional().describe('Exact GCP project ID. An environment with hosting.gcpProjectId uses its declared project. Otherwise bootstrap preview reuses repository-scoped access or derives a stable name, and prepare defaults to the Cloud Run connection projectId. Confirm bootstrap using the exact ID returned by preview.'),
       region: z.string().trim().min(1).optional().describe('GCP bootstrap/prepare target region for shared build resources; defaults to us-central1. Each region is reviewed and retained independently.'),
       billingAccountName: z.string().optional().describe('action="bootstrap": exact open billing account name chosen from discovery. Preview again with this account, then confirm the saved infrastructure plan separately.'),
+      recoverProjectState: z.string().trim().min(1).optional().describe('For a Google Cloud bootstrap preview that returned projectRecovery, pass its exact recovery reference to repair the local project record and preview again. Omit confirm.'),
+      gcpSetupPlanId: z.string().min(1).optional().describe('When a Google Cloud bootstrap preview returns requiresPlanId, confirm its cloud changes with the exact planId shown in that preview.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
@@ -205,6 +207,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId,
       region,
       billingAccountName,
+      recoverProjectState,
+      gcpSetupPlanId,
       deployServiceAccountEmail,
       gcsAccess,
       memorystoreAccess,
@@ -222,6 +226,13 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       adminAccessTokenRef,
       confirm,
     }) => {
+      if (gcpSetupPlanId !== undefined && (action !== 'bootstrap' || provider !== 'cloudrun' || !confirm || recoverProjectState !== undefined)) {
+        return commandError('VALIDATION', 'Use gcpSetupPlanId only for a Cloud Run bootstrap cloud plan with confirm=true. Omit recoverProjectState.');
+      }
+      if (recoverProjectState !== undefined && (action !== 'bootstrap' || provider !== 'cloudrun'
+        || confirm === true || !billingAccountName?.trim() || !gcpProjectId?.trim())) {
+        return commandError('VALIDATION', 'Use recoverProjectState only for a Cloud Run bootstrap preview with its exact project ID and billing account. Omit confirm.');
+      }
       if (view && provider) return commandError('VALIDATION', 'view is only available when listing connections. Omit provider.');
       const selectedRoles = role === undefined ? undefined : [...new Set(Array.isArray(role) ? role : [role])];
       if (selectedRoles && (!provider || action !== 'describe' || connectionRoles(provider, selectedRoles).length !== selectedRoles.length)) {
@@ -483,14 +494,43 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           gcpProjectId,
           scope,
           billingAccountName,
+          ...(recoverProjectState ? { recoverProjectState } : {}),
+          ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
           confirm,
         });
         if (!payload.success) {
+          if (payload.projectRecovery) {
+            const recovery = payload.projectRecovery;
+            const message = `Google reports that project ${recovery.projectId} (${recovery.projectNumber}) is active with no billing account attached. Repair Hypervibe’s local record for this project and preview the setup again?`;
+            return {
+              ...commandError('CONFIRM_REQUIRED', String(payload.error), {
+                details: payload,
+                hint: `After approval, repeat the bootstrap preview with --recover-project-state ${recovery.recoverProjectState} or use projectRecovery.retryCall. Review the new plan before applying any cloud changes.`,
+                agentInstruction: { action: 'ask_user', message },
+              }),
+              confirmation: { message, retryInput: recovery.retryCall, completeInput: true },
+            };
+          }
           return commandError('PROVIDER_ERROR', String(payload.error ?? 'GCP setup failed.'), {
             details: payload,
           });
         }
         if (payload.mode === 'preview') {
+          if (payload.requiresPlanId) {
+            const confirmCall = payload.confirmCall;
+            if (!confirmCall || !payload.planId || confirmCall.gcpSetupPlanId !== payload.planId) {
+              return commandError('PROVIDER_ERROR', 'The bootstrap preview did not identify the exact cloud plan to confirm. Preview again.');
+            }
+            const planId = confirmCall.gcpSetupPlanId;
+            const message = `Apply the changes shown in Google Cloud setup plan ${planId} for ${confirmCall.gcpProjectId}?`;
+            return {
+              ...commandSuccess({ project: { id: targetProject.id, name: targetProject.name }, ...payload }, {
+                hint: `Review the fresh setup plan and its costs and permissions. After approval, omit recoverProjectState and use the returned confirmCall, or repeat the bootstrap CLI call with --confirm --gcp-setup-plan-id ${planId}.`,
+                agentInstruction: { action: 'ask_user', message: `Show the changes and costs in plan ${planId}. After approval, submit its exact confirmCall.` },
+              }),
+              confirmation: { message, retryInput: confirmCall, completeInput: true },
+            };
+          }
           const accountNames = Array.isArray(payload.openBillingAccounts)
             ? payload.openBillingAccounts
               .map((account) => account && typeof account === 'object'
@@ -498,7 +538,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
                 : undefined)
               .filter((name): name is string => typeof name === 'string')
             : [];
-          const hint = billingAccountName
+          const hint = recoverProjectState
+            ? 'Review the fresh setup plan and its costs and permissions. After approval, omit recoverProjectState and repeat the other inputs with confirm=true.'
+            : billingAccountName
             ? 'Review the exact saved infrastructure plan and its costs and permissions. After approval, repeat these inputs with confirm=true; do not create a new preview in between.'
             : accountNames.length === 0
               ? 'No open billing accounts are visible. Give this Google login access to an open billing account, then repeat discovery.'

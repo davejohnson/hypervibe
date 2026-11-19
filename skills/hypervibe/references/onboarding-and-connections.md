@@ -65,6 +65,14 @@ its generated project and credential creation. Preserve the preview's exact
 project/account and repository scope. Do not assume a provider supports a
 bootstrap or local setup action merely because another provider does.
 
+If Google created the project but billing setup failed, preview bootstrap again
+with the same project, region and selected billing account. When Hypervibe
+returns `projectRecovery`, explain which existing project the local repair
+will retain. After approval, use its exact `retryCall` to repair the local
+record and obtain a fresh plan. Review the plan and its billing changes
+separately. When the preview returns `requiresPlanId`, use its exact
+`confirmCall`, which includes the new `gcpSetupPlanId`, after approval.
+
 If the current tool schema and result explicitly offer a local authentication
 recipe, follow its bounded continuation. Reuse valid login, verify the shell
 shares the credential reader's machine and user context, and preserve existing

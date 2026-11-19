@@ -55,6 +55,8 @@ export interface CommandEnvelope {
   confirmation?: {
     message: string;
     retryInput: Record<string, boolean | string | string[]>;
+    /** The complete next call excludes any authorization used to produce this preview. */
+    completeInput?: true;
   };
 }
 

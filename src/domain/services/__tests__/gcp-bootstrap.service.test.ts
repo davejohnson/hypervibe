@@ -8,6 +8,8 @@ import { AuditRepository } from '../../../adapters/db/repositories/audit.reposit
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { getSecretStore, SecretStore } from '../../../adapters/secrets/secret-store.js';
+import type { OpenTofuEngine } from '../../../adapters/engine/opentofu/engine.js';
+import { executeGcpProjectSetup, gcpSetupBackend } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import {
@@ -193,6 +195,110 @@ describe('runGcpBootstrap', () => {
     expect(client.updateProjectBillingInfo).not.toHaveBeenCalled();
     expect(client.createServiceAccountKey).not.toHaveBeenCalled();
     expect(dependencies.prepareCloud).not.toHaveBeenCalled();
+  });
+
+  it('offers a scoped project repair using fresh Google identity and unlinked billing evidence', async () => {
+    const selection = { project: seedProject(), environment: 'production', environmentProjectId: GCP_PROJECT_ID, gcpProjectId: GCP_PROJECT_ID,
+      region: 'europe-west1', billingAccountName: BILLING_ACCOUNT };
+    const unlinked = { ...linkedBilling, billingEnabled: false, billingAccountName: '' };
+    const client = makeClient({ getProjectBillingInfo: vi.fn(async () => unlinked) });
+    const token = 'repair-verified-project';
+    const dependencies = makeDependencies(client);
+    vi.mocked(dependencies.setupProject).mockResolvedValueOnce({ success: false, mode: 'preview', error: 'Protected project needs recovery.',
+      projectRecovery: { token, projectId: GCP_PROJECT_ID, projectNumber: '123456789', previousPlanId: 'setup-prior' } });
+    const result = await runGcpBootstrap(selection, dependencies);
+    expect(result).toMatchObject({ success: false, projectRecovery: { recoverProjectState: token, previousPlanId: 'setup-prior',
+      retryCall: { project: selection.project.name, environment: 'production', region: selection.region, billingAccountName: BILLING_ACCOUNT,
+        gcpProjectId: GCP_PROJECT_ID, recoverProjectState: token, action: 'bootstrap', adminAuth: 'default' } } });
+    const evidence = { projectId: GCP_PROJECT_ID, projectNumber: '123456789', scope: SCOPE + '#gcp:' + GCP_PROJECT_ID };
+    expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({ observedUnlinkedProject: evidence, confirm: false }));
+    vi.mocked(dependencies.setupProject).mockResolvedValueOnce({ success: true, mode: 'preview', requiresPlanId: true, planId: 'setup-fresh', actions: [] });
+    const preview = await runGcpBootstrap({ ...selection, recoverProjectState: token }, dependencies);
+    expect(preview).toMatchObject({ success: true, mode: 'preview', requiresConfirmation: true, requiresPlanId: true, planId: 'setup-fresh',
+      confirmCall: { project: selection.project.name, environment: 'production', region: selection.region, billingAccountName: BILLING_ACCOUNT,
+        gcpProjectId: GCP_PROJECT_ID, gcpSetupPlanId: 'setup-fresh', confirm: true } });
+    expect(dependencies.setupProject).toHaveBeenLastCalledWith(expect.objectContaining({ observedUnlinkedProject: evidence, recoverProjectState: token, confirm: false }));
+    expect(client.getProjectBillingInfo).toHaveBeenCalledTimes(2);
+    expect(client.updateProjectBillingInfo).not.toHaveBeenCalled();
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+  });
+
+  it('provides fresh linked billing evidence on preview and confirmation after an external billing change', async () => {
+    const selection = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    const dependencies = makeDependencies(makeClient());
+    const observedLinkedProject = { scope: SCOPE, projectId: GCP_PROJECT_ID, projectNumber: '123456789', billingAccountName: BILLING_ACCOUNT };
+    for (const update of [{}, { confirm: true, gcpSetupPlanId: 'approved-setup' }]) {
+      await runGcpBootstrap({ ...selection, ...update }, dependencies);
+      const call = vi.mocked(dependencies.setupProject).mock.lastCall![0];
+      expect(call).toMatchObject({ observedLinkedProject });
+      expect(call).not.toHaveProperty('observedUnlinkedProject');
+    }
+  });
+
+  it('confirms the saved billing plan through the executor only with its exact ID and fresh matching Google identity', async () => {
+    const address = 'google_project.hypervibe';
+    const selection = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    const unlinked = { ...linkedBilling, billingEnabled: false, billingAccountName: '' };
+    let billing = unlinked;
+    const client = makeClient({ getProjectBillingInfo: vi.fn(async () => billing) });
+    const plan = vi.fn<OpenTofuEngine['plan']>(async input => {
+      const before = { id: 'projects/' + GCP_PROJECT_ID, project_id: GCP_PROJECT_ID, number: '123456789', deletion_policy: 'PREVENT', billing_account: '' };
+      const change = { actions: ['update'], before, after: { ...before, billing_account: BILLING_ACCOUNT.split('/')[1] }, after_unknown: {} };
+      const accepted = input.verifyPlannedChanges?.({ resource_changes: [{ address, mode: 'managed', type: 'google_project', name: 'hypervibe',
+        provider_name: 'registry.opentofu.org/hashicorp/google', change }] });
+      if (!accepted) return { ok: false, stage: 'plan', error: 'Billing change did not match the preview.' };
+      const segment = { id: input.planId, engine: 'opentofu' as const, planDigest: 'plan', configurationDigest: 'config', engineVersion: '1.13.9', providerVersions: {} };
+      return { ok: true, segment, segmentId: input.planId, blockers: [], unmanagedDeletes: [], planFile: 'fixture.tfplan', actions: [{
+        id: 'project-setup:' + address, type: 'update', verified: true, resource: { kind: 'project', provider: 'gcp', name: 'Project billing' },
+        reason: 'Attach billing', diff: [{ field: 'google_project.billing_account' }], metadata: { engineSegment: { ...segment, addresses: [address] } },
+      }] };
+    });
+    const apply = vi.fn(async () => {
+      billing = linkedBilling;
+      return { outcomes: { [address]: 'succeeded' as const }, diagnostics: [] };
+    });
+    const dependencies = makeDependencies(client, { setupProject: params => executeGcpProjectSetup(gcpSetupBackend, { ...params, dataDir: tempDir }, { engine: { plan, apply } }) });
+    const preview = await runGcpBootstrap(selection, dependencies);
+    expect(preview).toMatchObject({ success: true, requiresPlanId: true });
+    const confirm = { ...selection, confirm: true };
+    for (const gcpSetupPlanId of [undefined, 'setup-before-repair']) {
+      expect((await runGcpBootstrap({ ...confirm, gcpSetupPlanId }, dependencies)).success).toBe(false);
+    }
+    const approved = { ...confirm, gcpSetupPlanId: preview.confirmCall!.gcpSetupPlanId };
+    vi.mocked(client.getProject).mockResolvedValueOnce({ ...observedProject, name: 'projects/999' });
+    expect((await runGcpBootstrap(approved, dependencies)).success).toBe(false);
+    expect(apply).not.toHaveBeenCalled();
+    expect(await runGcpBootstrap(approved, dependencies)).toMatchObject({ success: true });
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['existing billing', observedProject, linkedBilling],
+    ['disabled but still assigned', observedProject, { ...linkedBilling, billingEnabled: false }],
+    ['invalid project number', { ...observedProject, name: 'projects/0' }, { ...linkedBilling, billingEnabled: false, billingAccountName: '' }],
+    ['unknown project', null, null],
+    ['unknown billing', observedProject, null],
+  ] as const)('blocks local project repair for %s', async (_reason, project, billing) => {
+    const client = makeClient({ getProject: vi.fn(async () => project), getProjectBillingInfo: vi.fn(async () => billing) });
+    const dependencies = makeDependencies(client);
+    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT,
+      recoverProjectState: 'repair-verified-project' }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.setupProject).not.toHaveBeenCalled();
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('reports a project as active after a failed apply only if a new Google read confirms it (%s)', async active => {
+    const getProject = vi.fn<GcpBootstrapClientPort['getProject']>().mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(active ? observedProject : null);
+    const client = makeClient({ getProject });
+    const dependencies = makeDependencies(client);
+    vi.mocked(dependencies.setupProject).mockResolvedValue({ success: false, mode: 'confirm', error: 'Billing quota exceeded' });
+    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT,
+      confirm: true }, dependencies);
+    expect(result).toMatchObject({ success: false, error: 'Billing quota exceeded', partialProgress: { project: active ? 'observed-active' : 'not-started' } });
+    expect(client.getProject).toHaveBeenCalledTimes(2);
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
   });
 
   it('requires the exact preview ID on confirmation before accessing Google', async () => {

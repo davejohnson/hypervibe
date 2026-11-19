@@ -83,7 +83,7 @@ export interface GcpBootstrapDependencies {
 }
 
 export interface GcpBootstrapProgress {
-  project: BootstrapStepState;
+  project: BootstrapStepState | 'observed-active' | 'unknown';
   billing: 'not-started' | 'linked' | 'already-linked';
   iamService: 'not-started' | 'enabled' | 'already-enabled' | 'not-needed';
   serviceAccount: BootstrapStepState;
@@ -100,6 +100,15 @@ export interface GcpBootstrapResult extends Record<string, unknown> {
   scope?: string;
   error?: string;
   partialProgress?: GcpBootstrapProgress;
+  requiresPlanId?: true;
+  confirmCall?: Record<string, string | boolean> & { confirm: true; gcpSetupPlanId: string };
+  projectRecovery?: {
+    projectId: string;
+    projectNumber: string;
+    previousPlanId: string;
+    recoverProjectState: string;
+    retryCall: Record<string, string>;
+  };
 }
 
 interface ServiceAccountCredential {
@@ -155,6 +164,8 @@ export async function runGcpBootstrap(
     environmentProjectId?: string;
     scope?: string;
     billingAccountName?: string;
+    recoverProjectState?: string;
+    gcpSetupPlanId?: string;
     region?: string;
     confirm?: boolean;
   },
@@ -202,6 +213,13 @@ export async function runGcpBootstrap(
     serviceAccountEmail,
     runtimeServiceAccountEmail
   );
+  if (params.gcpSetupPlanId !== undefined && (mode !== 'confirm' || !params.gcpSetupPlanId.trim() || params.recoverProjectState !== undefined)) {
+    return { success: false, mode, scope, error: 'Use gcpSetupPlanId only when confirming the cloud plan shown by a bootstrap preview.' };
+  }
+  if (params.recoverProjectState !== undefined && (params.confirm === true || !params.recoverProjectState.trim()
+    || !params.gcpProjectId || !params.billingAccountName?.trim())) {
+    return { success: false, mode, scope, error: 'Project recovery requires the exact project ID, billing account and recovery reference from the preview. Omit confirm to request a local repair and a fresh plan.' };
+  }
   if (mode === 'confirm' && !params.billingAccountName?.trim()) {
     const error = 'confirm=true requires an explicit billingAccountName from the open accounts shown by preview.';
     recordBootstrapAudit(params.project, 'gcp.bootstrap.failed', {
@@ -225,6 +243,7 @@ export async function runGcpBootstrap(
   let adcLoaded = false;
   let client: GcpBootstrapClientPort | undefined;
   let createdKeyName: string | undefined;
+  let projectRecovery: GcpBootstrapResult['projectRecovery'];
   const sensitiveValues = new Set<string>();
 
   try {
@@ -254,14 +273,49 @@ export async function runGcpBootstrap(
       const configuration = buildGcpBootstrapConfiguration({ projectId: projectId.value,
         billingAccountName: params.billingAccountName.trim(), deployServiceAccountEmail: serviceAccountEmail,
         runtimeServiceAccountEmail, region: params.region });
+      const projectNumber = observation.project?.name.match(/^projects\/([1-9][0-9]*)$/)?.[1];
+      const observedProject = projectNumber && observation.project?.state === 'ACTIVE'
+        && observation.billing?.name === `projects/${projectId.value}/billingInfo`
+        ? { projectId: projectId.value, projectNumber, scope } : undefined;
+      const billing = observation.billing;
+      const observedUnlinkedProject = billing?.billingEnabled === false && billing.billingAccountName === '' ? observedProject : undefined;
+      const observedLinkedProject = observedProject && billing?.billingEnabled && billing.billingAccountName
+        ? { ...observedProject, billingAccountName: billing.billingAccountName } : undefined;
+      if (params.recoverProjectState && !observedUnlinkedProject) {
+        throw new Error('Project recovery requires Google to report the same active project with no billing account attached. Preview the current setup again.');
+      }
       infrastructure = await dependencies.setupProject({ projectId: params.project.id, projectName: params.project.name, gcpProjectId: projectId.value,
         auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: accessToken, GOOGLE_PROJECT: projectId.value }, redact: [accessToken] },
         ...(params.environmentProjectId ? { authenticationScope: scope } : {}),
+        ...(observedUnlinkedProject ? { observedUnlinkedProject } : {}),
+        ...(observedLinkedProject ? { observedLinkedProject } : {}),
+        ...(params.recoverProjectState ? { recoverProjectState: params.recoverProjectState } : {}),
+        ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
         contribution: { id: 'bootstrap', configuration }, confirm: mode === 'confirm' });
-      if (!infrastructure.success) throw new Error(infrastructure.error ?? 'Google project setup did not converge.');
+      if (!infrastructure.success) {
+        const recovery = infrastructure.projectRecovery;
+        if (mode === 'preview' && recovery && observedUnlinkedProject && recovery.projectId === projectId.value && recovery.projectNumber === projectNumber) {
+          const retry = bootstrapPreviewRetry(params.project.name, projectId.value, params);
+          projectRecovery = { projectId: recovery.projectId, projectNumber: recovery.projectNumber, previousPlanId: recovery.previousPlanId,
+            recoverProjectState: recovery.token, retryCall: { ...retry.retryCall, billingAccountName: params.billingAccountName.trim(), recoverProjectState: recovery.token } };
+        }
+        if (mode === 'confirm') {
+          // A failed apply can leave a created project behind. Report what Google can verify now.
+          const after = await client.getProject(projectId.value).catch(() => undefined);
+          if (after?.projectId === projectId.value && after.state === 'ACTIVE') progress.project = 'observed-active';
+          else if (after !== null) progress.project = 'unknown';
+        }
+        throw new Error(infrastructure.error ?? 'Google project setup did not converge.');
+      }
     }
 
     if (mode === 'preview') {
+      let confirmCall: GcpBootstrapResult['confirmCall'];
+      if (infrastructure?.requiresPlanId) {
+        if (!infrastructure.planId || !params.billingAccountName) throw new Error('The setup preview did not return the plan ID required for confirmation.');
+        confirmCall = { ...bootstrapPreviewRetry(params.project.name, projectId.value, params).retryCall,
+          billingAccountName: params.billingAccountName.trim(), gcpSetupPlanId: infrastructure.planId, confirm: true };
+      }
       const result: GcpBootstrapResult = {
         success: true,
         mode,
@@ -275,6 +329,7 @@ export async function runGcpBootstrap(
             ...(displayName ? { displayName } : {}),
           })),
         plannedSteps: plannedBootstrapSteps(observation),
+        ...(confirmCall ? { requiresPlanId: true, confirmCall } : {}),
         ...(infrastructure ? { planId: infrastructure.planId, htmlPath: infrastructure.htmlPath, actions: infrastructure.actions } : { needsBillingSelection: true }),
         requiresConfirmation: true,
       };
@@ -471,6 +526,7 @@ export async function runGcpBootstrap(
       target,
       error: safeError,
       partialProgress: progress,
+      ...(projectRecovery ? { projectRecovery } : {}),
       ...(recovery ? { recovery } : {}),
       ...(cleanupKeyResourceName ? {
         cleanupRequired: {
