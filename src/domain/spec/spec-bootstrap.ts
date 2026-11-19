@@ -18,6 +18,7 @@ export interface BootstrapParams {
   /** Managed queue env vars resolved by the caller (see queue-env.ts). */
   queueEnvVars?: Record<string, string>;
   /** Managed runtime variables that apply only to one service. */
+  removeEnvVarsByService?: Record<string, string[]>;
   envVarsByService?: Record<string, Record<string, string>>;
   /**
    * Service actions depend on an explicit project action, so they must not
@@ -116,7 +117,10 @@ export function specToBootstrapParams(
     };
   }
 
+  const removeEnvVarsByService = Object.fromEntries(Object.entries(env.services).flatMap(([name, service]) =>
+    service.removeEnvVars?.length ? [[name, service.removeEnvVars]] : []));
   return {
+    ...(Object.keys(removeEnvVarsByService).length ? { removeEnvVarsByService } : {}),
     projectName,
     environmentName,
     ...(env.hosting.region ? { hostingRegion: env.hosting.region } : {}),

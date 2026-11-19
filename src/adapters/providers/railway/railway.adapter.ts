@@ -1,3 +1,4 @@
+import { localConnectionRoleInputs } from '../../../domain/services/connection-roles.js';
 import { nativeDatabaseConnectivity } from '../../../domain/registry/database-connectivity.js';
 import { createRailwayRegistryCredentialLifecycle } from './railway-registry-credential.js';
 import { railwayDeploySource } from './railway-deploy-source.js';
@@ -8201,13 +8202,7 @@ providerRegistry.register({
     setupHelpUrl: 'https://railway.com/account/tokens',
     credentials: {
       defaultScalarKey: 'apiToken',
-      localEnvInputs: [
-        {
-          envKey: 'HYPERVIBE_RAILWAY_TOKEN',
-          credentialKeys: ['apiToken'],
-          comment: 'Railway API token for the selected workspace and project infrastructure',
-        },
-      ],
+      localEnvInputs: localConnectionRoleInputs('railway'),
     },
     maturity: {
       lifecycle: {

@@ -248,7 +248,7 @@ describe('retained database provision verification through the existing binding 
     vi.spyOn(f.database.provisionRecovery!, 'inspect').mockResolvedValue({ state: 'unknown', phase: 'workflow',
       code: 'synthetic-private-provider-error' } as never);
     const result = await planDatabaseScopeBinding({ project: f.project, spec: f.stored.spec.environments.staging,
-      environment: f.environment, components: [f.component], adapterFactory: f.ctx.adapterFactory });
+      environment: f.environment, components: [f.component], adapterFactory: f.ctx.adapterFactory, databaseBindings: f.ctx.repos.components });
     expect(result.actions).toEqual([]);
     expect(JSON.stringify(result)).not.toContain('synthetic-private-provider-error');
     expect(f.http.mutations).toEqual([]);

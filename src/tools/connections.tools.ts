@@ -1,3 +1,6 @@
+import { redactExactValues } from '../utils/redact-exact-values.js';
+import { connectionRoles } from '../domain/services/connection-roles.js';
+import { requiredConnectionChecklist } from '../application/spec-connections.js';
 import { cloudEngineForConnection } from '../application/cloud-engines.js';
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -154,8 +157,10 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    [CONTEXTUAL_SETUP_HINT, 'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages connections. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. For GCP bootstrap and prepare, select the environment to use its declared project. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
+    [CONTEXTUAL_SETUP_HINT, '{} lists every connection/provider. {project} lists the same saved connections and provider catalog with contextual setup links. Use repositoryContext to select the current repository. Use view="requirements" to see the connections a project needs, optionally filtered by environment. Pass provider to manage a connection. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context alone never changes provider scope. For GCP bootstrap and prepare, select the environment to use its declared project. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
+      view: z.enum(['catalog', 'requirements']).optional().describe('Read-only list view. The default catalog includes saved connections and available providers. Use requirements with a selected project or initialized repository and an optional environment filter.'),
+      role: z.union([z.string(), z.array(z.string()).min(1)]).optional().describe('action="describe": select one or more connection credential fields, such as GitHub packageReadToken.'),
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat.'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
@@ -173,7 +178,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
-      environment: z.string().optional().describe('For GCP bootstrap and prepare, select an environment from the project spec to use its declared hosting.gcpProjectId and default region. For connect, this names the environment shown on the connect page.'),
+      environment: z.string().optional().describe('Filter view="requirements" by environment or select the environment for setup guidance. For GCP bootstrap and prepare, this selects the declared hosting.gcpProjectId and default region. For connect, the environment appears on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
       azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
       azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
@@ -187,6 +192,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     },
     wrapCommandHandler(async ({
       provider,
+      view,
+      role,
       action,
       credentials,
       credentialsRef,
@@ -215,6 +222,11 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       adminAccessTokenRef,
       confirm,
     }) => {
+      if (view && provider) return commandError('VALIDATION', 'view is only available when listing connections. Omit provider.');
+      const selectedRoles = role === undefined ? undefined : [...new Set(Array.isArray(role) ? role : [role])];
+      if (selectedRoles && (!provider || action !== 'describe' || connectionRoles(provider, selectedRoles).length !== selectedRoles.length)) {
+        return commandError('VALIDATION', 'Use role with a registered credential field and action="describe".');
+      }
       if (repositoryContext && projectRef !== undefined) {
         return commandError('VALIDATION', 'Choose project or repositoryContext, not both.');
       }
@@ -271,7 +283,20 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           });
         }
         const { project, context } = await resolveGuidanceContext();
-        return listConnections(project, context);
+        if (view !== 'requirements') {
+          if (environment !== undefined) return commandError('VALIDATION', 'Use view="requirements" to filter project connection requirements by environment.');
+          return listConnections(project, context);
+        }
+        if (!project) return commandError('VALIDATION', 'Select a project or an initialized repository to list its connection requirements.');
+        const spec = new SpecStore().preview(project);
+        if (environment !== undefined && !Object.hasOwn(spec?.environments ?? {}, environment)) {
+          return commandError('NOT_FOUND', `Environment "${environment}" has no recorded spec in ${project.name}.`);
+        }
+        const required = spec ? requiredConnectionChecklist(ctx, spec, {
+          environments: environment ? [environment] : undefined, gitRemoteUrl: project.gitRemoteUrl,
+        }).required : [];
+        return commandSuccess({ project: { id: project.id, name: project.name }, connections: required },
+          { hint: 'Follow each returned connectionAction with hv_connections. For other missing connections use action="describe" with the provider, project and scope.' });
       }
 
       const requestedAction = action ?? 'add';
@@ -321,12 +346,13 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const { context: repositoryGuidance } = await resolveGuidanceContext();
         const context: ConnectionGuidanceContext = {
           ...repositoryGuidance,
+          ...(environment ? { environment } : {}),
           ...(scope ? { scope } : {}),
         };
         const metadata = providerRegistry.getMetadata(provider) ?? secretManagerRegistry.getMetadata(provider)!;
         return commandSuccess({
-          provider: providerDiscoveryEntry(metadata, context),
-          connectionSetup: connectionSetupDetails(provider, context),
+          provider: role ? { name: provider, displayName: metadata.displayName } : providerDiscoveryEntry(metadata, context),
+          connectionSetup: connectionSetupDetails(provider, { ...context, ...(selectedRoles ? { requiredCredentialKeys: selectedRoles } : {}) }),
         }, { hint: 'Setup guidance only; no credential was resolved, connection verified, or setup preview created. Provider-owned bootstrap takes precedence. Preserve the complete returned URL and review the remaining manual fields.' });
       }
       const sharedGcpFields = {
@@ -602,6 +628,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           });
         }
 
+        const roles = connectionRoles(provider, Object.keys(credentialsToSave));
         const data = {
           ...projectContext,
           provider,
@@ -609,6 +636,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           status: 'verified',
           message: verified.message,
           credentialsSource,
+          ...(roles.length ? { configuredRoles: redactExactValues(roles.map(role => {
+            const source = credentialsResolution[role.credentialKey!];
+            const sourceField = source?.sourceField ?? source?.sourceKey;
+            return { issuer: role.issuer, ...(sourceField ? { sourceField } : {}),
+              destinationRole: role.destinationRole, connectionField: role.credentialKey, scope: scope ?? 'global' };
+          }), Object.values(credentialsToSave).filter((value): value is string => typeof value === 'string')) } : {}),
           ...verified.data,
           ...(saved.dependenciesInstalled ? { dependenciesInstalled: saved.dependenciesInstalled } : {}),
           ...(saved.dependencyErrors ? { dependencyErrors: saved.dependencyErrors } : {}),

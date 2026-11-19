@@ -42,8 +42,15 @@ jobs:
         run: |
           set -o pipefail
           (
-            swift test --package-path apps/macos --filter CurrentCoreStatusContractTests
+            npm run build
           ) 2>&1 | tee hypervibe-failure-evidence/2.log
+      - name: "test 3"
+        shell: bash
+        run: |
+          set -o pipefail
+          (
+            HYPERVIBE_COMPANION_CONNECTION_FIXTURE="$PWD/test/fixtures/companion-connections.mjs" swift test --package-path apps/macos --filter CurrentCore
+          ) 2>&1 | tee hypervibe-failure-evidence/3.log
       - name: Upload non-secret failure evidence
         if: failure()
         uses: actions/upload-artifact@v7

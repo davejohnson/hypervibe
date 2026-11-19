@@ -1,3 +1,4 @@
+import { HYPERVIBE_VERSION } from '../../version.js';
 import { describe, expect, it } from 'vitest';
 import {
   toolSuccess,
@@ -189,7 +190,7 @@ describe('toolError', () => {
     const response = toolError('NOT_FOUND', 'no such project', { hint: 'list projects with hv_spec' });
     const body = parse(response);
     expect(body.ok).toBe(false);
-    expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project' });
+    expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project', build: { version: HYPERVIBE_VERSION } });
     expect(body.hint).toBe('list projects with hv_spec');
     expect(toMcpToolResponse(response).isError).toBe(true);
     expect(rendered(response)).toContain('❌  HYPERVIBE · ERROR');
@@ -256,6 +257,6 @@ describe('wrapHandler', () => {
       throw new Error('boom');
     });
     const body = parse(await handler({}));
-    expect(body.error).toEqual({ code: 'INTERNAL', message: 'boom' });
+    expect(body.error).toEqual({ code: 'INTERNAL', message: 'boom', build: { version: HYPERVIBE_VERSION } });
   });
 });

@@ -1,10 +1,11 @@
+import type { PublicationAuditPort } from '../ports/github-workflow-publication.port.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { pendingCredentialOperations } from './runtime-rollout.service.js';
 import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../../adapters/providers/github/github-credential-activation.js';
 import { acceptedCredentialCiInputs } from './accepted-credential-inputs.js';
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { githubPackagePullSource } from '../../adapters/providers/github/package-pull.js';
+import { githubPackagePullSetupKeys, githubPackagePullSource } from '../../adapters/providers/github/package-pull.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
@@ -31,7 +32,7 @@ import {
 } from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
-import { connectionSetupUrl, formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
+import { connectionSetupDetails, connectionSetupUrl, formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
   APPLIED_SPEC_HASH_OPERATION,
@@ -76,7 +77,12 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
   }
   if (missingImageRegistrySecrets) {
     const displayName = providerRegistry.getMetadata(provider)?.displayName ?? provider;
-    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, options)}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { ...options, intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    const keys = githubPackagePullSetupKeys(options.scope);
+    const setup = connectionSetupDetails('github', { ...options, requiredCredentialKeys: keys });
+    const form = keys.includes('apiToken')
+      ? `Use separate credentials (create the package token at ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, options)}) or assign one combined classic token to both roles (create the combined token at ${setup.recommendedSetupUrl}).`
+      : `Add the package-read role to your existing connection (${setup.recommendedSetupUrl}).`;
+    parts.push(`For ${displayName} GHCR image pulls, packageReadToken needs read:packages. ${form} Connect with ${setup.credentialExample}`);
   }
   return parts.join(' ');
 }
@@ -333,6 +339,7 @@ export async function observeManagedWorkflowFiles(params: {
   contract: ManagedWorkflowContract;
 }): Promise<{
   desiredFiles: Array<{ path: string; content: string }>;
+  observedHashes: Record<string, string | null>;
   liveContentHash: string | null;
   retiredPaths: string[];
   retiredFilePresent: boolean;
@@ -387,6 +394,7 @@ export async function observeManagedWorkflowFiles(params: {
         : 'drift';
   return {
     desiredFiles,
+    observedHashes: Object.fromEntries(observed.map(file => [file.path, file.content === null ? null : sha256(file.content)])),
     liveContentHash,
     retiredPaths,
     retiredFilePresent,
@@ -592,6 +600,7 @@ function buildAction(params: {
   reviewedEnvironmentSecrets?: string[];
   missingEnvironmentSecrets?: string[];
   staleEnvironmentSecrets?: string[];
+  observedHashes?: Record<string, string | null>;
   retiredPaths?: string[];
   workflowPublicationRequired?: boolean;
   iosBuildCredentialsSource?: IosBuildCredentialsSource;
@@ -624,6 +633,7 @@ function buildAction(params: {
         aggregateContentHash: workflowFilesContentHash(workflowFiles(params.workflow)),
         inputHash: params.inputHash,
         companionPaths: (params.workflow.companionFiles ?? []).map((file) => file.path),
+        ...(params.observedHashes ? { observedHashes: params.observedHashes } : {}),
         ...(params.retiredPaths?.length ? { retiredPaths: params.retiredPaths } : {}),
       },
       ...(params.missingProviderSecrets?.length ? { missingProviderSecrets: params.missingProviderSecrets } : {}),
@@ -827,7 +837,7 @@ export async function planGitHubActionsDeploy(params: {
         reason,
         verified: true,
         workflowPublicationRequired: true,
-        retiredPaths: observation.retiredPaths,
+        retiredPaths: observation.retiredPaths, observedHashes: observation.observedHashes,
         dependsOn: params.dependsOn,
       }),
       warnings,
@@ -945,7 +955,7 @@ export async function applyGitHubActionsDeploy(params: {
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
   authority?: 'publication-only' | 'secret-sync';
-}): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+}, publicationAudit: PublicationAuditPort): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
   if (params.action.type === 'noop') {
     return { success: true, message: 'No GitHub Actions workflow or secret changes were requested.', data: { skipped: true, reason: 'noop' } };
   }
@@ -1021,6 +1031,9 @@ export async function applyGitHubActionsDeploy(params: {
         error: 'The reviewed publication action no longer matches live repository state. Re-run hv_plan before syncing secrets.',
       };
     }
+    if (!reviewedWorkflow.observedHashes || JSON.stringify(reviewedWorkflow.observedHashes) !== JSON.stringify(observation.observedHashes)) {
+      return {success: false, status: 'blocked', message: 'Managed workflow contents changed or a prior plan lacks exact file observations. Review a new hv_plan before publication.'};
+    }
     const reviewedRetiredPaths = Array.isArray(reviewedWorkflow.retiredPaths)
       ? reviewedWorkflow.retiredPaths.filter((path): path is string => typeof path === 'string')
       : [];
@@ -1066,7 +1079,9 @@ export async function applyGitHubActionsDeploy(params: {
       targetBranch: workflow.branch,
       retiredManagedPaths: reviewedRetiredPaths,
       proposalBranch: managedWorkflowPublicationBranch(environmentName),
+      reviewedFileHashes: observation.observedHashes,
       requireDefaultTarget: true,
+      publicationAudit,
     });
     return {
       ...proposal,

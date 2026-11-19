@@ -203,20 +203,47 @@ export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: s
 /** The one firewall rule Hypervibe ever adds: this computer's address, only while it runs setup SQL. */
 export const AZURE_SETUP_RULE = 'hypervibe-setup';
 const POSTGRES_API = 'api-version=2024-08-01';
-const blockedAddress = (error: unknown): string | undefined =>
-  /no pg_hba\.conf entry for host "(\d{1,3}(?:\.\d{1,3}){3})"/.exec(error instanceof Error ? error.message : '')?.[1];
+/** A connection failure in a line: its code and message, or those of the first address tried. Connection errors carry no password. */
+function connectionAnswer(error: unknown): string {
+  const inner = error instanceof AggregateError && error.errors.length ? error.errors[0] : error;
+  const code = (error as { code?: unknown } | null)?.code ?? (inner as { code?: unknown } | null)?.code;
+  const message = (inner instanceof Error ? inner.message : '') || (error instanceof Error ? error.message : String(error));
+  return `${typeof code === 'string' ? `${code}: ` : ''}${message}`.slice(0, 300);
+}
+/** This computer's public IPv4 address as an AWS-run echo service sees it; undefined when it cannot be read. */
+export async function lookupPublicAddress(fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+  try {
+    const response = await fetchImpl('https://checkip.amazonaws.com/', { signal: AbortSignal.timeout(10_000) });
+    const text = (await response.text()).trim();
+    return response.ok && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(text) ? text : undefined;
+  } catch { return undefined; }
+}
+
+export interface AzureSetupAccessOptions {
+  pollMs?: number;
+  /** This computer's public address; the default asks an address service. */
+  lookupAddress?: () => Promise<string | undefined>;
+}
 
 /**
  * Flexible Server has no SQL-over-HTTPS API, and the server is closed to the
  * internet. To create or drop a login, Hypervibe turns public access on, allows
- * exactly this computer's address (the one Azure reports refusing), runs `work`,
- * then removes the rule and turns public access off again. Closing is attempted
- * whatever happened before it, and a failure to close is an error.
+ * exactly this computer's address, runs `work`, then removes the rule and turns
+ * public access off again. Closing is attempted whatever happened before it,
+ * and a failure to close is an error.
+ *
+ * Azure never says which address it turned away: with or without a firewall
+ * rule it drops the connection (observed live 2026-11-18, West US 2). So the
+ * address comes from an address service. The probe must then connect, which a
+ * wrong address cannot do.
  */
-export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, serverId: string, probe: () => Promise<void>, work: () => Promise<T>, pollMs = 5000): Promise<T> {
+export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, serverId: string, probe: () => Promise<void>, work: () => Promise<T>, options: AzureSetupAccessOptions = {}): Promise<T> {
+  const pollMs = options.pollMs ?? 5000;
+  const lookupAddress = options.lookupAddress ?? (() => lookupPublicAddress());
   const server = `${ARM}${serverId}`;
   const rule = `${server}/firewallRules/${AZURE_SETUP_RULE}?${POSTGRES_API}`;
   const wait = () => new Promise((done) => setTimeout(done, pollMs));
+  const allow = (address: string) => azureRest(tokens, AZURE_SCOPES.arm, 'PUT', rule, { properties: { startIpAddress: address, endIpAddress: address } });
   /** Sets public access and waits until Azure reports the server ready with that setting. */
   const publicAccess = async (wanted: 'Enabled' | 'Disabled'): Promise<string | undefined> => {
     const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${server}?${POSTGRES_API}`, { properties: { network: { publicNetworkAccess: wanted } } });
@@ -231,7 +258,13 @@ export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, server
   };
   const close = async (): Promise<string | undefined> => {
     const removed = await azureRest(tokens, AZURE_SCOPES.arm, 'DELETE', rule).catch(() => undefined);
-    const closed = await publicAccess('Disabled').catch((error: unknown) => error instanceof Error ? error.message : 'error');
+    // A dropped request must not leave the server open: closing is tried three times.
+    let closed: string | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      closed = await publicAccess('Disabled').catch((error: unknown) => error instanceof Error ? error.message : 'error');
+      if (!closed) break;
+      await wait();
+    }
     if (closed) return `Hypervibe could not turn the database server's public access off again (${closed}). Run hv_plan and hv_apply to close it.`;
     if (!removed || ![200, 202, 204, 404].includes(removed.status)) return `The database server is closed to the internet again, but its unused ${AZURE_SETUP_RULE} firewall rule could not be removed${removed ? ` (${azureError(removed)})` : ''}.`;
     return undefined;
@@ -241,24 +274,18 @@ export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, server
   try {
     const opened = await publicAccess('Enabled');
     if (opened) throw new Error(`Hypervibe could not open the database server to this computer (${opened}).`);
-    let address: string | undefined;
-    let allowed = false;
-    for (let attempt = 0; !address && !allowed; attempt++) {
-      try { await probe(); allowed = true; } catch (error) {
-        address = blockedAddress(error);
-        if (!address && attempt >= 11) throw new Error('Hypervibe could not learn which address Azure sees this computer as, so it did not open the database server to anything.');
-        if (!address) await wait();
-      }
-    }
-    if (address) {
-      const added = await azureRest(tokens, AZURE_SCOPES.arm, 'PUT', rule, { properties: { startIpAddress: address, endIpAddress: address } });
-      if (![200, 201, 202].includes(added.status)) throw new Error(`Hypervibe could not allow this computer to reach the database server (${azureError(added)}).`);
-      // The rule takes up to a few minutes to apply.
-      for (let attempt = 0; ; attempt++) {
-        try { await probe(); break; } catch (error) {
-          if (!blockedAddress(error) || attempt >= 59) throw error;
-          await wait();
-        }
+    const address = await lookupAddress();
+    if (!address) throw new Error('Hypervibe could not learn this computer\'s public address, so it did not open the database server to anything. Check the internet connection and run the plan again.');
+    const added = await allow(address);
+    if (![200, 201, 202].includes(added.status)) throw new Error(`Hypervibe could not allow this computer to reach the database server (${azureError(added)}).`);
+    // The rule takes up to a few minutes to apply; until then connections are dropped. The probe asks one
+    // thing: does the server answer this computer? Any PostgreSQL error (a login a new server does not
+    // know yet, say) is an answer, and `work` deals with it.
+    for (let attempt = 0; ; attempt++) {
+      try { await probe(); break; } catch (error) {
+        if (/^[0-9A-Z]{5}$/.test(String((error as { code?: unknown } | null)?.code ?? ''))) break;
+        if (attempt >= 23) throw new Error(`The database server did not answer this computer after allowing ${address}. Last answer: ${connectionAnswer(error)}`);
+        await wait();
       }
     }
     result = await work();

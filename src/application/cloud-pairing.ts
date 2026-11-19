@@ -1,3 +1,4 @@
+import type { LocalPairingSource } from './cloud-pairing-source.js';
 import { z } from 'zod';
 import { HvError } from './results.js';
 import { createCloudJsonClient } from './cloud-http.js';
@@ -68,6 +69,7 @@ export type HypervibeCloudPairingExchange =
 
 export interface PendingHypervibeCloudConnection {
   version: 1;
+  localSource?: LocalPairingSource;
   status: 'pending';
   baseUrl: string;
   repository: string;
@@ -80,6 +82,7 @@ export interface PendingHypervibeCloudConnection {
 
 export interface VerifiedHypervibeCloudConnection {
   version: 1;
+  localSource?: LocalPairingSource;
   status: 'verified';
   baseUrl: string;
   repository: string;

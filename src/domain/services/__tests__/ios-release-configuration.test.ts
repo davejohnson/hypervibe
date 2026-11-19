@@ -47,8 +47,9 @@ function ios(environment: 'staging' | 'production', validate = true): IosSpec {
   };
 }
 
-function workflow(environment: 'staging' | 'production', validate = true, expectedInfoPlist?: Record<string, string>) {
+function workflow(environment: 'staging' | 'production', validate = true, expectedInfoPlist?: Record<string, string>, matchPush = false) {
   const app = ios(environment, validate);
+  if (matchPush) { app.capabilities = ['PUSH_NOTIFICATIONS']; app.release!.signing = { provider: 'match', gitBranch: 'main' }; }
   if (expectedInfoPlist) app.release!.build.expectedInfoPlist = expectedInfoPlist;
   return parse(buildIosReleaseWorkflow({
     provider: 'railway', providerName: 'Railway',
@@ -103,6 +104,33 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive:
   });
   return { ...result, output };
 }
+
+it.each([false, true])('checks the installed App Store profile for declared production push before building (covered %s)', covered => {
+  const build = workflow('production', true, undefined, true).jobs.build;
+  const step = build.steps.find((s: { name?: string }) => s.name === 'Prepare Hypervibe-managed signing assets');
+  const python = step.run.split("python3 - <<'PY'\n")[1].split('\nPY')[0];
+  const fixture = `
+import datetime, os, pathlib, plistlib, tempfile, subprocess
+from unittest.mock import patch
+tmp = tempfile.TemporaryDirectory()
+root = pathlib.Path(tmp.name)
+folder = root / "Library/MobileDevice/Provisioning Profiles"
+folder.mkdir(parents=True)
+(folder / "fixture.mobileprovision").touch()
+bundle = os.environ["HYPERVIBE_BUNDLE_ID"]
+entitlements = {"application-identifier": "TEAM." + bundle}
+if os.environ["COVERED"] == "true": entitlements["aps-environment"] = "production"
+profile = dict(TeamIdentifier=["TEAM"], Name="match AppStore " + bundle, UUID="uuid", ExpirationDate=datetime.datetime(2099, 1, 1), Entitlements=entitlements)
+decoded = subprocess.CompletedProcess([], 0, stdout=plistlib.dumps(profile))
+patch.object(pathlib.Path, "home", return_value=root).start()
+patch("subprocess.run", return_value=decoded).start()
+os.environ["GITHUB_ENV"] = str(root / "env")
+`;
+  const result = spawnSync('python3', ['-c', fixture + '\n' + python], { encoding: 'utf8',
+    env: { ...process.env, ...step.env, HYPERVIBE_BUNDLE_ID: 'com.example.invoiceperfect', COVERED: String(covered) } });
+  expect(result.status, result.stderr).toBe(covered ? 0 : 1);
+  if (!covered) expect(result.stderr).toContain('fastlane match appstore --app_identifier com.example.invoiceperfect --force');
+});
 
 describe.each(['build', 'release'] as const)('emitted %s IPA environment validation', job => {
   it.each(['xml', 'binary'] as const)('accepts both environment-specific %s IPAs', format => {

@@ -32,7 +32,7 @@ describe('engine selection', () => {
     const environment = spec.environments.staging;
     environment.backups = { mode: 'daily' } as never;
     environment.email = { enabled: true } as never;
-    environment.domainRegistration = { provider: 'cloudflare' } as never;
+    environment.domainRegistration = { provider: 'cloudflare', register: true };
     environment.services.web!.volume = { mountPath: '/data' } as never;
     environment.database = { engine: 'postgres', provider: provider === 'cloudrun' ? 'cloudsql' : provider === 'aws' ? 'rds' : 'azure-postgres', resilience: {} } as never;
     const problems = engineEnvironmentProblems(spec, 'staging').join('\n');

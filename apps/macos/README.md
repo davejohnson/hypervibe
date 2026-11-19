@@ -145,12 +145,15 @@ swift test --package-path apps/macos
 The companion status contract uses responses captured from the current registered
 `hv_status` handler, with synthetic provider observations and no cloud calls.
 Ordinary `npm test` checks those captures have not drifted; the macOS contract
-check decodes the same files with Swift. When a deliberate response change needs
-new fixtures, run:
+check decodes the same files with Swift. It also runs companion refresh and
+provider catalog discovery against the built MCP server using a temporary
+repository and an offline connection database. To regenerate the status
+fixtures and run both Swift contracts:
 
 ```sh
 HYPERVIBE_UPDATE_COMPANION_FIXTURES=1 npm test -- src/tools/__tests__/macos-status.contract.test.ts
-swift test --package-path apps/macos --filter CurrentCoreStatusContractTests
+npm run build
+HYPERVIBE_COMPANION_CONNECTION_FIXTURE="$PWD/test/fixtures/companion-connections.mjs" swift test --package-path apps/macos --filter CurrentCore
 ```
 
 Do not edit the captured JSON by hand. Engine status keeps infrastructure drift

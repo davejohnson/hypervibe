@@ -241,6 +241,31 @@ describe('hv_connections', () => {
     } finally { await t.close(); }
   });
 
+  it('returns an exact token label and read-only package permissions for a single missing GitHub role', async () => {
+    const project = new ProjectRepository().create({ name: 'package-app', defaultPlatform: 'railway' });
+    const t = await makeClient();
+    const input = { provider: 'github', action: 'describe', role: 'packageReadToken', project: project.name, environment: 'staging' };
+    const setup = (await t.call('hv_connections', input)).data.connectionSetup;
+    expect(setup.roles).toHaveLength(1);
+    expect(setup.tokenType).not.toMatch(/repo|workflow/i);
+    expect(setup.requiredPermissions).toEqual(['read:packages']);
+    expect(setup.roles[0].tokenLabel).toBe('package-app / staging: HYPERVIBE_GITHUB_PACKAGES_TOKEN (read:packages)');
+    expect(new URL(setup.recommendedSetupUrl).searchParams.get('description')).toBe(setup.roles[0].tokenLabel);
+    expect(new URL(setup.recommendedSetupUrl).searchParams.get('scopes')).toBe('read:packages');
+    expect((await t.call('hv_connections', input)).data.connectionSetup).toEqual(setup);
+    await t.close();
+  });
+
+  it('labels SendGrid management and send-only runtime roles in the public setup prompt', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'sendgrid', action: 'describe' });
+    expect(result.data.connectionSetup.roles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceVariable: 'HYPERVIBE_SENDGRID_API_KEY', destinationRole: 'provider-management', issuer: 'SendGrid' }),
+      expect.objectContaining({ sourceVariable: 'SENDGRID_API_KEY', destinationRole: 'application-runtime', permissions: ['mail.send'] }),
+    ]));
+    await t.close();
+  });
+
   it('describes scoped credential forms without resolving credentials or writing connection state', async () => {
     const project = new ProjectRepository().create({ name: 'storefront', defaultPlatform: 'railway', gitRemoteUrl: 'git@github.com:acme/storefront.git' });
     const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Provider access must not occur during describe'));
@@ -759,6 +784,10 @@ describe('hv_connections', () => {
     });
 
     expect(result.ok).toBe(true);
+    expect(result.data.configuredRoles).toEqual([
+      { issuer: 'GitHub', sourceField: 'HYPERVIBE_GITHUB_TOKEN', destinationRole: 'provider-management', connectionField: 'apiToken', scope: 'global' },
+      { issuer: 'GitHub', sourceField: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN', destinationRole: 'package-read', connectionField: 'packageReadToken', scope: 'global' },
+    ]);
     expect(JSON.stringify(result)).not.toContain('gh-api-token');
     expect(JSON.stringify(result)).not.toContain('gh-package-token');
 
@@ -769,7 +798,7 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('accepts NODE_AUTH_TOKEN when a GitHub credentials ref names another supported alias', async () => {
+  it('preserves role boundaries when only a package token exists and management access is requested', async () => {
     process.env.NODE_AUTH_TOKEN = 'gh-combined-token';
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
@@ -783,24 +812,14 @@ describe('hv_connections', () => {
       credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toContain('HYPERVIBE_GITHUB_TOKEN');
+    expect(new ConnectionRepository().findByProvider('github')).toBeNull();
     expect(JSON.stringify(result)).not.toContain('gh-combined-token');
-    const connection = new ConnectionRepository().findByProvider('github')!;
-    const decrypted = getSecretStore().decryptObject<{
-      apiToken: string;
-      packageReadToken?: string;
-    }>(connection.credentialsEncrypted);
-    expect(decrypted.apiToken).toBe('gh-combined-token');
-    expect(decrypted.packageReadToken).toBe('gh-combined-token');
-    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
-      credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
-      credentialsResolution: { apiToken: { resolvedRef: 'env:NODE_AUTH_TOKEN', sourceKey: 'NODE_AUTH_TOKEN' } },
-    });
-    expect(result.data).not.toHaveProperty('credentialsResolution');
     await t.close();
   });
 
-  it('maps both GitHub credential roles from one supported dotenv alias', async () => {
+  it('preserves an explicit mapping of both roles to one existing dotenv source', async () => {
     const readSource = vi.spyOn(envParser, 'parseEnvFile');
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'NODE_AUTH_TOKEN=gh-combined-dotenv-token\n');
@@ -815,8 +834,8 @@ describe('hv_connections', () => {
       provider: 'github',
       credentialsRef: `dotenv:${envPath}`,
       credentialsMap: {
-        apiToken: 'HYPERVIBE_GITHUB_TOKEN',
-        packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
+        apiToken: 'NODE_AUTH_TOKEN',
+        packageReadToken: 'NODE_AUTH_TOKEN',
       },
     });
 
@@ -832,7 +851,7 @@ describe('hv_connections', () => {
     expect(readSource).toHaveBeenCalledTimes(1);
     expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
       credentialsRef: `dotenv:${envPath}`,
-      credentialsMap: { apiToken: 'HYPERVIBE_GITHUB_TOKEN', packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN' },
+      credentialsMap: { apiToken: 'NODE_AUTH_TOKEN', packageReadToken: 'NODE_AUTH_TOKEN' },
       credentialsResolution: {
         apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
         packageReadToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
@@ -841,15 +860,15 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('records the resolved dotenv fragment without replacing the declared alias', async () => {
+  it('records an explicitly mapped legacy dotenv source without renaming it', async () => {
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'NODE_AUTH_TOKEN=synthetic-alias-credential\n');
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'reader' });
     const t = await makeClient();
-    const result = await t.call('hv_connections', { provider: 'github', credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN` });
+    const result = await t.call('hv_connections', { provider: 'github', credentialsRef: `dotenv:${envPath}#NODE_AUTH_TOKEN` });
     expect(result.ok).toBe(true);
     expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
-      credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN`,
+      credentialsRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`,
       credentialsResolution: { apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' } },
     });
     expect(JSON.stringify(result)).not.toContain('synthetic-alias-credential');
@@ -884,7 +903,7 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('blocks ambiguous GitHub alias fallback without exposing either token', async () => {
+  it('requires an explicitly requested GitHub source even when both other roles exist', async () => {
     process.env.HYPERVIBE_GITHUB_TOKEN = 'gh-api-token';
     process.env.HYPERVIBE_GITHUB_PACKAGES_TOKEN = 'gh-package-token';
 
@@ -895,15 +914,14 @@ describe('hv_connections', () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error.message).toContain('accepted aliases');
-    expect(result.error.message).toContain('Set NODE_AUTH_TOKEN explicitly');
+    expect(result.error.message).toContain('NODE_AUTH_TOKEN');
     expect(JSON.stringify(result)).not.toContain('gh-api-token');
     expect(JSON.stringify(result)).not.toContain('gh-package-token');
     expect(new ConnectionRepository().findByProvider('github')).toBeNull();
     await t.close();
   });
 
-  it('stores the verified GitHub login for package pull credential sync', async () => {
+  it('records the verified GitHub login without assigning the management token to package pulls', async () => {
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
@@ -924,7 +942,7 @@ describe('hv_connections', () => {
     const decrypted = getSecretStore().decryptObject<{ apiToken: string; login?: string; packageReadToken?: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-token');
     expect(decrypted.login).toBe('davejohnson');
-    expect(decrypted.packageReadToken).toBe('gh-token');
+    expect(decrypted.packageReadToken).toBeUndefined();
     await t.close();
   });
 
@@ -1095,9 +1113,12 @@ describe('hv_connections', () => {
     const project = new ProjectRepository().create({ name: 'connection-list-app', defaultPlatform: 'railway' });
     const t = await makeClient();
 
+    new ConnectionRepository().create({ provider: 'github', scope: 'acme/saved', credentialsEncrypted: 'fixture' });
     const listed = await t.call('hv_connections', { project: project.name });
     expect(listed.ok).toBe(true);
     expect(listed.data.project).toEqual({ id: project.id, name: project.name });
+    expect(listed.data.connections).toEqual([{ provider: 'github', scope: 'acme/saved', status: 'pending', lastVerifiedAt: null }]);
+    expect(listed.data.availableProviders.deployment).toContainEqual(expect.objectContaining({ name: 'github' }));
 
     const unknown = await t.call('hv_connections', { project: 'does-not-exist' });
     expect(unknown.ok).toBe(false);
@@ -1110,6 +1131,19 @@ describe('hv_connections', () => {
     });
     expect(unknown.agentInstruction.action).toBe('continue');
     await t.close();
+  });
+
+  it.each([
+    { view: 'requirements' },
+    { environment: 'production' },
+    { view: 'requirements', provider: 'github', action: 'describe' },
+  ])('rejects an ambiguous requirements or catalog request %j', async args => {
+    const t = await makeClient();
+    try {
+      expect(await t.call('hv_connections', args)).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    } finally {
+      await t.close();
+    }
   });
 
   it('lists only when no operation parameters are supplied', async () => {

@@ -31,10 +31,14 @@ export const prepareGitHubCredentialRollout: NonNullable<CiLifecyclePort['prepar
     const contract = resolveManagedWorkflowContract({ project: params.project, environmentName: environment.name, environmentSpec, environment });
     if (!contract.ok || contract.workflow.path !== definition.path) continue;
     if (params.ref !== contract.workflow.branch || params.inputs?.rollback === 'true') throw new Error('Credential activation requires the exact reviewed deploy branch and a forward deployment.');
+    const operations = pendingCredentialOperations(environment);
+    if (Object.values(operations).some(operation => operation.configurationVersion !== undefined)) {
+      throw new Error('This managed deployment cannot verify the adopted configuration version. Versioned credential activation is unavailable.');
+    }
     const observation = await observeManagedWorkflowFiles({ ...context, contract });
     if (observation.acceptance === 'drift' || !observation.liveContentHash
       || !observation.desiredFiles.some(file => file.path === contract.workflow.path && file.content.includes('credential_operations:'))) throw new Error('Publish and review the managed credential rollout workflow through hv_plan and hv_apply first.');
-    return { ...params.inputs, credential_operations: JSON.stringify(pendingCredentialOperations(environment)) };
+    return { ...params.inputs, credential_operations: JSON.stringify(operations) };
   }
   // Unrelated workflows have no authority to claim credential activation.
   return params.inputs ?? {};

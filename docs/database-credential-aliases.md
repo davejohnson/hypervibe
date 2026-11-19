@@ -15,16 +15,18 @@ The isolated `database-credential-aliases` plan scope may emit one
 adapter must explicitly support this capability; unsupported providers block
 without falling back to a generic environment write or password reset.
 
-Begin with ordinary `hv_plan` for the selected environment. For a legacy binding
-whose provider scope is absent, it first offers the existing `database-bindings`
-repair only when the provider can independently prove the exact scope. Apply that
+Begin with ordinary `hv_plan` for the selected environment. If an older database
+binding is missing all or part of its provider scope, the plan can offer a
+`database-bindings` repair once the provider confirms the exact identity and
+every previously recorded part agrees. Apply that
 reviewed local-only action, then run `hv_plan` again to review alias repair.
 After applying alias repair, plan again for normal deployment work. Resupply any
 deployment overrides or secret references on that later plan; the isolated
-metadata and alias plans never store those deployment inputs. The explicit
-`scope="database-credential-aliases"` path requires already-complete bindings.
-Partial, malformed or unknown scope, unavailable alias capability and pending
-credential recovery block progress without unrelated mutations.
+metadata and alias plans never store those deployment inputs. If `hv_status` or
+`hv_plan scope="database-credential-aliases"` finds that a binding repair is
+available, it names the project and environment to pass to `hv_plan` without a
+scope. Conflicting, malformed or unverifiable identity and pending credential
+recovery continue to block binding repair.
 
 The capability observes the issuer and its dependent aliases, computes a bounded
 reference-only patch, and verifies that patch by reading provider configuration.

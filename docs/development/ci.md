@@ -64,6 +64,17 @@ Portable execution authority must compare its source against a current, strict n
 
 A shared container image default is distinct from each workload's runtime command. Preserve explicit web/worker/cron commands when selecting a generated image default; test the real spec-to-workflow path with different workload commands and execute the emitted Dockerfile-generation shell. Never require workers to use the web command just to build a shared image.
 
+Managed CI publication creates a complete commit from the reviewed default-branch
+files, then creates a fresh branch at that commit. The publication receipt binds
+the repository, environment branch, base, workflow inputs and immutable head.
+Retries reobserve the exact branch and PR even after an unclear response or an
+edited PR description. Closing or merging a PR permits a new proposal from the
+current default branch; the prior branch stays intact. For legacy publications,
+GitHub must confirm the exact repository, head and base of the closed PR.
+A changed head, an active legacy PR or unowned work requires owner review.
+Review or finish the existing PR and run a fresh publication plan. Publication
+only prepares repository changes for review.
+
 ## DG-125
 
 Generated-workflow tests must execute the emitted shell and JavaScript against a realistic multi-service fixture. Substring assertions may supplement those contract tests, but cannot stand in for proving target selection, provider calls, evidence writing, rollback, and fail-closed behavior.
@@ -83,6 +94,10 @@ and App Store submission must share its exact-resource validation. Retained
 artifacts without the extension and valid empty or populated operations remain
 compatible; malformed metadata never becomes permission to proceed. Execute
 producer output through these consumers in ordinary acceptance tests.
+A versioned credential operation needs a provider observation of the version
+adopted by each exact deployment. Current managed workflows cannot establish
+that fact and reject versioned requests before deploying. Railway continues to
+emit native deployment IDs for unversioned operations.
 
 ## DG-128
 
@@ -109,6 +124,17 @@ classic protection. Ruleset writes are covered by reconstructed responses in
 ordinary tests; only the read path and a no-change plan were run against a real
 repository.
 
+## Google Cloud release identity
+
+The project-shared OpenTofu plan grants the release account `roles/run.developer`
+and `roles/artifactregistry.writer` in the Google Cloud project. It grants
+`roles/iam.serviceAccountUser` on the runtime service account and
+`roles/iam.workloadIdentityUser` on the release account to the named GitHub
+repository's numeric identity. Review the complete list of environment,
+workflow, branch and triggering-event combinations in the access preview.
+Production defaults to manual dispatch. GitHub environment protection rules
+apply to the release job. No credential is retired during this setup.
+
 ## Execution authority and rollback
 
 Observe the effective privileged CI configuration, including imports, and the
@@ -127,7 +153,12 @@ A required candidate test gate runs before migrations and provider effects.
 
 Rollback freezes the selected artifact, successful producing run, immutable
 source, target identities and current execution state, then re-observes them
-before dispatch. Newer or running work, workflow drift and ambiguous evidence
+before dispatch. Pin the latest and source workflow attempts when dispatching.
+For a rerun, require exactly one release artifact created during the successful
+`deploy` job in that same attempt and re-read the source run to detect another
+retry. An older run can redeploy after a newer one. Read the complete workflow
+history and verify the order of deployment attempts for current and automatic
+previous-release selection. Newer or running work, workflow drift and ambiguous evidence
 block. A dispatch remains pending until completion and application checks.
 Direct-provider receipts and an old spec revision cannot authorize rollback
 without an immutable release capability. [Read-only recovery preparation](../rollback-recovery-preparation.md)
@@ -136,7 +167,10 @@ does not create that authority or certify historical artifacts as executable.
 ## Mobile release isolation
 
 Keep project build code and signing inputs separate from App Store submission
-credentials. Preparation and release jobs do not execute project checkout code;
+credentials. Before admitting a build, verify both the server workflow commit and
+the selected application commit belong to the configured release branch in the
+reviewed repository. A manual force request retains this requirement.
+Preparation and release jobs do not execute project checkout code;
 the isolated release job revalidates the IPA, exact server evidence and original
 upload identity before provider effects. Require successful jobs and artifact
 timestamps correlated to the exact run attempt, and recheck immediately before

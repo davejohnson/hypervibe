@@ -1,5 +1,5 @@
 import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { DescribeServicesCommand, DescribeTaskDefinitionCommand, DescribeTasksCommand, ListTasksCommand, ECSClient, type Task } from '@aws-sdk/client-ecs';
+import { DescribeServicesCommand, DescribeTaskDefinitionCommand, DescribeTasksCommand, ListTasksCommand, ECSClient, type Service, type Task } from '@aws-sdk/client-ecs';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ProviderRuntimeLogsRequest, ProviderRuntimeLogsResult } from '../../../domain/ports/provider-logs.port.js';
 import { stateResources, stateString, workloadBinding, type EngineWorkloadBinding, type WorkloadDeploymentObservation } from '../../../domain/ports/workload-diagnostics.port.js';
@@ -14,6 +14,15 @@ const clusterOfService = (serviceArn: string): string | undefined => {
   const match = /^(arn:aws:ecs:[^:]+:\d{12}):service\/([^/]+)\/[^/]+$/.exec(serviceArn);
   return match ? `${match[1]}:cluster/${match[2]}` : undefined;
 };
+
+function serviceActivity(service: Service, failed: boolean): NonNullable<WorkloadDeploymentObservation['runtime']> {
+  const { runningCount: running, desiredCount: desired, pendingCount: pending } = service;
+  if ([running, desired, pending].some(n => !Number.isSafeInteger(n) || n! < 0) || service.status !== 'ACTIVE') {
+    return { activity: failed ? 'failed' : 'unknown' };
+  }
+  return { running, desired, pending, activity: failed ? 'failed' : running! > 0 ? 'running'
+    : desired === 0 && pending === 0 ? 'idle' : 'starting' };
+}
 
 export function projectAwsWorkloadBindings(state: unknown, services: Record<string, { workloadKind?: string }>, scope: { accountId: string; region: string }): Record<string, EngineWorkloadBinding> {
   const resources = stateResources(state); const result: Record<string, EngineWorkloadBinding> = {};
@@ -100,7 +109,7 @@ export class AwsWorkloadDiagnostics {
         const service = r.services[0]; const primary = service.deployments?.filter((d) => d.status === 'PRIMARY');
         if (primary?.length !== 1) return { presence: 'present', status: 'unknown', reason: 'No unique primary deployment was observed.' };
         const settled = service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.desiredCount > 0 && service.runningCount === service.desiredCount;
-        return { presence: 'present', status: primary[0]!.rolloutState === 'FAILED' ? 'failed' : settled && service.deployments?.length === 1 && primary[0]!.rolloutState !== 'IN_PROGRESS' ? 'ready' : 'unknown' };
+        return { presence: 'present', runtime: serviceActivity(service, primary[0]!.rolloutState === 'FAILED'), status: primary[0]!.rolloutState === 'FAILED' ? 'failed' : settled && service.deployments?.length === 1 && primary[0]!.rolloutState !== 'IN_PROGRESS' ? 'ready' : 'unknown' };
       }
       if (!b.clusterArn || !b.taskDefinitionArn) throw new Error('The exact ECS cluster or task definition is missing.');
       const recorded = taskDefinitionIdentity(b.taskDefinitionArn);
@@ -154,7 +163,7 @@ export class AwsWorkloadDiagnostics {
       const latest = primary[0]!;
       const current = taskDefinitionIdentity(service.taskDefinition);
       if (!current || current.familyArn !== recorded.familyArn || current.revision < recorded.revision || latest.taskDefinition !== service.taskDefinition) return { presence: 'present', status: 'unknown', reason: 'The current service and primary revision do not confirm the bound task family release.' };
-      return { presence: 'present', status: latest.rolloutState === 'FAILED' ? 'failed' : latest.rolloutState === 'COMPLETED' && service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.runningCount === service.desiredCount ? 'ready' : 'unknown' };
+      return { presence: 'present', runtime: serviceActivity(service, latest.rolloutState === 'FAILED'), status: latest.rolloutState === 'FAILED' ? 'failed' : latest.rolloutState === 'COMPLETED' && service.status === 'ACTIVE' && service.pendingCount === 0 && typeof service.desiredCount === 'number' && service.runningCount === service.desiredCount ? 'ready' : 'unknown' };
     } catch (error) {
       throw new Error(redactEngineOutput(error instanceof Error ? error.message : String(error), access.redact));
     }

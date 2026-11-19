@@ -27,7 +27,7 @@ it.each(['fresh', 'upgrade', 'wrong-native', 'complete'] as const)('plans and re
   const env = ctx.repos.environments.create({ projectId: project.id, name: 'testing', platformBindings: { aws: { kind: 'opentofu', sharedDatabase: true, ...(scenario === 'fresh' ? {} : { databaseLoginAt: '2026-01-01T00:00:00Z' }) } } });
   const accountId = '111122223333'; const region = 'us-west-2';
   const querySecretArn = `arn:aws:secretsmanager:${region}:${accountId}:secret:hypervibe/${env.id.toLowerCase()}/database-query-AbCd12`;
-  if (scenario === 'complete') ctx.repos.environments.updatePlatformBindings(env.id, { aws: { ...env.platformBindings.aws as object, database: { querySecretArn } } });
+  if (scenario === 'complete') ctx.repos.environments.updatePlatformBindings(env.id, { aws: { ...env.platformBindings.aws as object, database: { querySecretArn, accountId, region, clusterArn: `arn:aws:rds:${region}:${accountId}:cluster:hv-db-app-shared-postgres`, name: 'app_testing', owner: 'app_testing_owner' } } });
   const connection = ctx.repos.connections.create({ provider: 'aws', scope: project.name, credentialsEncrypted: getSecretStore().encryptObject({ accountId, region,
     roleArn: `arn:aws:iam::${accountId}:role/hypervibe/hypervibe-deploy`, accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'private-local-secret-32-characters' }) });
   ctx.repos.connections.updateStatus(connection.id, 'verified');
@@ -46,9 +46,18 @@ it.each(['fresh', 'upgrade', 'wrong-native', 'complete'] as const)('plans and re
   const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: { testing: { hosting: { provider: 'aws', engine: 'opentofu' }, services: {}, database: { provider: 'rds' } } } });
   const planned = await planAwsInfrastructureEngine(ctx, { project, spec, specRevision: 1, environmentName: 'testing' });
   if ('blocked' in planned) throw new Error(JSON.stringify(planned));
-  const action = planned.actions.find(action => action.id === (scenario === 'fresh' ? 'database-login:postgres' : 'database-login:query'));
+  // Observed live on 2026-11-19: containers that start before DATABASE_URL is stored never start ("invalid ssm parameters"),
+  // and the web service's creation waits for them. So a new environment's login comes before everything in its own plan,
+  // and the query credential, which that plan creates, is filled in afterwards.
+  const first = planned.actions.find(action => action.id === 'database-login:postgres');
+  if (scenario === 'fresh') {
+    expect(first).toMatchObject({ metadata: { appLogin: true, queryCredential: false, wakerSecrets: [] } });
+    expect(first!.dependsOn ?? []).not.toContain('database-query:credential');
+    expect(planned.actions.find(action => action.id === 'database-query:credential')!.dependsOn).toContain('database-login:postgres');
+  } else expect(first).toBeUndefined();
+  const action = planned.actions.find(action => action.id === 'database-login:query');
   if (scenario === 'complete') { expect(action).toBeUndefined(); return; }
-  expect(action).toMatchObject({ dependsOn: ['database-query:credential'], metadata: { appLogin: scenario === 'fresh', queryCredential: true } });
+  expect(action).toMatchObject({ dependsOn: [...(scenario === 'fresh' ? ['database-login:postgres'] : []), 'database-query:credential'], metadata: { appLogin: false, queryCredential: true } });
   expect(planned.confirmActions).toContain('database-query:credential');
   expect(planned.confirmActions).toContain(action!.id);
   const login = vi.spyOn(native, 'ensureDatabaseLogin').mockResolvedValue({ success: true, message: 'Stored the app credential.' });
@@ -61,7 +70,7 @@ it.each(['fresh', 'upgrade', 'wrong-native', 'complete'] as const)('plans and re
   const applied = await applyAwsInfrastructureEngine(ctx, { project, spec, specRevision: 1, planId: planned.planRunId, confirmActions: planned.confirmActions });
   if (scenario === 'wrong-native') { expect(login).not.toHaveBeenCalled(); expect((ctx.repos.environments.findById(env.id)!.platformBindings.aws as any).database).toBeUndefined(); }
   else {
-    expect(login, JSON.stringify(applied)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ appLogin: scenario === 'fresh', queryCredential: { arn: querySecretArn, accountId, environmentId: env.id } }));
+    expect(login, JSON.stringify(applied)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ appLogin: false, queryCredential: { arn: querySecretArn, accountId, environmentId: env.id } }));
     expect((ctx.repos.environments.findById(env.id)!.platformBindings.aws as any).database.querySecretArn).toBe(querySecretArn);
   }
 });

@@ -1,4 +1,4 @@
-import { hasWorkloadDiagnostics } from '../ports/workload-diagnostics.port.js';
+import { hasWorkloadDiagnostics, type WorkloadActivity } from '../ports/workload-diagnostics.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { serviceWorkloadKind } from '../entities/service.entity.js';
@@ -44,6 +44,7 @@ export type ProjectDeploymentHealth = {
       state: DeploymentHealthState;
       status: string;
       presence?: 'present' | 'absent' | 'unknown';
+      runtime?: WorkloadActivity;
       url?: string;
       reason?: string;
     }>;
@@ -170,6 +171,7 @@ export async function collectProjectDeploymentHealth(params: {
           service,
           state,
           status: observed.status,
+          ...('runtime' in observed && observed.runtime ? { runtime: observed.runtime as WorkloadActivity } : {}),
           ...('presence' in observed && (observed.presence === 'present' || observed.presence === 'absent' || observed.presence === 'unknown') ? { presence: observed.presence } : {}),
           ...(observed.url ? { url: observed.url } : {}),
           ...(observed.reason

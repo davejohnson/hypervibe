@@ -7,3 +7,8 @@ export function reservedRuntimeEnvError(...sources: Array<Record<string, unknown
   return sources.some(source => Object.keys(source ?? {}).some(isReservedRuntimeEnvKey))
     ? RESERVED_RUNTIME_ENV_ERROR : undefined;
 }
+
+/** Exclude explicitly retired inputs after merging all ordinary deployment sources. */
+export function serviceRuntimeEnv(vars: Record<string, string>, removed?: readonly string[]): Record<string, string> {
+  return removed?.length ? Object.fromEntries(Object.entries(vars).filter(([key]) => !removed.includes(key))) : vars;
+}

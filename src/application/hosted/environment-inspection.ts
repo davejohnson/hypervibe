@@ -1,3 +1,4 @@
+import { serviceRuntimeEnv } from '../../domain/services/runtime-env-policy.js';
 import { z } from 'zod';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { diffEnvironment } from '../../domain/plan/diff.engine.js';
@@ -222,7 +223,10 @@ function compareHosting(input: {
     const blocked = action?.metadata?.blockedReason;
     const ambiguous = candidates.length > 1 || Boolean(binding && bindingCounts.get(binding.serviceId)! > 1);
     const complete = serviceComplete && !ambiguous && !blocked && Boolean(binding);
-    row.fields = configFields(spec.services[row.name], live, envVars, fields, complete, removeEnvVars, removalFields);
+    const service = spec.services[row.name];
+    const vars = serviceRuntimeEnv(envVars, service?.removeEnvVars);
+    const removed = [...new Set([...removeEnvVars, ...(service?.removeEnvVars ?? [])])].slice(0, MAX_ENV_FIELDS - Object.keys(vars).length);
+    row.fields = configFields(service, live, vars, fields, complete, removed, removalFields);
     if (binding) row.externalId = binding.serviceId;
     if (!complete) {
       row.status = 'unknown';
@@ -233,7 +237,7 @@ function compareHosting(input: {
       row.current.exists = true;
       row.status = row.fields.some(field => field.status === 'drifted') ? 'drifted' : 'matching';
     }
-    if (Object.keys(input.spec.envVars).length + (input.spec.removeEnvVars?.length ?? 0) > MAX_ENV_FIELDS) {
+    if (Object.keys(input.spec.envVars).length + (input.spec.removeEnvVars?.length ?? 0) + (service?.removeEnvVars?.length ?? 0) > MAX_ENV_FIELDS) {
       row.fields.push({ field: 'additional-variables', status: 'unknown', desired: 'configured', current: null });
       row.status = row.status === 'drifted' ? 'drifted' : 'unknown'; row.reasonCode = 'field_budget_exhausted';
     }

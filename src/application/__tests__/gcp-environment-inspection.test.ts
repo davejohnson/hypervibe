@@ -9,6 +9,7 @@ import { registerHvDbTools } from '../../tools/hv-db.tools.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
+import { registerConnectionsTools } from '../../tools/connections.tools.js';
 import { registerCoreTools } from '../../tools/core.tools.js';
 import { SecretStore } from '../../adapters/secrets/secret-store.js';
 import { registerLifecycleTools } from '../../tools/lifecycle.tools.js';
@@ -38,7 +39,7 @@ afterEach(() => {
 function fixture(scopedProject?: string, declareTarget = true) {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'inspect-app', defaultPlatform: 'cloudrun', gitRemoteUrl: remote });
-  const spec = { version: 1, project: project.name, gitRemoteUrl: remote, environments: {
+  const spec = { version: 1, project: project.name, environments: {
     staging: { hosting: { provider: 'cloudrun' }, services: { web: {} } },
     production: { hosting: { provider: 'cloudrun', ...(declareTarget ? { gcpProjectId: selected } : {}) }, services: { web: {} } },
   } };
@@ -65,6 +66,7 @@ function fixture(scopedProject?: string, declareTarget = true) {
   const commands = new CommandRegistry();
   registerLifecycleTools(commands, ctx);
   registerCoreTools(commands, ctx);
+  registerConnectionsTools(commands, ctx);
   registerHvDbTools(commands, ctx);
   return {
     read,
@@ -73,6 +75,7 @@ function fixture(scopedProject?: string, declareTarget = true) {
       const resolved = await ctx.adapterFactory.getStorageOperations('gcs', project, { environment });
       return resolved.adapter?.resolveObservationContext?.(project.name, environment, 'us-central1');
     },
+    requirements: (environment: string) => commands.execute('hv_connections', { project: project.name, view: 'requirements', environment }),
     checklist: () => commands.execute('hv_spec', { project: project.name }),
     inspect: (env: string) => commands.execute('hv_inspect', { provider: 'cloudrun', project: project.name, env }),
     verify: (scope: string, withProject = true) => commands.execute('hv_inspect', {
@@ -102,6 +105,15 @@ it('reports missing production access independently of verified staging access',
       expect.objectContaining({ provider: 'cloudrun', status: 'missing', environments: ['production'] }),
     ]),
   } } });
+});
+
+it.each([
+  [undefined, 'missing'], [defaultId, 'unverified'], [selected, 'verified'],
+])('checks the native project of filtered production requirements (%s)', async (credentialProject, status) => {
+  const { requirements } = fixture(credentialProject);
+  expect(await requirements('production')).toMatchObject({ ok: true, data: { connections: [
+    { provider: 'cloudrun', scope: 'acme/app#gcp:' + selected, environments: ['production'], status },
+  ] } });
 });
 
 it('opens the SQL connector with production credentials for the bound production instance', async () => {

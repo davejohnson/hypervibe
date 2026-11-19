@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createServer } from '../../server.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -135,8 +136,12 @@ function seedManagedCiRollbackProject(name: string, branch = 'main') {
   const workflowRefSha = 'f'.repeat(40);
   const getRef = vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
     ref: `refs/heads/${branch}`,
-    object: { sha: workflowRefSha },
+    object: { type: 'commit', sha: workflowRefSha },
   });
+  vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockImplementation(async (_owner, _repo, id) => ({
+    ...workflowRun(id, 'completed', 'success', '2026-07-20T00:00:00Z'), head_branch: branch, path: workflow.path,
+    run_attempt: 1, repository: {id: 1, full_name: 'davejohnson/' + project.name}, head_repository: {id: 1, full_name: 'davejohnson/' + project.name},
+  }));
   return { project, environment, workflow, inputHash, workflowRefSha, getRef };
 }
 
@@ -149,6 +154,7 @@ function workflowRun(
   return {
     id,
     name: 'Deploy Railway (production)',
+    run_attempt: 1,
     status,
     conclusion,
     created_at: createdAt,
@@ -231,16 +237,16 @@ function mockRollbackPreview() {
   const trigger = mockPreviousSuccessfulRelease(workflow, sha, 'a'.repeat(40));
   vi.spyOn(GitHubAdapter.prototype, 'getWorkflowRun').mockResolvedValue({
     ...workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
-    path: workflow.path, run_attempt: 1, repository: { full_name: `davejohnson/${project.name}` }, head_repository: { full_name: `davejohnson/${project.name}` },
+    path: workflow.path, run_attempt: 1, repository: { id: 1, full_name: `davejohnson/${project.name}` }, head_repository: { id: 1, full_name: `davejohnson/${project.name}` },
   });
   vi.spyOn(GitHubAdapter.prototype, 'readArtifactFiles').mockResolvedValue({ 'hypervibe-server-release.json': JSON.stringify(evidence) });
   return { ...seeded, trigger, sha, evidence,
     inputs: { project: project.name, env: 'production', action: 'preview', toSha: sha, sourceWorkflowRunId: '20', sourceArtifactId: '200' } };
 }
 
-async function makeClient() {
-  const server = new McpServer({ name: 'hv-deploy-test', version: '1.0.0' });
-  registerHvDeployTools(createMcpCommandRegistrar(server), createToolContext());
+async function makeClient(latestVersion?: () => Promise<string>) {
+  const server = latestVersion ? createServer({ latestVersion }) : new McpServer({ name: 'hv-deploy-test', version: '1.0.0' });
+  if (!latestVersion) registerHvDeployTools(createMcpCommandRegistrar(server), createToolContext());
   const client = new Client({ name: 'hv-deploy-test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -913,9 +919,10 @@ describe('hv_rollback', () => {
   it('previews the currently running protected release without confirmation, dispatch or persisted mutation plan', async () => {
     const { trigger, inputs, sha } = mockRollbackPreview();
     const plans = vi.spyOn(RunRepository.prototype, 'create');
-    const t = await makeClient();
+    const t = await makeClient(async () => '99.9.9');
     const result = await t.call('hv_rollback', inputs);
     expect(result.ok).toBe(true);
+    expect(result.build.status).toBe('stale');
     expect(result.data).toMatchObject({ mode: 'preview', status: 'evidence-compatible', rollbackToSha: sha,
       evidenceCompatible: true, restoreVerified: false, mutationCounts: { providerWrites: 0, ciDispatches: 0 } });
     expect(result.data.unchecked).toContain('Registry image availability and pull authorization');
@@ -923,6 +930,81 @@ describe('hv_rollback', () => {
     expect(plans).not.toHaveBeenCalled();
     await t.close();
   });
+
+  it.each(['verified', 'older run retried last', 'wrong job attempt', 'old artifact', 'changed attempt', 'two current artifacts', 'overlapping attempts', 'stale historical target'])(
+    'checks %s evidence for reruns through rollback preview and execution', async kind => {
+      const { inputs, workflow, trigger, sha } = mockRollbackPreview();
+      const previousSha = 'a'.repeat(40);
+      const day = (id: number) => kind === 'older run retried last' && id === 10 ? '2026-07-21' : `2026-07-${id}`;
+      const releaseRun = (id: number) => {
+        const date = day(id);
+        return {
+          ...workflowRun(id, 'completed', 'success', `2026-07-${id}T00:00:00Z`), updated_at: date + 'T00:08:00Z',
+          run_started_at: date + 'T00:02:00Z', run_attempt: 2, path: workflow.path,
+          repository: {id: 1, full_name: 'davejohnson/' + inputs.project},
+          head_repository: {id: 1, full_name: 'davejohnson/' + inputs.project},
+        };
+      };
+      const runs = [releaseRun(20), releaseRun(10)];
+      if (kind === 'older run retried last') {
+        // The older run is on the second page of GitHub's creation-ordered response.
+        runs.splice(1, 0, ...Array.from({length: 99}, (_, index) => ({
+          ...releaseRun(20), id: 1000 + index, run_attempt: 1, created_at: '2026-07-12T01:00:00Z',
+          run_started_at: '2026-07-12T01:00:00Z', updated_at: '2026-07-12T01:01:00Z', conclusion: 'failure',
+        })));
+      }
+      if (kind === 'overlapping attempts') runs[1].updated_at = '2026-07-20T00:06:00Z';
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, _workflow, options) => {
+        const offset = ((options?.page ?? 1) - 1) * 100;
+        return {total_count: runs.length, workflow_runs: runs.slice(offset, offset + 100)};
+      });
+      let readingJobs = false;
+      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+        ...releaseRun(id), run_attempt: kind === 'changed attempt' && readingJobs ? 3 : 2,
+      }));
+      const jobs = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunAttemptJobs').mockImplementation(async (_owner, _repo, id) => {
+        readingJobs = true;
+        return { total_count: 1, jobs: [{
+          id: id * 2, run_id: id, head_sha: releaseRun(id).head_sha,
+          ...(kind === 'wrong job attempt' ? {run_attempt: 1} : {}),
+          name: 'deploy', status: 'completed', conclusion: 'success',
+          started_at: day(id) + 'T00:03:00Z', completed_at: day(id) + 'T00:07:00Z',
+        }] };
+      });
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, runId) => {
+        const id = Number(runId);
+        const artifact = { ...releaseArtifact(id, id === 20 ? sha : previousSha), created_at: day(id) + 'T00:05:00Z' };
+        const stale = { ...artifact, id: artifact.id + 1, created_at: day(id) + 'T00:01:00Z' };
+        const requireStale = kind === 'old artifact' || (kind === 'stale historical target' && id === 10);
+        const candidates = requireStale ? [{...stale, id: artifact.id}] : kind === 'two current artifacts'
+          ? [artifact, {...artifact, id: artifact.id + 1}] : [stale, artifact];
+        return { total_count: candidates.length, artifacts: candidates };
+      });
+      const t = await makeClient();
+      const preview = await t.call('hv_rollback', inputs);
+      readingJobs = false;
+      const execution = await t.call('hv_rollback', { project: inputs.project, env: 'production', confirm: true });
+      if (kind === 'verified' || kind === 'older run retried last') {
+        const latestId = kind === 'verified' ? 20 : 10;
+        const sourceId = latestId === 20 ? 10 : 20;
+        expect(preview.data).toMatchObject({status: 'evidence-compatible', restoreVerified: false, observedLatestWorkflowRunId: latestId});
+        expect(execution.data).toMatchObject({status: 'pending', currentSha: latestId === 20 ? sha : previousSha,
+          rollbackToSha: sourceId === 10 ? previousSha : sha});
+        expect(jobs).toHaveBeenCalledWith('davejohnson', inputs.project, 20, 2);
+        expect(jobs).toHaveBeenCalledWith('davejohnson', inputs.project, 10, 2);
+        expect(trigger).toHaveBeenCalledWith('davejohnson', inputs.project, workflow.path, 'main', expect.objectContaining({
+          expected_latest_run_id: String(latestId), expected_latest_run_attempt: '2',
+          source_workflow_run_id: String(sourceId), source_workflow_run_attempt: '2', source_artifact_id: String(sourceId * 10),
+        }));
+      } else {
+        if (kind === 'stale historical target') expect(preview.data?.evidenceCompatible).toBe(true);
+        else expect(preview.data?.evidenceCompatible).not.toBe(true);
+        expect(execution.ok).toBe(false);
+        expect(trigger).not.toHaveBeenCalled();
+      }
+      await t.close();
+    },
+  );
 
   it('keeps database recovery and migration compatibility unknown when release evidence matches', async () => {
     const { inputs, trigger } = mockRollbackPreview();
@@ -975,6 +1057,21 @@ describe('hv_rollback', () => {
     const result = await t.call('hv_rollback', inputs);
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).not.toContain('untrusted-private-value');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each(['branch', 'event', 'tag', 'incomplete repository'])('denies rollback preview and selection for an untrusted producer (%s)', async kind => {
+    const { inputs, trigger, getRef } = mockRollbackPreview();
+    const run = await GitHubAdapter.prototype.getWorkflowRun('davejohnson', 'rollback-preview-app', 20);
+    vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+      ...run, id, ...(kind === 'branch' ? {head_branch: 'feature'} : kind === 'event' ? {event: 'pull_request'}
+        : kind === 'incomplete repository' ? {repository: {full_name: run.repository.full_name}} : {}),
+    }));
+    if (kind === 'tag') getRef.mockResolvedValue({ref: 'refs/tags/main', object: {sha: run.head_sha}});
+    const t = await makeClient();
+    expect((await t.call('hv_rollback', inputs)).ok).toBe(false);
+    expect((await t.call('hv_rollback', {project: inputs.project, env: 'production', toSha: 'a'.repeat(40), confirm: true})).ok).toBe(false);
     expect(trigger).not.toHaveBeenCalled();
     await t.close();
   });
@@ -1049,6 +1146,8 @@ describe('hv_rollback', () => {
         commit_sha: previousSha,
         rollback: 'true',
         expected_latest_run_id: '20',
+        expected_latest_run_attempt: '1',
+        source_workflow_run_attempt: '1',
         source_artifact_id: '100',
         source_workflow_run_id: '10',
       }
@@ -1142,7 +1241,7 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
-  it('restores the latest known-good exact SHA after a failed production promotion', async () => {
+  it.each([false, true])('restores the latest known-good exact SHA after a failed production promotion (stale server: %s)', async stale => {
     const { project, workflow } = seedManagedCiRollbackProject('rollback-failed-promotion-app');
     const knownGoodSha = 'c'.repeat(40);
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
@@ -1163,14 +1262,15 @@ describe('hv_rollback', () => {
     });
     const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
 
-    const t = await makeClient();
+    const t = await makeClient(stale ? async () => '99.9.9' : undefined);
     const result = await t.call('hv_rollback', {
       project: project.name,
       env: 'production',
       confirm: true,
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok, result.error?.message).toBe(true);
+    if (stale) expect(result.warnings[0]).toContain('99.9.9');
     expect(result.data).toMatchObject({
       status: 'pending',
       rollbackToSha: knownGoodSha,
@@ -1187,6 +1287,8 @@ describe('hv_rollback', () => {
         commit_sha: knownGoodSha,
         rollback: 'true',
         expected_latest_run_id: '30',
+        expected_latest_run_attempt: '1',
+        source_workflow_run_attempt: '1',
         source_artifact_id: '200',
         source_workflow_run_id: '20',
       }
@@ -1194,7 +1296,7 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
-  it('restores an explicitly requested previously verified exact SHA', async () => {
+  it.each([false, true])('restores an explicitly confirmed verified exact SHA (stale server: %s)', async stale => {
     const { project, workflow } = seedManagedCiRollbackProject('rollback-explicit-sha-app');
     const currentSha = 'c'.repeat(40);
     const previousSha = 'b'.repeat(40);
@@ -1224,7 +1326,7 @@ describe('hv_rollback', () => {
     }));
     const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
 
-    const t = await makeClient();
+    const t = await makeClient(stale ? async () => '99.9.9' : undefined);
     const result = await t.call('hv_rollback', {
       project: project.name,
       env: 'production',
@@ -1232,7 +1334,11 @@ describe('hv_rollback', () => {
       confirm: true,
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok, result.error?.message).toBe(true);
+    if (stale) {
+      expect(result.build.status).toBe('stale');
+      expect(result.warnings[0]).toContain('99.9.9');
+    }
     expect(result.data).toMatchObject({
       status: 'pending',
       rollbackToSha: requestedSha,
@@ -1249,6 +1355,8 @@ describe('hv_rollback', () => {
         commit_sha: requestedSha,
         rollback: 'true',
         expected_latest_run_id: '30',
+        expected_latest_run_attempt: '1',
+        source_workflow_run_attempt: '1',
         source_artifact_id: '100',
         source_workflow_run_id: '10',
       }
@@ -1309,6 +1417,8 @@ describe('hv_rollback', () => {
       commit_sha: currentSha,
       rollback: 'true',
       expected_latest_run_id: '20',
+      expected_latest_run_attempt: '1',
+      source_workflow_run_attempt: '1',
       source_artifact_id: String(sourceRun * 10),
       source_workflow_run_id: String(sourceRun),
     });
@@ -1501,9 +1611,9 @@ describe('hv_rollback', () => {
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
     const trigger = mockPreviousSuccessfulRelease(workflow, currentSha, previousSha);
     getRef
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: workflowRefSha } })
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: workflowRefSha } })
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: '1'.repeat(40) } });
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { type: 'commit', sha: workflowRefSha } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { type: 'commit', sha: workflowRefSha } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { type: 'commit', sha: '1'.repeat(40) } });
     const t = await makeClient();
     const result = await t.call('hv_rollback', {
       project: project.name,

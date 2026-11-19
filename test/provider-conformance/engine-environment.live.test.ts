@@ -10,7 +10,7 @@ import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsDatabaseExposure, readAwsInventory,
+import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory,
   readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -29,7 +29,10 @@ function required(name: string): string {
 
 async function processOutput(executable: string, args: string[], cwd: string, dataDir: string, input?: Json): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env: { ...process.env, HYPERVIBE_DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
+    // The shared test setup turns off repository specs and .env discovery for synthetic projects. The fixture is a real
+    // repository: Hypervibe finds the source to build through its repository spec, so those switches must not reach the CLI.
+    const { HYPERVIBE_DISABLE_REPO_SPEC: _spec, HYPERVIBE_DISABLE_IMPLICIT_DEPLOY_ENV_FILE: _envFile, ...inherited } = process.env;
+    const child = spawn(executable, args, { cwd, env: { ...inherited, HYPERVIBE_DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let bytes = 0;
     const timer = setTimeout(() => child.kill('SIGTERM'), 75 * 60_000); // An Azure apply may run 60 minutes.
     child.stdout.on('data', (chunk) => { bytes += chunk.length; if (bytes > 8 * 1024 * 1024) child.kill('SIGTERM'); else stdout += chunk; });
@@ -125,6 +128,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
       const baseline = JSON.parse(readFileSync(baselineFile, 'utf8')) as string[];
       const inventory = async () => sinceBaseline(await inventoryNow(), baseline);
 
+      const repoSpecFile = path.join(workspace, '.hypervibe', 'spec.json');
       const cli = async (command: string[], input: Json): Promise<Json> => {
         let envelope: Json;
         try { envelope = JSON.parse(await processOutput(process.execPath, [cliPath, ...command, '--input', '-', '--json'], workspace, dataDir, input)); }
@@ -132,13 +136,19 @@ live('AWS and Azure engine disposable environment fixture', () => {
         if (envelope.ok !== true) {
           // Hypervibe's own redacted blockers say what to fix; nothing else from the failed command is shown.
           const blocked = (envelope.error?.details?.blocked ?? []).map((entry: unknown) => String(entry).slice(0, 800)).join('\n');
-          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}).${blocked ? `\n${blocked}` : ''}`);
+          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}): ${String(envelope.error?.message ?? '').slice(0, 600)}${blocked ? `\n${blocked}` : ''}`);
         }
         return envelope;
       };
       if (!existsSync(path.join(workspace, '.git'))) {
         cpSync(path.join(import.meta.dirname, 'fixture-database'), workspace, { recursive: true });
         writeFileSync(path.join(workspace, '.gitignore'), '.hypervibe/\nnode_modules/\nfixture-evidence.json\nfixture-baseline.json\n.env*\n');
+        // Hypervibe builds from the repository that holds the project's spec file. Without it a plan has no
+        // source, builds no image and creates no workloads (live 2026-11-18: the release was then refused).
+        const stored = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
+        if (!stored) throw new Error('The dedicated project has no readable desired state.');
+        mkdirSync(path.join(workspace, '.hypervibe'), { recursive: true });
+        writeFileSync(repoSpecFile, `${JSON.stringify(JSON.parse(stored.document), null, 2)}\n`);
         for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Hypervibe fixture'], ['config', 'user.email', 'fixture@hypervibe.invalid'],
           ...(project.git_remote_url ? [['remote', 'add', 'origin', project.git_remote_url]] : []),
           ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore'], ['commit', '-m', 'Disposable engine conformance fixture']]) {
@@ -147,9 +157,9 @@ live('AWS and Azure engine disposable environment fixture', () => {
       }
 
       const savedSpec = (): Json => {
-        const row = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
-        if (!row) throw new Error('The dedicated project has no readable desired state; existing environments cannot be preserved.');
-        const spec = JSON.parse(row.document);
+        // The fixture repository's spec file is what the CLI reads and writes here.
+        if (!existsSync(repoSpecFile)) throw new Error('The fixture repository has no spec file; existing environments cannot be preserved.');
+        const spec = JSON.parse(readFileSync(repoSpecFile, 'utf8'));
         if (!spec.environments || spec.project !== projectName) throw new Error('The dedicated project specification is invalid.');
         return spec;
       };
@@ -159,7 +169,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
         const { [environmentName]: _removed, ...others } = original.environments;
         await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
-          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision) } : others } });
+          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, marker.region, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
       };
       const plan = async (input: Json = {}) => {
         const envelope = await cli(['plan'], { project: projectName, env: environmentName, ...input });
@@ -170,7 +180,11 @@ live('AWS and Azure engine disposable environment fixture', () => {
       const apply = async (envelope: Json): Promise<boolean> => {
         const confirmActions = changesOf(envelope).filter((action) => action.billable || action.dataBearing || action.requiresConfirm).map((action) => action.id);
         const applied = await cli(['apply'], { project: projectName, planId: envelope.data.planId, confirmActions });
-        return Array.isArray(applied.data?.receipts) && applied.data.receipts.every((receipt: Json) => ['succeeded', 'skipped_noop'].includes(receipt.status));
+        if (!Array.isArray(applied.data?.receipts)) return false;
+        const failed = applied.data.receipts.filter((receipt: Json) => !['succeeded', 'success', 'skipped_noop'].includes(receipt.status));
+        // Hypervibe's own redacted reason for each step that did not finish; without it a failed run says nothing useful.
+        for (const receipt of failed) process.stdout.write(`\nApply step ${receipt.step ?? receipt.action?.id ?? '?'}: ${receipt.status}. ${String(receipt.error ?? receipt.message ?? '').slice(0, 1200)}\n`);
+        return failed.length === 0;
       };
 
       process.once('SIGINT', stop); process.once('SIGTERM', stop);
@@ -213,17 +227,26 @@ live('AWS and Azure engine disposable environment fixture', () => {
           for (let attempt = 0; attempt < 8; attempt++) {
             const envelope = await plan();
             if (!changesOf(envelope).length) { await cli(['deploy'], { project: projectName, env: environmentName, confirm: true }); return; }
-            if (!await apply(envelope)) throw new Error('Fixture apply is incomplete; no dependent release is authorized.');
+            if (!await apply(envelope)) {
+              // Teardown deletes the services and their logs, so read why they are not running first.
+              if (aws) {
+                const auth = await awsEngineAuthentication(aws);
+                process.stdout.write(`\n${await readAwsContainerTrouble({ region: aws.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } }, `/hypervibe/hv-${projectName}-${environmentName}/tasks`)}\n`);
+              }
+              throw new Error('Fixture apply is incomplete; no dependent release is authorized.');
+            }
           }
           throw new Error('Fixture convergence exceeded its bounded apply steps.');
         },
         verifyRunning: async (revision) => {
-          const status = await cli(['status'], { project: projectName, env: environmentName });
-          const url = (status.data?.services ?? []).find((entry: Json) => entry.name === 'web')?.url;
-          if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('The fixture has no HTTPS address for its web service.');
+          // The address Hypervibe recorded for the web service when it applied. `status` on these engines reports workers only.
+          const row = db.prepare('SELECT platform_bindings FROM environments WHERE project_id = ? AND name = ?').get(project.id, environmentName) as { platform_bindings: string } | undefined;
+          const bindings = row ? JSON.parse(row.platform_bindings) as Json : {};
+          const url = bindings.services?.web?.url ?? bindings[cloud]?.services?.web?.url;
+          if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('Hypervibe recorded no HTTPS address for the web service.');
           // A new revision and the worker's first write take a few minutes to show.
           let problem: string | undefined = 'the web service did not answer';
-          for (let attempt = 0; attempt < 30 && problem; attempt++) {
+          for (let attempt = 0; attempt < 45 && problem; attempt++) {
             if (attempt) await sleep(20_000);
             try {
               const response = await fetch(new URL('/', url), { signal: AbortSignal.timeout(30_000), redirect: 'error' });

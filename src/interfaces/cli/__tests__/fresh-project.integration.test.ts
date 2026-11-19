@@ -59,10 +59,17 @@ describe('fresh-project CLI workflow', () => {
     expect(await runCli(['spec', '--input', '-', '--json'], { registry, io: write.io, initialize: false })).toBe(0);
     const written = JSON.parse(write.stdout());
     expect(written.warnings).toContainEqual(expect.stringContaining('service:jobs'));
-    expect(written.data.spec.environments.staging.services.jobs).toBeUndefined();
+    expect(written.data).not.toHaveProperty('spec');
     const read = captureIo();
     expect(await runCli(['spec', '--project', 'cli-resource-parity', '--json'], { registry, io: read.io, initialize: false })).toBe(0);
+    expect(JSON.parse(read.stdout()).data.spec.environments.staging.services.jobs).toBeUndefined();
     expect(JSON.parse(read.stdout()).warnings).toEqual(written.warnings);
+    const required = captureIo();
+    expect(await runCli(['connections', '--project', 'cli-resource-parity', '--view', 'requirements',
+      '--environment', 'staging', '--json'], { registry, io: required.io, initialize: false })).toBe(0);
+    expect(JSON.parse(required.stdout()).data.connections).toEqual([expect.objectContaining({
+      provider: 'railway', environments: ['staging'], status: 'missing',
+    })]);
     const human = captureIo();
     expect(await runCli(['spec', '--project', 'cli-resource-parity'], { registry, io: human.io, initialize: false })).toBe(0);
     expect(human.stdout()).toContain('service:jobs');

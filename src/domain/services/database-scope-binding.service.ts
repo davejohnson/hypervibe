@@ -10,6 +10,7 @@ import { hasPendingDatabaseInitialization } from '../plan/database-initializatio
 import { databaseProvisionRecoveryDiagnosticSchema, type DatabaseProvisionRecoveryObservation } from '../ports/database-provision-recovery.port.js';
 
 export const DATABASE_SCOPE_BIND_OPERATION = 'databaseScopeBind';
+export const DATABASE_PRIMARY_BINDING_CONFLICT = 'The committed primary database identity names a different database. Review databaseTopology.primary in .hypervibe/bindings.json.';
 export const DATABASE_PROVISION_RECOVERY_OPERATION = 'databaseProvisionRecovery';
 export const DATABASE_PROVISION_CANDIDATE_OPERATION = 'databaseProvisionCandidateBinding';
 const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
@@ -221,41 +222,60 @@ export function primaryDatabaseRecordState(environmentBindings: Record<string, u
   return recorded.provider === component.bindings.provider && recorded.externalId === component.externalId ? 'recorded' : 'conflict';
 }
 
-function recordedProviderScope(component: Component): Record<string, string> | null | undefined {
+export function recordedProviderScope(component: Component): Record<string, string> | null | undefined {
   if (!Object.hasOwn(component.bindings, 'providerScope')) return undefined;
   const parsed = recoverySourceIdentitySchema.shape.providerScope.safeParse(component.bindings.providerScope);
   return parsed.success && isDeepStrictEqual(parsed.data, component.bindings.providerScope) ? parsed.data : null;
 }
 
-function completeProviderScope(component: Component, scope: Record<string, string> | undefined): boolean {
+export function completeProviderScope(component: Component, scope: Record<string, string> | undefined): boolean {
   const keys = providerRegistry.get(String(component.bindings.provider))?.inspection?.selectors.database?.scopeKeys ?? [];
   return Boolean(scope) && keys.length > 0 && keys.every(key => Boolean(scope![key]));
 }
 
-export async function planDatabaseScopeBinding(context: BackupPolicyContext): Promise<{ actions: PlanAction[]; warnings: string[] }> {
+interface DatabaseBindingLookup {
+  findByExternalId(id: string): Component[];
+}
+/** A service ID can be reused across environments. Only complete, distinct
+ * provider coordinates establish that another binding refers to a different database. */
+export function databaseBindingOwnershipConflict(component: Component, scope: Record<string, string>, bindings: DatabaseBindingLookup): string | undefined {
+  const keys = providerRegistry.get(String(component.bindings.provider))?.inspection?.selectors.database?.scopeKeys ?? [];
+  if (!component.externalId) return 'The database has no bound provider resource ID.';
+  for (const other of bindings.findByExternalId(component.externalId)) {
+    if (other.id === component.id || other.bindings.provider !== component.bindings.provider) continue;
+    const otherScope = recordedProviderScope(other);
+    if (!otherScope || !keys.length || keys.some(key => !scope[key] || !otherScope[key])
+      || keys.every(key => scope[key] === otherScope[key])) {
+      return 'The database identity is shared or ambiguously bound to another environment.';
+    }
+  }
+}
+
+export async function planDatabaseScopeBinding(context: BackupPolicyContext & { databaseBindings: DatabaseBindingLookup }): Promise<{ actions: PlanAction[]; warnings: string[] }> {
   const incomplete = currentDatabaseProvisionRecoveryComponent(context);
   if (incomplete) return planDatabaseProvisionRecovery(context, incomplete);
   const component = currentDatabaseScopeComponent(context);
   if (!component) return { actions: [], warnings: [] };
   const recordedScope = recordedProviderScope(component);
   if (recordedScope === null) return { actions: [], warnings: ['Malformed database scope is preserved; no binding repair is authorized.'] };
+  const primaryState = primaryDatabaseRecordState(context.environment?.platformBindings, component);
+  if (primaryState === 'conflict') return { actions: [], warnings: [DATABASE_PRIMARY_BINDING_CONFLICT] };
   const needsScope = !completeProviderScope(component, recordedScope);
   const runtimeReference = !Object.hasOwn(component.bindings, 'directUrlVariable')
     ? await observeDatabaseRuntimeReference(context, component) : { state: 'unsupported' as const };
   const needsRuntimeReference = runtimeReference.state === 'known';
-  const primaryState = primaryDatabaseRecordState(context.environment?.platformBindings, component);
-  const conflictWarning = primaryState === 'conflict'
-    ? ['The committed primary database identity names a different database than the one Hypervibe manages. It was left unchanged; review databaseTopology.primary in .hypervibe/bindings.json.'] : [];
-  if (!needsScope && primaryState !== 'missing' && !needsRuntimeReference) return { actions: [], warnings: conflictWarning };
-  if (runtimeReference.state === 'unknown') return { actions: [], warnings: [...conflictWarning,
+  if (!needsScope && primaryState !== 'missing' && !needsRuntimeReference) return { actions: [], warnings: [] };
+  if (runtimeReference.state === 'unknown') return { actions: [], warnings: [
     'The database runtime URL reference could not be independently verified. No binding repair is authorized.'] };
   // The native source must independently agree with every recorded scope key;
   // only absent keys can be filled from exact provider evidence.
   const source = await observeDatabaseBindingSource(context, component);
-  if (!source) return { actions: [], warnings: [...conflictWarning,
+  if (!source) return { actions: [], warnings: [
     needsScope ? 'The current database lacks durable recovery scope and its native recovery source could not be independently verified. No binding repair is authorized.'
       : 'The current database identity is not recorded in .hypervibe/bindings.json and its native source could not be independently verified. No binding repair is authorized.',
   ] };
+  const conflict = databaseBindingOwnershipConflict(component, source.providerScope, context.databaseBindings);
+  if (conflict) return { actions: [], warnings: [conflict] };
   const action: PlanAction = { id: databaseScopeBindingActionId(source.provider, component.id), type: 'update',
     resource: { kind: 'database', name: component.type, provider: source.provider }, verified: true, requiresConfirm: true,
     reason: needsRuntimeReference
@@ -267,5 +287,5 @@ export async function planDatabaseScopeBinding(context: BackupPolicyContext): Pr
       ...(runtimeReference.state === 'known' ? { runtimeReference: runtimeReference.reference } : {}),
       ...(needsScope && recordedScope ? { priorProviderScope: recordedScope } : {}),
       bindingsFingerprint: databaseScopeBindingsFingerprint(component.bindings, needsRuntimeReference) } };
-  return isDatabaseScopeBindingAction(action) ? { actions: [action], warnings: conflictWarning } : { actions: [], warnings: conflictWarning };
+  return { actions: isDatabaseScopeBindingAction(action) ? [action] : [], warnings: [] };
 }

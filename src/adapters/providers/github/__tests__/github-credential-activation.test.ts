@@ -30,7 +30,7 @@ function fixture() {
   const adapter = { getWorkflow: vi.fn(async () => ({ id: 9, path: workflow, state: 'active' })), listWorkflows: vi.fn(async () => ({ total_count: 1, workflows: [{ id: 9, path: workflow, state: 'active' }] })), getWorkflowRun: vi.fn(async () => run), getRef: vi.fn(async () => ({ ref: 'refs/heads/main', object: { sha: run.head_sha } })), compareCommits: vi.fn(async () => ({ status: 'identical', behind_by: 0 })), listWorkflowRunArtifacts: vi.fn(async () => ({ total_count: 1, artifacts: [{ id: 30, name: managedCiReleaseArtifactName('production', evidence.source.sha), expired: false, workflow_run: { id: 20, head_sha: run.head_sha, repository_id: 40, head_repository_id: 40 } }] })), readArtifactFiles: vi.fn(async () => ({ [MANAGED_CI_RELEASE_EVIDENCE_FILE]: JSON.stringify(evidence) })), getFileContent: vi.fn(async () => files[0].content) };
   vi.spyOn(githubOps, 'getGitHubAdapter').mockReturnValue({ adapter } as any);
   vi.spyOn(workflows, 'resolveManagedWorkflowContract').mockReturnValue(contract);
-  vi.spyOn(workflows, 'observeManagedWorkflowFiles').mockResolvedValue({ acceptance: 'rendered', desiredFiles: files, liveContentHash: contentHash, retiredPaths: [], retiredFilePresent: false });
+  vi.spyOn(workflows, 'observeManagedWorkflowFiles').mockResolvedValue({ acceptance: 'rendered', observedHashes: {}, desiredFiles: files, liveContentHash: contentHash, retiredPaths: [], retiredFilePresent: false });
   return { project, environment, spec, adapter, run, evidence, workflow };
 }
 it('prepares reviewed non-secret operation inputs and accepts exact proven deployments despite source SHA differing from producer SHA', async () => {

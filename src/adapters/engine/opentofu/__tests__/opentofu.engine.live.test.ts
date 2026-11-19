@@ -65,7 +65,7 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
 
   it('validates project-shared keyless CI infrastructure with the pinned provider', async () => {
     const configuration = buildCiReleaseConfiguration({ projectId: 'demo-project', projectNumber: '123456789',
-      repository: 'owner/app', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' });
+      repository: 'owner/app', repositoryId: '345', releases: [{ environmentName: 'staging', branch: 'main', autoDeploy: true }], runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' });
     expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
@@ -79,7 +79,7 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     worker.enableApis.push('workflows.googleapis.com');
     const configuration = composeGcpProjectConfiguration({ bootstrap,
       workers: buildGcpPreparationConfiguration(worker),
-      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456789', repository: 'owner/app', runtimeServiceAccountEmail }),
+      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456789', repository: 'owner/app', repositoryId: '345', releases: [{ environmentName: 'staging', branch: 'main', autoDeploy: true }], runtimeServiceAccountEmail }),
     });
     expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
   }, 300_000);

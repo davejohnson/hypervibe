@@ -22,7 +22,7 @@ export interface AwsEngineInput {
   parameterPath: string;
   /** The environment's own database on the project's shared testing cluster. */
   database?: AwsEnvironmentDatabaseInput;
-  storage?: Array<{ name: string; bucket: string }>;
+  storage?: Array<{ name: string; bucket: string; versioning?: boolean; browserUploads?: boolean }>;
   /** Web services on Fargate; public ones get an HTTPS address through ECS Express Mode. */
   services?: AwsWebServiceInput[];
   /** Background workers on Fargate; on-demand ones sit at zero tasks until there is work. */
@@ -223,7 +223,24 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       bucketResources.aws_s3_bucket![key] = { bucket: bucket.bucket, force_destroy: false };
       bucketResources.aws_s3_bucket_public_access_block![key] = { bucket: `\${aws_s3_bucket.${key}.id}`, block_public_acls: true, block_public_policy: true, ignore_public_acls: true, restrict_public_buckets: true };
       bucketResources.aws_s3_bucket_ownership_controls![key] = { bucket: `\${aws_s3_bucket.${key}.id}`, rule: [{ object_ownership: 'BucketOwnerEnforced' }] };
-      for (const type of Object.keys(bucketResources)) resources[`${type}.${key}`] = mapping;
+      for (const type of ['aws_s3_bucket', 'aws_s3_bucket_public_access_block', 'aws_s3_bucket_ownership_controls']) resources[`${type}.${key}`] = mapping;
+      const reference = `\${aws_s3_bucket.${key}.id}`;
+      // Retain the policy address mapping when a setting is removed so its deletion is reviewable.
+      for (const type of ['aws_s3_bucket_versioning', 'aws_s3_bucket_lifecycle_configuration', 'aws_s3_bucket_cors_configuration']) {
+        resources[`${type}.${key}`] = mapping;
+      }
+      if (bucket.versioning) {
+        (bucketResources.aws_s3_bucket_versioning ??= {})[key] = { bucket: reference, versioning_configuration: [{ status: 'Enabled' }] };
+        (bucketResources.aws_s3_bucket_lifecycle_configuration ??= {})[key] = {
+          bucket: reference, depends_on: [`aws_s3_bucket_versioning.${key}`],
+          rule: [{ id: 'expire-old-versions', status: 'Enabled', filter: [{}], noncurrent_version_expiration: [{ noncurrent_days: 30 }] }],
+        };
+      }
+      if (bucket.browserUploads) {
+        (bucketResources.aws_s3_bucket_cors_configuration ??= {})[key] = { bucket: reference, cors_rule: [{
+          allowed_methods: ['PUT', 'POST', 'GET', 'HEAD'], allowed_origins: ['*'], allowed_headers: ['*'], expose_headers: ['ETag', 'Location'], max_age_seconds: 3600,
+        }] };
+      }
     }
     files['storage.tf.json'] = { resource: bucketResources };
   }

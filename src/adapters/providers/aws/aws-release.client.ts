@@ -71,7 +71,8 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
   await new S3Client({ ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}), ...transport, region, credentials }).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: source.archive, ContentType: 'application/zip' }));
   const codebuild = new CodeBuildClient({ ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}), ...transport, region, credentials });
   if (target.deadlineMs && Date.now() >= target.deadlineMs) return { error: 'The release deadline elapsed after uploading source; no build was started.' };
-  const started = await codebuild.send(new StartBuildCommand({
+  let started;
+  try { started = await codebuild.send(new StartBuildCommand({
     projectName: target.buildProjectArn ?? `${target.prefix}-images`, sourceTypeOverride: 'S3', sourceLocationOverride: `${bucket}/${key}`,
     environmentVariablesOverride: [
       { name: 'IMAGE_TAG', value: awsImageTag(source.commitSha), type: 'PLAINTEXT' },
@@ -79,7 +80,14 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
       { name: 'DOCKER_BUILDKIT', value: '1', type: 'PLAINTEXT' },
       ...(target.packageTokenParameter ? [{ name: 'NPM_TOKEN', value: target.packageTokenParameter, type: 'PARAMETER_STORE' as const }] : []),
     ],
-  }));
+  })); } catch (error) {
+    // AWS starts some new accounts with a build limit of zero and raises it only on request.
+    const refused = error as { name?: string; message?: string };
+    if (refused.name !== 'AccountLimitExceededException' || !/more than 0 /.test(refused.message ?? '')) throw error;
+    // The quota page for small Linux builds, the size Hypervibe uses. The general support form leads to a chat assistant instead.
+    const quotaUrl = `https://${region}.console.aws.amazon.com/servicequotas/home/services/codebuild/quotas/L-9D07B6EF`;
+    return { error: `AWS does not let this account run builds yet: its limit in ${region} is zero, which is common for a new account. Open ${quotaUrl}, choose "Request increase at account level" and ask for 5 (free), then run this again once AWS approves it.` };
+  }
   const id = started.build?.id;
   if (!id) return { error: 'CodeBuild did not start the build.' };
   const logsUrl = `https://${region}.console.aws.amazon.com/codesuite/codebuild/projects/${target.prefix}-images/build/${encodeURIComponent(id)}/log?region=${region}`;

@@ -1,4 +1,7 @@
-import { InitializeRequestSchema, type RequestId } from '@modelcontextprotocol/sdk/types.js';
+import { buildNotice, requiresCurrentServer, type RunningBuild } from './running-build.js';
+import { commandError, type BuildIdentity, type CommandEnvelope } from '../../application/results.js';
+import { toMcpToolResponse } from './adapter.js';
+import { CallToolRequestSchema, InitializeRequestSchema, type RequestId } from '@modelcontextprotocol/sdk/types.js';
 import { recordMcpClient } from '../../application/requesting-agent.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
@@ -36,14 +39,32 @@ export function instructionsForClient(
 }
 
 /** Adapt only the initialize receipt; SDK negotiation and all tools are intact. */
-export function withClientInstructions(transport: Transport, fullInstructions: string): Transport {
+export function withClientInstructions(transport: Transport, fullInstructions: string, runningBuild?: RunningBuild): Transport {
+  let clientName: string | undefined;
+  const calls = new Map<RequestId, { build: BuildIdentity; name: string }>();
   let initialization: { id: RequestId; instructions: string } | undefined;
   const wrapper: Transport = {
     async start() {
-      transport.onmessage = (message, extra) => {
+      transport.onmessage = async (message, extra) => {
+        if (runningBuild && 'method' in message && message.method === 'tools/call' && 'id' in message) {
+          const parsed = CallToolRequestSchema.safeParse(message);
+          if (parsed.success) {
+            const build = await runningBuild.check();
+            const { name, arguments: args = {} } = parsed.data.params;
+            calls.set(message.id, { name, build });
+            if (build.status === 'stale' && requiresCurrentServer(name, args)) {
+              const result = toMcpToolResponse(commandError('STALE_SERVER', 'Update this Hypervibe server and reconnect it before retrying this action.'), name);
+              await wrapper.send({ jsonrpc: '2.0', id: message.id, result });
+              return;
+            }
+          }
+        }
         if ('method' in message && message.method === 'initialize') {
           const parsed = InitializeRequestSchema.safeParse(message);
-          if (parsed.success) recordMcpClient(parsed.data.params.clientInfo);
+          if (parsed.success) {
+            clientName = parsed.data.params.clientInfo.name.trim().toLowerCase();
+            recordMcpClient(parsed.data.params.clientInfo);
+          }
           if (parsed.success && 'id' in message) {
             initialization = { id: message.id, instructions: instructionsForClient(parsed.data.params.clientInfo, fullInstructions) };
           }
@@ -59,6 +80,23 @@ export function withClientInstructions(transport: Transport, fullInstructions: s
         const instructions = initialization.instructions;
         initialization = undefined;
         if ('result' in message) message = { ...message, result: { ...message.result, instructions } };
+      }
+      if ('id' in message && message.id !== undefined && ('result' in message || 'error' in message)) {
+        const call = calls.get(message.id);
+        if (call) {
+          calls.delete(message.id);
+          const raw = 'result' in message ? message.result.structuredContent : undefined;
+          const envelope = raw && typeof raw === 'object' && 'ok' in raw
+            ? raw as CommandEnvelope
+            : commandError('VALIDATION', 'The MCP tool request was rejected. Review the tool name and input fields.');
+          const notice = buildNotice(call.build, clientName);
+          const result = toMcpToolResponse({ ...envelope, build: call.build,
+            ...(envelope.error ? { error: { ...envelope.error, build: call.build } } : {}),
+            ...(notice ? { warnings: [notice, ...(envelope.warnings ?? [])] } : {}),
+          }, call.name);
+          if (notice) result.content[0]!.text = `${notice}\n${result.content[0]!.text}`;
+          message = { jsonrpc: '2.0', id: message.id, result };
+        }
       }
       await transport.send(message, options);
     },

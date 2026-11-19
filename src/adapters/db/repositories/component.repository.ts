@@ -72,6 +72,11 @@ export class ComponentRepository {
     return rows.map((row) => this.mapRow(row));
   }
 
+  findByExternalId(externalId: string): Component[] {
+    const rows = getDb().prepare('SELECT * FROM components WHERE external_id = ?').all(externalId) as Record<string, unknown>[];
+    return rows.map(row => this.mapRow(row));
+  }
+
   findByEnvironmentAndType(environmentId: string, type: string): Component | null {
     const db = getDb();
     const row = db.prepare('SELECT * FROM components WHERE environment_id = ? AND type = ?').get(environmentId, type) as Record<string, unknown> | undefined;

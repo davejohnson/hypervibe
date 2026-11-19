@@ -28,7 +28,8 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 it('recovers native AWS identity from exact shared state and the environment-owned runtime secret without deriving renamed names', async () => {
-  const binding = await recoverEngineDatabaseBinding(project, environment, 'aws', aws);
+  const binding = await recoverEngineDatabaseBinding(project, environment, 'aws', { ...aws, region: 'ca-central-1' });
+  expect(calls).toContain('ssm.us-west-2.amazonaws.com');
   expect(binding).toEqual({ clusterArn, accountId: '111122223333', region: 'us-west-2', name: 'original_database', owner: 'original_owner' });
   expect(JSON.stringify(binding)).not.toContain('private-');
   expect(engine.inspectState.mock.calls.map(([request]) => request.state)).toContainEqual({ provider: 'aws', projectId: project.id, environmentId: environment.id, partition: 'environment' });
