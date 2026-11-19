@@ -173,6 +173,20 @@
         {
           "provider": "railway",
           "project": "companion-railway",
+          "roles": [
+            {
+              "issuer": "Railway",
+              "sourceVariable": "HYPERVIBE_RAILWAY_TOKEN",
+              "credentialKey": "apiToken",
+              "destinationRole": "provider-management",
+              "description": "Manage deployments through the selected Railway workspace connection.",
+              "permissions": [
+                "selected workspace access"
+              ],
+              "creationUrl": "https://railway.com/account/tokens",
+              "tokenLabel": "companion-railway: HYPERVIBE_RAILWAY_TOKEN (selected workspace access)"
+            }
+          ],
           "displayName": "Railway",
           "tokenType": "Railway Account API token (create with \"No workspace\" selected)",
           "recommendedSetupUrl": "https://railway.com/account/tokens",
@@ -194,7 +208,7 @@
               "credentialKeys": [
                 "apiToken"
               ],
-              "comment": "Railway API token for the selected workspace and project infrastructure"
+              "comment": "Manage deployments through the selected Railway workspace connection."
             }
           ]
         }
