@@ -158,8 +158,11 @@ describe('Google hosting and DNS stage composition', () => {
       await applyInfrastructureEngine(f.ctx, { ...params, planId: fresh.planRunId, confirmActions: [] });
       expect(purchases).toBe(1);
     }
-    await apply(fresh);
+    const retried = await apply(fresh);
     if (!rejected) {
+      expect(retried).toMatchObject({ kind: 'executed', result: { receipts: [
+        expect.objectContaining({ status: 'pending' }),
+      ] } });
       const next = await plan();
       expect(next.actions[0]?.type).toBe('update');
       await apply(next);

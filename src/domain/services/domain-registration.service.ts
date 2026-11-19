@@ -372,8 +372,8 @@ export async function applyCloudflareDomainRegistration(params: {
     } catch {
       return {
         success: false,
-        message: `Failed to poll Cloudflare registration for ${domain}`,
-        error: 'The registrar could not confirm the requested information. Check the connection and retry the status read.',
+        status: 'pending',
+        message: `Cloudflare could not confirm the status of the existing registration for ${domain}. Check the connection and run hv_plan and hv_apply to check this request again.`,
       };
     }
   }
@@ -463,7 +463,11 @@ export async function applyCloudflareDomainRegistration(params: {
     return workflowActionResult(domain, workflow, 'started');
   } catch (error) {
     if (error instanceof RegistrarPurchaseRejected) {
-      persistWorkflow(envRepo, project, envName, domain, accountId, attemptId, { state: 'failed', completed: true });
+      try {
+        persistWorkflow(envRepo, project, envName, domain, accountId, attemptId, { state: 'failed', completed: true });
+      } catch {
+        return { success: false, status: 'blocked', message: `Cloudflare declined the purchase for ${domain}, but Hypervibe could not save that result. Check the registration record and local repository access before reviewing another purchase.` };
+      }
       const next = error.status === 402 ? 'Check the payment method on your Cloudflare account.'
         : error.status === 401 || error.status === 403 ? 'Check the registrar permissions on your Cloudflare connection.'
         : 'Check the registrant contact and registration details on your Cloudflare account.';
