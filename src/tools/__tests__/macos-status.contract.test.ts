@@ -15,6 +15,7 @@ import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { registerCoreTools } from '../core.tools.js';
 import { createCommandRegistry } from '../../application/commands.js';
+import * as hostingEnv from '../../domain/services/hosting-env.service.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 
 const fixture = fileURLToPath(new URL('../../../apps/macos/Tests/HypervibeCompanionCoreTests/Fixtures/current-core-status.json', import.meta.url));
@@ -64,7 +65,8 @@ it('captures current registered hv_status responses for the companion decoder co
   expect(captures).toMatchObject({ gcp: { ok: true, data: { engine: 'opentofu' } }, aws: { ok: true }, azure: { ok: true }, railway: { ok: true }, plannedProvider: { ok: false } });
 });
 
-// The companion's refresh also reads the spec, recent runs and connections. Each
+// The companion also reads the spec, recent runs, connections, CI definitions,
+// hosting variables and health. Each
 // answer below comes from the public command; the Swift suite decodes it with the
 // decoder the app uses, so changing an answer's shape fails CI (workflow DG-137).
 const refreshFixture = fixture.replace('current-core-status.json', 'current-core-refresh.json');
@@ -89,10 +91,25 @@ it('captures the other answers the companion refresh decodes', async () => {
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production', platformBindings: {} });
     const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'deploy' });
     ctx.repos.runs.updateStatus(run.id, 'succeeded');
-    ctx.repos.connections.create({ provider: 'github', scope: 'example/companion-refresh', credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'synthetic-token' }) });
+    const github = ctx.repos.connections.create({ provider: 'github', scope: 'example/companion-refresh', credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'synthetic-token' }) });
     captures.runs = await commands.execute('hv_runs', { action: 'list', project: project.name, limit: 10 });
     captures.connections = await commands.execute('hv_connections', { project: project.name });
     captures.catalog = await commands.execute('hv_connections', { repositoryContext: true });
+    ctx.repos.projects.update(project.id, { gitRemoteUrl: 'https://github.com/example/companion-refresh.git' });
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
+      if (String(url).startsWith('https://web.example.com')) return new Response('ok', { status: 200 });
+      if (String(url).includes('/actions/workflows')) return Response.json({ total_count: 1, workflows: [{ id: 101, name: 'Hypervibe / release', path: '.github/workflows/hypervibe-release.yml', state: 'active' }] });
+      if (String(url).endsWith('/repos/example/companion-refresh')) return Response.json({ id: 4242, node_id: 'R_synthetic', full_name: 'example/companion-refresh', name: 'companion-refresh', owner: { login: 'example' }, default_branch: 'main', private: true });
+      return Response.json({ message: 'Not Found' }, { status: 404 });
+    }));
+    ctx.repos.environments.update(environment.id, { platformBindings: { services: { web: { serviceId: 'svc-web', url: 'https://web.example.com' } } } });
+    ctx.repos.connections.updateStatus(github.id, 'verified');
+    captures.guidance = await commands.execute('hv_connections', { action: 'describe', provider: 'github', repositoryContext: true });
+    captures.ciDefinitions = await commands.execute('hv_ci_status', { project: project.name, include: ['definitions'] });
+    vi.spyOn(hostingEnv, 'readHostingEnvVars').mockResolvedValue({ success: true, provider: 'cloudrun', variables: { API_KEY: 'provider-secret-value' } });
+    captures.variables = await commands.execute('hv_secrets', { project: project.name, env: 'production', service: 'web' });
+    captures.health = await commands.execute('hv_health', { project: project.name, env: 'production', service: 'web' });
+    captures.removed = await commands.execute('hv_connections', { action: 'remove', provider: 'github', scope: 'example/companion-refresh' });
   } finally {
     process.chdir(cwd);
     if (disabled === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC; else process.env.HYPERVIBE_DISABLE_REPO_SPEC = disabled;
@@ -105,6 +122,7 @@ it('captures the other answers the companion refresh decodes', async () => {
   });
   if (process.env.HYPERVIBE_UPDATE_COMPANION_FIXTURES === '1') writeFileSync(refreshFixture, serialized);
   expect(serialized, 'Regenerate with HYPERVIBE_UPDATE_COMPANION_FIXTURES=1 npm test -- src/tools/__tests__/macos-status.contract.test.ts, then run the Swift contract tests.').toBe(readFileSync(refreshFixture, 'utf8'));
-  expect(serialized).not.toContain('synthetic-token');
-  expect(captures).toMatchObject({ spec: { ok: true }, runs: { ok: true }, connections: { ok: true }, catalog: { ok: true } });
+  expect(serialized).not.toContain('synthetic-token'); expect(serialized).not.toContain('provider-secret-value');
+  expect(captures).toMatchObject({ spec: { ok: true }, runs: { ok: true }, connections: { ok: true }, catalog: { ok: true },
+    guidance: { ok: true }, ciDefinitions: { ok: true }, variables: { ok: true }, health: { ok: true }, removed: { ok: true } });
 });

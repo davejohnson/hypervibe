@@ -3535,5 +3535,207 @@
       }
     },
     "hint": "Provider-owned bootstrap takes precedence. When the provider is known and a human form is needed, call hv_connections with action=\"describe\", provider and the known non-secret scope before presenting a credential form; include project only if already known, and omit unknown optional fields. Do not supply credentials, credentialsRef or confirmation to describe; the read-only contextual call returns connectionSetup guidance. Copy the returned recommendedSetupUrl verbatim with its complete query string; do not construct or edit credential URLs yourself. Do not repeat a generic provider list as a substitute. Do not initialize a project solely to obtain setup guidance. This list is credential discovery only, not completed scoped setup. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available, the provider declares a native/default credential chain, or the user requested the bounded first-GCP bootstrap. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection."
+  },
+  "guidance": {
+    "ok": true,
+    "data": {
+      "provider": {
+        "name": "github",
+        "displayName": "GitHub",
+        "credentialFields": [
+          {
+            "name": "apiToken",
+            "label": "API Token",
+            "required": true,
+            "sensitive": true,
+            "inputKind": "secret"
+          },
+          {
+            "name": "login",
+            "label": "Login",
+            "required": false,
+            "sensitive": false,
+            "inputKind": "text"
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "required": false,
+            "sensitive": false,
+            "inputKind": "text"
+          },
+          {
+            "name": "packageReadToken",
+            "label": "Package Read Token",
+            "required": false,
+            "sensitive": true,
+            "inputKind": "secret"
+          }
+        ],
+        "defaultScalarKey": "apiToken",
+        "environmentVariableAliases": [
+          [
+            "NODE_AUTH_TOKEN",
+            "HYPERVIBE_GITHUB_TOKEN",
+            "HYPERVIBE_GITHUB_PACKAGES_TOKEN"
+          ]
+        ],
+        "setupHelpUrl": "https://github.com/settings/tokens/new?scopes=repo%2Cworkflow%2Cread%3Apackages&description=Hypervibe+CI+deploys+for+example%2Fcompanion-refresh",
+        "setupHelpUrls": [
+          {
+            "label": "Create recommended combined classic token",
+            "url": "https://github.com/settings/tokens/new?scopes=repo%2Cworkflow%2Cread%3Apackages&description=Hypervibe+CI+deploys+for+example%2Fcompanion-refresh"
+          },
+          {
+            "label": "Create pre-filled classic API token",
+            "url": "https://github.com/settings/tokens/new?scopes=repo%2Cworkflow&description=Hypervibe+GitHub+API+for+example%2Fcompanion-refresh"
+          },
+          {
+            "label": "Create pre-filled fine-grained repository token",
+            "url": "https://github.com/settings/personal-access-tokens/new?name=Hypervibe+repository%3A+example%2Fcompanion-&description=Hypervibe+repository+management+for+example%2Fcompanion-refresh&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write&target_name=example"
+          },
+          {
+            "label": "Create optional classic GHCR package token",
+            "url": "https://github.com/settings/tokens/new?scopes=read%3Apackages&description=Hypervibe+GHCR+pull+for+example%2Fcompanion-refresh"
+          },
+          {
+            "label": "GitHub fine-grained permission reference",
+            "url": "https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens"
+          }
+        ],
+        "tokenType": "classic GitHub personal access token with repo, workflow, and read:packages for the one-token setup; or a fine-grained repository token plus a separate classic package-read PAT for least privilege",
+        "requiredPermissions": [
+          "Select the repository owner and only the repositories Hypervibe should manage. Grant Metadata read; Administration read/write; Actions read/write; Contents read/write; Issues read/write; Pull requests read/write; Secrets read/write; and Workflows read/write.",
+          "When enabled in desired state, also grant Dependabot alerts read/write, Code scanning alerts read/write, and Secret scanning alerts read/write. Organization policy and product entitlement can still block these settings; Hypervibe reports that without claiming success.",
+          "For the one-token classic PAT setup, grant repo, workflow, and read:packages. Hypervibe uses it for API management and package/image reads.",
+          "For private GHCR image pulls, packageReadToken must have read:packages — create it here: https://github.com/settings/tokens/new?scopes=read%3Apackages&description=Hypervibe+GHCR+pull+for+example%2Fcompanion-refresh. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages."
+        ],
+        "credentialExample": "hv_connections provider=\"github\" scope=\"owner/repository\" credentialsRef=\"dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN\"",
+        "notes": [
+          "The fine-grained creation link pre-fills the token name, description, 90-day expiry, core repository permissions, and the resource owner when its exact scope is known. Review the owner and select the repositories manually; GitHub does not document a repository-selection URL parameter. For a classic PAT, select expiration manually; its description does not restrict repository access.",
+          "Save the repository-management PAT as HYPERVIBE_GITHUB_TOKEN in an existing gitignored .env file, replace /absolute/path in the Connect command with that file's directory, and let the agent call hv_connections.",
+          "Keep a read:packages-only NODE_AUTH_TOKEN separate from HYPERVIBE_GITHUB_TOKEN. When both roles are needed, map apiToken to HYPERVIBE_GITHUB_TOKEN and packageReadToken to NODE_AUTH_TOKEN.",
+          "To add or replace only package-read access on an existing verified connection, use that exact scope with credentialsRef=\"dotenv:/absolute/path/.env#NODE_AUTH_TOKEN\" and credentialsKey=\"packageReadToken\". Hypervibe privately preserves its existing API credential and verifies both tokens belong to the same account before saving the package role.",
+          "NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN remain accepted as aliases for compatibility when one explicitly referenced value supplies the requested scalar credential.",
+          "An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.",
+          "A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.",
+          "Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.",
+          "A classic apiToken remains supported for compatibility and needs repo + workflow (https://github.com/settings/tokens/new?scopes=repo%2Cworkflow&description=Hypervibe+GitHub+API+for+example%2Fcompanion-refresh); security endpoints may also need security_events."
+        ]
+      },
+      "connectionSetup": {
+        "provider": "github",
+        "project": "companion-refresh",
+        "displayName": "GitHub",
+        "tokenType": "classic GitHub personal access token with repo, workflow, and read:packages for the one-token setup; or a fine-grained repository token plus a separate classic package-read PAT for least privilege",
+        "recommendedSetupUrl": "https://github.com/settings/tokens/new?scopes=repo%2Cworkflow&description=Hypervibe+GitHub+API+for+example%2Fcompanion-refresh",
+        "setupUrls": [
+          "Create recommended combined classic token: https://github.com/settings/tokens/new?scopes=repo%2Cworkflow%2Cread%3Apackages&description=Hypervibe+CI+deploys+for+example%2Fcompanion-refresh",
+          "Create pre-filled classic API token: https://github.com/settings/tokens/new?scopes=repo%2Cworkflow&description=Hypervibe+GitHub+API+for+example%2Fcompanion-refresh",
+          "Create pre-filled fine-grained repository token: https://github.com/settings/personal-access-tokens/new?name=Hypervibe+repository%3A+example%2Fcompanion-&description=Hypervibe+repository+management+for+example%2Fcompanion-refresh&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write&target_name=example",
+          "Create optional classic GHCR package token: https://github.com/settings/tokens/new?scopes=read%3Apackages&description=Hypervibe+GHCR+pull+for+example%2Fcompanion-refresh",
+          "GitHub fine-grained permission reference: https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens"
+        ],
+        "requiredPermissions": [
+          "Select the repository owner and only the repositories Hypervibe should manage. Grant Metadata read; Administration read/write; Actions read/write; Contents read/write; Issues read/write; Pull requests read/write; Secrets read/write; and Workflows read/write.",
+          "When enabled in desired state, also grant Dependabot alerts read/write, Code scanning alerts read/write, and Secret scanning alerts read/write. Organization policy and product entitlement can still block these settings; Hypervibe reports that without claiming success.",
+          "For the one-token classic PAT setup, grant repo, workflow, and read:packages. Hypervibe uses it for API management and package/image reads.",
+          "For private GHCR image pulls, packageReadToken must have read:packages — create it here: https://github.com/settings/tokens/new?scopes=read%3Apackages&description=Hypervibe+GHCR+pull+for+example%2Fcompanion-refresh. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages."
+        ],
+        "credentialExample": "hv_connections project=\"companion-refresh\" provider=\"github\" scope=\"owner/repository\" credentialsRef=\"dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN\"",
+        "notes": [
+          "The fine-grained creation link pre-fills the token name, description, 90-day expiry, core repository permissions, and the resource owner when its exact scope is known. Review the owner and select the repositories manually; GitHub does not document a repository-selection URL parameter. For a classic PAT, select expiration manually; its description does not restrict repository access.",
+          "Save the repository-management PAT as HYPERVIBE_GITHUB_TOKEN in an existing gitignored .env file, replace /absolute/path in the Connect command with that file's directory, and let the agent call hv_connections.",
+          "Keep a read:packages-only NODE_AUTH_TOKEN separate from HYPERVIBE_GITHUB_TOKEN. When both roles are needed, map apiToken to HYPERVIBE_GITHUB_TOKEN and packageReadToken to NODE_AUTH_TOKEN.",
+          "To add or replace only package-read access on an existing verified connection, use that exact scope with credentialsRef=\"dotenv:/absolute/path/.env#NODE_AUTH_TOKEN\" and credentialsKey=\"packageReadToken\". Hypervibe privately preserves its existing API credential and verifies both tokens belong to the same account before saving the package role.",
+          "NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN remain accepted as aliases for compatibility when one explicitly referenced value supplies the requested scalar credential.",
+          "An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.",
+          "A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.",
+          "Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.",
+          "A classic apiToken remains supported for compatibility and needs repo + workflow (https://github.com/settings/tokens/new?scopes=repo%2Cworkflow&description=Hypervibe+GitHub+API+for+example%2Fcompanion-refresh); security endpoints may also need security_events."
+        ]
+      }
+    },
+    "hint": "Setup guidance only; no credential was resolved, connection verified, or setup preview created. Provider-owned bootstrap takes precedence. Preserve the complete returned URL and review the remaining manual fields."
+  },
+  "ciDefinitions": {
+    "ok": true,
+    "data": {
+      "repository": "example/companion-refresh",
+      "definitions": [
+        {
+          "id": 101,
+          "name": "Hypervibe / release",
+          "path": ".github/workflows/hypervibe-release.yml",
+          "state": "active"
+        }
+      ]
+    }
+  },
+  "variables": {
+    "ok": true,
+    "data": {
+      "environment": "production",
+      "service": "web",
+      "vars": {
+        "API_KEY": "[redacted]"
+      }
+    }
+  },
+  "health": {
+    "ok": true,
+    "data": {
+      "service": "web",
+      "baseUrl": "https://web.example.com",
+      "check": {
+        "name": "health",
+        "url": "https://web.example.com/",
+        "ok": true,
+        "status": 200,
+        "statusText": "",
+        "latencyMs": 0,
+        "redirected": false,
+        "finalUrl": "",
+        "headers": {
+          "content-type": "text/plain;charset=UTF-8"
+        },
+        "setCookie": {
+          "count": 0,
+          "headers": []
+        },
+        "bodyPreview": "ok"
+      },
+      "deploymentHealth": {
+        "state": "unknown",
+        "environments": [
+          {
+            "environment": "production",
+            "provider": "cloudrun",
+            "state": "unknown",
+            "services": [
+              {
+                "service": "web",
+                "state": "unknown",
+                "status": "unknown",
+                "reason": "No verified cloudrun hosting connection is available for deployment-status observation. No connection found for cloudrun. Confirm the Google Cloud Run credential type and permissions. Token/credential type: Google Cloud service account JSON key. Create or review it here: https://console.cloud.google.com/iam-admin/serviceaccounts. Required permissions: Grant roles/run.admin on the target Google Cloud project so Hypervibe can create/update Cloud Run services and jobs. Grant roles/iam.serviceAccountUser on the runtime service account. Grant roles/cloudbuild.builds.editor so Hypervibe can run Cloud Build builds. Grant roles/artifactregistry.admin when Hypervibe should create the Docker repository; roles/artifactregistry.writer is enough if the repository already exists. Grant roles/serviceusage.serviceUsageAdmin so Hypervibe can auto-enable required APIs. Grant roles/cloudsql.client when using Cloud SQL, plus roles/cloudsql.admin if Hypervibe provisions the instance. Grant roles/cloudscheduler.admin when using cron jobs. Grant roles/pubsub.editor when using queues. For read-only GCS inventory, explicitly prepare gcsAccess=\"inspect\" to enable storage.googleapis.com and grant roles/storage.viewer. For GCS create, object transfer, or teardown, explicitly prepare gcsAccess=\"lifecycle\" to grant roles/storage.admin to the deploy identity and, when configured, roles/storage.objectUser to the distinct runtime identity. Both grants are project-scoped; runtime object access spans every bucket in that GCP project, not just one bucket. For read-only Memorystore inventory, explicitly prepare memorystoreAccess=\"inspect\" to enable Redis/Compute APIs and grant roles/redis.viewer plus roles/compute.networkViewer. For Memorystore create or teardown, explicitly prepare memorystoreAccess=\"lifecycle\" to grant roles/redis.admin, roles/compute.networkViewer, and roles/compute.networkUser after reviewing that broader project-scoped access. For Pub/Sub queue lifecycle, explicitly prepare queueAccess=\"lifecycle\" to enable pubsub.googleapis.com and grant roles/pubsub.editor. Other preparation modes never add that role. Grant roles/logging.viewer and roles/logging.viewAccessor for logs. Native custom domains use the Cloud Run domain-mapping API covered by roles/run.admin. The connected identity must also be authorized for the verified base domain before apply. Notes: Run hv_connections action=\"prepare\" when Hypervibe should enable APIs and grant these roles. After the credential-free preview, prefer confirm=true with adminAuth=\"default\" to use existing Google Application Default Credentials; explicit one-time admin credential references remain available. GCS, Memorystore, and Pub/Sub access are staged independently and never added by another capability. The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec. Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there. Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS. Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above. Connect with: hv_connections provider=\"cloudrun\" credentialsRef=\"file:/absolute/path/cloudrun.json\"."
+              }
+            ],
+            "reason": "No verified cloudrun hosting connection is available for deployment-status observation. No connection found for cloudrun. Confirm the Google Cloud Run credential type and permissions. Token/credential type: Google Cloud service account JSON key. Create or review it here: https://console.cloud.google.com/iam-admin/serviceaccounts. Required permissions: Grant roles/run.admin on the target Google Cloud project so Hypervibe can create/update Cloud Run services and jobs. Grant roles/iam.serviceAccountUser on the runtime service account. Grant roles/cloudbuild.builds.editor so Hypervibe can run Cloud Build builds. Grant roles/artifactregistry.admin when Hypervibe should create the Docker repository; roles/artifactregistry.writer is enough if the repository already exists. Grant roles/serviceusage.serviceUsageAdmin so Hypervibe can auto-enable required APIs. Grant roles/cloudsql.client when using Cloud SQL, plus roles/cloudsql.admin if Hypervibe provisions the instance. Grant roles/cloudscheduler.admin when using cron jobs. Grant roles/pubsub.editor when using queues. For read-only GCS inventory, explicitly prepare gcsAccess=\"inspect\" to enable storage.googleapis.com and grant roles/storage.viewer. For GCS create, object transfer, or teardown, explicitly prepare gcsAccess=\"lifecycle\" to grant roles/storage.admin to the deploy identity and, when configured, roles/storage.objectUser to the distinct runtime identity. Both grants are project-scoped; runtime object access spans every bucket in that GCP project, not just one bucket. For read-only Memorystore inventory, explicitly prepare memorystoreAccess=\"inspect\" to enable Redis/Compute APIs and grant roles/redis.viewer plus roles/compute.networkViewer. For Memorystore create or teardown, explicitly prepare memorystoreAccess=\"lifecycle\" to grant roles/redis.admin, roles/compute.networkViewer, and roles/compute.networkUser after reviewing that broader project-scoped access. For Pub/Sub queue lifecycle, explicitly prepare queueAccess=\"lifecycle\" to enable pubsub.googleapis.com and grant roles/pubsub.editor. Other preparation modes never add that role. Grant roles/logging.viewer and roles/logging.viewAccessor for logs. Native custom domains use the Cloud Run domain-mapping API covered by roles/run.admin. The connected identity must also be authorized for the verified base domain before apply. Notes: Run hv_connections action=\"prepare\" when Hypervibe should enable APIs and grant these roles. After the credential-free preview, prefer confirm=true with adminAuth=\"default\" to use existing Google Application Default Credentials; explicit one-time admin credential references remain available. GCS, Memorystore, and Pub/Sub access are staged independently and never added by another capability. The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec. Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there. Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS. Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above. Connect with: hv_connections provider=\"cloudrun\" credentialsRef=\"file:/absolute/path/cloudrun.json\"."
+          }
+        ],
+        "failures": []
+      }
+    },
+    "warnings": [
+      "Deployment status is unknown for: production (No verified cloudrun hosting connection is available for deployment-status observation. No connection found for cloudrun. Confirm the Google Cloud Run credential type and permissions. Token/credential type: Google Cloud service account JSON key. Create or review it here: https://console.cloud.google.com/iam-admin/serviceaccounts. Required permissions: Grant roles/run.admin on the target Google Cloud project so Hypervibe can create/update Cloud Run services and jobs. Grant roles/iam.serviceAccountUser on the runtime service account. Grant roles/cloudbuild.builds.editor so Hypervibe can run Cloud Build builds. Grant roles/artifactregistry.admin when Hypervibe should create the Docker repository; roles/artifactregistry.writer is enough if the repository already exists. Grant roles/serviceusage.serviceUsageAdmin so Hypervibe can auto-enable required APIs. Grant roles/cloudsql.client when using Cloud SQL, plus roles/cloudsql.admin if Hypervibe provisions the instance. Grant roles/cloudscheduler.admin when using cron jobs. Grant roles/pubsub.editor when using queues. For read-only GCS inventory, explicitly prepare gcsAccess=\"inspect\" to enable storage.googleapis.com and grant roles/storage.viewer. For GCS create, object transfer, or teardown, explicitly prepare gcsAccess=\"lifecycle\" to grant roles/storage.admin to the deploy identity and, when configured, roles/storage.objectUser to the distinct runtime identity. Both grants are project-scoped; runtime object access spans every bucket in that GCP project, not just one bucket. For read-only Memorystore inventory, explicitly prepare memorystoreAccess=\"inspect\" to enable Redis/Compute APIs and grant roles/redis.viewer plus roles/compute.networkViewer. For Memorystore create or teardown, explicitly prepare memorystoreAccess=\"lifecycle\" to grant roles/redis.admin, roles/compute.networkViewer, and roles/compute.networkUser after reviewing that broader project-scoped access. For Pub/Sub queue lifecycle, explicitly prepare queueAccess=\"lifecycle\" to enable pubsub.googleapis.com and grant roles/pubsub.editor. Other preparation modes never add that role. Grant roles/logging.viewer and roles/logging.viewAccessor for logs. Native custom domains use the Cloud Run domain-mapping API covered by roles/run.admin. The connected identity must also be authorized for the verified base domain before apply. Notes: Run hv_connections action=\"prepare\" when Hypervibe should enable APIs and grant these roles. After the credential-free preview, prefer confirm=true with adminAuth=\"default\" to use existing Google Application Default Credentials; explicit one-time admin credential references remain available. GCS, Memorystore, and Pub/Sub access are staged independently and never added by another capability. The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec. Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there. Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS. Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above. Connect with: hv_connections provider=\"cloudrun\" credentialsRef=\"file:/absolute/path/cloudrun.json\".)."
+    ]
+  },
+  "removed": {
+    "ok": true,
+    "data": {
+      "provider": "github",
+      "scope": "example/companion-refresh",
+      "removed": true
+    }
   }
 }
