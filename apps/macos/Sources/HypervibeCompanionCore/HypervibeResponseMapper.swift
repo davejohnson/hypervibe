@@ -103,7 +103,8 @@ enum HypervibeResponseMapper {
                         pendingWorkReadFailed: worker.waker?.readError != nil,
                         activity: worker.activity, running: worker.running
                     )
-                }
+                },
+                partialEvidence: payload.partialEvidence
             )
         }
 
@@ -149,7 +150,8 @@ enum HypervibeResponseMapper {
                         provider: resource.provider
                     )
                 }
-            }
+            },
+            partialEvidence: payload.partialEvidence
         )
     }
 
@@ -773,6 +775,9 @@ private struct StatusToolData: Decodable {
     let inputRequired: CountedItems
     let observedAt: String?
     let services: [Service]?
+    let partial: Bool
+    let retainedDatabases: [RetainedDatabase]?
+    let backupReadiness: BackupReadiness?
 
     private enum CodingKeys: String, CodingKey {
         case engine
@@ -785,11 +790,44 @@ private struct StatusToolData: Decodable {
         case inputRequired
         case observedAt
         case services
+        case partial
+        case retainedDatabases
+        case backupReadiness
+    }
+
+    struct RetainedDatabase: Decodable {
+        let provider: String?
+        let externalId: String?
+        let observation: String
+        let status: String?
+    }
+
+    struct BackupReadiness: Decodable {
+        let ready: Bool
+        let gaps: [String]?
+    }
+
+    /// The facts an incomplete answer did return, in plain words.
+    var partialEvidence: [String]? {
+        var facts = (retainedDatabases ?? []).map { database -> String in
+            let name = ["Database", database.externalId, database.provider.map { "(\($0))" }]
+                .compactMap { $0 }.joined(separator: " ")
+            guard database.observation == "present" else { return "\(name): not verified" }
+            return "\(name): present" + (database.status.map { ", \($0)" } ?? "")
+        }
+        if let backupReadiness {
+            let gaps = (backupReadiness.gaps ?? []).joined(separator: " ")
+            facts.append(backupReadiness.ready ? "Backups: ready" : "Backups: not ready." + (gaps.isEmpty ? "" : " \(gaps)"))
+        }
+        return facts.isEmpty ? nil : facts
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         engine = try container.decodeIfPresent(String.self, forKey: .engine)
+        partial = try container.decodeIfPresent(Bool.self, forKey: .partial) ?? false
+        retainedDatabases = try container.decodeIfPresent([RetainedDatabase].self, forKey: .retainedDatabases)
+        backupReadiness = try container.decodeIfPresent(BackupReadiness.self, forKey: .backupReadiness)
         if engine == "opentofu" {
             verified = false
             inSync = false
@@ -798,6 +836,11 @@ private struct StatusToolData: Decodable {
             } else {
                 workers = try container.decode([Worker].self, forKey: .workers)
             }
+        } else if partial {
+            // An answer that says it is incomplete carries facts, not a verdict.
+            verified = false
+            inSync = false
+            workers = nil
         } else {
             // Missing lifecycle evidence is still malformed, not implicit success.
             verified = try container.decode(Bool.self, forKey: .verified)

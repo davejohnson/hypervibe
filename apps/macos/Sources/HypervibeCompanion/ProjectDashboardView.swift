@@ -381,6 +381,17 @@ struct ProjectDashboardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                        if let facts = observation.partialEvidence {
+                            Label("Partly checked", systemImage: "exclamationmark.magnifyingglass")
+                                .font(.caption.weight(.medium))
+                            ForEach(facts, id: \.self) { fact in
+                                Text(fact)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+
                         if let infrastructureStatus = observation.infrastructureStatus {
                             Label("OpenTofu", systemImage: "server.rack")
                                 .font(.caption.weight(.medium))

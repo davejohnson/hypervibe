@@ -161,7 +161,10 @@ public struct WorkerObservation: Codable, Equatable, Identifiable, Sendable {
     public var activity: String? = nil
     public var running: Int? = nil
 
-    public var needsAttention: Bool { pendingWorkReadFailed || wakerState == "FAILED" || activity == "failed" }
+    public var needsAttention: Bool { wakeUpCheckFailed || workloadFailed }
+    /// The wake-up check itself failed. Only on-demand workers have one.
+    public var wakeUpCheckFailed: Bool { pendingWorkReadFailed || wakerState == "FAILED" }
+    public var workloadFailed: Bool { activity == "failed" }
 
     public var configurationSummary: String {
         let modeLabel = mode == "on-demand" ? "On demand" : mode == "always-on" ? "Always on" : "Unknown mode"
@@ -200,6 +203,9 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
     public let engine: String?
     /// nil means workers were not read; an empty array means none configured.
     public let workers: [WorkerObservation]?
+    /// Facts from an incomplete status answer (databases, backups). They are shown
+    /// as returned and never make the environment healthy.
+    public let partialEvidence: [String]?
 
     public var infrastructureStatus: String? {
         engine == "opentofu"
@@ -218,7 +224,8 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         services: [ServiceObservation]? = nil,
         driftedResources: [DriftedResource]? = nil,
         engine: String? = nil,
-        workers: [WorkerObservation]? = nil
+        workers: [WorkerObservation]? = nil,
+        partialEvidence: [String]? = nil
     ) {
         self.health = health
         self.verified = verified
@@ -231,6 +238,7 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         self.driftedResources = driftedResources
         self.engine = engine
         self.workers = workers
+        self.partialEvidence = partialEvidence
     }
 
     public func service(named name: String) -> ServiceObservation? {
