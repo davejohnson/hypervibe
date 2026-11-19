@@ -5,7 +5,7 @@ import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '
 import { acceptedCredentialCiInputs } from './accepted-credential-inputs.js';
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { githubPackagePullSource } from '../../adapters/providers/github/package-pull.js';
+import { githubPackagePullSetupKeys, githubPackagePullSource } from '../../adapters/providers/github/package-pull.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
@@ -32,7 +32,7 @@ import {
 } from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
-import { connectionSetupUrl, formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
+import { connectionSetupDetails, formatConnectionGuidance } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
   APPLIED_SPEC_HASH_OPERATION,
@@ -77,7 +77,8 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
   }
   if (missingImageRegistrySecrets) {
     const displayName = providerRegistry.getMetadata(provider)?.displayName ?? provider;
-    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, options)}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { ...options, intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    const setup = connectionSetupDetails('github', { ...options, requiredCredentialKeys: githubPackagePullSetupKeys(options.scope) });
+    parts.push(`For ${displayName} GHCR image pulls, packageReadToken needs read:packages. Credential setup: ${setup.recommendedSetupUrl}. Connect with: ${setup.credentialExample}.`);
   }
   return parts.join(' ');
 }

@@ -111,7 +111,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     [CONTEXTUAL_SETUP_HINT, '{} lists every connection/provider. {project} lists the same saved connections and provider catalog with contextual setup links. Use repositoryContext to select the current repository. Use view="requirements" to see the connections a project needs, optionally filtered by environment. Pass provider to manage a connection. With provider, action="add" is the default. Use action="bootstrap" with provider="cloudrun" for the short, opinionated GCP setup; "verify", "remove", and "prepare" remain explicit advanced operations. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.'].join(' '),
     {
       view: z.enum(['catalog', 'requirements']).optional().describe('Read-only list view. The default catalog includes saved connections and available providers. Use requirements with a selected project or initialized repository and an optional environment filter.'),
-      role: z.string().optional().describe('action="describe": request only the selected connection credential field, such as GitHub packageReadToken.'),
+      role: z.union([z.string(), z.array(z.string()).min(1)]).optional().describe('action="describe": select one or more connection credential fields, such as GitHub packageReadToken.'),
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat.'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
@@ -174,7 +174,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       confirm,
     }) => {
       if (view && provider) return commandError('VALIDATION', 'view is only available when listing connections. Omit provider.');
-      if (role && (!provider || action !== 'describe' || !connectionRoles(provider, [role]).length)) {
+      const selectedRoles = role === undefined ? undefined : [...new Set(Array.isArray(role) ? role : [role])];
+      if (selectedRoles && (!provider || action !== 'describe' || connectionRoles(provider, selectedRoles).length !== selectedRoles.length)) {
         return commandError('VALIDATION', 'Use role with a registered credential field and action="describe".');
       }
       if (repositoryContext && projectRef !== undefined) {
@@ -244,7 +245,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
         const required = spec ? requiredConnectionChecklist(ctx, spec, environment ? [environment] : undefined).required : [];
         return commandSuccess({ project: { id: project.id, name: project.name }, connections: required },
-          { hint: 'Use hv_connections action="describe" with the provider, project and scope for setup guidance.' });
+          { hint: 'Follow each returned connectionAction with hv_connections. For other missing connections use action="describe" with the provider, project and scope.' });
       }
 
       const requestedAction = action ?? 'add';
@@ -300,7 +301,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const metadata = providerRegistry.getMetadata(provider) ?? secretManagerRegistry.getMetadata(provider)!;
         return commandSuccess({
           provider: role ? { name: provider, displayName: metadata.displayName } : providerDiscoveryEntry(metadata, context),
-          connectionSetup: connectionSetupDetails(provider, { ...context, ...(role ? { requiredCredentialKeys: [role] } : {}) }),
+          connectionSetup: connectionSetupDetails(provider, { ...context, ...(selectedRoles ? { requiredCredentialKeys: selectedRoles } : {}) }),
         }, { hint: 'Setup guidance only; no credential was resolved, connection verified, or setup preview created. Provider-owned bootstrap takes precedence. Preserve the complete returned URL and review the remaining manual fields.' });
       }
       const sharedGcpFields = {

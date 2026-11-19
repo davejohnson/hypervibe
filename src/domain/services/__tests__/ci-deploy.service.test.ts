@@ -491,7 +491,7 @@ describe('ci-deploy.service', () => {
     it('includes GHCR reconnect guidance when IMAGE_REGISTRY_* secrets are missing', () => {
       const message = missingProviderSecretsMessage('railway', ['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
       expect(message).toContain('Missing provider secrets: IMAGE_REGISTRY_USERNAME, IMAGE_REGISTRY_TOKEN.');
-      expect(message).toContain('For Railway GHCR image pulls, reconnect GitHub');
+      expect(message).toContain('For Railway GHCR image pulls, packageReadToken');
       expect(message).toContain('packageReadToken needs read:packages');
       expect(message).not.toContain('Connect and verify railway');
     });
@@ -499,7 +499,7 @@ describe('ci-deploy.service', () => {
     it('includes both guidance blocks when API and registry secrets are missing', () => {
       const message = missingProviderSecretsMessage('railway', ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_TOKEN']);
       expect(message).toContain('Connect and verify railway');
-      expect(message).toContain('For Railway GHCR image pulls, reconnect GitHub');
+      expect(message).toContain('For Railway GHCR image pulls, packageReadToken');
     });
 
   });

@@ -1,4 +1,4 @@
-import { githubPackagePullSource } from '../adapters/providers/github/package-pull.js';
+import { githubPackagePullSetupKeys, githubPackagePullSource } from '../adapters/providers/github/package-pull.js';
 import type { CommandContext } from './context.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
@@ -7,23 +7,34 @@ import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 
+type ConnectionUse = { environment: string; reason: string; packagePull: boolean };
+type ChecklistItem = {
+  provider: string;
+  status: string;
+  scope?: string;
+  environments: string[];
+  reasons: string[];
+  guidance?: string;
+  requiredCredentialKeys?: string[];
+  missingCredentialKeys?: string[];
+  connectionAction?: { project: string; provider: string; scope?: string; action: 'verify' | 'describe'; role?: string | string[] };
+};
+
+function summarizeUses(uses: ConnectionUse[]) {
+  return {
+    environments: [...new Set(uses.map(use => use.environment))].sort(),
+    reasons: [...new Set(uses.map(use => use.reason))].sort(),
+  };
+}
+
 export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec, selected?: readonly string[]) {
-  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string>; packagePull: boolean }>();
+  const required = new Map<string, { provider: string; scopeHints: string[]; uses: ConnectionUse[] }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = [], packagePull = false) => {
     if (selected && !selected.includes(environment)) return;
     const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
-    const existing = required.get(key) ?? {
-      provider,
-      environments: new Set<string>(),
-      reasons: new Set<string>(),
-      scopeHints: new Set<string>(),
-      packagePull: false,
-    };
-    existing.environments.add(environment);
-    existing.reasons.add(reason);
-    existing.packagePull ||= packagePull;
-    scopeHints.forEach((scopeHint) => existing.scopeHints.add(scopeHint));
-    required.set(key, existing);
+    const entry = required.get(key) ?? { provider, scopeHints, uses: [] };
+    entry.uses.push({ environment, reason, packagePull });
+    required.set(key, entry);
   };
 
   const devops = resolveDevOpsSelection(spec);
@@ -68,12 +79,12 @@ export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSp
 
   const items = Array.from(required.values())
     .sort((a, b) => a.provider.localeCompare(b.provider))
-    .map((entry) => {
+    .flatMap((entry): ChecklistItem[] => {
       const connectionProviders = providerRegistry.connectionProviders(entry.provider);
       const connections = connectionProviders.flatMap((connectionProvider) =>
         ctx.repos.connections.findAllByProvider(connectionProvider)
       );
-      const scopeHints = Array.from(entry.scopeHints);
+      const { scopeHints } = entry;
       const scopedConnection = scopeHints.length > 0
         ? connectionProviders
           .map((connectionProvider) => ctx.repos.connections.findBestMatchFromHints(connectionProvider, scopeHints))
@@ -96,26 +107,49 @@ export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSp
       } else if (scopeHints.length === 0 && connections.length > 0) {
         status = 'unverified';
       }
-      let guidance: string | undefined;
-      if (entry.packagePull) {
+      const base = { provider: entry.provider, ...(scope ? { scope } : {}), ...summarizeUses(entry.uses), status };
+      const pulls = entry.uses.filter(use => use.packagePull);
+      if (!pulls.length || !scope) return [base];
+
+      const actionContext = { project: spec.project, provider: entry.provider };
+      const primaryOnly = entry.uses.filter(use => !use.packagePull);
+      const fulfilled = verified && primaryOnly.length ? [{ ...base, ...summarizeUses(primaryOnly) }] : [];
+      const pending = verified ? { ...base, ...summarizeUses(pulls) } : base;
+      if (verified) {
         try {
-          if (!githubPackagePullSource({ githubRepo: scope })) {
-            status = 'missing';
-            guidance = 'This deploy pulls a private GitHub Container Registry image. Assign a GitHub token with read:packages to packageReadToken for this repository. A combined classic token can be mapped to both apiToken and packageReadToken.';
-          }
+          if (githubPackagePullSource({ githubRepo: scope })) return [base];
         } catch {
-          status = 'unverified';
-          guidance = 'Hypervibe could not read the saved GitHub package credential. Check local credential access before deploying.';
+          return [...fulfilled, {
+            ...pending,
+            status: 'unverified',
+            requiredCredentialKeys: [],
+            guidance: 'Hypervibe could not read the saved GitHub credential. Restore local credential access and check the project requirements again.',
+          }];
         }
       }
-      return {
-        provider: entry.provider,
-        status,
-        environments: Array.from(entry.environments).sort(),
-        reasons: Array.from(entry.reasons).sort(),
-        ...(scope ? { scope } : {}),
-        ...(guidance ? { guidance, ...(status === 'missing' ? { missingCredentialKeys: ['packageReadToken'] } : {}) } : {}),
-      };
+      if (scopedConnection && scopedConnection.status !== 'verified') {
+        return [...fulfilled, {
+          ...pending,
+          status: 'unverified',
+          requiredCredentialKeys: [],
+          guidance: 'Verify the saved GitHub connection, then check the project requirements again.',
+          connectionAction: { ...actionContext, action: 'verify', ...(scopedConnection.scope ? { scope: scopedConnection.scope } : {}) },
+        }];
+      }
+      const requiredCredentialKeys = githubPackagePullSetupKeys(scope);
+      return [...fulfilled, {
+        ...pending,
+        status: 'missing',
+        requiredCredentialKeys,
+        missingCredentialKeys: verified ? ['packageReadToken'] : requiredCredentialKeys,
+        guidance: requiredCredentialKeys.length === 1
+          ? 'The image pull needs read:packages. Add packageReadToken to this repository’s verified GitHub connection.'
+          : 'Set up this repository’s GitHub connection with apiToken for workflow management and packageReadToken for image pulls. A combined classic token can be explicitly mapped to both roles.',
+        connectionAction: {
+          ...actionContext, action: 'describe', scope,
+          role: requiredCredentialKeys.length === 1 ? requiredCredentialKeys[0] : requiredCredentialKeys,
+        },
+      }];
     });
 
   return {

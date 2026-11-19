@@ -833,7 +833,7 @@ export function connectionSetupDetails(
     ...(options.scope ? { scope: options.scope } : {}),
     ...(roles.length ? { roles } : {}),
     displayName: guidance.displayName,
-    tokenType: guidance.tokenType,
+    tokenType: onlyPackage ? 'classic GitHub personal access token with read:packages' : guidance.tokenType,
     ...(recommendedSetupUrl
       ? { recommendedSetupUrl }
       : {}),

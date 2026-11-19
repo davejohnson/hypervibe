@@ -245,6 +245,7 @@ describe('hv_connections', () => {
     const input = { provider: 'github', action: 'describe', role: 'packageReadToken', project: project.name, environment: 'staging' };
     const setup = (await t.call('hv_connections', input)).data.connectionSetup;
     expect(setup.roles).toHaveLength(1);
+    expect(setup.tokenType).not.toMatch(/repo|workflow/i);
     expect(setup.requiredPermissions).toEqual(['read:packages']);
     expect(setup.roles[0].tokenLabel).toBe('package-app / staging: HYPERVIBE_GITHUB_PACKAGES_TOKEN (read:packages)');
     expect(new URL(setup.recommendedSetupUrl).searchParams.get('description')).toBe(setup.roles[0].tokenLabel);

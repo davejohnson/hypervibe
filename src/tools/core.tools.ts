@@ -654,7 +654,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         },
         {
           hint: connections.missing.length > 0
-            ? 'For each missing connection needed by this change, use hv_connections action="describe" with its provider, project and scope.'
+            ? 'Follow each returned connectionAction with hv_connections. For other missing connections use action="describe" with the provider, project and scope.'
             : undefined,
           warnings,
           next: connections.missing.length > 0 ? ['hv_connections', 'hv_plan'] : ['hv_plan'],
@@ -909,7 +909,6 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = connectionRecoveryHint(connectBeforeApply, {
           project: project.name,
           gitRemoteUrl: project.gitRemoteUrl,
-          includePackageRead: true,
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
       } else if (result.inputRequired.length > 0) {

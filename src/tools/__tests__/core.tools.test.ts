@@ -411,15 +411,15 @@ describe('hv_spec', () => {
         runtime: { kind: 'node', version: '24' },
       });
       const initializedLocalEnv = readFileSync(path.join(repoDir, '.env'), 'utf8');
-      for (const key of ['HYPERVIBE_GITHUB_TOKEN', 'HYPERVIBE_RAILWAY_TOKEN']) {
+      for (const key of ['HYPERVIBE_GITHUB_PACKAGES_TOKEN', 'HYPERVIBE_GITHUB_TOKEN', 'HYPERVIBE_RAILWAY_TOKEN']) {
         expect(initializedLocalEnv).toMatch(new RegExp(`# Hypervibe: [^\\n]+\\n${key}=`));
       }
       expect(initialized.data.localEnv.addedKeys).toEqual([
+        'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
         'HYPERVIBE_GITHUB_TOKEN',
         'HYPERVIBE_RAILWAY_TOKEN',
       ]);
       expect(initializedLocalEnv).toContain('GitHub API token for repository and workflow management');
-      expect(initializedLocalEnv).not.toContain('GitHub Packages read token');
 
       rmSync(path.join(repoDir, '.env'));
 
@@ -1405,6 +1405,91 @@ describe('hv_spec', () => {
     expect(read.data.connections.missing).not.toContainEqual(expect.objectContaining({ provider: 'github' }));
     await t.close();
   });
+
+  it.each(['new', 'exact', 'unverified', 'unreadable', 'owner wildcard', 'wildcard with package access'])(
+    'offers usable private image recovery when the connection is %s', async state => {
+      const t = await makeClient();
+      const previousCwd = process.cwd();
+      const project = 'private-image-setup';
+      const scope = `acme/${project}`;
+      vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+      try {
+        process.chdir(tempDir);
+        execFileSync('git', ['init', '-q']);
+        const gitRemoteUrl = `https://github.com/${scope}.git`;
+        execFileSync('git', ['remote', 'add', 'origin', gitRemoteUrl]);
+        vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+          success: true, login: 'acme-owner', id: 81, scopes: ['repo', 'workflow', 'read:packages'],
+        });
+        if (state !== 'new') {
+          const repo = new ConnectionRepository();
+          const connection = repo.create({
+            provider: 'github', scope: state.includes('wildcard') ? 'acme/*' : scope,
+            credentialsEncrypted: state === 'unreadable' ? 'unreadable-encrypted-record' : getSecretStore().encryptObject({
+              apiToken: 'existing-primary', login: 'acme-owner',
+              ...(state === 'wildcard with package access' ? { packageReadToken: 'existing-package' } : {}),
+            }),
+          });
+          if (state !== 'unverified') repo.updateStatus(connection.id, 'verified');
+        }
+        const environment = { hosting: { provider: 'railway' }, services: { web: {} } };
+        const saved = await t.call('hv_spec', { spec: { project, gitRemoteUrl,
+          github: { repository: scope, canonicalEnvironment: 'staging' },
+          environments: { production: { ...environment, deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } }, staging: environment },
+        } });
+        expect(saved.ok).toBe(true);
+        const listed = await t.call('hv_connections', { project, view: 'requirements', environment: 'production' });
+        const github = listed.data.connections.find((item: { provider: string }) => item.provider === 'github');
+        const missing = saved.data.connections.missing.find((item: { provider: string }) => item.provider === 'github');
+        const slots = saved.data.localEnv.addedKeys.filter((key: string) => key.startsWith('HYPERVIBE_GITHUB'));
+        if (state === 'wildcard with package access') {
+          expect(missing).toBeUndefined();
+          expect(github.status).toBe('verified');
+          expect(slots).toEqual([]);
+          return;
+        }
+        if (state === 'unreadable') {
+          expect(missing.status).toBe('unverified');
+          expect(missing).not.toHaveProperty('missingCredentialKeys');
+          expect(missing.guidance).toContain('Restore local credential access');
+          expect(slots).toEqual([]);
+          return;
+        }
+        if (state === 'unverified') {
+          expect(missing.status).toBe('unverified');
+          expect(missing).not.toHaveProperty('missingCredentialKeys');
+          expect(slots).toEqual([]);
+          expect(github.connectionAction).toEqual({ project, provider: 'github', action: 'verify', scope });
+          expect((await t.call('hv_connections', github.connectionAction)).ok).toBe(true);
+          const reread = await t.call('hv_spec', { project });
+          expect(reread.data.connections.missing).toContainEqual(expect.objectContaining({ scope, missingCredentialKeys: ['packageReadToken'] }));
+          return;
+        }
+        const exact = state === 'exact';
+        const needPrimary = state === 'new';
+        expect(missing.environments).toEqual(needPrimary ? ['production', 'staging'] : ['production']);
+        expect(missing.missingCredentialKeys).toEqual(needPrimary ? ['apiToken', 'packageReadToken'] : ['packageReadToken']);
+        expect(slots).toEqual(exact ? ['HYPERVIBE_GITHUB_PACKAGES_TOKEN'] : ['HYPERVIBE_GITHUB_PACKAGES_TOKEN', 'HYPERVIBE_GITHUB_TOKEN']);
+        expect(missing.connectionAction).toEqual(github.connectionAction);
+        const described = await t.call('hv_connections', github.connectionAction);
+        const setup = described.data.connectionSetup;
+        expect(setup.roles.map((role: { credentialKey: string }) => role.credentialKey)).toEqual(exact ? ['packageReadToken'] : ['apiToken', 'packageReadToken']);
+        const example = setup.credentialExample;
+        expect(example).toContain(`scope="${scope}"`);
+        expect(example).toContain(exact ? 'credentialsKey="packageReadToken"' : 'credentialsMap=');
+        writeFileSync(path.join(tempDir, '.env'), 'HYPERVIBE_GITHUB_TOKEN=api-value\nHYPERVIBE_GITHUB_PACKAGES_TOKEN=packages-value\n');
+        const credentialsRef = /credentialsRef="([^"]+)"/.exec(example)![1].replace('/absolute/path', tempDir);
+        const keys = exact ? { credentialsKey: 'packageReadToken' } : { credentialsMap: JSON.parse(/credentialsMap=(\{[^}]+\})/.exec(example)![1]) };
+        expect((await t.call('hv_connections', { provider: 'github', project, scope, credentialsRef, ...keys })).ok).toBe(true);
+        const reread = await t.call('hv_spec', { project });
+        expect(reread.data.connections.missing).not.toContainEqual(expect.objectContaining({ provider: 'github' }));
+      } finally {
+        await t.close();
+        process.chdir(previousCwd);
+        vi.unstubAllEnvs();
+      }
+    }
+  );
 
   it('returns required connection setup immediately from the desired spec', async () => {
     const t = await makeClient();
@@ -2683,7 +2768,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('fails CI workflow apply when Railway image pull credentials are missing', async () => {
+  it.each(['repository', 'global'])('returns actionable package setup for a %s GitHub primary when plan/apply need a Railway image pull', async primary => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -2700,7 +2785,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson' });
+    const scope = 'davejohnson/ci-missing-image-token-app';
+    const repo = new ConnectionRepository();
+    const primaryConnection = repo.create({ provider: 'github', scope: primary === 'repository' ? scope : null,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token', login: 'davejohnson' }) });
+    repo.updateStatus(primaryConnection.id, 'verified');
+    const expectedKeys = primary === 'repository' ? ['packageReadToken'] : ['apiToken', 'packageReadToken'];
     const project = new ProjectRepository().findByName('ci-missing-image-token-app')!;
     bindObservedRailwayWeb(project);
     const { getFileContent, setSecret } = mockPendingGitHubPublication(
@@ -2758,15 +2848,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(storedPlanAction(syncPlan.data.planId, service.id)?.dependsOn).toContain(ci.id);
     expect(syncPlan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
       provider: 'github',
-      reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
+      scope, requiredCredentialKeys: expectedKeys,
     }));
-    expect(syncPlan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
+    expect(syncPlan.warnings).toContainEqual(expect.stringContaining(primary === 'repository' ? 'credentialsKey="packageReadToken"' : 'credentialsMap='));
     expect(syncPlan.next).toEqual(['hv_connections', 'hv_plan']);
-    expectActionableConnectionSetup(syncPlan.data.connectionSetup, {
+    const setup = expectActionableConnectionSetup(syncPlan.data.connectionSetup, {
       provider: 'github',
       project: 'ci-missing-image-token-app',
       scope: 'davejohnson/ci-missing-image-token-app',
     });
+    expect(setup.roles.map((role: { credentialKey: string }) => role.credentialKey)).toEqual(expectedKeys);
     expect(syncPlan.agentInstruction).toMatchObject({ action: 'ask_user' });
     expect(syncPlan.agentInstruction.message).toContain('exact clickable setup links');
     expect(syncPlan.agentInstruction.message).toContain('offer to open');
@@ -2778,14 +2869,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.error.code).toBe('MISSING_CONNECTION');
     expect(apply.error.details.blocked).toContainEqual(expect.objectContaining({
       provider: 'github',
-      reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
+      scope, requiredCredentialKeys: expectedKeys,
     }));
     expectActionableConnectionSetup(apply.error.details.connectionSetup, {
       provider: 'github',
       project: 'ci-missing-image-token-app',
       scope: 'davejohnson/ci-missing-image-token-app',
     });
-    expect(apply.hint).toContain('combined classic PAT');
+    if (primary === 'repository') expect(apply.hint).not.toContain('combined classic PAT');
+    else expect(apply.hint).toContain('combined classic PAT');
     expect(apply.hint).toContain('read:packages');
     expect(apply.hint).toContain('connectionSetup');
     expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);

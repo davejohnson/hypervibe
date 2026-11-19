@@ -72,7 +72,7 @@ describe('connection local env inputs', () => {
     }
   });
 
-  it('requires both saved GitHub roles when a CI image pull is missing', () => {
+  it('names each provider and role needed to set up missing deploy inputs', () => {
     const { actionScopedBlocked } = splitActionScopedConnectionBlocks([], [{
       id: 'ci:deploy',
       type: 'update',
@@ -81,7 +81,8 @@ describe('connection local env inputs', () => {
       reason: 'CI image credential is missing',
       metadata: {
         operation: 'githubActionsDeployBranch',
-        missingProviderSecrets: ['IMAGE_REGISTRY_TOKEN'],
+        provider: 'railway',
+        missingProviderSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_TOKEN'],
       },
     }]);
 
@@ -89,9 +90,11 @@ describe('connection local env inputs', () => {
       provider: 'github',
       requiredCredentialKeys: ['apiToken', 'packageReadToken'],
     }));
+    expect(actionScopedBlocked).toContainEqual(expect.objectContaining({ provider: 'railway', reason: expect.stringContaining('RAILWAY_API_TOKEN') }));
     expect(connectionLocalEnvInputs(actionScopedBlocked).map((input) => input.envKey)).toEqual([
       'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
       'HYPERVIBE_GITHUB_TOKEN',
+      'HYPERVIBE_RAILWAY_TOKEN',
     ]);
   });
 

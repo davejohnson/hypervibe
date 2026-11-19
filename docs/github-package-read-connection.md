@@ -12,6 +12,16 @@ exporting the stored API token is required. This is the same command in MCP and
 CLI, not a new connection mode. Input containing `apiToken` still replaces the
 complete credential object under the existing add-and-verify behavior.
 
+For a managed private GitHub Container Registry pull, `hv_spec` and
+`hv_connections view="requirements"` return the GitHub connection action for the
+repository. Pass its arguments to `hv_connections`. An exact verified repository
+connection needs only the package token. A new repository connection needs both
+roles. If only a wildcard or global connection supplies API access, the suggested
+command creates a repository-scoped pair and preserves the broader connection.
+A verified matching connection that already supplies both roles needs no setup.
+For a saved unverified connection, run the returned verification action and read
+the requirements again.
+
 The secondary-only path requires an existing verified connection at that exact
 scope. A wildcard/global connection is never silently copied into a requested
 repository scope. GitHub verifies both tokens through read-only `GET /user`,
