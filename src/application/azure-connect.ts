@@ -10,7 +10,10 @@ import { signInToAzure, type AzureSignInSession } from './azure-sign-in.js';
 import { escapeHtml } from './local-paste-page.js';
 import { applyAzureSetup, listAzureSubscriptions, planAzureSetup, type AzureSetupChange, type AzureSetupPlan, type AzureSubscription } from '../adapters/providers/azure/azure-setup.client.js';
 
-/** Closest Azure region to the app's other environments; East US 2 otherwise (broad service availability, lowest US prices). */
+/**
+ * Closest Azure region to the app's other environments; West US 2 otherwise. East US 2 was the default until it refused a
+ * new pay-as-you-go subscription the smallest database every time it was tried (docs/opentofu-engine-azure.md). List prices match.
+ */
 export function chooseAzureLocation(spec?: ProjectSpec): string {
   const regions = Object.values(spec?.environments ?? {}).map((environment) => (environment as { hosting?: { region?: string } }).hosting?.region ?? '');
   const near: Array<[RegExp, string]> = [
@@ -20,7 +23,7 @@ export function chooseAzureLocation(spec?: ProjectSpec): string {
     [/^(australia|ap-southeast-2|australiaeast)/, 'australiaeast'], [/^(us-west|westus)/, 'westus2'], [/^(northamerica-northeast|ca-central|canadacentral)/, 'canadacentral'],
   ];
   for (const region of regions) for (const [pattern, azure] of near) if (pattern.test(region)) return azure;
-  return 'eastus2';
+  return 'westus2';
 }
 
 /** Azure engine environments in the spec, which get a GitHub Actions credential at setup. */
