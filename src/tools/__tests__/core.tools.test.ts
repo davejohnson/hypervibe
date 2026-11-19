@@ -1046,8 +1046,13 @@ describe('hv_spec', () => {
     const read = await t.call('hv_spec', { project });
     expect(read.data.spec.environments.staging.envVars).not.toHaveProperty('MEDIA_DIR');
     expect(read.data.spec.environments.production.envVars.MEDIA_DIR).toBe('/data');
-    const listed = await t.call('hv_connections', { project, environment: 'staging' });
+    const all = await t.call('hv_connections', { project, view: 'requirements' });
+    expect(all.data.connections).toContainEqual(expect.objectContaining({ provider: 'cloudflare', environments: ['production'] }));
+    const implicit = await t.call('hv_connections', { project, environment: 'staging' });
+    expect(implicit).toMatchObject({ ok: false, error: { code: 'VALIDATION', message: expect.stringContaining('view="requirements"') } });
+    const listed = await t.call('hv_connections', { project, view: 'requirements', environment: 'staging' });
     expect(listed.ok).toBe(true);
+    expect(listed.data.connections).toEqual([expect.objectContaining({ provider: 'railway', environments: ['staging'], status: 'missing' })]);
     expect(JSON.stringify(listed.data)).not.toMatch(/cloudflare|credentialExample|setupHelpUrls/);
     expect(listed.hint).toContain('action="describe"');
     await t.close();

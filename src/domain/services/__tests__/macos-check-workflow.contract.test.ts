@@ -15,7 +15,8 @@ describe('committed macOS contract check', () => {
       triggers: { pullRequest: true, push: ['main'] },
       commands: [
         'npm test -- src/tools/__tests__/macos-status.contract.test.ts',
-        'swift test --package-path apps/macos --filter CurrentCoreStatusContractTests',
+        'npm run build',
+        'HYPERVIBE_COMPANION_CONNECTION_FIXTURE="$PWD/test/fixtures/companion-connections.mjs" swift test --package-path apps/macos --filter CurrentCore',
       ],
     });
     const files = compileManagedGitHubFiles(spec.github!, spec.runtime);

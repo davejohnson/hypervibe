@@ -1067,9 +1067,12 @@ describe('hv_connections', () => {
     const project = new ProjectRepository().create({ name: 'connection-list-app', defaultPlatform: 'railway' });
     const t = await makeClient();
 
+    new ConnectionRepository().create({ provider: 'github', scope: 'acme/saved', credentialsEncrypted: 'fixture' });
     const listed = await t.call('hv_connections', { project: project.name });
     expect(listed.ok).toBe(true);
     expect(listed.data.project).toEqual({ id: project.id, name: project.name });
+    expect(listed.data.connections).toEqual([{ provider: 'github', scope: 'acme/saved', status: 'pending', lastVerifiedAt: null }]);
+    expect(listed.data.availableProviders.deployment).toContainEqual(expect.objectContaining({ name: 'github' }));
 
     const unknown = await t.call('hv_connections', { project: 'does-not-exist' });
     expect(unknown.ok).toBe(false);
@@ -1082,6 +1085,19 @@ describe('hv_connections', () => {
     });
     expect(unknown.agentInstruction.action).toBe('continue');
     await t.close();
+  });
+
+  it.each([
+    { view: 'requirements' },
+    { environment: 'production' },
+    { view: 'requirements', provider: 'github', action: 'describe' },
+  ])('rejects an ambiguous requirements or catalog request %j', async args => {
+    const t = await makeClient();
+    try {
+      expect(await t.call('hv_connections', args)).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    } finally {
+      await t.close();
+    }
   });
 
   it('lists only when no operation parameters are supplied', async () => {
