@@ -945,6 +945,8 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort {
       id: number;
       name: string;
       display_title?: string;
+      run_attempt?: number;
+      run_started_at?: string;
       status: string;
       conclusion: string | null;
       created_at: string;
@@ -967,6 +969,8 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort {
         id: number;
         name: string;
         display_title?: string;
+        run_attempt?: number;
+        run_started_at?: string;
         status: string;
         conclusion: string | null;
         created_at: string;

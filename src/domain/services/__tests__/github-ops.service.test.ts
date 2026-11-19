@@ -654,7 +654,7 @@ describe('github tools', () => {
     );
   });
 
-  it.each(['trusted', 'feature', 'incomplete', 'fork', 'tag', 'event'])('checks the %s rollback producer before deployment', async kind => {
+  it.each(['trusted', 'rerun', 'older run retried last', 'old artifact', 'wrong job', 'source rerun', 'latest rerun', 'feature', 'incomplete', 'fork', 'tag', 'event'])('checks the %s rollback producer before deployment', async kind => {
     const targetSha = '0123456789abcdef0123456789abcdef01234567';
     const target = reviewedTarget('railway', {
       environmentName: 'production',
@@ -669,28 +669,43 @@ describe('github tools', () => {
     });
     const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
     const script = extractGitHubScript(generated.content, 'Verify rollback release evidence');
-    const listWorkflowRuns = vi.fn().mockResolvedValue({
-      data: { workflow_runs: [{ id: 900 }, { id: 99 }] },
-    });
+    const attempt = ['rerun', 'older run retried last', 'old artifact', 'wrong job', 'source rerun', 'latest rerun'].includes(kind) ? 2 : 1;
+    const priorRun = { id: 99, status: 'completed', run_attempt: kind === 'latest rerun' ? 3 : attempt,
+      created_at: '2026-07-20T00:00:00Z', run_started_at: '2026-07-22T00:00:00Z', updated_at: '2026-07-22T00:08:00Z' };
+    const earlierRelease = {id: 100, status: 'completed', run_attempt: 1, created_at: '2026-07-21T00:00:00Z',
+      run_started_at: '2026-07-21T00:00:00Z', updated_at: '2026-07-21T00:08:00Z'};
+    const history = [{id: 900}, ...(kind === 'older run retried last' ? Array.from({length: 99},
+      (_, index) => ({...earlierRelease, id: 1000 + index})) : []), priorRun];
+    const listWorkflowRuns = vi.fn(async ({page}: {page: number}) => ({
+      data: {total_count: history.length, workflow_runs: history.slice((page - 1) * 100, page * 100)},
+    }));
     const listWorkflowRunArtifacts = vi.fn();
     const getWorkflowRun = vi.fn().mockResolvedValue({
       data: {
-        id: 42, run_attempt: 1, status: 'completed', event: kind === 'event' ? 'pull_request' : 'workflow_dispatch',
+        id: 42, run_attempt: attempt, run_started_at: '2026-07-20T00:02:00Z', status: 'completed', event: kind === 'event' ? 'pull_request' : 'workflow_dispatch',
         head_sha: 'b'.repeat(40), head_branch: kind === 'feature' ? 'feature' : 'main',
         repository: {id: 1, full_name: 'dave/app'}, head_repository: {id: kind === 'fork' ? 2 : 1, full_name: 'dave/app'},
         conclusion: 'success',
         path: '.github/workflows/deploy-railway-production.yml',
       },
     });
+    const listJobsForWorkflowRunAttempt = vi.fn().mockImplementation(async () => {
+      if (kind === 'source rerun') getWorkflowRun.mockResolvedValue({data: {id: 42, run_attempt: 3}});
+      return {data: {total_count: 1, jobs: [{
+        id: 71, run_id: 42, head_sha: 'b'.repeat(40), name: 'deploy', status: 'completed',
+        conclusion: kind === 'wrong job' ? 'skipped' : 'success',
+        started_at: '2026-07-20T00:03:00Z', completed_at: '2026-07-20T00:07:00Z',
+      }]}};
+    });
     const paginate = vi.fn().mockResolvedValue([{
-      id: 7,
+      id: 7, created_at: kind === 'old artifact' ? '2026-07-20T00:01:00Z' : '2026-07-20T00:05:00Z',
       name: `hypervibe-server-release-v4-production-${targetSha}`,
       expired: false,
       workflow_run: { id: 42, head_sha: 'b'.repeat(40), head_branch: 'main', repository_id: kind === 'incomplete' ? undefined : 1, head_repository_id: 1 },
     }]);
     const github = {
       paginate,
-      rest: { git: { getRef: async () => ({data: {ref: kind === 'tag' ? 'refs/tags/main' : 'refs/heads/main', object: {type: 'commit', sha: 'b'.repeat(40)}}}) }, actions: { listWorkflowRuns, listWorkflowRunArtifacts, getWorkflowRun } },
+      rest: { git: { getRef: async () => ({data: {ref: kind === 'tag' ? 'refs/tags/main' : 'refs/heads/main', object: {type: 'commit', sha: 'b'.repeat(40)}}}) }, actions: { listWorkflowRuns, listWorkflowRunArtifacts, getWorkflowRun, listJobsForWorkflowRunAttempt } },
     };
     const core = { info: vi.fn() };
     const execute = new AsyncFunction('github', 'context', 'process', 'core', script);
@@ -704,24 +719,29 @@ describe('github tools', () => {
           HYPERVIBE_ROLLBACK_SHA: targetSha,
           HYPERVIBE_WORKFLOW_REF: 'dave/app/.github/workflows/deploy-railway-production.yml@refs/heads/main',
           HYPERVIBE_EXPECTED_LATEST_RUN_ID: '99',
+          HYPERVIBE_EXPECTED_LATEST_RUN_ATTEMPT: String(attempt),
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ATTEMPT: String(attempt),
           HYPERVIBE_SOURCE_ARTIFACT_ID: '7',
           HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: '42',
         },
       },
       core
     );
-    if (kind !== 'trusted') {
-      await expect(validation).rejects.toThrow(/source|producer|branch/);
+    if (!['trusted', 'rerun', 'older run retried last'].includes(kind)) {
+      await expect(validation).rejects.toThrow(/source|producer|branch|attempt|stale/);
       expect(core.info).not.toHaveBeenCalled();
       return;
     }
     await expect(validation).resolves.toBeUndefined();
 
+    if (kind === 'rerun') expect(listJobsForWorkflowRunAttempt).toHaveBeenCalledWith({
+      owner: 'dave', repo: 'app', run_id: 42, attempt_number: 2, per_page: 100,
+    });
     expect(listWorkflowRuns).toHaveBeenCalledWith({
       owner: 'dave',
       repo: 'app',
       workflow_id: '.github/workflows/deploy-railway-production.yml',
-      per_page: 10,
+      per_page: 100, page: 1,
     });
     expect(paginate).toHaveBeenCalledWith(listWorkflowRunArtifacts, {
       owner: 'dave',
@@ -755,7 +775,9 @@ describe('github tools', () => {
       rest: {
         actions: {
           listWorkflowRuns: vi.fn().mockResolvedValue({
-            data: { workflow_runs: [{ id: 900 }, { id: 100 }, { id: 99 }] },
+            data: { total_count: 3, workflow_runs: [{ id: 900 },
+              {id: 100, run_attempt: 1, status: 'queued'}, {id: 99, run_attempt: 1, status: 'completed',
+                created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:08:00Z'}] },
           }),
           listWorkflowRunArtifacts,
           getWorkflowRun: vi.fn(),
@@ -773,6 +795,8 @@ describe('github tools', () => {
           HYPERVIBE_ROLLBACK_SHA: targetSha,
           HYPERVIBE_WORKFLOW_REF: 'dave/app/.github/workflows/deploy-railway-production.yml@refs/heads/main',
           HYPERVIBE_EXPECTED_LATEST_RUN_ID: '99',
+          HYPERVIBE_EXPECTED_LATEST_RUN_ATTEMPT: '1',
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ATTEMPT: '1',
           HYPERVIBE_SOURCE_ARTIFACT_ID: '7',
           HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: '42',
         },
@@ -1066,6 +1090,13 @@ describe('github tools', () => {
     expect(pythonWorkflow.content).toContain("python-version: '3.13'");
     expect(pythonDockerfile).toContain('python -m pip install -r requirements.txt');
     expect(pythonDockerfile).not.toContain('FROM node:20-slim');
+  });
+
+  it('requires reviewed publication before dispatching rollback with workflow attempts', () => {
+    const target: BranchDeployTarget = { environmentName: 'production', kind: 'production', branch: 'main',
+      autoDeployOnPush: false, serviceNames: ['web'], providerServiceIds: ['web-1'] };
+    const input = { provider: 'railway', target, migration: {includeStep: false} };
+    expect(githubActionsWorkflowInputHash(input)).not.toBe(canonicalJsonSha256({version: 1, rendererRevision: 8, ...input}));
   });
 
   it('requires review of the iOS provenance repair without migrating server-only workflows', () => {

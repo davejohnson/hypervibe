@@ -1,3 +1,4 @@
+import { iosReleaseAttemptRuntimeBase64 } from './ios-release-attempt.js';
 import { releaseSourceRuntimeBase64 } from './github-release-source.js';
 import { iosBuildContractFingerprint } from './ios-release-evidence.js';
 import { API_RELEASE_WORKFLOW_RENDERER_REVISION, buildApiReleaseWorkflowSteps } from './api-release-workflow.js';
@@ -61,8 +62,8 @@ export type {
   BranchDeployWorkflow,
 };
 
-// Removing target.backupPolicy already migrates affected inputs; preserve unrelated reviewed locks.
-export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 8;
+// Rollback dispatches pin the latest and source workflow attempts.
+export const GITHUB_ACTIONS_WORKFLOW_RENDERER_REVISION = 9;
 const GITHUB_ACTIONS_PROMOTION_RENDERER_REVISION = 2;
 export const GITHUB_ACTIONS_SERVER_PROGRAM_REVISION = 1;
 
@@ -236,6 +237,14 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
         type: boolean
       expected_latest_run_id:
         description: 'Latest observed deploy run. Hypervibe uses it to reject stale rollback dispatches.'
+        required: false
+        type: string
+      expected_latest_run_attempt:
+        description: 'Reviewed attempt of the latest deployment run.'
+        required: false
+        type: string
+      source_workflow_run_attempt:
+        description: 'Reviewed attempt that produced the selected release artifact.'
         required: false
         type: string
       source_artifact_id:
@@ -1143,6 +1152,8 @@ ${buildReleaseEvidenceRuntimeStep()}      - name: Verify rollback release eviden
           HYPERVIBE_ROLLBACK_SHA: \${{ steps.deploy.outputs.sha }}
           HYPERVIBE_WORKFLOW_REF: \${{ github.workflow_ref }}
           HYPERVIBE_EXPECTED_LATEST_RUN_ID: \${{ inputs.expected_latest_run_id }}
+          HYPERVIBE_EXPECTED_LATEST_RUN_ATTEMPT: \${{ inputs.expected_latest_run_attempt }}
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ATTEMPT: \${{ inputs.source_workflow_run_attempt }}
           HYPERVIBE_SOURCE_ARTIFACT_ID: \${{ inputs.source_artifact_id }}
           HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: \${{ inputs.source_workflow_run_id }}
         with:
@@ -1154,6 +1165,11 @@ ${buildReleaseEvidenceRuntimeStep()}      - name: Verify rollback release eviden
             if (!Number.isSafeInteger(expectedLatestRunId) || expectedLatestRunId <= 0) {
               throw new Error('Rollback requires Hypervibe expected_latest_run_id evidence');
             }
+            const latestAttempt = Number(process.env.HYPERVIBE_EXPECTED_LATEST_RUN_ATTEMPT);
+            const sourceAttempt = Number(process.env.HYPERVIBE_SOURCE_WORKFLOW_RUN_ATTEMPT);
+            if (!Number.isSafeInteger(latestAttempt) || latestAttempt <= 0 || !Number.isSafeInteger(sourceAttempt) || sourceAttempt <= 0) {
+              throw new Error('Rollback requires the reviewed latest and source workflow attempts');
+            }
             const sourceArtifactId = Number(process.env.HYPERVIBE_SOURCE_ARTIFACT_ID);
             const sourceWorkflowRunId = Number(process.env.HYPERVIBE_SOURCE_WORKFLOW_RUN_ID);
             if (!Number.isSafeInteger(sourceArtifactId) || sourceArtifactId <= 0
@@ -1161,18 +1177,20 @@ ${buildReleaseEvidenceRuntimeStep()}      - name: Verify rollback release eviden
               throw new Error('Rollback requires exact Hypervibe source artifact and workflow run evidence');
             }
             const workflowPath = process.env.HYPERVIBE_WORKFLOW_REF.split('@')[0].split('/').slice(2).join('/');
-            const recentRuns = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: workflowPath,
-              per_page: 10,
-            });
-            const latestPriorRun = recentRuns.data.workflow_runs.find((run) => run.id !== context.runId);
+            const source = {exports: {}};
+            new Function('module', Buffer.from('${releaseSourceRuntimeBase64}', 'base64').toString('utf8'))(source);
+            const [latestPriorRun] = await source.exports.rollbackHistory(async page => (
+              await github.rest.actions.listWorkflowRuns({...context.repo, workflow_id: workflowPath, per_page: 100, page})
+            ).data, context.runId);
             if (!latestPriorRun || latestPriorRun.id !== expectedLatestRunId) {
               throw new Error(
                 'Rollback dispatch is stale: expected latest run ' + expectedLatestRunId
                 + ', observed ' + (latestPriorRun ? latestPriorRun.id : 'none')
               );
+            }
+            if (latestPriorRun.status !== 'completed' || latestPriorRun.run_attempt !== latestAttempt) {
+              throw new Error('Rollback dispatch is stale: deployment run ' + expectedLatestRunId
+                + ' is ' + latestPriorRun.status + ' on attempt ' + latestPriorRun.run_attempt + '; expected completed attempt ' + latestAttempt);
             }
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               owner: context.repo.owner,
@@ -1190,12 +1208,23 @@ ${buildReleaseEvidenceRuntimeStep()}      - name: Verify rollback release eviden
               repo: context.repo.repo,
               run_id: sourceWorkflowRunId,
             });
-            if (run.data.id !== sourceWorkflowRunId || run.data.run_attempt !== 1 || artifact.expired !== false) {
+            if (run.data.id !== sourceWorkflowRunId || run.data.run_attempt !== sourceAttempt || artifact.expired !== false) {
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
-            const source = {exports: {}};
-            new Function('module', Buffer.from('${releaseSourceRuntimeBase64}', 'base64').toString('utf8'))(source);
             await source.exports.verifyGitHubReleaseSource(github, context.repo, ${JSON.stringify(target.branch)}, workflowPath, run.data, artifact);
+            if (sourceAttempt > 1) {
+              const attempt = {exports: {}};
+              new Function('module', Buffer.from('${iosReleaseAttemptRuntimeBase64()}', 'base64').toString('utf8'))(attempt);
+              const verified = await source.exports.rollbackArtifactsForAttempt(run.data, artifacts, {
+                repository: context.repo.owner + '/' + context.repo.repo, branch: ${JSON.stringify(target.branch)},
+                workflow: workflowPath, prefix: '${managedCiReleaseArtifactPrefix(target.environmentName)}',
+              }, attempt.exports,
+                async (run_id, attempt_number) => (await github.rest.actions.listJobsForWorkflowRunAttempt({
+                  ...context.repo, run_id, attempt_number, per_page: 100,
+                })).data,
+                async run_id => (await github.rest.actions.getWorkflowRun({...context.repo, run_id})).data);
+              if (!verified.some(candidate => candidate.id === sourceArtifactId)) throw new Error('Rollback artifact belongs to a different attempt');
+            }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
 ${buildReleaseTargetPreflight(provider, target)}      - uses: actions/checkout@v7
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:

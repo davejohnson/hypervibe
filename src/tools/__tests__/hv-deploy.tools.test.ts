@@ -154,6 +154,7 @@ function workflowRun(
   return {
     id,
     name: 'Deploy Railway (production)',
+    run_attempt: 1,
     status,
     conclusion,
     created_at: createdAt,
@@ -930,6 +931,81 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
+  it.each(['verified', 'older run retried last', 'wrong job attempt', 'old artifact', 'changed attempt', 'two current artifacts', 'overlapping attempts', 'stale historical target'])(
+    'checks %s evidence for reruns through rollback preview and execution', async kind => {
+      const { inputs, workflow, trigger, sha } = mockRollbackPreview();
+      const previousSha = 'a'.repeat(40);
+      const day = (id: number) => kind === 'older run retried last' && id === 10 ? '2026-07-21' : `2026-07-${id}`;
+      const releaseRun = (id: number) => {
+        const date = day(id);
+        return {
+          ...workflowRun(id, 'completed', 'success', `2026-07-${id}T00:00:00Z`), updated_at: date + 'T00:08:00Z',
+          run_started_at: date + 'T00:02:00Z', run_attempt: 2, path: workflow.path,
+          repository: {id: 1, full_name: 'davejohnson/' + inputs.project},
+          head_repository: {id: 1, full_name: 'davejohnson/' + inputs.project},
+        };
+      };
+      const runs = [releaseRun(20), releaseRun(10)];
+      if (kind === 'older run retried last') {
+        // The older run is on the second page of GitHub's creation-ordered response.
+        runs.splice(1, 0, ...Array.from({length: 99}, (_, index) => ({
+          ...releaseRun(20), id: 1000 + index, run_attempt: 1, created_at: '2026-07-12T01:00:00Z',
+          run_started_at: '2026-07-12T01:00:00Z', updated_at: '2026-07-12T01:01:00Z', conclusion: 'failure',
+        })));
+      }
+      if (kind === 'overlapping attempts') runs[1].updated_at = '2026-07-20T00:06:00Z';
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRuns).mockImplementation(async (_owner, _repo, _workflow, options) => {
+        const offset = ((options?.page ?? 1) - 1) * 100;
+        return {total_count: runs.length, workflow_runs: runs.slice(offset, offset + 100)};
+      });
+      let readingJobs = false;
+      vi.mocked(GitHubAdapter.prototype.getWorkflowRun).mockImplementation(async (_owner, _repo, id) => ({
+        ...releaseRun(id), run_attempt: kind === 'changed attempt' && readingJobs ? 3 : 2,
+      }));
+      const jobs = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunAttemptJobs').mockImplementation(async (_owner, _repo, id) => {
+        readingJobs = true;
+        return { total_count: 1, jobs: [{
+          id: id * 2, run_id: id, head_sha: releaseRun(id).head_sha,
+          ...(kind === 'wrong job attempt' ? {run_attempt: 1} : {}),
+          name: 'deploy', status: 'completed', conclusion: 'success',
+          started_at: day(id) + 'T00:03:00Z', completed_at: day(id) + 'T00:07:00Z',
+        }] };
+      });
+      vi.mocked(GitHubAdapter.prototype.listWorkflowRunArtifacts).mockImplementation(async (_owner, _repo, runId) => {
+        const id = Number(runId);
+        const artifact = { ...releaseArtifact(id, id === 20 ? sha : previousSha), created_at: day(id) + 'T00:05:00Z' };
+        const stale = { ...artifact, id: artifact.id + 1, created_at: day(id) + 'T00:01:00Z' };
+        const requireStale = kind === 'old artifact' || (kind === 'stale historical target' && id === 10);
+        const candidates = requireStale ? [{...stale, id: artifact.id}] : kind === 'two current artifacts'
+          ? [artifact, {...artifact, id: artifact.id + 1}] : [stale, artifact];
+        return { total_count: candidates.length, artifacts: candidates };
+      });
+      const t = await makeClient();
+      const preview = await t.call('hv_rollback', inputs);
+      readingJobs = false;
+      const execution = await t.call('hv_rollback', { project: inputs.project, env: 'production', confirm: true });
+      if (kind === 'verified' || kind === 'older run retried last') {
+        const latestId = kind === 'verified' ? 20 : 10;
+        const sourceId = latestId === 20 ? 10 : 20;
+        expect(preview.data).toMatchObject({status: 'evidence-compatible', restoreVerified: false, observedLatestWorkflowRunId: latestId});
+        expect(execution.data).toMatchObject({status: 'pending', currentSha: latestId === 20 ? sha : previousSha,
+          rollbackToSha: sourceId === 10 ? previousSha : sha});
+        expect(jobs).toHaveBeenCalledWith('davejohnson', inputs.project, 20, 2);
+        expect(jobs).toHaveBeenCalledWith('davejohnson', inputs.project, 10, 2);
+        expect(trigger).toHaveBeenCalledWith('davejohnson', inputs.project, workflow.path, 'main', expect.objectContaining({
+          expected_latest_run_id: String(latestId), expected_latest_run_attempt: '2',
+          source_workflow_run_id: String(sourceId), source_workflow_run_attempt: '2', source_artifact_id: String(sourceId * 10),
+        }));
+      } else {
+        if (kind === 'stale historical target') expect(preview.data?.evidenceCompatible).toBe(true);
+        else expect(preview.data?.evidenceCompatible).not.toBe(true);
+        expect(execution.ok).toBe(false);
+        expect(trigger).not.toHaveBeenCalled();
+      }
+      await t.close();
+    },
+  );
+
   it('keeps database recovery and migration compatibility unknown when release evidence matches', async () => {
     const { inputs, trigger } = mockRollbackPreview();
     const registry = new CommandRegistry();
@@ -1070,6 +1146,8 @@ describe('hv_rollback', () => {
         commit_sha: previousSha,
         rollback: 'true',
         expected_latest_run_id: '20',
+        expected_latest_run_attempt: '1',
+        source_workflow_run_attempt: '1',
         source_artifact_id: '100',
         source_workflow_run_id: '10',
       }
@@ -1209,6 +1287,8 @@ describe('hv_rollback', () => {
         commit_sha: knownGoodSha,
         rollback: 'true',
         expected_latest_run_id: '30',
+        expected_latest_run_attempt: '1',
+        source_workflow_run_attempt: '1',
         source_artifact_id: '200',
         source_workflow_run_id: '20',
       }
@@ -1275,6 +1355,8 @@ describe('hv_rollback', () => {
         commit_sha: requestedSha,
         rollback: 'true',
         expected_latest_run_id: '30',
+        expected_latest_run_attempt: '1',
+        source_workflow_run_attempt: '1',
         source_artifact_id: '100',
         source_workflow_run_id: '10',
       }
@@ -1335,6 +1417,8 @@ describe('hv_rollback', () => {
       commit_sha: currentSha,
       rollback: 'true',
       expected_latest_run_id: '20',
+      expected_latest_run_attempt: '1',
+      source_workflow_run_attempt: '1',
       source_artifact_id: String(sourceRun * 10),
       source_workflow_run_id: String(sourceRun),
     });

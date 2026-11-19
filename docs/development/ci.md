@@ -153,7 +153,12 @@ A required candidate test gate runs before migrations and provider effects.
 
 Rollback freezes the selected artifact, successful producing run, immutable
 source, target identities and current execution state, then re-observes them
-before dispatch. Newer or running work, workflow drift and ambiguous evidence
+before dispatch. Pin the latest and source workflow attempts when dispatching.
+For a rerun, require exactly one release artifact created during the successful
+`deploy` job in that same attempt and re-read the source run to detect another
+retry. An older run can redeploy after a newer one. Read the complete workflow
+history and verify the order of deployment attempts for current and automatic
+previous-release selection. Newer or running work, workflow drift and ambiguous evidence
 block. A dispatch remains pending until completion and application checks.
 Direct-provider receipts and an old spec revision cannot authorize rollback
 without an immutable release capability. [Read-only recovery preparation](../rollback-recovery-preparation.md)

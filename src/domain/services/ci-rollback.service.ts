@@ -1,4 +1,4 @@
-import { releaseSource } from './github-release-source.js';
+import { releaseSource, rollbackArtifactsForAttempt, rollbackHistory } from './github-release-source.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -23,7 +23,6 @@ const auditRepo = new AuditRepository();
 const FULL_SHA = /^[0-9a-f]{40}$/i;
 
 type WorkflowRun = Awaited<ReturnType<GitHubAdapter['listWorkflowRuns']>>['workflow_runs'][number];
-type WorkflowRunArtifact = Awaited<ReturnType<GitHubAdapter['listWorkflowRunArtifacts']>>['artifacts'][number];
 
 export const CI_ROLLBACK_NOTE =
   'Managed CI rollback restores application code from a previously verified exact Git SHA. It does not reverse database migrations or provider-side manual configuration; startup and release-command migrations must remain backward-compatible.';
@@ -51,6 +50,7 @@ type ReleaseEvidence = {
   sha: string;
   artifactId: number;
   artifactName: string;
+  workflowRunAttempt: number;
   workflowRunId: number;
   createdAt: string;
 };
@@ -66,6 +66,7 @@ type ManagedCiRollbackObservation = {
   workflowRefSha: string;
   latestWorkflowRunId: number;
   latestWorkflowConclusion: string;
+  latestWorkflowRunAttempt: number;
   selection: RollbackSelection;
   currentRelease?: ReleaseEvidence;
   targetRelease: ReleaseEvidence;
@@ -94,13 +95,6 @@ export type CiRollbackResult = {
   errors?: string[];
 };
 
-function sortRunsNewestFirst(runs: WorkflowRun[]): WorkflowRun[] {
-  return [...runs].sort((left, right) => (
-    new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
-    || right.id - left.id
-  ));
-}
-
 async function releaseEvidenceForRun(params: {
   adapter: GitHubAdapter;
   owner: string;
@@ -118,19 +112,12 @@ async function releaseEvidenceForRun(params: {
   );
   if (artifacts.total_count !== artifacts.artifacts.length) throw new Error('Rollback release artifact listing is incomplete.');
   const producer = await params.adapter.getWorkflowRun(params.owner, params.repo, params.run.id);
-  if (producer.id !== params.run.id || producer.head_sha !== params.run.head_sha || producer.run_attempt !== 1) return null;
+  if (producer.id !== params.run.id || producer.head_sha !== params.run.head_sha || producer.run_attempt !== params.run.run_attempt) return null;
   const prefix = managedCiReleaseArtifactPrefix(params.environmentName);
-  const matches = artifacts.artifacts
-    .filter((artifact) => artifact.expired === false && releaseSource.matchesReleaseProducer(
-      producer, artifact, params.owner + '/' + params.repo, params.branch, params.workflowPath))
-    .map((artifact): { artifact: WorkflowRunArtifact; sha: string } | null => {
-      if (!artifact.name.startsWith(prefix)) return null;
-      const sha = artifact.name.slice(prefix.length).toLowerCase();
-      return FULL_SHA.test(sha) ? { artifact, sha } : null;
-    })
-    .filter((entry): entry is { artifact: WorkflowRunArtifact; sha: string } => entry !== null);
-
-  const distinctShas = new Set(matches.map((entry) => entry.sha));
+  const verified = await rollbackArtifactsForAttempt(params.adapter, params.owner, params.repo,
+    { branch: params.branch, workflow: params.workflowPath, prefix }, producer, artifacts.artifacts);
+  const matches = verified.map(artifact => ({ artifact, sha: artifact.name.slice(prefix.length).toLowerCase() }));
+  const distinctShas = new Set(matches.map(entry => entry.sha));
   if (distinctShas.size > 1) {
     throw new Error(
       `Workflow run ${params.run.id} emitted ambiguous production release evidence for ${Array.from(distinctShas).join(', ')}`
@@ -147,6 +134,7 @@ async function releaseEvidenceForRun(params: {
     artifactId: selected.artifact.id,
     artifactName: selected.artifact.name,
     workflowRunId: params.run.id,
+    workflowRunAttempt: producer.run_attempt,
     createdAt: selected.artifact.created_at,
   };
 }
@@ -161,8 +149,7 @@ async function currentReleaseSha(params: {
   branchHead: string;
   environmentName: string;
 }): Promise<string | undefined> {
-  const response = await params.adapter.listWorkflowRuns(params.owner, params.repo, params.workflowPath, { per_page: 100 });
-  const latestRun = sortRunsNewestFirst(response.workflow_runs)[0];
+  const [latestRun] = await rollbackHistory(params.adapter, params.owner, params.repo, params.workflowPath);
   if (!latestRun || latestRun.status !== 'completed' || latestRun.conclusion !== 'success') return undefined;
   return (await releaseEvidenceForRun({ ...params, run: latestRun }))?.sha;
 }
@@ -303,8 +290,7 @@ async function observeManagedCiRollback(params: {
       return workflowBlock!;
     }
 
-    const runsResponse = await adapter.listWorkflowRuns(owner, repo, workflow.path, { per_page: 100 });
-    const runs = sortRunsNewestFirst(runsResponse.workflow_runs);
+    const runs = await rollbackHistory(adapter, owner, repo, workflow.path);
     const latestRun = runs[0];
     if (!latestRun) {
       return {
@@ -404,6 +390,11 @@ async function observeManagedCiRollback(params: {
       };
     }
 
+    if (selection !== 'explicit') {
+      const targetRun = successfulRuns.find(run => run.id === targetRelease.workflowRunId)!;
+      releaseSource.assertRollbackRunOrder(targetRun, successfulRuns);
+    }
+
     return {
       ok: true,
       observation: {
@@ -414,6 +405,7 @@ async function observeManagedCiRollback(params: {
         ref: contract.target.branch,
         workflowRefSha,
         latestWorkflowRunId: latestRun.id,
+        latestWorkflowRunAttempt: latestRun.run_attempt,
         latestWorkflowConclusion: latestRun.conclusion ?? 'unknown',
         selection,
         ...(currentRelease ? { currentRelease } : {}),
@@ -440,6 +432,9 @@ function sameAuthorizedObservation(
     && fresh.ref === planned.ref
     && fresh.workflowRefSha === planned.workflowRefSha
     && fresh.latestWorkflowRunId === planned.latestWorkflowRunId
+    && fresh.latestWorkflowRunAttempt === planned.latestWorkflowRunAttempt
+    && fresh.currentRelease?.artifactId === planned.currentRelease?.artifactId
+    && fresh.targetRelease.workflowRunAttempt === planned.targetRelease.workflowRunAttempt
     && fresh.latestWorkflowConclusion === planned.latestWorkflowConclusion
     && fresh.selection === planned.selection
     && fresh.targetRelease.sha === planned.targetRelease.sha
@@ -475,8 +470,10 @@ export async function executeManagedCiRollback(params: {
       targetSha: planned.targetRelease.sha,
       targetArtifactId: planned.targetRelease.artifactId,
       targetWorkflowRunId: planned.targetRelease.workflowRunId,
+      targetWorkflowRunAttempt: planned.targetRelease.workflowRunAttempt,
       observedLatestWorkflowRunId: planned.latestWorkflowRunId,
       observedLatestConclusion: planned.latestWorkflowConclusion,
+      observedLatestWorkflowRunAttempt: planned.latestWorkflowRunAttempt,
       selection: planned.selection,
     },
   };
@@ -509,6 +506,8 @@ export async function executeManagedCiRollback(params: {
       || metadata.targetSha !== planned.targetRelease.sha
       || metadata.targetArtifactId !== planned.targetRelease.artifactId
       || metadata.targetWorkflowRunId !== planned.targetRelease.workflowRunId
+      || metadata.observedLatestWorkflowRunAttempt !== planned.latestWorkflowRunAttempt
+      || metadata.targetWorkflowRunAttempt !== planned.targetRelease.workflowRunAttempt
       || metadata.observedLatestWorkflowRunId !== planned.latestWorkflowRunId
     ) {
       return {
@@ -568,6 +567,8 @@ export async function executeManagedCiRollback(params: {
         commit_sha: planned.targetRelease.sha,
         rollback: 'true',
         expected_latest_run_id: String(planned.latestWorkflowRunId),
+        expected_latest_run_attempt: String(planned.latestWorkflowRunAttempt),
+        source_workflow_run_attempt: String(planned.targetRelease.workflowRunAttempt),
         source_artifact_id: String(planned.targetRelease.artifactId),
         source_workflow_run_id: String(planned.targetRelease.workflowRunId),
       }

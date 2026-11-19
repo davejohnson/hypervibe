@@ -742,10 +742,9 @@ describe('generated managed-CI promotion evidence gate', () => {
     delete target.programFingerprint;
     delete target.deploymentContractFingerprint;
     const migration = { includeStep: false };
-    // Accepted input hash after the first discovery fix; keep its literal
-    // promotion revision independent of runtime constants.
+    // Hold the reviewed server contract fixed while comparing promotion revisions.
     const previousHash = (inputTarget: BranchDeployTarget) => canonicalJsonSha256({
-      version: 1, rendererRevision: 8,
+      version: 1, rendererRevision: 9,
       ...(inputTarget.promoteFromEnvironment ? { promotionRendererRevision: 1 } : {}),
       provider: 'railway', target: inputTarget, migration,
     });
