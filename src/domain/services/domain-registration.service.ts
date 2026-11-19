@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -18,6 +19,7 @@ import { CLOUDFLARE_TOKEN_URLS, connectionSetupUrl } from './connection-guidance
 const OPERATION = 'cloudflareRegistrarRegistration';
 
 interface DomainRegistrationBinding {
+  attemptId?: string;
   provider?: string;
   accountId?: string;
   state?: string;
@@ -76,7 +78,8 @@ function safeState(value: unknown): string {
 function registrationBinding(environment: Environment | null, domain: string): DomainRegistrationBinding | null {
   const registrations = asRecord(environment?.platformBindings?.domainRegistrations);
   const binding = asRecord(registrations?.[domain]);
-  return binding ? { provider: 'cloudflare', accountId: typeof binding.accountId === 'string' ? binding.accountId : undefined,
+  if (registrations && Object.hasOwn(registrations, domain) && !binding) return { state: 'unknown' };
+  return binding ? { attemptId: typeof binding.attemptId === 'string' && /^[a-f0-9-]{36}$/.test(binding.attemptId) ? binding.attemptId : undefined, provider: 'cloudflare', accountId: typeof binding.accountId === 'string' ? binding.accountId : undefined,
     state: safeState(binding.state), completed: binding.completed === true } : null;
 }
 
@@ -197,6 +200,7 @@ function registrationAction(params: {
       operation: OPERATION,
       accountId: params.accountId,
       registration: registrationOptions(params.environmentSpec),
+      ...(params.type === 'create' && params.binding ? { previousAttempt: params.binding.attemptId ?? 'legacy-failed' } : {}),
       ...(params.candidate ? { candidate: summarizeRegistrarDomain(params.candidate) } : {}),
       ...(params.binding ? { workflow: params.binding } : {}),
     },
@@ -305,6 +309,7 @@ export async function planCloudflareDomainRegistration(params: {
       type: 'create',
       reason: `Register ${domain} on Cloudflare account ${accountId} for ${terms}, auto-renew ${renewal}, privacy ${registrationSpec.privacyMode ?? 'redaction'}. Successful purchases are non-refundable.`,
       candidate,
+      binding: binding ?? undefined,
       environmentSpec,
     }),
     warnings,
@@ -373,6 +378,9 @@ export async function applyCloudflareDomainRegistration(params: {
     }
   }
 
+  if (action.type === 'create' && (action.metadata?.previousAttempt ?? null) !== (binding ? binding.attemptId ?? 'legacy-failed' : null)) {
+    return { success: false, status: 'blocked', message: 'A purchase attempt occurred after this review. Run hv_plan to review its outcome before buying again.' };
+  }
   if (action.type !== 'create' || !action.requiresConfirm || !action.billable) {
     return { success: false, status: 'blocked', message: 'This status check cannot start a registration. Run hv_plan to review current terms.' };
   }
@@ -429,7 +437,7 @@ export async function applyCloudflareDomainRegistration(params: {
   const target = environment ?? envRepo.create({ projectId: project.id, name: envName });
   const registrations = asRecord(target.platformBindings.domainRegistrations) ?? {};
   const submitted = { ...target.platformBindings, domainRegistrations: {
-    ...registrations, [domain]: { provider: 'cloudflare', accountId, state: 'submitted', completed: false },
+    ...registrations, [domain]: { provider: 'cloudflare', accountId, attemptId: randomUUID(), state: 'submitted', completed: false },
   } };
   if (!envRepo.replacePlatformBindingsIfUnchanged(target, submitted)) {
     return { success: false, status: 'blocked', message: 'The environment changed while preparing the purchase. Run hv_plan again.' };
@@ -477,6 +485,7 @@ function persistWorkflow(
       [domain]: {
         provider: 'cloudflare',
         accountId,
+        attemptId: registrationBinding(environment, domain)?.attemptId,
         state: safeState(workflow.state),
         completed: workflow.completed === true,
         updatedAt: new Date().toISOString(),

@@ -2395,6 +2395,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(JSON.stringify(new EnvironmentRepository().findByProjectAndName(project.id, 'production')?.platformBindings)).not.toContain('private-registrar-response');
     expect(poll).toHaveBeenCalledWith('acct-1', 'pending-example.com');
     expect(create).toHaveBeenCalledTimes(1);
+    poll.mockResolvedValueOnce({ completed: true, state: 'failed', links: { self: '/status' }, created_at: '', updated_at: '' });
+    const statusPlan = await t.call('hv_plan', { project: project.name, env: 'production' });
+    await t.call('hv_apply', { project: project.name, planId: statusPlan.data.planId });
+    await t.call('hv_apply', { project: project.name, planId: retryPlan.data.planId, confirmActions: [purchase.id] });
+    expect(create).toHaveBeenCalledTimes(1);
+    const newPurchase = await t.call('hv_plan', { project: project.name, env: 'production' });
+    await t.call('hv_apply', { project: project.name, planId: newPurchase.data.planId, confirmActions: [purchase.id] });
+    expect(create).toHaveBeenCalledTimes(2);
     await t.close();
   });
 
