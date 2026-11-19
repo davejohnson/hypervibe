@@ -8,7 +8,7 @@ export default defineConfig({
     setupFiles: ['src/test/setup.ts'],
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
     // Keep passing tests quiet while retaining failures, logs, and CI annotations.
-    reporters: process.env.GITHUB_ACTIONS === 'true' ? ['minimal', 'github-actions'] : ['minimal'],
+    reporters: process.env.GITHUB_ACTIONS === 'true' ? ['minimal', 'github-actions', './src/test/slowest-reporter.ts'] : ['minimal'],
     // Isolated processes keep cwd, environment, and module state separate.
     // Bound concurrency because some files also spawn compilers and containers.
     pool: 'forks',
