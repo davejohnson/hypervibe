@@ -1,17 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import '../providers.js';
 import '../devops-providers.js';
-import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { getDb, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { PublicDnsClient } from '../../adapters/dns/public-dns.client.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { createCommandContext, type CommandContext } from '../context.js';
 import { executePlanApply } from '../apply-plan.js';
 import { PlanService } from '../../domain/plan/plan.service.js';
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
-import { AdapterFactory } from '../../domain/services/adapter.factory.js';
+import { AdapterFactory, adapterFactory } from '../../domain/services/adapter.factory.js';
+import { managedBackupTargetHash } from '../../domain/services/managed-backup-target.service.js';
+import { observeManagedBackupProgram } from '../../domain/services/managed-backup-policy.service.js';
+import { applyGitHubInfrastructure } from '../../domain/services/github-infrastructure.service.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import { workflowFiles } from '../../domain/services/ci-deploy.service.js';
 import { compileManagedBackupFiles } from '../../domain/services/managed-backup-workflows.service.js';
@@ -141,6 +146,172 @@ describe('backup activation through CI credentials and canonical repository publ
   }
 
   const backupPaths = ['.github/hypervibe/backups-production.json', '.github/workflows/hypervibe-backup-production.yml'];
+  const previousProgram = new URL('../../domain/services/__tests__/fixtures/backup-program-v0.1.52/', import.meta.url);
+
+  const lastMonitoredImage = 'ghcr.io/davejohnson/hypervibe/backup-runner@sha256:bb0358608d057fa764c6c195522f48c0a2e4b819783a06f47a5f2c3723e28734';
+
+  function installPreviousWorkflow(f: Awaited<ReturnType<typeof fixture>>, image: string) {
+    const oldTarget = JSON.parse(readFileSync(new URL(path.basename(backupPaths[0]), previousProgram), 'utf8'));
+    const target = { ...oldTarget, runnerImage: image };
+    const workflow = readFileSync(new URL(path.basename(backupPaths[1]), previousProgram), 'utf8')
+      .replaceAll(oldTarget.runnerImage, image).replaceAll(managedBackupTargetHash(oldTarget), managedBackupTargetHash(target));
+    f.files.set(backupPaths[0], JSON.stringify(target, null, 2) + '\n');
+    f.files.set(backupPaths[1], workflow);
+    getDb().prepare('UPDATE components SET id = ? WHERE environment_id = ? AND external_id = ?')
+      .run(target.database.componentId, f.environment.id, target.database.source.primaryExternalId);
+    return new SpecStore().merge(f.project, { environments: { production: { backups: { mode: 'daily', runnerImage: image } } } });
+  }
+
+  it('does not report a previous template as ready for a release with a different alert format', async () => {
+    const f = await fixture();
+    const image = 'ghcr.io/davejohnson/hypervibe/backup-runner@sha256:f1afe914ebefbc1927be64dfc58d3f946cb5ac7f3662977154402518994ae9f6';
+    const { spec } = installPreviousWorkflow(f, image);
+    expect(await observeManagedBackupProgram({ project: f.project, spec: spec.environments.production,
+      environment: f.environment, components: ctx.repos.components.findByEnvironmentId(f.environment.id), adapterFactory }))
+      .toMatchObject({ state: 'blocked' });
+  });
+
+  it('repairs an old workflow generated for a newer official helper without changing its digest', async () => {
+    const f = await fixture();
+    for (const name of ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']) f.secretNames.add(name);
+    const image = 'ghcr.io/davejohnson/hypervibe/backup-runner@sha256:' + 'd'.repeat(64);
+    const { spec } = installPreviousWorkflow(f, image);
+    const observed = await observeManagedBackupProgram({ project: f.project, spec: spec.environments.production,
+      environment: f.environment, components: ctx.repos.components.findByEnvironmentId(f.environment.id), adapterFactory });
+    expect(observed.state).toBe('blocked');
+    const planned = await f.plan();
+    if ('error' in planned) throw new Error(planned.error);
+    expect(planned).toMatchObject({ scope: 'backup-program-publication', blocked: [] });
+    const files = planned.actions[0].metadata?.desiredFiles as Array<{ path: string; content: string }>;
+    expect(files[0].content).toBe(f.files.get(backupPaths[0]));
+    expect(files[1].content).toContain(image);
+    expect(files[1].content).not.toContain('issues: write');
+    expect(f.writes).toEqual([]);
+  });
+
+  it('requires a compatible helper when activating an older release pin without any published workflow', async () => {
+    const f = await fixture();
+    new SpecStore().merge(f.project, { environments: { production: { backups: { mode: 'daily',
+      runnerImage: lastMonitoredImage } } } });
+    const result = await f.plan();
+    expect(result).toMatchObject({ actions: [], blocked: [expect.objectContaining({ reason: expect.stringContaining('backups.runnerImage') })] });
+    expect(f.files.has(backupPaths[1])).toBe(false);
+    const spec = new SpecStore().get(f.project)!.spec;
+    const incompatible = await compileManagedBackupFiles({ project: f.project, spec, environmentName: 'production' });
+    expect(incompatible.issues).toEqual([]);
+    for (const file of incompatible.files) f.files.set(file.path, file.content);
+    expect(await observeManagedBackupProgram({ project: f.project, spec: spec.environments.production, environment: f.environment,
+      components: ctx.repos.components.findByEnvironmentId(f.environment.id), adapterFactory })).toMatchObject({ state: 'blocked' });
+    expect(f.writes).toEqual([]);
+  });
+
+  it('requires a new plan before applying a saved publication of the retired workflow', async () => {
+    const f = await fixture();
+    for (const name of ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']) f.secretNames.add(name);
+    const contract = readFileSync(new URL('backups-production.json', previousProgram), 'utf8');
+    const target = JSON.parse(contract);
+    getDb().prepare('UPDATE components SET id = ? WHERE environment_id = ? AND external_id = ?')
+      .run(target.database.componentId, f.environment.id, target.database.source.primaryExternalId);
+    const plan = await f.plan();
+    if ('error' in plan) throw new Error(plan.error);
+    const document = ctx.repos.runs.findById(plan.planRunId)!.plan!;
+    const action = plan.actions[0];
+    const previous = readFileSync(new URL('hypervibe-backup-production.yml', previousProgram), 'utf8');
+    const desired = action.metadata!.desiredFiles as Array<{ path: string; content: string; hash: string }>;
+    expect(desired.find(file => file.path === backupPaths[0])?.content).toBe(contract);
+    const metadata = { ...action.metadata, desiredFiles: desired.map(file => file.path === backupPaths[1]
+      ? { ...file, content: previous, hash: createHash('sha256').update(previous).digest('hex') } : file) };
+    const saved = ctx.repos.runs.create({ projectId: f.project.id, environmentId: f.environment.id, type: 'plan',
+      plan: { ...document, actions: [{ ...action, metadata }] } });
+    const applied = await executePlanApply(ctx, { project: f.project, spec: f.stored.spec, specRevision: f.stored.revision,
+      planId: saved.id, confirmActions: [action.id] });
+    expect(applied).toMatchObject({ kind: 'executed', result: { success: false, receipts: [
+      expect.objectContaining({ status: 'blocked', message: expect.stringContaining('Re-run hv_plan') }),
+    ] } });
+    expect(f.writes).toEqual([]);
+  });
+
+  it('preserves the installed backup program until its reviewed helper and workflow are upgraded together', async () => {
+    const f = await fixture();
+    for (const name of ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']) f.secretNames.add(name);
+    // Previous production TypeScript build, with a synthetic app and stable imported database identity.
+    const { spec } = installPreviousWorkflow(f, lastMonitoredImage);
+    const previous = JSON.parse(f.files.get(backupPaths[0])!);
+    f.files.set('.github/hypervibe/manifest.json', JSON.stringify({ version: 1, managedBy: 'hypervibe', files: backupPaths }));
+    const context = { project: f.project, spec: spec.environments.production, environment: f.environment,
+      components: ctx.repos.components.findByEnvironmentId(f.environment.id), adapterFactory };
+    const before = new Map(f.files);
+    const desired = await compileManagedBackupFiles({ project: f.project, spec, environmentName: 'production' });
+    expect(desired.files[0].content).toBe(before.get(backupPaths[0]));
+    expect(await observeManagedBackupProgram(context)).toMatchObject({ state: 'ready', target: previous });
+    // Historical ownership alone does not certify changed job behavior.
+    for (const change of [['contents: read', 'contents: write'], ['receipt-invalid', 'receipt-missing']]) {
+      f.files.set(backupPaths[1], before.get(backupPaths[1])!.replace(change[0], change[1]));
+      expect(await observeManagedBackupProgram(context)).toMatchObject({ state: 'blocked' });
+    }
+    f.files.set(backupPaths[1], before.get(backupPaths[1])!);
+    const blocked = await f.plan();
+    expect(blocked).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [
+      expect.objectContaining({ reason: expect.stringMatching(/runnerImage.*hv_plan.*backups/) }),
+    ] });
+    expect(f.files).toEqual(before);
+    expect(f.writes).toEqual([]);
+    const image = `ghcr.io/acme/backup@sha256:${'b'.repeat(64)}`;
+    const updated = new SpecStore().merge(f.project, { environments: { production: { backups: { mode: 'daily', runnerImage: image } } } });
+    const upgrade = await f.plan();
+    if ('error' in upgrade) throw new Error(upgrade.error);
+    expect(upgrade).toMatchObject({ scope: 'backup-program-publication', blocked: [], actions: [
+      expect.objectContaining({ requiresConfirm: true, billable: true, metadata: expect.objectContaining({ backupEnvironment: 'production' }) }),
+    ] });
+    const files = upgrade.actions[0].metadata?.desiredFiles as Array<{ path: string; content: string }>;
+    expect(files.map(file => file.path)).toEqual(backupPaths);
+    expect(JSON.parse(files[0].content)).toEqual({ ...previous, runnerImage: image });
+    expect(files[1].content).not.toMatch(/47 \* \* \* \*|issues: write/);
+    expect(f.files).toEqual(before);
+    expect(f.writes).toEqual([]);
+    for (const file of files) f.files.set(file.path, file.content);
+    expect(await observeManagedBackupProgram({ ...context, spec: updated.spec.environments.production })).toMatchObject({ state: 'ready' });
+  });
+
+  it('stops a saved initial publication if a monitored program with that pin appeared after review', async () => {
+    const f = await fixture();
+    for (const name of ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']) f.secretNames.add(name);
+    const planned = await f.plan();
+    if ('error' in planned) throw new Error(planned.error);
+    expect(planned.scope).toBe('backup-program-publication');
+    for (const file of backupPaths) f.files.set(file, readFileSync(new URL(path.basename(file), previousProgram), 'utf8'));
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({ ref: 'refs/heads/main', object: { sha: 'b'.repeat(40) } });
+    const result = await applyGitHubInfrastructure({ action: planned.actions[0] });
+    expect(result).toMatchObject({ success: false, status: 'blocked', message: expect.stringContaining('files changed since review') });
+    expect(f.writes).toEqual([]); expect(f.unexpected).toEqual([]);
+  });
+
+  it('uses the published legacy contract when its workflow image was edited', async () => {
+    const f = await fixture();
+    for (const name of ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']) f.secretNames.add(name);
+    const contract = readFileSync(new URL(path.basename(backupPaths[0]), previousProgram), 'utf8');
+    const previous = readFileSync(new URL(path.basename(backupPaths[1]), previousProgram), 'utf8');
+    const changed = previous.replace(JSON.parse(contract).runnerImage, 'ghcr.io/acme/backup@sha256:' + 'c'.repeat(64));
+    expect(changed).not.toBe(previous);
+    f.files.set(backupPaths[0], contract); f.files.set(backupPaths[1], changed);
+    expect(await f.plan()).toMatchObject({ scope: 'backup-readiness', actions: [], blocked: [
+      expect.objectContaining({ reason: expect.stringContaining('runnerImage') }),
+    ] });
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(['unparseable', 'stray alert job'])('can repair a %s current-format workflow with its existing helper', async damage => {
+    const f = await fixture();
+    for (const name of ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']) f.secretNames.add(name);
+    const compiled = await compileManagedBackupFiles({ project: f.project, spec: f.stored.spec, environmentName: 'production' });
+    const [contract, workflow] = compiled.files;
+    f.files.set(contract.path, contract.content);
+    f.files.set(workflow.path, workflow.content + (damage === 'unparseable' ? '  unexpected: [\n' : '  alert: {}\n'));
+    expect(await f.plan()).toMatchObject({ scope: 'backup-program-publication', blocked: [],
+      actions: [expect.objectContaining({ requiresConfirm: true })] });
+    expect(f.writes).toEqual([]);
+  });
 
   async function disabledProgramFixture(manifestPaths: string[] | null) {
     const f = await fixture();

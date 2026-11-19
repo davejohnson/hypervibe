@@ -5,8 +5,7 @@ export const BACKUP_HEALTH_REASON_CODES = ['backup-missing', 'backup-stale', 'ba
   'scheduler-stale', 'execution-failed', 'observation-unavailable', 'receipt-missing', 'receipt-invalid'] as const;
 const receiptRules = { stages: RECOVERY_FAILURE_STAGES, categories: RECOVERY_FAILURE_CATEGORIES, reasons: BACKUP_HEALTH_REASON_CODES };
 
-/** Self-contained runtime validator, used unchanged in the controller and emitted
- * alert/deployment gate. It accepts legacy receipts; only v2 permits diagnostics. */
+/** The controller retains legacy receipt support. Version 2 also carries diagnostics. */
 function parseBackupOperationReceipt(value: unknown, rules: {
   stages: readonly string[]; categories: readonly string[]; reasons: readonly string[];
 }) {
@@ -64,6 +63,3 @@ export const backupOperationReceiptSchema = {
     return parsed.data;
   },
 };
-export function backupOperationReceiptValidatorSource(): string {
-  return `const parseBackupOperationReceipt = ${parseBackupOperationReceipt.toString()};\nconst backupReceiptRules = ${JSON.stringify(receiptRules)};`;
-}

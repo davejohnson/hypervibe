@@ -11,6 +11,7 @@ import { PlanService } from '../../domain/plan/plan.service.js';
 import * as backups from '../../domain/services/backup-policy.service.js';
 import * as storage from '../../domain/services/storage-plan.service.js';
 import * as health from '../../domain/services/backup-health.service.js';
+import { compileManagedBackupFiles } from '../../domain/services/managed-backup-workflows.service.js';
 import * as githubInfrastructure from '../../domain/services/github-infrastructure.service.js';
 import * as bootstrap from '../../domain/services/bootstrap.service.js';
 import '../providers.js';
@@ -153,21 +154,25 @@ describe('independent backup setup and deployment prerequisites at the real appl
   ] as const)('keeps backup program $mode publication isolated and honors confirmation=$confirmed', async ({ mode, confirmed }) => {
     const ctx = createCommandContext();
     const project = ctx.repos.projects.create({ name: 'backup-publication', defaultPlatform: 'railway', gitRemoteUrl: 'https://github.com/acme/backup-publication' });
+    const bucket = (externalId: string) => ({ provider: 'railway', region: 'iad', externalId,
+      instanceScope: { projectId: 'p', environmentId: 'e' }, services: [], envKeys: [] });
     const environment = ctx.repos.environments.create({ projectId: project.id, name: 'production',
-      platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e', appliedSpecHash: 'old-contract' } });
+      platformBindings: { provider: 'railway', projectId: 'p', environmentId: 'e', appliedSpecHash: 'old-contract',
+        storage: { files: bucket('files-1'), 'hypervibe-backups': { ...bucket('backups-1'), purpose: 'backup' } } } });
     const spec = projectSpecSchema.parse({ version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl,
-      environments: { production: { hosting: { provider: 'railway' }, services: { web: {} }, database: { provider: 'railway' },
-        backups: mode === 'daily' ? { mode } : { mode, reason: 'Reviewed removal of the managed program' } } } });
+      environments: { production: { hosting: { provider: 'railway' }, services: { web: {} },
+        storage: { files: { provider: 'railway', type: 'bucket', region: 'iad', injectInto: [] } },
+        backups: mode === 'daily' ? { mode, runnerImage: 'ghcr.io/acme/backup@sha256:' + 'a'.repeat(64) } : { mode, reason: 'Reviewed removal of the managed program' } } } });
+    const reviewed = await compileManagedBackupFiles({ project, spec, environmentName: 'production' });
+    expect(reviewed.issues).toEqual([]);
+    expect(reviewed.files).toHaveLength(mode === 'daily' ? 2 : 0);
     const action = { id: 'github:infrastructure', type: 'update',
       resource: { kind: 'repo', provider: 'github', name: 'acme/backup-publication' }, verified: true,
       requiresConfirm: true, billable: mode === 'daily', reason: 'Publish the reviewed backup workflow',
       metadata: { operation: 'githubInfrastructurePullRequest', repository: 'acme/backup-publication', backupWorkflowPublicationRequired: true,
         backupEnvironment: 'production',
         ...(mode === 'disabled' ? { retiredManagedFiles: retirementEvidence() } : {}),
-        desiredFiles: mode === 'disabled' ? [] : [
-          publicationFile('.github/workflows/hypervibe-backup-production.yml', 'reviewed workflow'),
-          publicationFile('.github/hypervibe/backups-production.json', 'reviewed contract'),
-        ] } };
+        desiredFiles: reviewed.files } };
     const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan',
       plan: { kind: 'hv_plan', scope: 'backup-program-publication', environmentName: 'production', specRevision: 1,
         observedFingerprint: null, actions: [action] } });

@@ -16,6 +16,7 @@ import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
+import { compileManagedBackupFiles } from '../domain/services/managed-backup-workflows.service.js';
 import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
 import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
@@ -1559,9 +1560,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'github.infrastructure.sync') {
       if (planScope === 'backup-program-publication') {
-        const publishing = Array.isArray(action.metadata?.desiredFiles) && action.metadata.desiredFiles.length > 0;
+        const reviewedFiles = action.metadata?.desiredFiles;
+        const publishing = Array.isArray(reviewedFiles) && reviewedFiles.length > 0;
         if (action.metadata?.backupEnvironment !== envName || envSpec.backups?.mode !== (publishing ? 'daily' : 'disabled')) {
           return { success: false, status: 'blocked', message: 'The selected backup publication no longer matches the explicit environment backup intent. Re-run hv_plan scope="backups".' };
+        }
+        if (publishing) {
+          const current = await compileManagedBackupFiles({ project: applyProject, spec, environmentName: envName });
+          if (current.issues.length || current.files.length !== reviewedFiles.length || current.files.some(file =>
+            !reviewedFiles.some(reviewed => reviewed?.path === file.path && reviewed.content === file.content && reviewed.hash === file.hash))) {
+            return { success: false, status: 'blocked', message: 'The saved backup program differs from the current configuration or generator. Re-run hv_plan scope="backups" and review the new files.' };
+          }
         }
       }
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);

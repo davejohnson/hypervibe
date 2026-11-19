@@ -1803,7 +1803,7 @@ export class PlanService {
       // Exact, independently observed backup programs have their own repository
       // authority. App API policy, source detachment and release-workflow drift
       // cannot authorize or obstruct this repository-only operation.
-      if (publications.length === 1 || disabled) {
+      if (publications.length === 1 || disabled || scopedBackupProgram.blocked.length > 0) {
         const blocked: EnvironmentPlan['blocked'] = [...scopedBackupProgram.blocked, ...this.providerPreflight(publications.map(action => action.resource.provider))];
         for (const action of scopedBackupProgram.actions) {
           if (action.metadata?.blockedReason) blocked.push({ category: 'prerequisite', provider: action.resource.provider,

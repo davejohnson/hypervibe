@@ -1,7 +1,8 @@
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { getGitHubAdapter } from './github-ops.service.js';
 import type { BackupPolicyContext, BackupResource } from './backup-policy.service.js';
-import { compileBackupWorkflow } from './backup-workflow.service.js';
+import { compileBackupWorkflow, managedBackupFilePaths } from './backup-workflow.service.js';
+import { isMonitoredBackupRelease, matchesPreviousBackupWorkflow } from './previous-backup-workflow.js';
 import { objectRecoverySourceIdentity, resolveManagedBackupTarget, type ManagedBackupTarget } from './managed-backup-target.service.js';
 
 export function managedRecoverySource(target: ManagedBackupTarget, resource: BackupResource) {
@@ -27,11 +28,21 @@ export async function observeManagedBackupProgram(context: BackupPolicyContext) 
     const files = compileBackupWorkflow({ project: resolved.target.project, environment: resolved.target.environment,
       contractHash: resolved.contractHash, runnerImage: resolved.target.runnerImage,
       providerCredentialNames: resolved.providerCredentialNames, contract: resolved.target });
-    for (const file of files) if (await connected.adapter.getFileContent(owner, repo, file.path) !== file.content) {
+    const [, workflowPath] = managedBackupFilePaths(resolved.target.environment);
+    for (const file of files) {
+      const published = await connected.adapter.getFileContent(owner, repo, file.path);
+      if (published === file.content) {
+        if (file.path === workflowPath && isMonitoredBackupRelease(resolved.target.runnerImage)) {
+          return { state: 'blocked' as const, issues: ['The installed daily-only backup workflow needs a matching published helper. Update backups.runnerImage and run hv_plan scope="backups".'] };
+        }
+        continue;
+      }
+      if (published && file.path === workflowPath
+        && matchesPreviousBackupWorkflow(published, file.content, resolved.target.environment, resolved.target.runnerImage)) continue;
       return { state: 'blocked' as const, issues: ['The managed backup workflow and exact resource contract await publication.'] };
     }
     const workflows = await connected.adapter.listWorkflows(owner, repo);
-    const selected = workflows.workflows.filter(item => item.path === `.github/workflows/hypervibe-backup-${resolved.target.environment}.yml`);
+    const selected = workflows.workflows.filter(item => item.path === workflowPath);
     if (workflows.total_count !== workflows.workflows.length || selected.length !== 1 || selected[0].state !== 'active') {
       return { state: 'blocked' as const, issues: ['The managed backup schedule is not active or its inventory is incomplete.'] };
     }
