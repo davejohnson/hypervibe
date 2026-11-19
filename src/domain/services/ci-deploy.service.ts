@@ -32,7 +32,7 @@ import {
 } from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
-import { connectionSetupDetails, formatConnectionGuidance } from './connection-guidance.js';
+import { connectionSetupDetails, connectionSetupUrl, formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
   APPLIED_SPEC_HASH_OPERATION,
@@ -77,8 +77,12 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
   }
   if (missingImageRegistrySecrets) {
     const displayName = providerRegistry.getMetadata(provider)?.displayName ?? provider;
-    const setup = connectionSetupDetails('github', { ...options, requiredCredentialKeys: githubPackagePullSetupKeys(options.scope) });
-    parts.push(`For ${displayName} GHCR image pulls, packageReadToken needs read:packages. Credential setup: ${setup.recommendedSetupUrl}. Connect with: ${setup.credentialExample}.`);
+    const keys = githubPackagePullSetupKeys(options.scope);
+    const setup = connectionSetupDetails('github', { ...options, requiredCredentialKeys: keys });
+    const form = keys.includes('apiToken')
+      ? `Use separate credentials (create the package token at ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, options)}) or assign one combined classic token to both roles (create the combined token at ${setup.recommendedSetupUrl}).`
+      : `Add the package-read role to your existing connection (${setup.recommendedSetupUrl}).`;
+    parts.push(`For ${displayName} GHCR image pulls, packageReadToken needs read:packages. ${form} Connect with ${setup.credentialExample}`);
   }
   return parts.join(' ');
 }

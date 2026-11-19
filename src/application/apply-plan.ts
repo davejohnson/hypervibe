@@ -60,6 +60,7 @@ import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rol
 import {
   applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
+  missingProviderSecretsMessage,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
 import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
@@ -577,12 +578,12 @@ export function splitActionScopedConnectionBlocks(
     const providerSecrets = missing.filter(name => !name.startsWith('IMAGE_REGISTRY_'));
     const provider = String(action.metadata?.provider ?? action.resource.provider);
     const repository = typeof action.metadata?.repository === 'string'
-      ? action.metadata.repository : parseGitHubRepoFromRemote(context.repositoryUrl) ?? undefined;
+      ? action.metadata.repository : parseGitHubRepoFromRemote(context.repositoryUrl) ?? context.scope;
     const blocks: ConnectionBlock[] = [];
     if (registry.length) blocks.push({
       provider: 'github', ...(repository ? { scope: repository } : {}),
       requiredCredentialKeys: githubPackagePullSetupKeys(repository),
-      reason: `GitHub Actions deploy ${action.resource.name} requires GHCR image pull credentials (${registry.join(', ')}).`,
+      reason: missingProviderSecretsMessage(provider, registry, { project: context.project, scope: repository }),
     });
     if (providerSecrets.length) blocks.push({
       provider,
