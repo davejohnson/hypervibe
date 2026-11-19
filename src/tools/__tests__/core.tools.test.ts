@@ -1998,8 +1998,27 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.verified).toBe(false);
     expect(plan.data.summary.create).toBeGreaterThan(0);
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
+    expect(path.isAbsolute(plan.data.htmlPath)).toBe(true);
+    const report = readFileSync(plan.data.htmlPath, 'utf8');
+    expect(report).toContain(plan.data.planId);
+    expect(report).toContain('Blockers');
+    expect(new RunRepository().findById(plan.data.planId)?.plan).toMatchObject({
+      reviewBlockers: expect.arrayContaining([plan.data.blocked[0].reason]),
+    });
     expect(plan.hint).toContain('hv_connections');
     await t.close();
+  });
+
+  it('returns the saved plan ID when its final review cannot be written', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', { spec: SPEC });
+    mockObserved(null);
+    vi.spyOn(RunRepository.prototype, 'updatePlanReview').mockImplementationOnce(() => { throw new Error('Storage is read-only'); });
+    try {
+      const result = await t.call('hv_plan', { project: 'core-spec-app', env: 'staging' });
+      expect(result).toMatchObject({ ok: false, error: { code: 'INTERNAL', details: { persisted: true, planId: expect.any(String) } }, next: ['hv_plan'] });
+      expect(new RunRepository().findById(result.error.details.planId)?.type).toBe('plan');
+    } finally { await t.close(); }
   });
 
   it('adopts an exact Railway domain on a bound service even when the legacy binding omitted its hostname', async () => {

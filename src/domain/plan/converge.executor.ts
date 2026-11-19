@@ -14,7 +14,7 @@ import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
-import type { PlanAction } from './plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
 import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
@@ -945,11 +945,7 @@ export class ConvergeExecutor {
     const applyRun = reservation.run;
 
     const receipts: ActionReceipt[] = [];
-    const unconfirmed = ordered.find((action) =>
-      action.type !== 'noop'
-      && (action.requiresConfirm === true || action.billable === true || action.dataBearing === true)
-      && !confirmed.has(action.id)
-    );
+    const unconfirmed = ordered.find(action => requiresActionConfirmation(action) && !confirmed.has(action.id));
     if (unconfirmed) {
       const message = `Requires explicit confirmation: pass confirmActions: ["${unconfirmed.id}"]`;
       for (const action of ordered) {

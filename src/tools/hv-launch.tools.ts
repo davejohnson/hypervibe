@@ -71,7 +71,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             next: ['hv_launch'],
           });
         case 'needs_access':
-          return commandSuccess(result, {
+          return commandSuccess({ ...result, ...(typeof result.grants.htmlPath === 'string' ? { htmlPath: result.grants.htmlPath } : {}) }, {
             hint: result.accessId === 'aws-setup'
               ? `Show the account, region and each change in one short list. After the user approves, call hv_launch again with approveAccess including "aws-setup" and awsAccountId ${JSON.stringify(result.grants.accountId)}.`
               : result.accessId === 'azure-setup'

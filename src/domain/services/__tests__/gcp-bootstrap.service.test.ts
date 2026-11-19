@@ -138,7 +138,7 @@ function makeDependencies(
     getDefaultAdminAccessToken: vi.fn(async () => ADMIN_TOKEN),
     createClient: vi.fn(() => client),
     prepareCloud: vi.fn(async () => ({ success: true })),
-    setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', actions: [] })),
+    setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [] })),
     verifyPreparation: vi.fn(async () => {}),
     sleep: vi.fn(async (_milliseconds: number) => {}),
     verifyProvider: vi.fn(async (_provider, credentials) => ({
@@ -650,9 +650,11 @@ describe('runGcpBootstrap', () => {
   it('verifies exact identities after saved engine setup and never invokes bootstrap infrastructure writes', async () => {
     const client = makeClient();
     const dependencies = makeDependencies(client);
-    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID,
-      billingAccountName: BILLING_ACCOUNT, confirm: true }, dependencies);
-    expect(result.success).toBe(true);
+    const target = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    for (const confirm of [false, true]) {
+      const result = await runGcpBootstrap({ ...target, confirm }, dependencies);
+      expect(result).toMatchObject({ success: true, planId: 'saved-setup', htmlPath: '/reports/saved-setup.html' });
+    }
     expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({ confirm: true,
       contribution: expect.objectContaining({ id: 'bootstrap' }) }));
     expect(client.enableService).not.toHaveBeenCalled();

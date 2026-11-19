@@ -9,7 +9,7 @@ import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { runCloudPrepare, verifyAndRecordBootstrapPreparation } from '../cloud-prepare.execute.js';
 import { getCloudPreparation, getCloudPrepareProfile, isCloudPrepared } from '../cloud-prepare.js';
 
-const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: true, mode: 'preview', planId: 'saved-setup', actions: [] as unknown[], error: undefined as string | undefined })));
+const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: undefined as string | undefined, actions: [] as unknown[], error: undefined as string | undefined })));
 vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: () => undefined }));
 vi.mock('google-auth-library', () => ({ GoogleAuth: class {
   async getClient() { return { getAccessToken: async () => ({ token: 'private-admin-token' }) }; }
@@ -25,7 +25,7 @@ describe('runCloudPrepare', () => {
 
   beforeEach(() => {
     setup.mockReset();
-    setup.mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-setup', actions: [], error: undefined });
+    setup.mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [], error: undefined });
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cloud-prepare-'));
     SqliteAdapter.resetInstance();
     initializeDatabase(path.join(tempDir, 'hypervibe.db'));
@@ -71,6 +71,7 @@ describe('runCloudPrepare', () => {
     expect(payload).toMatchObject({
       success: true,
       mode: 'preview',
+      htmlPath: '/reports/saved-setup.html',
       plan: {
         provider: 'cloudrun',
         version: 'gcp-cloudrun-v2',
@@ -323,7 +324,7 @@ describe('runCloudPrepare', () => {
   });
 
   it('returns a blocked engine confirmation without making provider calls or recording access', async () => {
-    setup.mockResolvedValue({ success: false, mode: 'confirm', planId: 'saved-setup', actions: [], error: 'Preview the exact setup again.' });
+    setup.mockResolvedValue({ success: false, mode: 'confirm', planId: 'saved-setup', htmlPath: undefined, actions: [], error: 'Preview the exact setup again.' });
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const project = seedProject();
@@ -334,7 +335,7 @@ describe('runCloudPrepare', () => {
   });
 
   it.each([true, false])('verifies role convergence after engine apply before recording preparation (converged=%s)', async (converged) => {
-    setup.mockResolvedValue({ success: true, mode: 'confirm', planId: 'saved-setup', actions: [], error: undefined });
+    setup.mockResolvedValue({ success: true, mode: 'confirm', planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [], error: undefined });
     const requests: Array<{ url: string; method?: string }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({ url, method: init?.method });

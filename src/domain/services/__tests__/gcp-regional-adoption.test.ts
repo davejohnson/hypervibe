@@ -164,8 +164,12 @@ describe('legacy engine regional setup adoption', () => {
     const preview = await runCloudPrepare(f.params);
     expect(preview.success, String(preview.error)).toBe(true);
     expect(f.configurations[0]?.imports ?? {}).toEqual({});
-    const file = fs.readdirSync(paths.plans).find((name) => name.endsWith('.json'))!;
-    const saved = JSON.parse(fs.readFileSync(path.join(paths.plans, file), 'utf8')) as { manifest: { contributions: Record<string, EngineConfiguration> } };
+    const manifests = fs.readdirSync(paths.plans).filter(name => /^setup-[0-9a-f]{64}\.json$/.test(name));
+    expect(manifests).toHaveLength(1);
+    const saved = JSON.parse(fs.readFileSync(path.join(paths.plans, manifests[0]!), 'utf8')) as {
+      planId: string; manifest: { contributions: Record<string, EngineConfiguration> }
+    };
+    expect(saved.planId).toBe(preview.planId);
     const base = saved.manifest.contributions['prepare-base-us-central1']!;
     expect(base.resources).not.toHaveProperty('google_storage_bucket.build_source');
     expect(base.resources).not.toHaveProperty(repositoryAddress);
