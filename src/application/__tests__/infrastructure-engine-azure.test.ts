@@ -5,7 +5,7 @@ import { azureCiRegistry } from '../../adapters/providers/azure/azure-ci-registr
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
 import {
-  AZURE_DATABASE_LOGIN_OPERATION, AZURE_IMAGE_BUILD_OPERATION, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureEngineLayout, azureEngineProblems,
+  AZURE_DATABASE_LOGIN_OPERATION, AZURE_IMAGE_BUILD_OPERATION, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureBindingToSave, azureEngineLayout, azureLegacyNames, azureResourceName, azureEngineProblems,
   azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext,
 } from '../infrastructure-engine-azure.js';
 
@@ -33,6 +33,39 @@ const spec = (environments: Record<string, unknown>) => projectSpecSchema.parse(
 });
 
 describe('Azure engine planning', () => {
+  // Observed live on 2026-11-19: project hvlive, environments fx-604326d6 and fx-604326d6b. The second apply failed with
+  // 'azurerm_user_assigned_identity.runtime: a resource with the ID ".../hv-hvlive-fx-604326d-runtime" already exists'.
+  it('keeps environments apart when their names differ only past the length Azure allows', () => {
+    const live = { id: 'p', name: 'hvlive' };
+    const a = azureEngineLayout(live, 'fx-604326d6', 'E1', connection);
+    const b = azureEngineLayout(live, 'fx-604326d6b', 'E2', connection);
+    expect(a.prefix).not.toBe(b.prefix);
+    const long = { id: 'p', name: 'sequence-resource-planner' };
+    const production = azureEngineLayout(long, 'production', 'E1', connection);
+    const staging = azureEngineLayout(long, 'staging', 'E2', connection);
+    expect(production.prefix).not.toBe(staging.prefix);
+    expect(production.shared.prefix).not.toBe(staging.shared.prefix);
+    expect(azureResourceName(a.prefix, 'notifications-api')).not.toBe(azureResourceName(a.prefix, 'notifications-worker'));
+    for (const name of [a.prefix, b.prefix, production.prefix, staging.prefix, production.shared.prefix]) expect(name).toMatch(/^[a-z][a-z0-9-]{1,18}[a-z0-9]$/);
+    expect(azureResourceName(a.prefix, 'notifications-worker')).toMatch(/^[a-z][a-z0-9-]{1,30}[a-z0-9]$/);
+  });
+
+  it('leaves names that fit, and the names of environments that already exist, exactly as they were', () => {
+    expect(azureEngineLayout(project, 'test', 'ENV1', connection).prefix).toBe('hv-billforge-test');
+    expect(azureResourceName('hv-billforge-test', 'web')).toBe('hv-billforge-test-web');
+    const existing = { platformBindings: { azure: { kind: 'opentofu', image: 'registry/app@sha256:1' } } } as never;
+    const fresh = { platformBindings: {} } as never;
+    expect(azureLegacyNames(existing)).toBe(true);
+    expect(azureLegacyNames(fresh)).toBe(false);
+    // The first thing saved about a new environment records its naming, so later saves cannot turn it into an old one.
+    expect(azureLegacyNames({ platformBindings: { azure: { ...azureBindingToSave(fresh), kind: 'opentofu' } } } as never)).toBe(false);
+    expect(azureBindingToSave(existing)).toEqual({ kind: 'opentofu', image: 'registry/app@sha256:1' });
+    const old = azureEngineLayout({ id: 'p', name: 'hvlive' }, 'fx-604326d6', 'E1', connection, true);
+    expect(old.prefix).toBe('hv-hvlive-fx-604326d');
+    expect(azureResourceName(old.prefix, 'notifications-worker', true)).toBe('hv-hvlive-fx-604326d-notificatio');
+    expect(azureEngineLayout({ id: 'p', name: 'sequence-resource-planner' }, 'production', 'E1', connection, true).shared.prefix).toBe('hv-sequence-resource');
+  });
+
   it('shares the production shape with staging; testing environments share one server and registry', () => {
     expect(azureProfileFor('staging')).toBe('production');
     expect(azureProfileFor('pr-12')).toBe('testing');
