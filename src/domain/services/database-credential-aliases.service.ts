@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { Component } from '../entities/component.entity.js';
@@ -15,7 +14,9 @@ import { databaseCredentialAliasTargetSchema, databaseCredentialAliasesInspectio
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import { adapterFactory } from './adapter.factory.js';
 import { bindingIdentityFingerprint } from './binding-identity.js';
-import { currentDatabaseScopeComponent, planDatabaseScopeBinding } from './database-scope-binding.service.js';
+import type { BackupPolicyContext } from './backup-policy.service.js';
+import { completeProviderScope, currentDatabaseScopeComponent, databaseBindingOwnershipConflict, DATABASE_PRIMARY_BINDING_CONFLICT,
+  planDatabaseScopeBinding, primaryDatabaseRecordState, recordedProviderScope } from './database-scope-binding.service.js';
 
 export const DATABASE_CREDENTIAL_ALIASES_OPERATION = 'databaseCredentialAliasesRepair';
 const namesSchema = z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/));
@@ -49,6 +50,11 @@ const recoverySchema = z.object({ phase: z.literal('attempted'), metadata: datab
 const components = new ComponentRepository();
 const environments = new EnvironmentRepository();
 class AliasPrerequisite extends Error {}
+class IncompleteAliasScope extends AliasPrerequisite {
+  constructor(readonly context: BackupPolicyContext) {
+    super('Credential alias repair requires complete database provider scope.');
+  }
+}
 function pending(component: Component) {
   if (component.bindings.credentialAliasRepair === undefined) return undefined;
   const parsed = recoverySchema.safeParse(component.bindings.credentialAliasRepair);
@@ -61,29 +67,56 @@ function activeRotation(component: Component): boolean {
 }
 function load(project: Project, environmentName: string, spec: EnvironmentSpec) {
   const environment = environments.findByProjectAndName(project.id, environmentName);
-  const candidates = environment ? components.findByEnvironmentId(environment.id).filter(c => c.type === spec.database?.engine) : [];
+  const environmentComponents = environment ? components.findByEnvironmentId(environment.id) : [];
+  const candidates = environmentComponents.filter(c => c.type === spec.database?.engine);
   const component = candidates.length === 1 ? candidates[0] : undefined;
   if (spec.database?.credentialAliases?.mode !== 'issuer-references' || !environment || !component?.externalId
     || component.bindings.provider !== spec.database.provider || component.bindings.retainedCleanup
     || component.bindings.provisioningIncomplete || component.bindings.unresolvedMutation) {
     throw new AliasPrerequisite('Credential alias repair requires its declaration and one complete existing database binding.');
   }
-  const scope = z.record(z.string().min(1), z.string().min(1)).safeParse(component.bindings.providerScope);
-  if (!scope.success || !Object.keys(scope.data).length) throw new AliasPrerequisite('Credential alias repair requires complete database provider scope.');
-  if (components.findByEnvironmentId(environment.id).some(activeRotation)) {
+  const scope = recordedProviderScope(component);
+  if (scope === null) throw new AliasPrerequisite('The recorded database provider scope is malformed. It was preserved.');
+  if (environmentComponents.some(activeRotation)) {
     throw new AliasPrerequisite('Recover the active database password rotation before repairing aliases.');
   }
-  for (const otherProject of new ProjectRepository().findAll()) for (const otherEnvironment of environments.findByProjectId(otherProject.id)) {
-    for (const other of components.findByEnvironmentId(otherEnvironment.id)) {
-      if (other.id === component.id || other.externalId !== component.externalId || other.bindings.provider !== component.bindings.provider) continue;
-      const otherScope = z.record(z.string().min(1), z.string().min(1)).safeParse(other.bindings.providerScope);
-      if (!otherScope.success || !isDeepStrictEqual(Object.keys(otherScope.data).sort(), Object.keys(scope.data).sort())
-        || isDeepStrictEqual(otherScope.data, scope.data)) {
-        throw new AliasPrerequisite('The database identity is shared or ambiguously bound to another environment.');
-      }
-    }
+  if (primaryDatabaseRecordState(environment.platformBindings, component) === 'conflict') {
+    throw new AliasPrerequisite(DATABASE_PRIMARY_BINDING_CONFLICT);
   }
-  return { environment, component, target: { provider: spec.database.provider, resourceId: component.externalId, providerScope: scope.data } };
+  if (!scope || !completeProviderScope(component, scope)) {
+    if (environmentComponents.some(entry => entry.bindings.credentialAliasRepair !== undefined)) {
+      throw new AliasPrerequisite('The pending alias repair needs its original database scope for readback. Its recovery record was preserved.');
+    }
+    throw new IncompleteAliasScope({ project, spec, environment, components: environmentComponents, adapterFactory });
+  }
+  const conflict = databaseBindingOwnershipConflict(component, scope, components);
+  if (conflict) throw new AliasPrerequisite(conflict);
+  return { environment, component, target: { provider: spec.database.provider, resourceId: component.externalId, providerScope: scope } };
+}
+
+async function reviewedAliasBinding(context: BackupPolicyContext) {
+  const provider = context.spec.database!.provider;
+  const resolved = await context.adapterFactory.getDatabaseOperations(provider, context.project);
+  if (!resolved.success || !resolved.adapter?.credentialAliases) {
+    throw new AliasPrerequisite(`Credential alias repair is unsupported or unavailable for ${provider}.`);
+  }
+  return planDatabaseScopeBinding({ ...context, databaseBindings: components });
+}
+
+async function loadForAliasInspection(project: Project, environmentName: string, spec: EnvironmentSpec) {
+  try {
+    return load(project, environmentName, spec);
+  } catch (error) {
+    if (!(error instanceof IncompleteAliasScope)) throw error;
+    // Discover the same local-only prerequisite as ordinary planning. Status
+    // and the explicit alias plan can explain it, but cannot issue that action.
+    const binding = await reviewedAliasBinding(error.context);
+    if (binding.warnings.length) throw new AliasPrerequisite(binding.warnings.join(' '));
+    if (!binding.actions.length) throw error;
+    throw new AliasPrerequisite('The database binding is missing provider scope. '
+      + `Run hv_plan with project=${JSON.stringify(project.name)} and env=${JSON.stringify(environmentName)} without a scope. `
+      + 'If it returns a database-bindings plan, review and apply that repair, then run hv_plan again to review the credential aliases.');
+  }
 }
 function inspection(value: unknown, target: Metadata['target']) {
   const parsed = databaseCredentialAliasesInspectionSchema.parse(value);
@@ -104,7 +137,7 @@ export async function observeDatabaseCredentialAliases(params: { project: Projec
 } | undefined> {
   if (!params.spec.database?.credentialAliases) return undefined;
   try {
-    const current = load(params.project, params.environmentName, params.spec);
+    const current = await loadForAliasInspection(params.project, params.environmentName, params.spec);
     if (pending(current.component)) throw new AliasPrerequisite('The original alias repair needs readback verification through its isolated plan.');
     const adapter = await adapterFactory.getDatabaseOperations(current.target.provider, params.project);
     if (!adapter.success || !adapter.adapter?.credentialAliases) throw new AliasPrerequisite('The database provider does not support credential alias inspection.');
@@ -141,11 +174,11 @@ export async function planDatabaseCredentialAliases(params: { project: Project; 
       // legacy scope. Malformed/conflicting identity and pending work stay blocked.
       if (component
         && !context.components.some(entry => entry.bindings.credentialAliasRepair !== undefined || activeRotation(entry))) {
-        const provider = await adapterFactory.getDatabaseOperations(spec.database.provider, params.project);
-        if (!provider.success || !provider.adapter?.credentialAliases) {
-          throw new AliasPrerequisite(`Credential alias repair is unsupported or unavailable for ${spec.database.provider}.`);
+        const binding = await reviewedAliasBinding(context);
+        const recordedScope = recordedProviderScope(component);
+        if (binding.warnings.length && (!recordedScope || !completeProviderScope(component, recordedScope))) {
+          throw new AliasPrerequisite(binding.warnings.join(' '));
         }
-        const binding = await planDatabaseScopeBinding(context);
         if (binding.actions.length) {
           const document = { kind: 'hv_plan', scope: 'database-bindings' as const,
             environmentName: params.environmentName, specRevision: params.revision,
@@ -159,7 +192,8 @@ export async function planDatabaseCredentialAliases(params: { project: Project; 
         }
       }
     }
-    const current = load(params.project, params.environmentName, spec);
+    const current = params.onlyIfNeeded ? load(params.project, params.environmentName, spec)
+      : await loadForAliasInspection(params.project, params.environmentName, spec);
     const resolved = await adapterFactory.getDatabaseOperations(spec.database.provider, params.project);
     const capability = resolved.adapter?.credentialAliases;
     if (!resolved.success || !capability) throw new AliasPrerequisite(`Credential alias repair is unsupported or unavailable for ${spec.database.provider}.`);

@@ -5,6 +5,7 @@ import path from 'node:path';
 import '../providers.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext, type CommandContext } from '../context.js';
+import { createCommandRegistry } from '../commands.js';
 import { AdapterFactory } from '../../domain/services/adapter.factory.js';
 import { PlanService, type PlanOptions } from '../../domain/plan/plan.service.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -84,7 +85,7 @@ describe('reviewed legacy database scope binding', () => {
     const plan = (options: PlanOptions = {}) => planner.plan(project, 'staging', { includeEnvFile: false, ...options });
     const context = () => ({ project, spec: spec.environments.staging,
       environment: ctx.repos.environments.findById(environment.id)!,
-      components: ctx.repos.components.findByEnvironmentId(environment.id), adapterFactory: ctx.adapterFactory });
+      components: ctx.repos.components.findByEnvironmentId(environment.id), adapterFactory: ctx.adapterFactory, databaseBindings: ctx.repos.components });
     return { http, volume, project, spec, stored, environment, component, service, database, plan, context };
   }
 
@@ -192,6 +193,30 @@ describe('reviewed legacy database scope binding', () => {
     expect(f.http.contractErrors).toEqual([]);
   });
 
+  it.each([
+    ['hv_plan', 'absent'], ['hv_status', 'absent'], ['hv_plan', 'partial'], ['hv_status', 'partial'],
+  ] as const)('%s directs a user with %s database scope to the ordinary plan', async (command, state) => {
+    const f = await fixture({}, true);
+    if (state === 'partial') ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId } });
+    const component = ctx.repos.components.findById(f.component.id);
+    const commands = createCommandRegistry(ctx);
+    const response = await commands.execute(command, { project: f.project.name, env: 'staging',
+      ...(command === 'hv_plan' ? { scope: 'database-credential-aliases' } : {}) });
+    const guidance = expect.stringMatching(/hv_plan.*legacy-scope.*staging.*without (?:a )?scope/i);
+    if (command === 'hv_plan') {
+      expect(response).toMatchObject({ ok: true, data: { scope: 'database-credential-aliases', actions: [],
+        blocked: [{ category: 'prerequisite', reason: guidance }] } });
+    } else {
+      expect(response).toMatchObject({ ok: true, data: { inSync: false, verified: false,
+        databaseAliases: { state: 'unknown', reason: guidance } } });
+      expect(ctx.repos.runs.findByProjectId(f.project.id)).toEqual([]);
+    }
+    expect(ctx.repos.components.findById(f.component.id)).toEqual(component);
+    expect(ctx.repos.environments.findById(f.environment.id)).toEqual(f.environment);
+    expect(new SpecStore().get(f.project)?.spec).toEqual(f.spec);
+    expect(f.http.mutations).toEqual([]);
+  });
+
   it.each(['unknown', 'conflicting-partial', 'malformed', 'unsupported', 'rotation'] as const)('keeps %s scope blocked when aliases are declared', async state => {
     const f = await fixture(state === 'unknown' ? { responseOverride: ({ query }) => query.includes('DatabaseCheckpointTarget')
       ? Response.json({ errors: [{ message: 'synthetic unavailable scope' }] }, { status: 403 }) : undefined } : {}, true);
@@ -205,6 +230,73 @@ describe('reviewed legacy database scope binding', () => {
     expect(planned.scope).toBe('database-credential-aliases');
     expect(planned.actions).toEqual([]);
     expect(planned.blocked.length).toBeGreaterThan(0);
+    if (state === 'unknown' || state === 'conflicting-partial') {
+      expect(planned.blocked[0].reason).toContain('could not be independently verified');
+    }
+    const narrow = await f.plan({ scope: 'database-credential-aliases' });
+    expect(narrow).toMatchObject({ scope: 'database-credential-aliases', actions: [],
+      blocked: [{ category: 'prerequisite', reason: expect.not.stringContaining('without a scope') }] });
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  function bindOtherDatabase(f: Awaited<ReturnType<typeof fixture>>, providerScope: Record<string, string>) {
+    const otherProject = ctx.repos.projects.create({ name: 'another-project', defaultPlatform: 'railway' });
+    const other = ctx.repos.environments.create({ projectId: otherProject.id, name: 'another-environment' });
+    ctx.repos.components.create({ environmentId: other.id, type: 'postgres', externalId: f.component.externalId,
+      bindings: { provider: 'railway', providerScope } });
+  }
+
+  const ambiguousScopes: Array<Record<string, string>> = [
+    { projectId, environmentId: stagingId }, { projectId }, { projectId, environmentId: ' ' },
+    { projectId, environmentId: stagingId, region: 'extra-field' },
+  ];
+  it.each(ambiguousScopes)('blocks both plans for an ambiguous legacy database identity %j', async otherScope => {
+    const f = await fixture({}, true);
+    bindOtherDatabase(f, otherScope);
+    const blocked = { actions: [], blocked: [{ reason: expect.stringContaining('another environment') }] };
+    expect(await f.plan()).toMatchObject(blocked);
+    expect(await f.plan({ scope: 'database-credential-aliases' })).toMatchObject(blocked);
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('can repair a legacy scope when a second database has a distinct complete provider scope', async () => {
+    const f = await fixture({}, true);
+    bindOtherDatabase(f, { projectId, environmentId: 'different-environment-id' });
+    const narrow = await f.plan({ scope: 'database-credential-aliases' });
+    expect(narrow).toMatchObject({ actions: [], blocked: [{ reason: expect.stringContaining('without a scope') }] });
+    const r = await reviewed(f);
+    expect(await r.apply()).toMatchObject({ success: true, data: { applied: 1, providerMutations: 0 } });
+    expect(ctx.repos.components.findById(f.component.id)?.bindings.providerScope).toEqual({ projectId, environmentId: stagingId });
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('rejects shared ownership acquired during binding apply before writing any local metadata', async () => {
+    let f: Awaited<ReturnType<typeof fixture>>;
+    let acquire = false;
+    f = await fixture({ responseOverride: ({ query }) => {
+      if (acquire && query.includes('DatabaseCheckpointTarget')) {
+        acquire = false;
+        bindOtherDatabase(f, { projectId, environmentId: stagingId });
+      }
+      return undefined;
+    } }, true);
+    const r = await reviewed(f);
+    acquire = true;
+    expect(await r.apply()).toMatchObject({ success: false, status: 'blocked', data: { applied: 0, providerMutations: 0 } });
+    expect(acquire).toBe(false);
+    expect(ctx.repos.components.findById(f.component.id)).toEqual(f.component);
+    expect(ctx.repos.environments.findById(f.environment.id)).toEqual(f.environment);
+    expect(f.http.mutations).toEqual([]);
+  });
+
+  it('blocks a conflicting primary identity before offering a legacy binding repair', async () => {
+    const f = await fixture({}, true);
+    ctx.repos.environments.updatePlatformBindings(f.environment.id, { databaseTopology: {
+      primary: { provider: 'railway', externalId: 'other-postgres' }, replicas: {} } });
+    expect(await f.plan()).toMatchObject({ actions: [], blocked: [{ reason: expect.stringContaining('different database') }] });
+    ctx.repos.components.updateBindings(f.component.id, { providerScope: { projectId, environmentId: stagingId } });
+    expect(await f.plan({ scope: 'database-credential-aliases' })).toMatchObject({ actions: [],
+      blocked: [{ reason: expect.stringContaining('different database') }] });
     expect(f.http.mutations).toEqual([]);
   });
 
@@ -220,6 +312,8 @@ describe('reviewed legacy database scope binding', () => {
     expect(pending.scope).toBe('database-credential-aliases');
     expect(pending.actions).toEqual([]);
     expect(pending.blocked.length).toBeGreaterThan(0);
+    expect(await f.plan({ scope: 'database-credential-aliases' })).toMatchObject({ actions: [],
+      blocked: [{ reason: expect.stringContaining('pending alias repair') }] });
     expect(await executePlanApply(ctx, { project: f.project, spec: f.spec, specRevision: before.specRevision,
       planId: before.planRunId, confirmActions: [before.actions[0].id] })).toMatchObject({ kind: 'blocked' });
     expect(ctx.repos.components.findById(f.component.id)?.bindings.credentialAliasRepair).toEqual(recovery);

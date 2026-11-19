@@ -5,7 +5,7 @@ import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { BackupPolicyContext } from '../domain/services/backup-policy.service.js';
 import { bindingIdentityFingerprint, providerIdentityScopeMatches } from '../domain/services/binding-identity.js';
-import { currentDatabaseScopeComponent, databaseScopeBindingMetadataSchema,
+import { currentDatabaseScopeComponent, databaseBindingOwnershipConflict, DATABASE_PRIMARY_BINDING_CONFLICT, databaseScopeBindingMetadataSchema,
   databaseScopeBindingsFingerprint, isDatabaseScopeBindingAction, observeDatabaseBindingSource,
   observeDatabaseRuntimeReference, primaryDatabaseRecordState, DATABASE_PROVISION_RECOVERY_OPERATION, DATABASE_PROVISION_CANDIDATE_OPERATION,
   databaseProvisionRecoveryMetadataSchema, isDatabaseProvisionRecoveryAction,
@@ -70,9 +70,11 @@ export async function applyDatabaseScopeBinding(params: {
       environmentBindings: current.context.environment!.platformBindings, provider: source.provider,
       liveScope: source.providerScope })) return blocked('Database or environment bindings changed during source observation. Re-run hv_plan.');
   const environmentId = current.component.environmentId;
+  const ownershipConflict = databaseBindingOwnershipConflict(current.component, source.providerScope, ctx.repos.components);
+  if (ownershipConflict) return blocked(ownershipConflict);
   const primaryState = primaryDatabaseRecordState(current.context.environment!.platformBindings, current.component);
   if (primaryState === 'conflict') {
-    return blocked('The committed primary database identity names a different database. It was left unchanged; review databaseTopology.primary in .hypervibe/bindings.json.');
+    return blocked(DATABASE_PRIMARY_BINDING_CONFLICT);
   }
   let applied = 0;
   let recordedPrimary = false;
