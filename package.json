@@ -57,6 +57,8 @@
     "typecheck": "tsc --noEmit",
     "check:duplication": "jscpd",
     "test": "vitest run",
+    "test:fast": "HYPERVIBE_TEST_GROUP=fast vitest run",
+    "test:heavy": "HYPERVIBE_TEST_GROUP=heavy vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:providers:api-contracts": "vitest run src/adapters/providers/railway/__tests__/railway.api-contract.test.ts src/adapters/providers/railway/__tests__/railway.service-volume.api-contract.test.ts src/adapters/providers/railway/__tests__/railway.checkpoint.api-contract.test.ts src/adapters/providers/railway/__tests__/railway.checkpoint.lifecycle.test.ts src/adapters/providers/sendgrid/__tests__/sendgrid.signing-contract.test.ts src/adapters/providers/sendgrid/__tests__/sendgrid.inbound-signing-contract.test.ts",
