@@ -169,7 +169,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
         const { [environmentName]: _removed, ...others } = original.environments;
         await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
-          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
+          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, marker.region, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
       };
       const plan = async (input: Json = {}) => {
         const envelope = await cli(['plan'], { project: projectName, env: environmentName, ...input });
@@ -239,7 +239,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
           if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('Hypervibe recorded no HTTPS address for the web service.');
           // A new revision and the worker's first write take a few minutes to show.
           let problem: string | undefined = 'the web service did not answer';
-          for (let attempt = 0; attempt < 30 && problem; attempt++) {
+          for (let attempt = 0; attempt < 45 && problem; attempt++) {
             if (attempt) await sleep(20_000);
             try {
               const response = await fetch(new URL('/', url), { signal: AbortSignal.timeout(30_000), redirect: 'error' });

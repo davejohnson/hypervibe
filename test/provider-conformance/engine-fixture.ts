@@ -11,27 +11,40 @@ import { resourceKey, type NativeFixtureResource } from './lifecycle-live-harnes
 
 export type EngineFixtureCloud = 'aws' | 'azure';
 
-/** The disposable environment: a public web service and a worker that both use the database. */
-export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', region?: string): Record<string, unknown> {
+/**
+ * The disposable environment: a public web service, an always-on worker, a worker
+ * that runs only while it has work, a scheduled job and file storage, all using
+ * one database.
+ */
+export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', connectionRegion: string, region?: string): Record<string, unknown> {
   return {
     // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
     hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
     database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
+    storage: { files: { provider: cloud === 'aws' ? 's3' : 'azureblob', type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
     services: {
       web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true },
       worker: { workloadKind: 'worker', startCommand: 'node server.mjs worker' },
+      ondemand: { workloadKind: 'worker', startCommand: 'node server.mjs ondemand', onDemand: {
+        pendingWorkQuery: "SELECT count(*) FROM conformance_jobs WHERE status = 'queued'",
+        nextWorkAtQuery: "SELECT min(run_at) FROM conformance_jobs WHERE status = 'queued'",
+      } },
+      scheduled: { workloadKind: 'cron', cronSchedule: '*/2 * * * *', startCommand: 'node server.mjs scheduled' },
     },
     email: { enabled: false }, envVars: { CONFORMANCE_APP_REVISION: revision }, deploy: { strategy: 'manual' },
   };
 }
 
-/** The app's answer must show the revision, a database write and a recent worker write. */
+/** The app's answer must show the revision and recent proof from every workload and from storage. */
 export function engineFixtureResponseProblem(status: number, value: unknown, revision: string): string | undefined {
-  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean } | null;
+  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean; onDemand?: boolean; scheduled?: boolean; storage?: boolean } | null;
   if (status !== 200 || body?.service !== 'hypervibe-provider-conformance') return `the web service did not answer as the fixture (HTTP ${status})`;
   if (body.revision !== revision) return `the web service is not serving the ${revision} revision`;
   if (body.database !== true) return 'the web service could not use its database';
   if (body.worker !== true) return 'the worker has not written to the database in the last two minutes';
+  if (body.storage !== true) return 'the web service could not write a file to its storage and read it back';
+  if (body.scheduled !== true) return 'the scheduled job has not run in the last five minutes';
+  if (body.onDemand !== true) return 'the on-demand worker has not finished queued work in the last five minutes';
   return undefined;
 }
 
