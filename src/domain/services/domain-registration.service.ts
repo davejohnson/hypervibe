@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { cloudflareTokenKind } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { cloudflareTokenKind, RegistrarPurchaseRejected } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type {
   RegistrarDomainCandidate,
   RegistrarWorkflowStatus,
@@ -367,7 +367,7 @@ export async function applyCloudflareDomainRegistration(params: {
   if (binding && !(binding.state === 'failed' && binding.completed === true)) {
     try {
       const workflow = await adapter.getRegistrarRegistrationStatus(accountId, domain);
-      persistWorkflow(envRepo, project, envName, domain, accountId, workflow);
+      persistWorkflow(envRepo, project, envName, domain, accountId, binding.attemptId, workflow);
       return workflowActionResult(domain, workflow, 'polled');
     } catch {
       return {
@@ -436,8 +436,9 @@ export async function applyCloudflareDomainRegistration(params: {
   // lead to a status read for this account and domain, even after a restart.
   const target = environment ?? envRepo.create({ projectId: project.id, name: envName });
   const registrations = asRecord(target.platformBindings.domainRegistrations) ?? {};
+  const attemptId = randomUUID();
   const submitted = { ...target.platformBindings, domainRegistrations: {
-    ...registrations, [domain]: { provider: 'cloudflare', accountId, attemptId: randomUUID(), state: 'submitted', completed: false },
+    ...registrations, [domain]: { provider: 'cloudflare', accountId, attemptId, state: 'submitted', completed: false },
   } };
   if (!envRepo.replacePlatformBindingsIfUnchanged(target, submitted)) {
     return { success: false, status: 'blocked', message: 'The environment changed while preparing the purchase. Run hv_plan again.' };
@@ -458,9 +459,16 @@ export async function applyCloudflareDomainRegistration(params: {
       privacyMode: registrationSpec.privacyMode ?? 'redaction',
       years: registrationSpec.years ?? 1,
     });
-    persistWorkflow(envRepo, project, envName, domain, accountId, workflow);
+    persistWorkflow(envRepo, project, envName, domain, accountId, attemptId, workflow);
     return workflowActionResult(domain, workflow, 'started');
-  } catch {
+  } catch (error) {
+    if (error instanceof RegistrarPurchaseRejected) {
+      persistWorkflow(envRepo, project, envName, domain, accountId, attemptId, { state: 'failed', completed: true });
+      const next = error.status === 402 ? 'Check the payment method on your Cloudflare account.'
+        : error.status === 401 || error.status === 403 ? 'Check the registrar permissions on your Cloudflare connection.'
+        : 'Check the registrant contact and registration details on your Cloudflare account.';
+      return { success: false, message: `Cloudflare declined the registration for ${domain}. ${next} Run hv_plan to review and confirm a new purchase.` };
+    }
     return {
       success: false, status: 'pending',
       message: `The registration outcome for ${domain} is unknown. Run hv_plan and hv_apply to check the existing request.`,
@@ -474,22 +482,29 @@ function persistWorkflow(
   envName: string,
   domain: string,
   accountId: string,
-  workflow: RegistrarWorkflowStatus
+  attemptId: string | undefined,
+  workflow: Pick<RegistrarWorkflowStatus, 'state' | 'completed'>
 ): void {
-  const environment = envRepo.findByProjectAndName(project.id, envName)
-    ?? envRepo.create({ projectId: project.id, name: envName });
+  const environment = envRepo.findByProjectAndName(project.id, envName);
+  const saved = registrationBinding(environment, domain);
+  if (!environment || !saved || saved.attemptId !== attemptId || saved.accountId !== accountId || saved.completed) {
+    throw new Error('Registration changed while waiting for Cloudflare. Review its current status.');
+  }
   const existing = asRecord(environment.platformBindings.domainRegistrations) ?? {};
-  envRepo.updatePlatformBindings(environment.id, {
+  const updated = envRepo.replacePlatformBindingsIfUnchanged(environment, {
+    ...environment.platformBindings,
     domainRegistrations: {
       ...existing,
       [domain]: {
         provider: 'cloudflare',
         accountId,
-        attemptId: registrationBinding(environment, domain)?.attemptId,
+        attemptId,
         state: safeState(workflow.state),
         completed: workflow.completed === true,
         updatedAt: new Date().toISOString(),
       },
     },
   });
+  if (!updated) throw new Error('Registration changed while saving the response. Review its current status.');
+  envRepo.syncRepoBindingsForId(environment.id);
 }

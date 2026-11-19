@@ -211,6 +211,12 @@ class CloudflareApiError extends Error {
   }
 }
 
+export class RegistrarPurchaseRejected extends Error {
+  constructor(readonly status: number) {
+    super('Cloudflare rejected the registration request.');
+  }
+}
+
 function isCloudflareNotFound(error: unknown): boolean {
   return error instanceof CloudflareApiError && error.status === 404;
 }
@@ -386,6 +392,13 @@ export class CloudflareAdapter implements IDnsProvider, IEdgeMaintenanceAdapter,
     const data = (await response.json()) as CloudflareResponse<T>;
 
     if (!response.ok || data.success !== true) {
+      // Only the purchase response can establish that Cloudflare refused this attempt.
+      if (method === 'POST' && /^\/accounts\/[^/]+\/registrar\/registrations$/.test(endpoint)
+        && !response.redirected && [400, 401, 402, 403, 422].includes(response.status)
+        && data.success === false && data.result === null && Array.isArray(data.errors)
+        && data.errors.some(error => Number.isInteger(error?.code) && typeof error.message === 'string' && error.message.trim())) {
+        throw new RegistrarPurchaseRejected(response.status);
+      }
       const errorMsg = Array.isArray(data.errors)
         ? data.errors.map((error) => error.message).join(', ')
         : '';
