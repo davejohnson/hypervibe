@@ -56,13 +56,13 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
     },
     recordImage: (imageUri) => {
       const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-      ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri, imageLaunchVersion: 1 } });
+      ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri } });
     },
     releaseWorkload: async ({ name, kind, resource, image }) => {
       // A private web service is an ordinary ECS service, released like a worker.
       const result = kind === 'web' && (environmentSpec.services[name]!.public ?? true)
-        ? await releaseWebService(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!), undefined, environmentSpec.services[name]!.startCommand)
-        : await releaseTask(target, name, resource, image, kind !== 'cron', undefined, kind === 'web' ? { startCommand: environmentSpec.services[name]!.startCommand } : undefined);
+        ? await releaseWebService(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!))
+        : await releaseTask(target, name, resource, image, kind !== 'cron');
       if (result.status === 'released' && result.taskDefinitionArn) {
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
         const services = (current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {};

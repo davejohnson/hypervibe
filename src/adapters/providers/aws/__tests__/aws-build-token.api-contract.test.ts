@@ -28,22 +28,21 @@ describe('CodeBuild private package token HTTP contract', () => {
     expect(result).toMatchObject({ imageUri: expect.stringContaining(digest) });
     const build = JSON.parse(requests.find((request) => request.hostname.startsWith('codebuild.'))!.body);
     expect(build.environmentVariablesOverride.filter((item: { name: string }) => item.name === 'NPM_TOKEN')).toEqual(packageTokenParameter ? [{ name: 'NPM_TOKEN', type: 'PARAMETER_STORE', value: packageTokenParameter }] : []);
-    expect(build.environmentVariablesOverride).toContainEqual({ name: 'RELEASE_TAG', value: awsImageTag('a'.repeat(40)), type: 'PLAINTEXT' });
+    expect(build.environmentVariablesOverride).toContainEqual({ name: 'IMAGE_TAG', value: awsImageTag('a'.repeat(40)), type: 'PLAINTEXT' });
   });
 
   it.each([false, true])('executes the generated build command without placing the token in arguments (%s)', (hasToken) => {
     const directory = mkdtempSync(path.join(os.tmpdir(), 'hv-build-command-'));
     try {
-      writeFileSync(path.join(directory, 'docker'), '#!/bin/sh\nif [ "$1 $2" = "image inspect" ]; then printf \'%s\\n\' \'{"Entrypoint":["node","a.js"],"Cmd":["serve"]}\'; fi\nif [ "$1" = "build" ]; then for arg do if [ "$arg" = "-" ]; then cat > "$NORMALIZED"; break; fi; done; fi\nprintf "%s\\n" "$@" >> "$CAPTURE"\n', { mode: 0o755 });
+      writeFileSync(path.join(directory, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$@" >> "$CAPTURE"\n', { mode: 0o755 });
       const config = buildAwsBuildConfiguration({ ...base, packageTokenKey: 'NPM_TOKEN' });
       const file = config.files['builds.tf.json'] as any;
       const buildspec = JSON.parse(file.resource.aws_codebuild_project.images.source[0].buildspec.replace(/\$\$\{/g, '${'));
-      execFileSync('/bin/sh', ['-c', buildspec.phases.build.commands.join('\n')], { env: { PATH: `${directory}:${process.env.PATH}`, NORMALIZED: path.join(directory, 'normalized'), CAPTURE: path.join(directory, 'args'), REGISTRY: 'registry/app', IMAGE_TAG: 'commit', ...(hasToken ? { NPM_TOKEN: 'private-token-sentinel' } : {}) } });
+      execFileSync('/bin/sh', ['-c', buildspec.phases.build.commands.join('\n')], { env: { PATH: directory, CAPTURE: path.join(directory, 'args'), REGISTRY: 'registry/app', IMAGE_TAG: 'commit', ...(hasToken ? { NPM_TOKEN: 'private-token-sentinel' } : {}) } });
       const args = readFileSync(path.join(directory, 'args'), 'utf8');
       expect(args).not.toContain('private-token-sentinel');
       expect(args.includes('id=npm_token,env=NPM_TOKEN')).toBe(hasToken);
       expect(args).not.toContain('--build-arg');
-      expect(readFileSync(path.join(directory, 'normalized'), 'utf8')).toMatch(/ENTRYPOINT \[\]\nCMD \["node","a.js","serve"\]/);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 });

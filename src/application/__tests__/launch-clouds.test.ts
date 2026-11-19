@@ -57,15 +57,11 @@ describe('hv_launch on AWS and Azure', () => {
     expect(connectAzure).not.toHaveBeenCalled(); expect(connectAws).not.toHaveBeenCalled();
   });
 
-  it('admits distinct AWS web commands and proceeds to the ordinary access check', async () => {
-    resolveAwsEngineContext.mockResolvedValue({ blocked: 'no access' });
-    connectAws.mockResolvedValueOnce({ status: 'needs_approval', accountId: '123456789012', changes: [] });
-    const dev = environment('aws', { deploy: { strategy: 'branch' }, services: {
+  it('refuses different AWS web commands before access setup', async () => {
+    await expect(launch('aws', 'dev', { deploy: { strategy: 'branch' }, services: {
       api: { workloadKind: 'web', startCommand: 'node api.js' }, admin: { workloadKind: 'web', startCommand: 'node admin.js' },
-    } });
-    await expect(launch('aws', 'dev', {}, { spec: { gitRemoteUrl: 'https://github.com/fixture/demo.git', environments: { dev } } }))
-      .resolves.toMatchObject({ status: 'needs_access', accessId: 'aws-setup' });
-    expect(connectAws).toHaveBeenCalled();
+    } })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/different web start commands/) });
+    expect(connectAws).not.toHaveBeenCalled();
   });
 
   it('connects Azure through its own sign-in and stops at each choice the person makes', async () => {
