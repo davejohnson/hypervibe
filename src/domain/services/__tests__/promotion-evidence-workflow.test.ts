@@ -682,7 +682,7 @@ describe('generated managed-CI promotion evidence gate', () => {
     {},
   ])('fails closed on an unverified source branch reference %#', async (branchRef) => {
     const gate = await runPromotionGate({ runs: [sourceRun()], artifacts: [sourceArtifact()], branchRef });
-    await expect(gate.result).rejects.toThrow('Promotion source branch');
+    await expect(gate.result).rejects.toThrow('release source branch');
     expect(gate.core.setOutput).not.toHaveBeenCalled();
   });
 
@@ -694,9 +694,7 @@ describe('generated managed-CI promotion evidence gate', () => {
     });
     await expect(gate.result).resolves.toBeUndefined();
     expect(gate.getRef).toHaveBeenCalledWith({ owner: 'acme', repo: 'promoted-app', ref: 'heads/main' });
-    expect(gate.compareCommitsWithBasehead).toHaveBeenCalledWith({
-      owner: 'acme', repo: 'promoted-app', basehead: TRUSTED_HEAD_SHA + '...' + TRUSTED_HEAD_SHA, per_page: 1,
-    });
+    expect(gate.compareCommitsWithBasehead).not.toHaveBeenCalled();
   });
 
   it('skips an untrusted newer artifact and selects the trusted release for the same deployed SHA', async () => {
@@ -744,10 +742,9 @@ describe('generated managed-CI promotion evidence gate', () => {
     delete target.programFingerprint;
     delete target.deploymentContractFingerprint;
     const migration = { includeStep: false };
-    // Accepted input hash after the first discovery fix; keep its literal
-    // promotion revision independent of runtime constants.
+    // Hold the reviewed server contract fixed while comparing promotion revisions.
     const previousHash = (inputTarget: BranchDeployTarget) => canonicalJsonSha256({
-      version: 1, rendererRevision: 7,
+      version: 1, rendererRevision: 9,
       ...(inputTarget.promoteFromEnvironment ? { promotionRendererRevision: 1 } : {}),
       provider: 'railway', target: inputTarget, migration,
     });

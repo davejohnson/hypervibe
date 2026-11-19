@@ -60,7 +60,7 @@ export interface AzureEngineInput extends AzurePlacement {
   shared: { registryId: string; registryLoginServer: string; appsEnvironmentId: string };
   /** The project's Key Vault (created at setup). */
   vault: { id: string; uri: string };
-  storage?: Array<{ name: string; container: string }>;
+  storage?: Array<{ name: string; container: string; versioning?: boolean; browserUploads?: boolean }>;
   services?: AzureWebServiceInput[];
   workers?: AzureWorkerInput[];
   jobs?: AzureJobInput[];
@@ -362,7 +362,12 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
       resource: {
         azurerm_storage_account: { files: { name: azureStorageAccountName(input), ...placed, account_kind: 'StorageV2', account_tier: 'Standard', account_replication_type: 'LRS',
           https_traffic_only_enabled: true, min_tls_version: 'TLS1_2', allow_nested_items_to_be_public: false, shared_access_key_enabled: false,
-          default_to_oauth_authentication: true, cross_tenant_replication_enabled: false } },
+          default_to_oauth_authentication: true, cross_tenant_replication_enabled: false,
+          ...(buckets[0]!.versioning || buckets[0]!.browserUploads ? { blob_properties: [{
+            ...(buckets[0]!.versioning ? { delete_retention_policy: [{ days: 30 }] } : {}),
+            ...(buckets[0]!.browserUploads ? { cors_rule: [{ allowed_methods: ['PUT', 'POST', 'GET', 'HEAD'], allowed_origins: ['*'],
+              allowed_headers: ['*'], exposed_headers: ['ETag', 'x-ms-request-id'], max_age_in_seconds: 3600 }] } : {}),
+          }] } : {}) } },
         azurerm_storage_container: containers,
       },
       output: { storage_blob_endpoint: { value: '${azurerm_storage_account.files.primary_blob_endpoint}' } },

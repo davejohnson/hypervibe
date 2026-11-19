@@ -6,6 +6,7 @@
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
           MATCH_GIT_BRANCH: @@GIT_BRANCH_JSON@@
           MATCH_APP_IDENTIFIER: ${{ env.HYPERVIBE_BUNDLE_ID }}
+          HYPERVIBE_REQUIRE_PUSH: @@REQUIRE_PUSH@@
           MATCH_TYPE: appstore
           MATCH_READONLY: "true"
           MATCH_KEYCHAIN_NAME: ${{ env.HYPERVIBE_SIGNING_KEYCHAIN }}
@@ -53,6 +54,10 @@
                       continue
                   if data.get("Entitlements", {}).get("get-task-allow") is True:
                       continue
+                  if data.get("ProvisionedDevices") or data.get("ProvisionsAllDevices"):
+                      continue
+                  if os.environ["HYPERVIBE_REQUIRE_PUSH"] == "true" and data.get("Entitlements", {}).get("aps-environment") != "production":
+                      continue
                   expires = data.get("ExpirationDate")
                   if not isinstance(expires, datetime.datetime):
                       continue
@@ -63,7 +68,9 @@
                   candidates.append((expires, data, profile))
 
           if not candidates:
-              raise SystemExit("Match did not install a non-expired App Store profile for " + bundle_id)
+              command = f"fastlane match appstore --app_identifier {bundle_id} --force --git_branch={os.environ['MATCH_GIT_BRANCH']}"
+              raise SystemExit(f"No current App Store profile covers {bundle_id} and its required signing entitlements. "
+                               f"With write access to the signing repository, run {command}. Then retry the release.")
           _, profile, profile_path = max(candidates, key=lambda candidate: candidate[0])
           values = {
               "HYPERVIBE_PROVISIONING_PROFILE_NAME": profile["Name"],

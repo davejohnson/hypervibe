@@ -69,6 +69,18 @@ environment variables, extra client options, comments and unrelated settings
 remain intact. Skills installed with `--skill-only` can be upgraded the same
 way without touching MCP.
 
+When a running server reports a newer version, reconnecting the installer's exact
+pin starts the same release. Run the upgrade command for the agent first, then
+restart the agent and check the running version in a tool result. If another
+installation manages MCP, update the server through that installation. An MCP
+command using `@latest` can pick up the new version when it reconnects.
+
+A stale server continues to serve reads and rollback previews with a warning.
+With `confirm=true`, `hv_rollback` can restore the previous verified release
+or the verified release named by `toSha`. The usual release evidence and
+authorization checks still apply. Other confirmation-gated
+actions, including apply and launch, require the updated server.
+
 Foreign servers, changed launch commands, disabled entries, edited skills,
 symbolic-link skill targets, malformed configuration and duplicate JSON keys
 stop setup. A matching command without an ownership receipt does not authorize

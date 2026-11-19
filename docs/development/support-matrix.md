@@ -19,6 +19,12 @@ secrets and their rotation, backups and tested restores, CI, promotion and
 rollback, domains, and the common outside services an app needs (Stripe,
 SendGrid, Cloudflare, GitHub, App Store Connect).
 
+SendGrid Email Logs has a dated read-only receipt for one account search and
+one exact-message timeline. Environment attribution and other account scopes
+remain unverified. The domain, sender and webhook operations have separate
+entries in `hv_inspect({})`; none has a live mutation receipt in this matrix.
+[Read the bounded October 15 receipt](../../test/provider-contracts/sendgrid-email-logs.md#bounded-live-evidence).
+
 Railway is frozen. It keeps working for existing apps and receives no new
 capabilities. Nothing new may depend on it, and it is not listed below.
 
@@ -41,12 +47,12 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Production-shaped environments | yes: dedicated database, deletion protection; new databases start with 14 daily backups and 7 days point-in-time recovery; existing backup policy is preserved | blocked (#625) | blocked (#625) |
 | Database size (`database.size`), deletion protection | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
-| File versioning (30 days), browser uploads straight to storage | yes | blocked (#664) | blocked (#664) |
+| File versioning (30 days), browser uploads straight to storage | yes | S3 versioning, 30-day noncurrent expiry and signed uploads | Blob soft delete (30 days) and SAS uploads. All containers in an environment share these account settings. |
 | Always-on web service (`alwaysOn`) | yes | blocked (#625) | blocked (#625) |
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |
-| Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
-| Buying a domain | blocked (#627) | blocked (#627) | blocked (#627) |
+| Custom domains | Primary `domain` plus `domains: [{ domain, dns }]` on the same public service. Each hostname selects a DNS-only zone and connection. | blocked (#606) | blocked (#606) |
+| Buying a domain | reviewed Cloudflare purchase followed by Cloudflare DNS and Cloud Run attachment; offline coverage (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
 | Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
@@ -65,6 +71,10 @@ normal-CI transport and public-command checks, but have no live validation yet.
 They use exact state-derived workload identities; worker/job-only health does not
 require an HTTP endpoint. See [engine diagnostics](../engine-diagnostics.md) for
 native coverage, log windows, pagination bounds and execution-history limits.
+For AWS and Azure, `hv_status` shows current workload activity when exact service
+counts are available. Scaling a service to zero is distinct from a missing or
+unreadable workload. Worker queue depth, next wake and database pause history
+still need coverage.
 Build-log and deployment-history listing remain unavailable on these engines.
 GCP and Railway retain their existing observation paths and evidence status.
 

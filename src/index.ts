@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { HYPERVIBE_VERSION } from './version.js';
+import { redactSensitiveString } from './utils/redact-sensitive-string.js';
+
 import { dispatchEntrypoint } from './entrypoint.js';
 import { runInstall } from './interfaces/cli/install.js';
 
@@ -15,6 +18,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('Fatal error:', error);
+  console.error(`Hypervibe ${HYPERVIBE_VERSION} fatal error:`, error instanceof Error ? redactSensitiveString(error.message) : 'Unexpected error');
   process.exit(1);
 });

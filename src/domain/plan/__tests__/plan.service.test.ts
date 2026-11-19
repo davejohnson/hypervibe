@@ -1073,16 +1073,16 @@ describe('PlanService.plan', () => {
     });
   });
 
-  it('does not allow tombstones for environment keys owned by declared infrastructure', async () => {
+  it.each([true, false])('does not allow tombstones for environment keys owned by declared infrastructure, service scoped=%s', async serviceScoped => {
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
       environments: {
         staging: {
           hosting: { provider: 'railway' },
-          services: { web: {} },
+          services: { web: serviceScoped ? { removeEnvVars: ['DATABASE_URL'] } : {} },
           database: { provider: 'railway' },
-          removeEnvVars: ['DATABASE_URL'],
+          ...(!serviceScoped ? { removeEnvVars: ['DATABASE_URL'] } : {}),
         },
       },
     });

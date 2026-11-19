@@ -198,7 +198,7 @@ describe('connection guidance', () => {
     expect(new URL(setup.recommendedSetupUrl!).searchParams.get('description')).toBe('Hypervibe CI deploys for davejohnson/livetrainer');
     expect(new URL(setup.recommendedSetupUrl!).searchParams.get('scopes')).toBe('repo,workflow,read:packages');
     expect(setup.credentialExample).toBe(
-      'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"NODE_AUTH_TOKEN"}'
+      'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}'
     );
   });
 

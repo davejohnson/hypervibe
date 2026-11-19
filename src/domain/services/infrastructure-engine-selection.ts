@@ -25,9 +25,12 @@ const present = (value: unknown): boolean => value !== undefined && value !== nu
  */
 export function commonEngineProblems(environment: EnvironmentSpec): string[] {
   const problems: string[] = [];
+  if (Object.values(environment.services).some(service => service.removeEnvVars?.length)) {
+    problems.push('This cloud does not support confirmed service-specific variable retirement yet.');
+  }
   const unsupported: Array<[string, unknown]> = [
     ['domainRecreateRevision', environment.domainRecreateRevision],
-    ['domainRegistration', environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
+    ['domainRegistration', environment.hosting.provider === 'cloudrun' ? undefined : environment.domainRegistration], ['webhooks', environment.webhooks], ['ios', environment.ios],
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
     ['email', environment.email?.enabled ? environment.email : undefined],
     ['deploy.trigger="native"', environment.deploy?.trigger === 'native' ? environment.deploy : undefined],
@@ -65,11 +68,19 @@ function googleOnlyProblems(environment: EnvironmentSpec): string[] {
   }
   if (environment.database?.size) problems.push(`database.size is not yet supported on ${cloud}.`);
   if (environment.database?.deletionProtection !== undefined) problems.push(`database.deletionProtection is not yet supported on ${cloud}.`);
-  for (const [name, storage] of Object.entries(environment.storage ?? {})) {
-    if (storage.versioning) problems.push(`Storage ${name}: versioning is not yet supported on ${cloud}.`);
-    if (storage.browserUploads) problems.push(`Storage ${name}: browserUploads is not yet supported on ${cloud}.`);
-  }
   return problems;
+}
+
+/** Use the account that owns the declared primary Cloudflare zone. */
+export function gcpRegistrarSpec(spec: EnvironmentSpec): EnvironmentSpec | string {
+  const registration = spec.domainRegistration;
+  const dns = spec.dns;
+  if (spec.hosting.provider !== 'cloudrun' || !registration?.register || !spec.domain || dns?.provider !== 'cloudflare'
+    || dns.zone.name !== spec.domain.trim().toLowerCase().replace(/\.$/, '')
+    || registration.accountId && registration.accountId !== dns.zone.accountId) {
+    return 'Cloud Run domainRegistration needs the primary domain’s Cloudflare DNS zone and the same account for registration and DNS.';
+  }
+  return { ...spec, domainRegistration: { ...registration, accountId: dns.zone.accountId } };
 }
 
 /** Unsupported desired state must block planning instead of falling back to another engine. */
@@ -81,10 +92,14 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   const problems: string[] = [];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   problems.push(...commonEngineProblems(environment));
+  if (environment.domainRegistration?.register) {
+    const registrar = gcpRegistrarSpec(environment);
+    if (typeof registrar === 'string') problems.push(registrar);
+  }
   // Cloud Run cannot switch traffic to another environment yet; AWS and Azure can.
   if (present(environment.domainTarget)) problems.push('domainTarget is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.');
   if (environment.migrations?.mode === 'releaseCommand' && !environment.migrations.command?.trim()) problems.push('migrations.mode="releaseCommand" needs a command.');
-  if (environment.domain) {
+  if (environment.domain || environment.domains?.length) {
     if (environment.domainProxy) problems.push('domainProxy must be off: Google issues the certificate and needs DNS-only records.');
     if (domainServiceFor(environment) === undefined) problems.push('A custom domain needs exactly one public web service to point at.');
   }
@@ -125,3 +140,10 @@ export function domainServiceFor(environment: EnvironmentSpec): string | undefin
   return candidates.length === 1 ? candidates[0] : undefined;
 }
 
+
+
+/** Preserve the primary hostname used by existing specs and DNS integrations. */
+export function environmentDomains(environment: EnvironmentSpec) {
+  const primary = environment.domain?.trim().toLowerCase().replace(/\.$/, '');
+  return [...(primary ? [{ domain: primary, dns: environment.dns }] : []), ...(environment.domains ?? [])];
+}

@@ -145,9 +145,16 @@ Plan DNS through `hv_plan`, apply its saved stage, and plan again to continue th
 consumer workflow. Hypervibe manages OpenTofu privately; no separate installation
 or direct record-writing workaround is needed.
 
-Use `environment.domain` for a hosted app or email domain; DNS selection needs
-it. SendGrid records wait for an observed domain authorization. Existing
+Use `environment.domain` and `environment.dns` for the primary hostname.
+On Cloud Run, put additional hostnames on the same public service with
+`environment.domains: [{ domain, dns }]`. Supply each hostname’s exact DNS
+zone and connection scope. Each mapping and certificate has its own readiness
+check. SendGrid records wait for an observed domain authorization. Existing
 records require explicit exact-ID adoption and preservation of unrelated values.
+
+For SendGrid, read the capability evidence in `hv_inspect({})`. The October 15,
+2026 Email Logs check covered one account search and one message timeline.
+Sender, domain and webhook writes remain live-unverified.
 
 Defaults are public DNS, required HTTPS, proxy off and no wildcards; preserve
 existing DNSSEC and CAA policy. Required security settings block when evidence

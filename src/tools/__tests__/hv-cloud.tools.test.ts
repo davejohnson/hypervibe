@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'os';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
@@ -85,10 +86,73 @@ function createGitTransportFixture() {
   const pending = () => context.secretStore.decryptObject<Record<string, unknown>>(
     stored()!.credentialsEncrypted
   );
-  return { git, run, requests, fetchImpl, stored, pending };
+  return { directory, git, run, requests, fetchImpl, stored, pending };
 }
 
 describe('hv_cloud_pair', () => {
+  it.each([
+    {finalState: 'pending', previous: 'absent'}, {finalState: 'verified', previous: 'absent'},
+    {finalState: 'pending', previous: 'expired'}, {finalState: 'verified', previous: 'expired'},
+  ])('preserves the winning $finalState grant when two starts race from $previous', async ({finalState, previous}) => {
+    const account = 'northstar/launchpad';
+    const issued = (letter: string, userCode: string) => ({deviceCode: letter.repeat(43), repository: account,
+      expiresAt: '2026-08-27T20:10:00.000Z', intervalSeconds: 2, userCode, verificationUrl: 'https://hypervibe.dev/pair?code=' + userCode});
+    const first = issued('A', '2345-6789'), winner = issued('B', '3456-789A');
+    let release!: (value: typeof first) => void;
+    const delayed = new Promise<typeof first>(resolve => {release = resolve;});
+    const start = vi.fn<HypervibeCloudPairingClient['start']>().mockReturnValueOnce(delayed).mockResolvedValueOnce(winner);
+    const token = 'hvc_12345678-1234-1234-1234-123456789abc_' + 'C'.repeat(43);
+    const exchange = vi.fn<HypervibeCloudPairingClient['exchange']>().mockResolvedValue({
+      applied: 1, skipped: 0, status: 'completed', project: {id: 'p', name: 'Launchpad'},
+      credentials: [{environment: {id: 's', key: 'staging', name: 'Staging'}, token}],
+    });
+    const {registry, context} = createFixture({start, exchange});
+    if (previous === 'expired') {
+      const expired = {...issued('Z', '6789-ABCD'), version: 1, baseUrl: 'https://hypervibe.dev',
+        status: 'pending', expiresAt: '2026-08-27T19:00:00.000Z'};
+      context.repos.connections.create({provider: HYPERVIBE_CLOUD_CONNECTION_PROVIDER, scope: account,
+        credentialsEncrypted: context.secretStore.encryptObject(expired)});
+    }
+    const losing = registry.execute('hv_cloud_pair', {});
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    expect(await registry.execute('hv_cloud_pair', {})).toMatchObject({ok: true, data: {userCode: winner.userCode}});
+    if (finalState === 'verified') expect(await registry.execute('hv_cloud_pair', {action: 'status'})).toMatchObject({ok: true, data: {status: 'verified'}});
+    const before = context.repos.connections.findByProviderAndScope(HYPERVIBE_CLOUD_CONNECTION_PROVIDER, account);
+    release(first);
+    const returned = await losing;
+    expect(context.repos.connections.findByProviderAndScope(HYPERVIBE_CLOUD_CONNECTION_PROVIDER, account)).toEqual(before);
+    expect(returned).toMatchObject({ok: true, data: {status: finalState, ...(finalState === 'pending' ? {userCode: winner.userCode} : {})}});
+    expect(JSON.stringify(returned)).not.toContain(first.userCode);
+    for (const secret of [first.deviceCode, winner.deviceCode, token]) expect(JSON.stringify(returned)).not.toContain(secret);
+  });
+
+  it.each(['unborn', 'missing object', 'broken ref'])('classifies the local Git revision when HEAD is %s', async kind => {
+    const fixture = createGitTransportFixture();
+    fixture.git('checkout', '--quiet', '--orphan', 'new-history');
+    if (kind !== 'unborn') writeFileSync(path.join(fixture.directory, '.git/refs/heads/new-history'),
+      kind === 'missing object' ? '1'.repeat(40) + '\n' : 'broken-ref\n');
+    const response = await fixture.run();
+    expect(response).toMatchObject({ok: true, data: {localSource: {state: kind === 'unborn' ? 'no-commit' : 'unavailable'}}});
+    expect(fixture.pending().localSource).not.toHaveProperty('revision');
+  });
+
+  it('keeps a bounded local hint for the exact committed bytes without sending the spec', async () => {
+    const fixture = createGitTransportFixture();
+    const content = '{"private":"example-only"}';
+    mkdirSync(path.join(fixture.directory, '.hypervibe'));
+    const file = path.join(fixture.directory, '.hypervibe/spec.json');
+    writeFileSync(file, content);
+    fixture.git('add', '.hypervibe/spec.json');
+    fixture.git('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-qm', 'declared spec');
+    const revision = fixture.git('rev-parse', 'HEAD');
+    writeFileSync(file, 'uncommitted-private-example');
+    const result = await fixture.run();
+    expect(result).toMatchObject({ ok: true, data: { localSource: { version: 1, repository: 'northstar/launchpad',
+      revision, specSha256: createHash('sha256').update(content).digest('hex'), workingTree: 'dirty', publication: 'unverified' } } });
+    expect(JSON.stringify(fixture.requests)).not.toMatch(/example-only|uncommitted-private|specSha256/);
+    expect(fixture.pending().localSource).toEqual((result as any).data.localSource);
+  });
+
   it('infers the symbolic branch from the same client workspace as the repository through the real HTTP client', async () => {
     const fixture = createGitTransportFixture();
 

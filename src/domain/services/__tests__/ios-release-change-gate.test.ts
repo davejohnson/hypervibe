@@ -46,15 +46,18 @@ function releaseAttemptFixture(environmentName = 'staging', branch = 'main') {
   const workflow = generated(environmentName, '.', ['mobile', 'packages/shared'], undefined, branch);
   const expected = JSON.parse(workflow.jobs.eligibility.env.HYPERVIBE_EXPECTED_SERVER_RELEASE);
   const run = {id: 55, status: 'completed', conclusion: 'success', path: expected.workflowPath,
-    head_sha: DISPATCH_REF_SHA, run_attempt: 2, run_started_at: '2026-10-22T11:00:00Z',
-    repository: {full_name: 'owner/app'}, head_repository: {full_name: 'owner/app'}};
+    head_branch: branch, event: 'workflow_dispatch', head_sha: DISPATCH_REF_SHA, run_attempt: 2, run_started_at: '2026-10-22T11:00:00Z',
+    repository: {id: 123, full_name: 'owner/app'}, head_repository: {id: 123, full_name: 'owner/app'}};
   const artifact = {id: 90, expired: false, name: expected.artifactPrefix + SHA,
     created_at: '2026-10-22T11:02:00Z', updated_at: '2026-10-22T11:02:00Z',
-    workflow_run: {id: 55, head_sha: DISPATCH_REF_SHA}};
+    workflow_run: {id: 55, head_sha: DISPATCH_REF_SHA, head_branch: branch, repository_id: 123, head_repository_id: 123}};
   const job = {id: 70, run_id: 55, run_attempt: 2, head_sha: DISPATCH_REF_SHA, name: 'deploy', status: 'completed', conclusion: 'success',
     started_at: '2026-10-22T11:01:00Z', completed_at: '2026-10-22T11:03:00Z'};
   const jobs = {total_count: 1, jobs: [job]};
-  const github = {rest: {actions: {
+  const github = {rest: {git: {getRef: vi.fn(async () => ({data: {ref: 'refs/heads/' + branch, object: {type: 'commit', sha: DISPATCH_REF_SHA}}}))},
+    repos: {compareCommitsWithBasehead: vi.fn(async ({basehead}: {basehead: string}) => ({data: {
+      status: 'ahead', base_commit: {sha: basehead.split('...')[0]}, merge_base_commit: {sha: basehead.split('...')[0]},
+    }}))}, actions: {
     getWorkflowRun: vi.fn(async () => ({data: run})),
     listWorkflowRunArtifacts: vi.fn(async () => ({data: {total_count: 1, artifacts: [artifact]}})),
     listJobsForWorkflowRunAttempt: vi.fn(async () => ({data: jobs})),
@@ -525,4 +528,18 @@ it.each(['./mobile', 'mobile/', './mobile/', 'mobile\\native'])('never skips leg
   const result = relevance('staging', {workingDirectory, files: [{filename: 'mobile/View.swift', status: 'modified'}]});
   await result.result;
   expect(result.outputs.should_release).toBe('true');
+});
+
+it.each(['diverged', 'unknown ref', 'incomplete comparison'])('keeps signing unavailable when selected source trust is %s', async failure => {
+  const f = releaseAttemptFixture();
+  if (failure === 'unknown ref') f.github.rest.git.getRef.mockResolvedValue({data: {ref: 'refs/tags/main', object: {type: 'commit', sha: DISPATCH_REF_SHA}}});
+  else f.github.rest.repos.compareCommitsWithBasehead.mockResolvedValue({data: {status: failure === 'diverged' ? 'diverged' : 'ahead',
+    base_commit: {sha: SHA}, merge_base_commit: {sha: ''}}});
+  const attempt = f.execute('workflow_dispatch', true);
+  await expect(attempt.result).rejects.toThrow(/source|branch/);
+  expect(attempt.outputs).toEqual({});
+  expect(f.workflow.jobs.prepare.needs).toBe('eligibility');
+  expect(f.workflow.jobs.build.needs).toBe('prepare');
+  expect(f.workflow.jobs.prepare.outputs.sha).toBe('${{ needs.eligibility.outputs.sha }}');
+  expect(f.workflow.jobs.build.steps.find((s: any) => s.uses?.startsWith('actions/checkout@')).with.ref).toBe('${{ needs.prepare.outputs.sha }}');
 });

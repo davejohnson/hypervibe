@@ -11,11 +11,11 @@ import { extractGitHubScript, installReleaseEvidenceValidator, releaseEvidenceVa
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })));
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-it('preserves the accepted server validator bytes when sharing credential activation validation', () => {
-  // Captured at 0c74fd26, before extracting the validator for mobile consumers.
+it('pins the reviewed server validator for the version-aware activation producer', () => {
+  // Reviewed with the versioned-activation migration at server renderer revision 8.
   // This migration must not silently change locked server-only workflows.
   expect(createHash('sha256').update(releaseEvidenceValidationRuntime().trim() + '\n').digest('hex'))
-    .toBe('09cd0133c555baff8384ddc759c0de94671a0d0c3397d04a2a85afff8272cba9');
+    .toBe('d610f35e8cd7d4fc90bb876cc9db305cf05f71835e3f34f854b0074003f96349');
 });
 it('joins accepted credential operations only to exact native deployment output in the executed producer', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'hv-credential-artifact-')); dirs.push(dir);
@@ -43,6 +43,58 @@ it('joins accepted credential operations only to exact native deployment output 
   }
   env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS = JSON.stringify([{ serviceId: 'unreviewed', deploymentIds: ['deployment-new'] }]);
   await expect(execute()).rejects.toThrow(/credential/i);
-  env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS = '[]'; await execute();
+  env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS = '[]';
+  await expect(execute()).rejects.toThrow(/configuration version/i);
+  env.HYPERVIBE_CREDENTIAL_OPERATIONS = '{}'; await execute();
   expect(JSON.parse(output).credentialActivation.operations).toEqual([]);
+});
+
+it.each(['staging', 'production'] as const)('checks %s version support before deploying and writes evidence from the deployment output', async kind => {
+  const resources = ['web', 'worker'].map((logicalName, i) => ({
+    logicalName, providerResourceId: 'service-' + i, providerResourceType: 'service' as const,
+    workloadKind: i === 0 ? 'web' as const : 'worker' as const,
+  }));
+  const target = { kind, environmentName: kind, branch: 'main', providerProjectId: 'project', providerEnvironmentId: 'environment',
+    providerServiceIds: resources.map(r => r.providerResourceId), serviceNames: resources.map(r => r.logicalName), autoDeployOnPush: false,
+    programFingerprint: 'c'.repeat(64), releaseTarget: managedCiReleaseTarget({ provider: 'railway', environmentName: kind,
+      scope: { providerProjectId: 'project', providerEnvironmentId: 'environment' }, resources }) };
+  const { content } = buildBranchDeployWorkflow('railway', target, { includeStep: false });
+  const dir = mkdtempSync(join(tmpdir(), 'activation-producer-')); dirs.push(dir);
+  const validator = installReleaseEvidenceValidator(content, dir);
+  const sha = 'a'.repeat(40);
+  const inputs = { credential_operations: '' };
+  const outputs: Record<string, string> = {};
+  const core = { info() {}, setOutput(key: string, value: string) { outputs[key] = value; } };
+  const env: Record<string, string> = { GITHUB_SHA: sha, RAILWAY_API_TOKEN: 'test', RAILWAY_ENVIRONMENT_ID: 'environment',
+    RAILWAY_SERVICE_IDS: target.providerServiceIds.join(','), IMAGE_REGISTRY_USERNAME: 'test', IMAGE_REGISTRY_TOKEN: 'test', IMAGE_URI: 'registry/image', DEPLOY_SHA: sha,
+    HYPERVIBE_RELEASE_VALIDATOR_PATH: validator.validatorPath, HYPERVIBE_RELEASE_VALIDATOR_SHA256: validator.validatorSha256,
+    HYPERVIBE_RELEASE_SHA: sha, HYPERVIBE_RELEASE_PROVIDER: 'railway', HYPERVIBE_RELEASE_ENVIRONMENT: kind, HYPERVIBE_RELEASE_SERVICES: JSON.stringify(target.serviceNames),
+    HYPERVIBE_RELEASE_TARGET_SCOPE: JSON.stringify(target.releaseTarget.scope), HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(target.releaseTarget.resources),
+    HYPERVIBE_RELEASE_BINDINGS_FINGERPRINT: target.releaseTarget.bindingsFingerprint, HYPERVIBE_RELEASE_PROGRAM_FINGERPRINT: target.programFingerprint,
+    HYPERVIBE_RELEASE_DEPLOYMENT_CONTRACT_FINGERPRINT: 'b'.repeat(64), HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE: 'false', GITHUB_REPOSITORY: 'owner/repo' };
+  const calls: string[] = [];
+  const fetchRailway = async (_: string, request: { body: string }) => {
+    const { query, variables } = JSON.parse(request.body);
+    const op = query.split(' ')[1].split('(')[0]; calls.push(op);
+    const responses: Record<string, unknown> = { ServiceEnvironmentInstance: { service: { serviceInstances: { edges: [{ node: { environmentId: 'environment' } }] } } },
+      UpdateServiceImage: { serviceInstanceUpdate: true }, DeployServiceImage: { serviceInstanceDeployV2: 'deployment-' + variables.serviceId },
+      DeploymentStatus: { deployment: { id: variables.id, status: 'SUCCESS' } } };
+    if (!responses[op]) throw new Error('Unexpected Railway operation ' + op);
+    return { ok: true, text: async () => JSON.stringify({ data: responses[op] }) };
+  };
+  const execute = async (operations: Record<string, unknown>) => {
+    inputs.credential_operations = JSON.stringify(operations);
+    await new AsyncFunction('context', 'process', 'core', extractGitHubScript(content, 'Resolve deploy SHA'))({ payload: { inputs } }, { env }, core);
+    await new AsyncFunction('fetch', 'process', 'core', extractGitHubScript(content, 'Deploy image to Railway'))(fetchRailway, { env }, core);
+    env.HYPERVIBE_CREDENTIAL_OPERATIONS = inputs.credential_operations;
+    env.HYPERVIBE_CREDENTIAL_DEPLOYMENTS = outputs.credential_deployments;
+    let evidence = '';
+    await new AsyncFunction('require','process','core',extractGitHubScript(content,'Write server release evidence'))(
+      releaseEvidenceValidatorRequire(validator, { writeFileSync: (_, bytes) => { evidence = String(bytes); } }), { env }, core);
+    return JSON.parse(evidence).credentialActivation.operations;
+  };
+  const operations = Object.fromEntries(resources.map(r => [r.logicalName, { serviceId: r.providerResourceId, operationId: 'accepted' }]));
+  await expect(execute({ ...operations, worker: { ...operations.worker, configurationVersion: 42 } })).rejects.toThrow(/configuration version/i);
+  expect(calls).toEqual([]);
+  expect(await execute(operations)).toEqual(resources.map(r => ({ service: r.logicalName, ...operations[r.logicalName], deploymentIds: ['deployment-' + r.providerResourceId] })));
 });

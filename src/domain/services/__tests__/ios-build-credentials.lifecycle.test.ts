@@ -1,3 +1,4 @@
+import { AuditRepository } from '../../../adapters/db/repositories/audit.repository.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -84,7 +85,7 @@ function fixture(options: { source?: string; accepted?: boolean } = { source: 'p
   });
   const publish = vi.spyOn(infrastructure, 'proposeGitHubInfrastructureFiles').mockResolvedValue({ success: false, status: 'pending', message: 'Review prepared', data: { pullRequestNumber: 1 } });
   const plan = (name = 'staging') => planGitHubActionsDeploy({ project, environmentName: name, environmentSpec: spec.environments[name], environment: environments.findByProjectAndName(project.id, name) });
-  const apply = (action: NonNullable<Awaited<ReturnType<typeof plan>>['action']>, name = 'staging') => applyGitHubActionsDeploy({ project, environmentName: name, environmentSpec: spec.environments[name], action });
+  const apply = (action: NonNullable<Awaited<ReturnType<typeof plan>>['action']>, name = 'staging') => applyGitHubActionsDeploy({ project, environmentName: name, environmentSpec: spec.environments[name], action }, new AuditRepository());
   return { project, spec, state, requested, destinationNames, destinationRead, workflowRead, writes, publish, plan, apply };
 }
 

@@ -1,3 +1,5 @@
+import { sendGridCapabilityEvidence } from './sendgrid-capability-evidence.js';
+import { localConnectionRoleInputs } from '../../../domain/services/connection-roles.js';
 import { z } from 'zod';
 import { createPublicKey } from 'node:crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -662,12 +664,14 @@ export class SendGridAdapter {
 providerRegistry.register({
   metadata: {
     name: 'sendgrid',
+    maturity: {integration: sendGridCapabilityEvidence},
     displayName: 'SendGrid',
     category: 'email',
     credentialsSchema: SendGridCredentialsSchema,
     setupHelpUrl: 'https://app.sendgrid.com/settings/api_keys',
     credentials: {
       defaultScalarKey: 'apiKey',
+      localEnvInputs: localConnectionRoleInputs('sendgrid'),
     },
   },
   factory: (credentials) => {

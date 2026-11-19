@@ -1,3 +1,4 @@
+import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { prepareGitHubCredentialRollout, observeGitHubCredentialRollout } from '../adapters/providers/github/github-credential-activation.js';
 import { GitHubRepositoryVariablesAdapter } from '../adapters/providers/github/github-repository-variables.adapter.js';
 import {
@@ -47,7 +48,7 @@ devOpsProviderRegistry.registerCiProvider({
       return { actions: result.action ? [result.action] : [], warnings: result.warnings, ...(result.error ? { error: result.error } : {}) };
     },
     async applyDeploy(params) {
-      return applyGitHubActionsDeploy(params);
+      return applyGitHubActionsDeploy(params, new AuditRepository());
     },
     async planAppliedSpecHash(params) {
       const result = await planGitHubActionsAppliedSpecHash(params);

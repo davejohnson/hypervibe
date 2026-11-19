@@ -1,3 +1,4 @@
+import { serviceRuntimeEnv } from '../services/runtime-env-policy.js';
 import type { EnvironmentSpec, ProjectRuntimeSpec, ServiceSpec } from '../spec/spec.schema.js';
 import { hasPendingDatabaseInitialization } from './database-initialization.contract.js';
 import { createHash } from 'crypto';
@@ -191,6 +192,7 @@ function certificateStatusIsReady(status?: string): boolean {
  *   appends provider-precondition items separately.
  */
 export function diffEnvironment(input: {
+  serviceScopedRemovalsOnly?: boolean;
   spec: EnvironmentSpec;
   envName: string;
   observed: ObservedState | null;
@@ -531,7 +533,7 @@ export function diffEnvironment(input: {
         ...buildDatabaseAliasEnvVars(managedDatabaseEnvVars ?? {}, serviceSpec.databaseEnvAliases),
         ...(managedCacheEnvVars ?? {}),
         ...(managedQueueEnvVars ?? {}),
-        ...spec.envVars,
+        ...serviceRuntimeEnv(spec.envVars, serviceSpec.removeEnvVars),
       };
       const diff = diffServiceConfig(serviceSpec, live, desiredServiceEnvVars, {
         presenceOnlyEnvVars: presenceOnlyManagedEnvVars,
@@ -688,11 +690,17 @@ export function diffEnvironment(input: {
   // Variable omission is preserve-only. Deletion is modeled separately from
   // service configuration so it is visible, confirm-gated, and can never be
   // inferred from a partial desired map.
-  if (!providerChanged && (spec.removeEnvVars?.length ?? 0) > 0) {
-    const retiredKeys = [...new Set(spec.removeEnvVars ?? [])].sort();
-    for (const name of Object.keys(spec.services)) {
-      const mainAction = actions.find((action) => action.id === `service:${name}`);
+  if (!providerChanged) {
+    const sharedKeys = input.serviceScopedRemovalsOnly ? [] : spec.removeEnvVars ?? [];
+    for (const [name, service] of Object.entries(spec.services)) {
       const live = observedServices.get(name);
+      const binding = localServiceBindings[name]?.serviceId;
+      const serviceKeys = service.removeEnvVars ?? [];
+      const knownService = observed && serviceObservationKnown && live && binding && live.externalId === binding;
+      if (serviceKeys.length && !knownService) warnings.push(`Cannot verify retired variables on "${name}" without an exact observed service binding.`);
+      const retiredKeys = [...new Set([...sharedKeys, ...(knownService ? serviceKeys : [])])].sort();
+      if (!retiredKeys.length) continue;
+      const mainAction = actions.find((action) => action.id === `service:${name}`);
       const keys = observed
         ? retiredKeys.filter((key) => live?.envVarKeys.includes(key))
         : Boolean(localServiceBindings[name]?.serviceId)

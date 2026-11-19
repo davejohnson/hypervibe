@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { runInstall } from '../install.js';
 import { HYPERVIBE_VERSION } from '../../../version.js';
 
@@ -37,7 +39,7 @@ describe.skipIf(process.platform === 'win32')('agent installer subprocess and co
     const outputDirectory = path.join(packageDirectory, 'dist');
     mkdirSync(outputDirectory, { recursive: true });
     writeFileSync(path.join(packageDirectory, 'package.json'), JSON.stringify({ type: 'module', version }));
-    for (const relative of ['index.ts', 'entrypoint.ts', 'version.ts', 'interfaces/cli/install.ts', 'interfaces/cli/io.ts']) {
+    for (const relative of ['index.ts', 'entrypoint.ts', 'version.ts', 'utils/redact-sensitive-string.ts', 'interfaces/cli/install.ts', 'interfaces/cli/io.ts']) {
       const source = readFileSync(new URL(`../../../${relative}`, import.meta.url), 'utf8');
       const outputPath = path.join(outputDirectory, relative.replace(/\.ts$/, '.js'));
       mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -124,6 +126,70 @@ if (client === 'codex' && args[1] === 'list') {
     vi.unstubAllEnvs();
     rmSync(directory, { recursive: true, force: true });
   });
+
+  it('recovers an installer-pinned MCP server only after reinstalling and starting its new command', async () => {
+    installPreviousRelease('opencode');
+    const current = packagedExecutable();
+    const root = fileURLToPath(new URL('../../../../', import.meta.url));
+    const compile = spawnSync(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'),
+      '-p', path.join(root, 'tsconfig.build.json'), '--noCheck', '--declaration', 'false',
+      '--declarationMap', 'false', '--sourceMap', 'false', '--outDir', path.dirname(current),
+    ], { encoding: 'utf8' });
+    expect(compile.status, compile.stderr || compile.stdout).toBe(0);
+    cpSync(path.dirname(current), path.join(directory, 'package-0.0.1/dist'), { recursive: true });
+
+    for (const version of ['0.0.1', HYPERVIBE_VERSION]) {
+      symlinkSync(path.join(root, 'templates'), path.join(directory, `package-${version}/templates`));
+    }
+
+    // Resolve the two local package fixtures the way npx resolves exact pins and
+    // the latest tag. Only npm resolution/metadata and the client are fixtures.
+    const npx = path.join(directory, 'bin/npx');
+    writeFileSync(npx, `#!${process.execPath}
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const latest = ${JSON.stringify(HYPERVIBE_VERSION)};
+const releases = {'@hypervibe/hypervibe@latest': latest, ['@hypervibe/hypervibe@' + latest]: latest, '@hypervibe/hypervibe@0.0.1': '0.0.1'};
+const version = releases[process.argv[3]];
+if (process.argv[2] !== '-y' || !version) process.exit(2);
+globalThis.fetch = async url => {
+  if (String(url) !== 'https://registry.npmjs.org/@hypervibe%2fhypervibe/latest') throw Error('Unexpected request');
+  return Response.json({version: latest});
+};
+const entry = path.join(${JSON.stringify(directory)}, 'package-' + version, 'dist/index.js');
+process.argv.splice(1, 3, entry);
+import(pathToFileURL(entry));
+`, { mode: 0o700 });
+    async function startFromRegistration() {
+      const config = JSON.parse(readFileSync(openCodeConfig('json'), 'utf8'));
+      const [command, ...args] = config.mcp.hypervibe.command;
+      const client = new Client({ name: 'opencode', version: '1.2.0' });
+      const transport = new StdioClientTransport({
+        command, args, cwd: userHome, stderr: 'pipe',
+        env: { PATH: path.dirname(npx), HOME: userHome, HYPERVIBE_DATA_DIR: path.join(directory, 'data') },
+      });
+      let diagnostics = '';
+      transport.stderr?.on('data', chunk => { diagnostics += chunk; });
+      try {
+        await client.connect(transport);
+        return await client.callTool({ name: 'hv_apply', arguments: { planId: 'missing-plan' } });
+      } catch (error) {
+        throw new Error(diagnostics || 'Installed MCP command failed', { cause: error });
+      } finally { await client.close(); }
+    }
+
+    const before = await startFromRegistration();
+    expect(before.structuredContent).toMatchObject({ build: { version: '0.0.1', status: 'stale' }, error: { code: 'STALE_SERVER' } });
+    const reconnected = await startFromRegistration();
+    expect(reconnected.structuredContent).toMatchObject({ build: { version: '0.0.1', status: 'stale' }, error: { code: 'STALE_SERVER' } });
+    const upgrade = 'npx -y @hypervibe/hypervibe@latest install opencode';
+    expect((reconnected.content as { text: string }[])[0].text.split('\n')[0]).toContain(upgrade);
+    const [cmd, ...args] = upgrade.split(' ');
+    const installation = spawnSync(cmd, args, { cwd: userHome, encoding: 'utf8', env: process.env });
+    expect(installation.status, installation.stderr).toBe(0);
+    const after = await startFromRegistration();
+    expect(after.structuredContent).toMatchObject({ build: { version: HYPERVIBE_VERSION, status: 'current' }, error: { code: 'NOT_FOUND' } });
+  }, 60_000);
 
   it.each(['codex'])('checks missing %s skills without writing or invoking a client', async client => {
     expect(await runInstall([client, '--skill-only', '--check'], { io })).toBe(0);

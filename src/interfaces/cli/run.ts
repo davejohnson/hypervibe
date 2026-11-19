@@ -1,7 +1,7 @@
 import { initializeDatabase } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../../application/context.js';
 import { createCommandRegistry, type CommandRegistry } from '../../application/commands.js';
-import type { CommandEnvelope } from '../../application/results.js';
+import { commandError, type CommandEnvelope } from '../../application/results.js';
 import { formatCommandResult } from '../../application/presentation.js';
 import { HYPERVIBE_VERSION } from '../../version.js';
 import { createProcessCliIo, type CliIo } from './io.js';
@@ -30,7 +30,9 @@ export async function runCli(
   try {
     invocation = await parseCliInvocation(registry, argv, io.readStdin);
   } catch (error) {
-    io.writeErr(`Hypervibe CLI error: ${error instanceof Error ? error.message : String(error)}\n`);
+    const result = commandError('VALIDATION', `Hypervibe CLI error: ${error instanceof Error ? error.message : String(error)}`);
+    if (argv.includes('--json')) io.writeOut(renderResult('cli', result, true));
+    else io.writeErr(renderResult('cli', result, false));
     return 2;
   }
 
@@ -67,7 +69,7 @@ export async function runCli(
     io.writeOut(renderResult(invocation.command.id, result, false));
     const confirmed = await io.confirm(result.confirmation.message);
     if (!confirmed) {
-      io.writeErr('Confirmation declined; no confirmed action was executed.\n');
+      io.writeErr(`Hypervibe ${HYPERVIBE_VERSION}: Confirmation declined; no confirmed action was executed.\n`);
       return 1;
     }
     result = await registry.execute(invocation.command.id, {

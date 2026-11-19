@@ -46,8 +46,11 @@ credential; follow the result's actual category.
 
 ## Connect only the required access
 
-Use the selected project's `hv_connections` results and the current plan's
-`connectionSetup` requirements. Existing unverified access needs verification;
+Call `hv_connections` with `project` and `view="requirements"` to see which
+connections the spec needs. Add `environment` to check one environment. The CLI
+equivalent is `hypervibe connections --project <project> --view requirements`.
+The default view lists saved connections and the provider catalog. Use the
+current plan's `connectionSetup` guidance. Existing unverified access needs verification;
 failed or unknown access does not prove a resource is absent. Do not replace a
 connection or restart setup merely because a credential expires locally.
 

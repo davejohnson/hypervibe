@@ -1,6 +1,10 @@
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { buildGcpPreparationConfiguration } from './gcp-setup.backend.js';
 
+import { assertEngineCiIntent } from '../../../../domain/spec/engine-ci.js';
+
+export interface GcpCiReleaseScope { environmentName: string; branch: string; autoDeploy: boolean }
+
 export const CI_RELEASE_ACCOUNT_ID = 'hypervibe-release';
 export const CI_POOL_ID = 'hypervibe-github';
 export const CI_PROVIDER_ID = 'github';
@@ -13,10 +17,11 @@ export const ciWorkloadIdentityProvider = (number: string): string => `projects/
  * executable configuration is checked against the pinned provider in CI.
  */
 export function buildCiReleaseConfiguration(input: {
-  projectId: string; projectNumber: string; repository: string; runtimeServiceAccountEmail: string;
+  projectId: string; projectNumber: string; repository: string; repositoryId: string; releases: GcpCiReleaseScope[]; runtimeServiceAccountEmail: string;
 }): EngineConfiguration {
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(input.projectId)
     || !/^[0-9]+$/.test(input.projectNumber)
+    || !/^[1-9][0-9]*$/.test(input.repositoryId) || !input.releases.length
     || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input.repository)
     || !input.runtimeServiceAccountEmail.endsWith(`@${input.projectId}.iam.gserviceaccount.com`)) {
     throw new Error('CI releases need an exact GCP project, runtime identity, and GitHub repository.');
@@ -28,7 +33,16 @@ export function buildCiReleaseConfiguration(input: {
     resources[`${type}.${key}`] = { actionId: `ci-access:${key}`, kind: 'ci', name };
   };
   const account = ciReleaseIdentity(input.projectId);
-  const principal = `principalSet://iam.googleapis.com/projects/${input.projectNumber}/locations/global/workloadIdentityPools/${CI_POOL_ID}/attribute.repository/${input.repository}`;
+  const scopes = input.releases.map(release => {
+    assertEngineCiIntent({ ...release, repository: input.repository });
+    const ref = `refs/heads/${release.branch}`;
+    const workflow = `${input.repository}/.github/workflows/hypervibe-release-${release.environmentName}.yml@${ref}`;
+    const events = release.autoDeploy ? "(assertion.event_name == 'push' || assertion.event_name == 'workflow_dispatch')" : "assertion.event_name == 'workflow_dispatch'";
+    return `(assertion.environment == '${release.environmentName}' && assertion.ref == '${ref}' && assertion.workflow_ref == '${workflow}' && ${events})`;
+  });
+  const condition = `assertion.repository_id == '${input.repositoryId}' && assertion.repository == '${input.repository}' && (${scopes.join(' || ')})`;
+  if (condition.length > 4096) throw new Error('The exact GitHub workflow restrictions exceed the Google identity provider condition limit.');
+  const principal = `principalSet://iam.googleapis.com/projects/${input.projectNumber}/locations/global/workloadIdentityPools/${CI_POOL_ID}/attribute.repository_id/${input.repositoryId}`;
   const shared = buildGcpPreparationConfiguration({
     gcpProjectId: input.projectId, deployServiceAccountEmail: account,
     runtimeServiceAccountEmail: input.runtimeServiceAccountEmail,
@@ -54,8 +68,8 @@ export function buildCiReleaseConfiguration(input: {
   add('google_iam_workload_identity_pool_provider', 'ci_github', {
     project: input.projectId, workload_identity_pool_id: CI_POOL_ID, workload_identity_pool_provider_id: CI_PROVIDER_ID,
     display_name: 'GitHub Actions', oidc: [{ issuer_uri: 'https://token.actions.githubusercontent.com' }],
-    attribute_mapping: { 'google.subject': 'assertion.sub', 'attribute.repository': 'assertion.repository', 'attribute.ref': 'assertion.ref' },
-    attribute_condition: `assertion.repository == '${input.repository}'`,
+    attribute_mapping: { 'google.subject': 'assertion.sub', 'attribute.repository_id': 'assertion.repository_id' },
+    attribute_condition: condition,
     depends_on: ['google_iam_workload_identity_pool.ci_github'],
   }, `GitHub trust for ${input.repository}`);
   add('google_service_account_iam_member', 'ci_github', {

@@ -84,6 +84,9 @@ describe('hv_logs', () => {
       expect(JSON.stringify(result)).not.toMatch(/recipient@|private reason|synthetic-project-key|synthetic-unrelated-key/);
       const registry = new CommandRegistry();
       registerHvObservabilityTools(registry, createToolContext());
+      const logEvidence = providerRegistry.getMetadata('sendgrid')?.maturity?.integration?.emailLogs?.summary;
+      expect(logEvidence).toContain('2026-10-15');
+      expect(registry.get('hv_logs')?.description).toContain(logEvidence);
       let stdout = '';
       let stderr = '';
       const exitCode = await runCli(['logs', '--project', project.name, '--env', 'staging', '--source', 'sendgrid', '--recipient', 'recipient@example.test', '--limit', '5', '--json'], {

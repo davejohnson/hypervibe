@@ -1,5 +1,6 @@
 import '../../application/providers.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
+import { runCli } from '../../interfaces/cli/run.js';
 import { registerCoreTools } from '../core.tools.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
@@ -186,6 +187,37 @@ it.each([{ publicAccess: 'Disabled' }, { wrongId: true }, { secretDatabase: 'oth
   expect(result.ok).toBe(false); expect(wire.sql).toEqual([]);
   expect(requests.filter(request => !request.url.includes('login.microsoftonline.com')).every(request => request.method === 'GET')).toBe(true);
   expect(JSON.stringify(result)).not.toMatch(/private-/);
+});
+
+it.each([['mcp', 'azure'], ['cli', 'azure'], ['mcp', 'railway'], ['cli', 'railway']])('reports exact retained cloud database and backup evidence through %s on %s without creating a plan', async (transport, hosting) => {
+  const { project, environment, requests } = azureSeed();
+  const ctx = createToolContext();
+  const retainedServer = azureServer.replace('accepted-server', 'retained-server');
+  new SpecStore().replace(project, { version: 1, project: project.name, environments: { [environment.name]: {
+    hosting: { provider: hosting }, services: { web: {} }, database: { provider: 'azure-postgres', engine: 'postgres' }, backups: { mode: 'daily' },
+  } } });
+  ctx.repos.components.create({ environmentId: environment.id, type: 'postgres', externalId: retainedServer, bindings: {
+    provider: 'azure-postgres', providerScope: { subscriptionId: azureSubscription, resourceGroup: 'hv-accepted' },
+  } });
+  const call = async (command: 'status' | 'plan') => {
+    const input = { project: project.name, env: environment.name, ...(command === 'plan' ? { scope: 'backups' } : {}) };
+    if (transport === 'mcp') return query(input, `hv_${command}`);
+    let out = '';
+    await runCli([command, '--input', '-', '--json'], { initialize: false, io: {
+      readStdin: async () => JSON.stringify(input), writeOut: text => { out += text; }, writeErr: () => {}, stdinIsTTY: false, confirm: async () => false,
+    } });
+    return JSON.parse(out);
+  };
+  const changes = () => SqliteAdapter.getInstance().getDb().prepare('select total_changes() as n').get();
+  const before = changes();
+  const status = await call('status');
+  expect(status).toMatchObject({ ok: true, data: { retainedDatabases: [{ externalId: retainedServer, provider: 'azure-postgres', observation: 'unknown' }] } });
+  expect(requests.some(r => r.url.includes(retainedServer))).toBe(true);
+  const report = await call('plan');
+  expect(report).toMatchObject({ ok: true, data: { scope: 'backups', backupCoverage: { resources: [{ state: 'unsupported' }] } } });
+  expect(report.data).not.toHaveProperty('planId');
+  expect(requests.filter(r => !r.url.includes('login.microsoftonline.com')).every(r => r.method === 'GET')).toBe(true);
+  expect(changes()).toEqual(before);
 });
 
 it('retains native RDS operational clients using the verified AWS engine connection', async () => {

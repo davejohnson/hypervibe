@@ -55,6 +55,22 @@ describe('Azure engine planning', () => {
     expect(azureEngineProblems(spec({ test: testing() }), 'test')).toEqual([]);
   });
 
+  it('configures account-wide Blob soft delete and signed browser uploads, and rejects incompatible container settings', () => {
+    const documents = { provider: 'azureblob', type: 'bucket', region: 'eastus2', injectInto: [], versioning: true, browserUploads: true };
+    const desired = spec({ test: testing({ storage: { documents } }) });
+    expect(azureEngineProblems(desired, 'test')).toEqual([]);
+    const layout = azureEngineLayout(project, 'test', 'ENV1', connection);
+    const input = buildAzureEngineInput(desired, 'test', { connection: connection as never, ...layout, environment: { id: 'ENV1' } }, { secretKeys: [] });
+    const storage = buildAzureEnvironmentConfiguration(input).files['storage.tf.json'];
+    expect(storage).toMatchObject({ resource: { azurerm_storage_account: { files: {
+      shared_access_key_enabled: false, allow_nested_items_to_be_public: false, blob_properties: [{
+        delete_retention_policy: [{ days: 30 }], cors_rule: [{ allowed_methods: ['PUT', 'POST', 'GET', 'HEAD'], allowed_origins: ['*'] }],
+      }],
+    } }, azurerm_storage_container: { documents: { container_access_type: 'private' } } } });
+    const mixed = spec({ test: testing({ storage: { documents, scratch: { ...documents, browserUploads: false } } }) });
+    expect(azureEngineProblems(mixed, 'test')).toContainEqual(expect.stringMatching(/share one storage account.*browserUploads/));
+  });
+
   it('builds web, on-demand worker, cron job, storage and secrets from the spec, with every secret it references', () => {
     const desired = spec({ test: testing() });
     const layout = azureEngineLayout(project, 'test', 'ENV1', connection);
