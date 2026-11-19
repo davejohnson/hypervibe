@@ -30,13 +30,16 @@ describe('provider conformance matrix', () => {
     const actions = repositorySpec.github?.actions ?? {};
     expect(actions.acceptance).toMatchObject({
       kind: 'check', changeScope: 'all', triggers: { pullRequest: true, push: ['main'] },
-      commands: ['npm run typecheck', 'npm test'],
+      commands: ['npm run typecheck', 'npm run test:fast -- --shard=1/2'],
     });
     expect(repositorySpec.github?.collaboration.pullRequests).toMatchObject({
       requirePr: true, requireStatusChecks: true,
-      statusChecks: ['Hypervibe / acceptance', 'Hypervibe / macos-contract'],
+      statusChecks: ['Hypervibe / acceptance', 'Hypervibe / acceptance-2', 'Hypervibe / acceptance-heavy', 'Hypervibe / macos-contract'],
     });
-    for (const id of ['acceptance', 'provider-conformance']) {
+    // The full suite is split across three jobs: two halves of the fast tests and the slow files.
+    expect(actions['acceptance-2']).toMatchObject({ kind: 'check', commands: ['npm run test:fast -- --shard=2/2'] });
+    expect(actions['acceptance-heavy']).toMatchObject({ kind: 'check', commands: ['npm run test:heavy'] });
+    for (const id of ['acceptance', 'acceptance-2', 'acceptance-heavy', 'provider-conformance']) {
       const committed = readFileSync(path.resolve(`.github/workflows/hypervibe-${id}.yml`), 'utf8');
       const generated = compileGitHubAutomationWorkflow(id, actions[id]!, repositorySpec.github!, repositorySpec.runtime);
       expect(parse(committed)).toEqual(parse(generated));
