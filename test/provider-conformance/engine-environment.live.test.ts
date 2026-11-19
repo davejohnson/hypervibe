@@ -29,7 +29,10 @@ function required(name: string): string {
 
 async function processOutput(executable: string, args: string[], cwd: string, dataDir: string, input?: Json): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env: { ...process.env, HYPERVIBE_DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
+    // The shared test setup turns off repository specs and .env discovery for synthetic projects. The fixture is a real
+    // repository: Hypervibe finds the source to build through its repository spec, so those switches must not reach the CLI.
+    const { HYPERVIBE_DISABLE_REPO_SPEC: _spec, HYPERVIBE_DISABLE_IMPLICIT_DEPLOY_ENV_FILE: _envFile, ...inherited } = process.env;
+    const child = spawn(executable, args, { cwd, env: { ...inherited, HYPERVIBE_DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let bytes = 0;
     const timer = setTimeout(() => child.kill('SIGTERM'), 75 * 60_000); // An Azure apply may run 60 minutes.
     child.stdout.on('data', (chunk) => { bytes += chunk.length; if (bytes > 8 * 1024 * 1024) child.kill('SIGTERM'); else stdout += chunk; });
@@ -125,6 +128,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
       const baseline = JSON.parse(readFileSync(baselineFile, 'utf8')) as string[];
       const inventory = async () => sinceBaseline(await inventoryNow(), baseline);
 
+      const repoSpecFile = path.join(workspace, '.hypervibe', 'spec.json');
       const cli = async (command: string[], input: Json): Promise<Json> => {
         let envelope: Json;
         try { envelope = JSON.parse(await processOutput(process.execPath, [cliPath, ...command, '--input', '-', '--json'], workspace, dataDir, input)); }
@@ -132,13 +136,19 @@ live('AWS and Azure engine disposable environment fixture', () => {
         if (envelope.ok !== true) {
           // Hypervibe's own redacted blockers say what to fix; nothing else from the failed command is shown.
           const blocked = (envelope.error?.details?.blocked ?? []).map((entry: unknown) => String(entry).slice(0, 800)).join('\n');
-          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}).${blocked ? `\n${blocked}` : ''}`);
+          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}): ${String(envelope.error?.message ?? '').slice(0, 600)}${blocked ? `\n${blocked}` : ''}`);
         }
         return envelope;
       };
       if (!existsSync(path.join(workspace, '.git'))) {
         cpSync(path.join(import.meta.dirname, 'fixture-database'), workspace, { recursive: true });
         writeFileSync(path.join(workspace, '.gitignore'), '.hypervibe/\nnode_modules/\nfixture-evidence.json\nfixture-baseline.json\n.env*\n');
+        // Hypervibe builds from the repository that holds the project's spec file. Without it a plan has no
+        // source, builds no image and creates no workloads (live 2026-11-18: the release was then refused).
+        const stored = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
+        if (!stored) throw new Error('The dedicated project has no readable desired state.');
+        mkdirSync(path.join(workspace, '.hypervibe'), { recursive: true });
+        writeFileSync(repoSpecFile, `${JSON.stringify(JSON.parse(stored.document), null, 2)}\n`);
         for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Hypervibe fixture'], ['config', 'user.email', 'fixture@hypervibe.invalid'],
           ...(project.git_remote_url ? [['remote', 'add', 'origin', project.git_remote_url]] : []),
           ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore'], ['commit', '-m', 'Disposable engine conformance fixture']]) {
@@ -147,9 +157,9 @@ live('AWS and Azure engine disposable environment fixture', () => {
       }
 
       const savedSpec = (): Json => {
-        const row = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
-        if (!row) throw new Error('The dedicated project has no readable desired state; existing environments cannot be preserved.');
-        const spec = JSON.parse(row.document);
+        // The fixture repository's spec file is what the CLI reads and writes here.
+        if (!existsSync(repoSpecFile)) throw new Error('The fixture repository has no spec file; existing environments cannot be preserved.');
+        const spec = JSON.parse(readFileSync(repoSpecFile, 'utf8'));
         if (!spec.environments || spec.project !== projectName) throw new Error('The dedicated project specification is invalid.');
         return spec;
       };

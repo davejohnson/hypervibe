@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, taggedResources, withAzureSetupAccess, type SqlRunner } from '../azure-ops.client.js';
+import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, lookupPublicAddress, taggedResources, withAzureSetupAccess, type SqlRunner } from '../azure-ops.client.js';
 
 const access = { tenantId: 't', clientId: 'c', clientSecret: 'client-secret-value' };
 const json = (status: number, body: unknown = {}) => new Response(status === 204 ? null : JSON.stringify(body), { status });
@@ -104,7 +104,11 @@ describe('Azure storage and absence checks', () => {
 
 describe('Azure database setup access', () => {
   const serverId = '/subscriptions/s/resourceGroups/hv-app/providers/Microsoft.DBforPostgreSQL/flexibleServers/hv-app-shared-abc123';
-  /** A server that starts closed, refuses addresses without a rule and reports the caller's address when it does. */
+  /**
+   * A server as Azure behaved live on 2026-11-18 (West US 2): it starts closed, and it drops every
+   * connection ("timeout expired") unless public access is on and a rule allows the caller's address.
+   * It never says which address it turned away.
+   */
   const server = (options: { failClose?: boolean } = {}) => {
     const state = { access: 'Disabled', rule: undefined as string | undefined };
     const azure = fake((method, url, body) => {
@@ -119,60 +123,59 @@ describe('Azure database setup access', () => {
       }
       return json(200, { properties: { state: 'Ready', network: { publicNetworkAccess: state.access } } });
     });
-    const probe = async () => {
-      if (state.access !== 'Enabled') throw new Error('connect ETIMEDOUT');
-      if (state.rule !== '203.0.113.7') throw new Error('no pg_hba.conf entry for host "203.0.113.7", user "hypervibe-deploy-app", database "postgres", SSL encryption');
-    };
+    const probe = async () => { if (state.access !== 'Enabled' || state.rule !== '203.0.113.7') throw new Error('timeout expired'); };
     return { azure, state, probe };
   };
-  /** No waiting between attempts, and no address service unless a test supplies one. */
-  const quiet = { pollMs: 0, lookupAddress: async () => undefined };
+  /** No waiting between attempts; the address service answers with this computer's address. */
+  const here = { pollMs: 0, lookupAddress: async () => '203.0.113.7' as string | undefined };
   const puts = (azure: { calls: Array<{ method: string; body?: string }> }) => azure.calls.filter((call) => call.method === 'PUT').map((call) => JSON.parse(call.body!).properties.startIpAddress);
 
   it('opens the server to this computer\'s address only, runs the work, then closes it again', async () => {
     const { azure, state, probe } = server();
     const seen: Array<typeof state> = [];
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { seen.push({ ...state }); return 'done'; }, quiet)).resolves.toBe('done');
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { seen.push({ ...state }); return 'done'; }, here)).resolves.toBe('done');
     expect(seen).toEqual([{ access: 'Enabled', rule: '203.0.113.7' }]);
     expect(state).toEqual({ access: 'Disabled', rule: undefined });
-    // Nothing wider than one address was ever written: first an address nobody can use, then this computer's.
-    expect(puts(azure)).toEqual(['192.0.2.1', '203.0.113.7']);
-  });
-
-  it('asks an address service when Azure drops the connection without saying which address it refused', async () => {
-    // Live 2026-11-18 (West US 2): with public access on, every attempt ended "timeout expired". Azure sent no refusal to read the address from.
-    const { azure, state } = server();
-    const silent = async () => { if (state.access !== 'Enabled' || state.rule !== '203.0.113.7') throw new Error('timeout expired'); };
-    const learned: string[] = [];
-    await expect(withAzureSetupAccess(azure.tokens, serverId, silent, async () => state.rule, { pollMs: 0, lookupAddress: async () => '203.0.113.7', onLearned: (how) => learned.push(how) })).resolves.toBe('203.0.113.7');
-    expect(puts(azure)).toEqual(['192.0.2.1', '203.0.113.7']);
-    expect(learned).toEqual(['an address service']);
-    expect(state).toEqual({ access: 'Disabled', rule: undefined });
-  });
-
-  it('keeps waiting through dropped connections while the new rule takes effect, and takes a refused login as reached', async () => {
-    const slow = server();
-    let attempts = 0;
-    const lagging = async () => { await slow.probe(); if (slow.state.rule === '203.0.113.7' && attempts++ < 3) throw new Error('timeout expired'); };
-    await expect(withAzureSetupAccess(slow.azure.tokens, serverId, lagging, async () => 'done', quiet)).resolves.toBe('done');
-    const refused = server();
-    // A new server does not know its administrator for a minute: the network is open, so the work runs and retries the login itself.
-    const login = async () => { await refused.probe(); throw Object.assign(new Error('password authentication failed'), { code: '28P01' }); };
-    await expect(withAzureSetupAccess(refused.azure.tokens, serverId, login, async () => refused.state.rule, quiet)).resolves.toBe('203.0.113.7');
-    expect(refused.state).toEqual({ access: 'Disabled', rule: undefined });
+    // Nothing but the one address was ever allowed.
+    expect(puts(azure)).toEqual(['203.0.113.7']);
   });
 
   it('closes the server again when the work fails, and reports the failure', async () => {
     const { azure, state, probe } = server();
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { throw new Error('permission denied to create role'); }, quiet)).rejects.toThrow('permission denied to create role');
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { throw new Error('permission denied to create role'); }, here)).rejects.toThrow('permission denied to create role');
     expect(state).toEqual({ access: 'Disabled', rule: undefined });
   });
 
-  it('allows no usable address when it cannot learn this computer\'s, and still closes', async () => {
-    const { azure, state } = server();
-    await expect(withAzureSetupAccess(azure.tokens, serverId, async () => { throw new Error('connect ETIMEDOUT'); }, async () => 'never', quiet)).rejects.toThrow(/did not open the database server to anything/);
-    expect(puts(azure)).toEqual(['192.0.2.1']);
+  it('allows nothing when it cannot learn this computer\'s address, and still closes', async () => {
+    const { azure, state, probe } = server();
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'never', { pollMs: 0, lookupAddress: async () => undefined })).rejects.toThrow(/did not open the database server to anything/);
+    expect(puts(azure)).toEqual([]);
     expect(state).toEqual({ access: 'Disabled', rule: undefined });
+  });
+
+  it('keeps waiting through dropped connections while the rule takes effect, and takes a refused login as reached', async () => {
+    const slow = server();
+    let attempts = 0;
+    const lagging = async () => { await slow.probe(); if (attempts++ < 3) throw new Error('timeout expired'); };
+    await expect(withAzureSetupAccess(slow.azure.tokens, serverId, lagging, async () => 'done', here)).resolves.toBe('done');
+    // A new server does not know its administrator for a minute: the network is open, so the work runs and retries the login itself.
+    const refused = server();
+    const login = async () => { await refused.probe(); throw Object.assign(new Error('password authentication failed'), { code: '28P01' }); };
+    await expect(withAzureSetupAccess(refused.azure.tokens, serverId, login, async () => refused.state.rule, here)).resolves.toBe('203.0.113.7');
+    expect(refused.state).toEqual({ access: 'Disabled', rule: undefined });
+  });
+
+  it('says what the server last answered when the allowed address never gets through, and closes', async () => {
+    // The address service can be wrong (another network path, say): the wrong address is allowed, nothing connects, and the window closes.
+    const { azure, state, probe } = server();
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'never', { pollMs: 0, lookupAddress: async () => '198.51.100.9' }))
+      .rejects.toThrow(/did not answer this computer after allowing 198\.51\.100\.9\. Last answer: timeout expired/);
+    // Node reports several failed addresses as one error with an empty message.
+    const several = server();
+    const aggregate = Object.assign(new AggregateError([Object.assign(new Error('connect ETIMEDOUT 20.1.2.3:5432'), { code: 'ETIMEDOUT' })], ''), { code: 'ETIMEDOUT' });
+    await expect(withAzureSetupAccess(several.azure.tokens, serverId, async () => { throw aggregate; }, async () => 'never', here)).rejects.toThrow(/Last answer: ETIMEDOUT: connect ETIMEDOUT 20\.1\.2\.3:5432/);
+    expect(state).toEqual({ access: 'Disabled', rule: undefined });
+    expect(several.state).toEqual({ access: 'Disabled', rule: undefined });
   });
 
   it('tries again when closing fails once', async () => {
@@ -182,24 +185,20 @@ describe('Azure database setup access', () => {
       if (init?.method === 'PATCH' && String(init.body).includes('Disabled') && !failed) { failed = true; throw new TypeError('fetch failed'); }
       return azure.tokens.fetchImpl(url, init);
     }) as typeof fetch };
-    await expect(withAzureSetupAccess(flaky, serverId, probe, async () => 'done', quiet)).resolves.toBe('done');
+    await expect(withAzureSetupAccess(flaky, serverId, probe, async () => 'done', here)).resolves.toBe('done');
     expect(state).toEqual({ access: 'Disabled', rule: undefined });
-  });
-
-  it('reports what the server answered when it cannot learn this computer\'s address', async () => {
-    // Live 2026-11-18 (West US 2): the address was never learned and the message gave no reason, so the cause could not be found.
-    const timedOut = server();
-    await expect(withAzureSetupAccess(timedOut.azure.tokens, serverId, async () => { throw Object.assign(new Error('connect ETIMEDOUT 20.1.2.3:5432'), { code: 'ETIMEDOUT' }); }, async () => 'never', quiet))
-      .rejects.toThrow(/did not open the database server to anything\. Last answer: ETIMEDOUT: connect ETIMEDOUT 20\.1\.2\.3:5432/);
-    // Node reports several failed addresses as one error with an empty message.
-    const several = server();
-    const aggregate = Object.assign(new AggregateError([Object.assign(new Error('connect ETIMEDOUT 20.1.2.3:5432'), { code: 'ETIMEDOUT' })], ''), { code: 'ETIMEDOUT' });
-    await expect(withAzureSetupAccess(several.azure.tokens, serverId, async () => { throw aggregate; }, async () => 'never', quiet)).rejects.toThrow(/Last answer: ETIMEDOUT: connect ETIMEDOUT 20\.1\.2\.3:5432/);
-    expect(several.state).toEqual({ access: 'Disabled', rule: undefined });
   });
 
   it('says so when it cannot close the server, even though the work succeeded', async () => {
     const { azure, probe } = server({ failClose: true });
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'done', quiet)).rejects.toThrow(/could not turn the database server's public access off again.*hv_plan/);
+    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'done', here)).rejects.toThrow(/could not turn the database server's public access off again.*hv_plan/);
+  });
+
+  it('reads this computer\'s address from the address service and rejects anything that is not one address', async () => {
+    const answer = (text: string, status = 200) => (async () => new Response(text, { status })) as unknown as typeof fetch;
+    expect(await lookupPublicAddress(answer('203.0.113.7\n'))).toBe('203.0.113.7');
+    expect(await lookupPublicAddress(answer('<html>blocked</html>'))).toBeUndefined();
+    expect(await lookupPublicAddress(answer('203.0.113.7', 503))).toBeUndefined();
+    expect(await lookupPublicAddress((async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch)).toBeUndefined();
   });
 });

@@ -242,12 +242,11 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     the server. To create or drop a login, `withAzureSetupAccess` turns public
     access on, learns this computer's address, allows it alone in the rule
     `hypervibe-setup`, runs the SQL, then deletes the rule and turns public
-    access off. With public access on and no rule, Azure drops connections
-    without an answer (observed live 2026-11-18), so the rule first holds an
-    address nobody can use (`192.0.2.1`) in case Azure then names the address it
-    refuses; if it still does not, Hypervibe asks `checkip.amazonaws.com`. That
-    request carries nothing but itself, and a wrong answer cannot connect. The
-    step's result says which source was used. It closes whatever happened in between, and a
+    access off. Azure never says which address it turned away: with or without a
+    rule it drops the connection (observed live 2026-11-18), so Hypervibe asks
+    `checkip.amazonaws.com` for this computer's public address. That request
+    carries nothing but itself, and a wrong answer cannot connect.
+    It closes whatever happened in between, and a
     failure to close is reported as an error; the next plan also shows public
     access as a change to turn off. The plan step says it does this. It happens
     when an environment's database is first created, when a worker's counting
@@ -261,10 +260,10 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     2026-11-17 never turned on `Microsoft.Network`; the plan says to run
     `hv_connections provider="azure" action="connect"` once.
   - **Verified live 2026-11-18 (West US 2):** the shared network, app environment,
-    registry and server are created, and public access can be switched on a
-    running server.
-  - **Not verified live:** whether Azure names the refused address once a rule
-    exists, the address-service fallback, a login created through the window,
+    registry and server are created; a login is created through the window, with
+    the address from the address service; teardown leaves the resource group as
+    it was (the log workspace often needs a second teardown pass).
+  - **Not verified live:** that the server is closed again after the window,
     the private endpoint and DNS resolution from the apps, the KEDA scale rule
     reaching the private address, and moving an older project.
 - **On-demand worker.** KEDA's PostgreSQL scaler counts `onDemand.pendingWorkQuery`
