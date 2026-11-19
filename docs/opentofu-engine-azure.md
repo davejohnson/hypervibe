@@ -273,7 +273,7 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     check. An unchanged plan is a noop, an environment-variable change and a
     release update in place, and teardown leaves the resource group as it was
     (the log workspace sometimes needs a second teardown pass).
-  - **Verified live 2026-11-18 (West US 2), one passing run at 4fa5ad13 with a
+  - **Verified live 2026-11-18 (West US 2), one passing run at 2cdcb6a9 with a
     wider fixture:** all of the above, plus the web service writing a file to
     Blob storage with its managed identity and reading it back, the scheduled
     job running on its two-minute schedule, and the on-demand worker finishing
