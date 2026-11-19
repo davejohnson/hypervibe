@@ -25,6 +25,11 @@ export interface ProviderLiveEvidence {
   reference: string;
 }
 
+export type ProviderIntegrationEvidence = { access: 'read' | 'write'; summary: string } & (
+  | {status: 'live-unverified'; liveEvidence?: never}
+  | {status: 'partially-verified'; liveEvidence: ProviderLiveEvidence}
+);
+
 export interface ProviderCapabilityMaturity {
   status: ProviderImplementationStatus;
   /** Required for supported capabilities and omitted until live evidence exists. */
@@ -194,6 +199,7 @@ export interface ProviderMetadata {
   maturity?: {
     /** Evidence status for each lifecycle slice implemented by this registration. */
     lifecycle?: Partial<Record<ProviderLifecycleCapability, ProviderCapabilityMaturity>>;
+    integration?: Record<string, ProviderIntegrationEvidence>;
   };
   orchestration?: ProviderOrchestrationMetadata;
   lifecycle?: {
@@ -396,6 +402,12 @@ export class ProviderRegistry {
   register(provider: RegisteredProvider): void {
     if (this.providers.has(provider.metadata.name)) {
       throw new Error(`Provider "${provider.metadata.name}" is already registered`);
+    }
+    for (const [capability, evidence] of Object.entries(provider.metadata.maturity?.integration ?? {})) {
+      if (!evidence.summary.trim() || (evidence.status === 'partially-verified'
+          && (!Number.isFinite(Date.parse(evidence.liveEvidence?.verifiedAt)) || !evidence.liveEvidence?.reference.trim()))) {
+        throw new Error(`Provider ${provider.metadata.name} must describe the verified scope and dated receipt for ${capability}.`);
+      }
     }
     this.assertCredentialMetadata(provider);
     this.assertCapabilityMaturity(provider);

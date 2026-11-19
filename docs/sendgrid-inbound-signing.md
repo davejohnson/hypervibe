@@ -96,7 +96,7 @@ and keep it in a local environment variable. No documented pre-filled creation
 template is available. Connect without putting the value in chat:
 
 ```text
-hv_connections provider="sendgrid" scope="OWNER/REPOSITORY" credentialsRef="env:SENDGRID_API_KEY"
+hv_connections provider="sendgrid" scope="OWNER/REPOSITORY" credentialsRef="env:HYPERVIBE_SENDGRID_API_KEY"
 ```
 
 ## Evidence and regression coverage

@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { RunningBuild, type BuildCheckOptions } from './interfaces/mcp/running-build.js';
 import { withClientInstructions } from './interfaces/mcp/client-instructions.js';
 import { createCommandContext } from './application/context.js';
 import { createCommandRegistry } from './application/commands.js';
@@ -26,17 +27,18 @@ export const HYPERVIBE_SERVER_INSTRUCTIONS = [
   'Custom domain and DNS changes must be modeled as desired infrastructure and reconciled through hv_plan/hv_apply. Do not bypass a blocked apply with one-off DNS/provider mutations.',
   'For a first GCP Cloud Run/Cloud SQL connection, use hv_connections provider="cloudrun" action="bootstrap" with explicit project, gcpProjectId, and adminAuth="default" to get the read-only setup preview. Show openBillingAccounts and ask the user to choose one exact account; then preview again with that billingAccountName. Show the exact saved setup plan and get separate approval before repeating with confirm=true. Never choose a billable account for the user or ask them to create, download, paste, or name Hypervibe\'s generated service-account key.',
   'When an hv_* result reports a missing required connection, use hv_connections only when a safe credentialsRef is already available, the provider declares a native/default credential chain, or the bounded GCP bootstrap above applies. Otherwise stop and explain the concrete blocked task. Offer to help connect credentials the user already controls or prepare a value-free handoff for the person who manages that provider; do not assume the current user should receive provider access. Do not run hv_plan, hv_apply, hv_deploy, or one-off tools as a workaround.',
-  'Parameter modes: hv_connections({project?}) and hv_secrets({project?}) list by default; secret hosting reads require env. hv_inspect({}) alone discovers providers and each resource mode\'s accepted selectors; every bounded inspection requires provider, full environment inspection requires provider + project + env, and limit is valid only when that mode advertises acceptsLimit=true. When a validation result includes suggestedCall with action=continue, retry that exact corrected call once.',
+  'Parameter modes: hv_connections({project?}) lists saved connections and available providers. Set view="requirements" with project to list its prerequisites. hv_secrets({project?}) lists by default; secret hosting reads require env. hv_inspect({}) alone discovers providers and each resource mode\'s accepted selectors; every bounded inspection requires provider, full environment inspection requires provider + project + env, and limit is valid only when that mode advertises acceptsLimit=true. When a validation result includes suggestedCall with action=continue, retry that exact corrected call once.',
   'If a capability seems missing, check the other hv_* tools (most have action/target parameters) before reaching for anything outside Hypervibe.',
 ].join('\n');
 
 class HypervibeMcpServer extends McpServer {
+  runningBuild?: RunningBuild;
   override connect(transport: Transport): Promise<void> {
-    return super.connect(withClientInstructions(transport, HYPERVIBE_SERVER_INSTRUCTIONS));
+    return super.connect(withClientInstructions(transport, HYPERVIBE_SERVER_INSTRUCTIONS, this.runningBuild));
   }
 }
 
-export function createServer(): McpServer {
+export function createServer(buildCheck?: BuildCheckOptions): McpServer {
   const server = new HypervibeMcpServer(
     {
       name: 'hypervibe',
@@ -46,6 +48,8 @@ export function createServer(): McpServer {
       instructions: HYPERVIBE_SERVER_INSTRUCTIONS,
     }
   );
+
+  if (buildCheck) server.runningBuild = new RunningBuild(buildCheck);
 
   server.registerResource('hypervibe-guidance', 'hypervibe://guidance', {
     title: 'Complete Hypervibe operating guidance',

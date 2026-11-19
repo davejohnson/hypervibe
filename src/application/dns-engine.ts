@@ -13,6 +13,7 @@ import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { resolveDnsPolicy } from '../domain/services/dns-policy.service.js';
+import { additionalGcpDomainDnsOwner } from '../domain/services/domain-scope.js';
 import { inspectDomainSecurity } from '../domain/services/domain-security.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
@@ -78,26 +79,55 @@ function sameZone(left: DnsZoneIdentity, right: DnsZoneIdentity): boolean {
   return left.provider === right.provider && left.zoneId === right.zoneId && normalized(left.zoneName) === normalized(right.zoneName)
     && ['accountId', 'projectId', 'subscriptionId', 'resourceGroup'].every(key => left.scope[key as keyof typeof left.scope] === right.scope[key as keyof typeof right.scope]);
 }
-function binding(environment: Environment): DnsBinding | undefined {
-  const value = (environment.platformBindings as { dnsEngine?: DnsBinding }).dnsEngine;
+const extraOwner = (owner?: string) => Boolean(owner && /^gcp-domain-[a-f0-9]{20}$/.test(owner));
+const bindingKey = (owner?: string) => extraOwner(owner) ? `dnsEngine_${owner}` : 'dnsEngine';
+
+/** The original primary DNS state also holds email and other integrations. Extra hosts have independent state and recovery. */
+export function gcpDomainDnsOwner(environment: Environment, domain: string, primary?: string, savedOwner?: string): string {
+  const extra = additionalGcpDomainDnsOwner(domain);
+  if (savedOwner === extra || binding(environment, extra)) return extra;
+  const legacy = getDnsOwnedDomain(environment, 'gcp-domain');
+  const claims = (environment.platformBindings.engine as { domainClaims?: Record<string, { owner?: string }>; domains?: string[] } | undefined);
+  // Older mappings had one implicit primary owner, even before the first DNS receipt was written.
+  const reserved = new Set([...(legacy ? [legacy] : []),
+    ...Object.entries(claims?.domainClaims ?? {}).filter(([, claim]) => !claim.owner || claim.owner === 'gcp-domain').map(([hostname]) => hostname),
+    ...(claims?.domains ?? []).filter(hostname => !claims?.domainClaims?.[hostname] && !binding(environment, additionalGcpDomainDnsOwner(hostname))),
+  ]);
+  if (savedOwner === 'gcp-domain' || reserved.has(domain)) return 'gcp-domain';
+  if (!reserved.size && normalized(primary ?? '') === domain) return 'gcp-domain';
+  return extra;
+}
+function binding(environment: Environment, owner?: string): DnsBinding | undefined {
+  const value = environment.platformBindings[bindingKey(owner)] as DnsBinding | undefined;
   if (value === undefined) return undefined;
   if (!value || value.version !== 1 || !value.zone || typeof value.recordsEncrypted !== 'string'
     || typeof value.ownersEncrypted !== 'string' || typeof value.configurationEncrypted !== 'string') throw new Error('The saved DNS ownership record is unreadable; preserve it before continuing.');
   return value;
 }
-export function getDnsBindingIdentity(environment: Environment): DnsZoneIdentity | undefined { return binding(environment)?.zone; }
-export function getDnsBindingSelection(environment: Environment): { zone: DnsZoneIdentity; connectionScope?: string } | undefined {
-  const saved = binding(environment);
+export function getDnsBindingIdentity(environment: Environment, owner?: string): DnsZoneIdentity | undefined { return binding(environment, owner)?.zone; }
+export function getDnsBindingSelection(environment: Environment, owner?: string): { zone: DnsZoneIdentity; connectionScope?: string } | undefined {
+  const saved = binding(environment, owner);
   return saved ? { zone: saved.zone, connectionScope: saved.connectionScope } : undefined;
 }
 export function getDnsOwnedDomain(environment: Environment, owner: string): string | undefined {
-  const saved = binding(environment);
+  const saved = binding(environment, owner);
   return hasOwnedDnsRecords(environment, owner) ? saved?.ownerDomains?.[owner] ?? saved?.domain : undefined;
 }
 export function hasOwnedDnsRecords(environment: Environment, owner?: string): boolean {
-  const saved = binding(environment);
+  const saved = binding(environment, owner);
   return Boolean(saved && (saved.attempt && (!owner || saved.attempt.owner === owner)
     || (owner ? saved.ownedOwners?.includes(owner) : saved.ownedOwners?.length)));
+}
+export function ownedGcpDnsDomains(environment: Environment): string[] {
+  return ['gcp-domain', ...Object.keys(environment.platformBindings).filter(key => key.startsWith('dnsEngine_')).map(key => key.slice(10))]
+    .flatMap(owner => getDnsOwnedDomain(environment, owner) ?? []);
+}
+export function onlyGoogleProofRemains(ctx: CommandContext, environment: Environment, owner: string, proofName: string): boolean {
+  const saved = binding(environment, owner);
+  if (!saved || saved.attempt) return false;
+  const records = owned(ctx, saved).filter(record => record.owner === owner && record.intent.values.length);
+  return records.length > 0 && records.every(record => record.intent.type === 'TXT' && normalized(record.intent.name) === proofName
+    && record.intent.authority.kind === 'managed');
 }
 function owned(ctx: CommandContext, saved: DnsBinding | undefined): ManagedRecord[] {
   if (!saved) return [];
@@ -110,7 +140,8 @@ function owned(ctx: CommandContext, saved: DnsBinding | undefined): ManagedRecor
 }
 /** Safe native identities only. Never returns TXT tokens, credential values or raw engine state. */
 export function readDnsOwnedRecords(ctx: CommandContext, environment: Environment, owner?: string): Array<{ nativeId: string; name: string; type: DnsRecordType; address: string; owner: string; retainedOnly?: true }> {
-  return owned(ctx, binding(environment)).filter(record => !owner || record.owner === owner).map(record => ({
+  const slots = owner ? [owner] : [undefined, ...Object.keys(environment.platformBindings).filter(key => key.startsWith('dnsEngine_')).map(key => key.slice(10))];
+  return slots.flatMap(slot => owned(ctx, binding(environment, slot))).filter(record => !owner || record.owner === owner).map(record => ({
     nativeId: record.intent.authority.kind === 'managed' ? record.intent.authority.nativeId : '',
     name: record.intent.name, type: record.intent.type, address: record.address, owner: record.owner,
     ...(record.intent.values.length === 0 ? { retainedOnly: true as const } : {}),
@@ -126,25 +157,27 @@ async function observeRecords(observer: DnsObserver, name: string, type: DnsReco
   return observed.status === 'absent' ? [] : observed.value.map(record => ({ ...record, values: normalizedValues(type, record.values) }));
 }
 function ownerOf(key: string): string { return key.split(':', 1)[0]!; }
-function engineState(environment: Environment, provider: string): EngineStateIdentity & { partition: 'environment' } {
-  return { provider: `dns-${provider}`, projectId: environment.projectId, environmentId: environment.id, partition: 'environment' };
+export function dnsEngineState(environment: Environment, provider: string, owner?: string): EngineStateIdentity & { partition: 'environment' } {
+  return { provider: `dns-${provider}`, projectId: environment.projectId, environmentId: extraOwner(owner) ? `${environment.id}-${owner}` : environment.id, partition: 'environment' };
 }
 function lookupHints(project: Project, domain: string, zone: DnsZoneIdentity): string[] {
   return [...new Set([parseGitHubRepoFromRemote(project.gitRemoteUrl), domain, normalized(zone.zoneName)].filter((value): value is string => Boolean(value)))];
 }
-function otherOwnership(ctx: CommandContext, environment: Environment, zone: DnsZoneIdentity, intents: DnsRecordIntent[]): string | undefined {
+function otherOwnership(ctx: CommandContext, environment: Environment, owner: string, zone: DnsZoneIdentity, intents: DnsRecordIntent[]): string | undefined {
   for (const project of ctx.repos.projects.findAll()) for (const candidate of ctx.repos.environments.findByProjectId(project.id)) {
-    if (candidate.id === environment.id) continue;
-    const saved = binding(candidate);
-    if (!saved || !sameZone(saved.zone, zone)) continue;
-    const inventory = owned(ctx, saved);
-    const uncertain = saved.attempt ? ctx.secretStore.decryptObject<DnsPayload>(saved.attempt.payloadEncrypted).records : [];
-    for (const intent of intents) {
-      const matches = (record: DnsRecordIntent) => normalized(record.name) === normalized(intent.name) && record.type === intent.type;
-      if (uncertain.some(matches) || inventory.some(record => matches(record.intent)
-        && (zone.provider !== 'cloudflare' || intent.authority.kind !== 'absent' && record.intent.authority.kind !== 'absent'
-          && intent.authority.nativeId === record.intent.authority.nativeId))) {
-        return 'Another Hypervibe environment owns or is recovering this exact DNS record set. Preserve that state; transferring DNS ownership requires an explicit migration workflow.';
+    for (const key of Object.keys(candidate.platformBindings).filter(key => key === 'dnsEngine' || key.startsWith('dnsEngine_'))) {
+      if (candidate.id === environment.id && key === bindingKey(owner)) continue;
+      const saved = binding(candidate, key === 'dnsEngine' ? undefined : key.slice(10));
+      if (!saved || !sameZone(saved.zone, zone)) continue;
+      const inventory = owned(ctx, saved);
+      const uncertain = saved.attempt ? ctx.secretStore.decryptObject<DnsPayload>(saved.attempt.payloadEncrypted).records : [];
+      for (const intent of intents) {
+        const matches = (record: DnsRecordIntent) => normalized(record.name) === normalized(intent.name) && record.type === intent.type;
+        if (uncertain.some(matches) || inventory.some(record => matches(record.intent)
+          && (zone.provider !== 'cloudflare' || intent.authority.kind !== 'absent' && record.intent.authority.kind !== 'absent'
+            && intent.authority.nativeId === record.intent.authority.nativeId))) {
+          return 'Another Hypervibe environment owns or is recovering this exact DNS record set. Preserve that state; transferring DNS ownership requires an explicit migration workflow.';
+        }
       }
     }
   }
@@ -157,7 +190,7 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
   try {
     if (!/^[a-z][a-z0-9_-]{0,40}$/.test(input.owner)) return blocked('DNS consumer identity is invalid.');
     const current = input.ctx.repos.environments.findById(input.environment.id) ?? input.environment;
-    const saved = binding(current);
+    const saved = binding(current, input.owner);
     let previous = owned(input.ctx, saved);
     if (input.remove && !saved) return { actions: [], ready: true };
     const effective = input.remove && saved ? { ...input.environmentSpec, domain: input.domain,
@@ -179,7 +212,7 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
       const engine = await deps.engine();
       const auth = { ...connection.auth, redact: sorted([...connection.auth.redact, ...privateValues([...attempt.records, ...attempt.retired])]) };
       const inspected = await engine.inspectState({ backend: dnsEngineBackend(identity), configuration: attempt.configuration,
-        auth, state: engineState(current, identity.provider), project: projectNativeIds });
+        auth, state: dnsEngineState(current, identity.provider, input.owner), project: projectNativeIds });
       if (!inspected.ok) return blocked('The interrupted DNS attempt has unreadable private engine state. Preserve it and retry observation before planning mutations.');
       if (inspected.present) {
         const recovered = new Map(previous.map(record => [record.intent.key, record]));
@@ -219,7 +252,7 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
     const owners = saved ? input.ctx.secretStore.decryptObject<Record<string, DesiredDnsRecord[]>>(saved.ownersEncrypted) : {};
     if (!owners || typeof owners !== 'object' || Array.isArray(owners)) return blocked('Saved DNS consumer intent is unreadable.');
     const previousOwnersFingerprint = hash(owners);
-    const retained = input.remove ? [] : (owners[input.owner] ?? []).filter(record => input.retainExistingTypes?.includes(record.type));
+    const retained = (owners[input.owner] ?? []).filter(record => input.retainExistingTypes?.includes(record.type));
     owners[input.owner] = input.remove ? [] : input.records.flatMap(record => {
       const base = { ...record, name: normalized(record.name), ttl: effective.dns?.ttl ?? record.ttl };
       // Cloudflare owns individual values; other providers own a complete RRset.
@@ -306,11 +339,11 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
       const extra = exact?.values.filter(value => !oldValues.includes(value)) ?? [];
       retired.push({ ...record, authority: { ...authority, preserveValues: sorted([...authority.preserveValues, ...extra]) } });
     }
-    const overlap = otherOwnership(input.ctx, current, identity, [...records, ...retired]);
+    const overlap = otherOwnership(input.ctx, current, input.owner, identity, [...records, ...retired]);
     if (overlap) return blocked(overlap);
     const configuration = buildDnsConfiguration({ zone: identity, records, retiredRecords: retired });
     const engine = await deps.engine();
-    const state = engineState(current, identity.provider);
+    const state = dnsEngineState(current, identity.provider, input.owner);
     const planId = randomUUID();
     const auth = { ...connection.auth, redact: sorted([...connection.auth.redact, ...privateValues([...records, ...retired])]) };
     const planned = await engine.plan({ backend: dnsEngineBackend(identity), configuration, auth, state, planId });
@@ -354,13 +387,13 @@ export async function executeDnsOwnershipReconciliation(input: {
   const stop = (message: string): ActionResult => ({ success: false, status: 'blocked', message });
   try {
     const d = input.descriptor;
-    if (JSON.stringify(d.state) !== JSON.stringify(engineState(input.environment, d.zone.provider))) return stop('DNS ownership verification targets a different environment.');
+    if (JSON.stringify(d.state) !== JSON.stringify(dnsEngineState(input.environment, d.zone.provider, d.owner))) return stop('DNS ownership verification targets a different environment.');
     const payload = input.ctx.secretStore.decryptObject<DnsPayload>(d.payloadEncrypted);
     if (!payload.readOnlyReconciliation) return stop('This saved DNS artifact does not authorize a read-only ownership reconciliation.');
     const current = input.ctx.repos.environments.findById(input.environment.id) ?? input.environment;
-    const saved = binding(current);
+    const saved = binding(current, d.owner);
     if (!saved || hash(saved) !== payload.bindingFingerprint) return stop('DNS ownership changed after review. Run hv_plan again.');
-    const overlap = otherOwnership(input.ctx, current, d.zone, [...payload.records, ...payload.retired]);
+    const overlap = otherOwnership(input.ctx, current, d.owner, d.zone, [...payload.records, ...payload.retired]);
     if (overlap) return stop(overlap);
     const connection = await deps.connect({ context: input.ctx, zone: d.zone, connectionScope: d.connectionScope, scopeHints: lookupHints(input.project, d.domain, d.zone) });
     if ('blocked' in connection) return stop(connection.blocked);
@@ -391,7 +424,7 @@ export async function executeDnsOwnershipReconciliation(input: {
         || d.zone.provider === 'cloudflare' && ['A', 'AAAA', 'CNAME'].includes(record.type) && exact.proxied !== (record.proxied ?? false)) return stop('DNS has not converged to the exact retained values and security settings.');
       managed.push({ owner: ownerOf(record.key), address, intent: { ...record, values: desired ? record.values : [] } });
     }
-    input.ctx.repos.environments.updatePlatformBindings(current.id, { dnsEngine: { ...saved, domain: d.domain,
+    input.ctx.repos.environments.updatePlatformBindings(current.id, { [bindingKey(d.owner)]: { ...saved, domain: d.domain,
       recordsEncrypted: input.ctx.secretStore.encryptObject(managed), ownersEncrypted: input.ctx.secretStore.encryptObject(payload.owners),
       configurationEncrypted: input.ctx.secretStore.encryptObject(payload.configuration),
       ownedOwners: sorted(managed.filter(record => record.intent.values.length).map(record => record.owner)), attempt: undefined } });
@@ -440,7 +473,7 @@ export async function executeDnsEngineSegment(input: {
   try {
     const d = input.descriptor;
     if (!d || d.version !== 1 || d.segment.id !== input.segment.id || !/^[a-z][a-z0-9_-]{0,40}$/.test(d.owner)
-      || JSON.stringify(d.state) !== JSON.stringify(engineState(input.environment, d.zone.provider))) return stop('The saved DNS plan targets a different environment or segment.');
+      || JSON.stringify(d.state) !== JSON.stringify(dnsEngineState(input.environment, d.zone.provider, d.owner))) return stop('The saved DNS plan targets a different environment or segment.');
     if (input.members.some(member => member.metadata?.operation !== DNS_ENGINE_OPERATION)) return stop('This segment contains non-DNS actions.');
     const connection = await deps.connect({ context: input.ctx, zone: d.zone, connectionScope: d.connectionScope,
       scopeHints: lookupHints(input.project, d.domain, d.zone) });
@@ -456,16 +489,16 @@ export async function executeDnsEngineSegment(input: {
       if (recordFingerprint(present) !== snapshot.fingerprint) return stop('DNS records changed after review. Generate a fresh plan before modifying them.');
     }
     const current = input.ctx.repos.environments.findById(input.environment.id) ?? input.environment;
-    const old = binding(current);
+    const old = binding(current, d.owner);
     if (hash(old ?? null) !== payload.bindingFingerprint || old && !sameZone(old.zone, d.zone)) return stop('The environment DNS binding changed after this plan.');
-    const overlap = otherOwnership(input.ctx, current, d.zone, [...payload.records, ...payload.retired]);
+    const overlap = otherOwnership(input.ctx, current, d.owner, d.zone, [...payload.records, ...payload.retired]);
     if (overlap) return stop(overlap);
     const base: DnsBinding = { version: 1, zone: d.zone, domain: d.domain, connectionScope: d.connectionScope, zoneNativeId: payload.zoneNativeId,
       zoneFingerprint: d.zoneFingerprint, recordsEncrypted: input.ctx.secretStore.encryptObject(payload.managed),
       ownersEncrypted: input.ctx.secretStore.encryptObject(payload.owners), configurationEncrypted: input.ctx.secretStore.encryptObject(payload.configuration),
       ownedOwners: sorted(payload.managed.filter(record => record.intent.values.length).map(record => record.owner)),
       ownerDomains: { ...old?.ownerDomains, [d.owner]: d.domain }, attempt: d };
-    input.ctx.repos.environments.updatePlatformBindings(current.id, { dnsEngine: base });
+    input.ctx.repos.environments.updatePlatformBindings(current.id, { [bindingKey(d.owner)]: base });
     const engine = await deps.engine();
     const auth = { ...connection.auth, redact: sorted([...connection.auth.redact, ...privateValues([...payload.records, ...payload.retired])]) };
     const outcome = await engine.apply({ backend: dnsEngineBackend(d.zone), auth, state: d.state,
@@ -485,7 +518,7 @@ export async function executeDnsEngineSegment(input: {
         values: sorted([...record.values, ...(old?.intent.values ?? [])]),
         authority: { kind: 'managed', nativeId, preserveValues: record.authority.kind === 'absent' ? [] : record.authority.preserveValues } } });
     }
-    input.ctx.repos.environments.updatePlatformBindings(current.id, { dnsEngine: { ...base,
+    input.ctx.repos.environments.updatePlatformBindings(current.id, { [bindingKey(d.owner)]: { ...base,
       recordsEncrypted: input.ctx.secretStore.encryptObject([...recovery.values()]),
       ownedOwners: sorted([...recovery.values()].filter(record => record.intent.values.length).map(record => record.owner)) } });
     const managed: ManagedRecord[] = [];
@@ -510,7 +543,7 @@ export async function executeDnsEngineSegment(input: {
     }
     const complete = !verificationFailed && addresses.every(address => outcome.outcomes[address] === 'succeeded');
     const latest = input.ctx.repos.environments.findById(current.id) ?? current;
-    input.ctx.repos.environments.updatePlatformBindings(latest.id, { dnsEngine: { ...base,
+    input.ctx.repos.environments.updatePlatformBindings(latest.id, { [bindingKey(d.owner)]: { ...base,
       recordsEncrypted: input.ctx.secretStore.encryptObject(managed), ownedOwners: sorted(managed.filter(record => record.intent.values.length).map(record => record.owner)),
       ...(complete ? { attempt: undefined } : {}) } });
     if (verificationFailed) return { outcomes: Object.fromEntries(addresses.map(address => [address, 'unknown'])), diagnostics: ['DNS resources have not converged to the exact reviewed identities and values. Recovery state is retained; observe again before advancing.'] };

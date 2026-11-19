@@ -27,7 +27,7 @@ it.each(['fresh', 'upgrade', 'wrong-native', 'complete'] as const)('plans and re
   const env = ctx.repos.environments.create({ projectId: project.id, name: 'testing', platformBindings: { aws: { kind: 'opentofu', sharedDatabase: true, ...(scenario === 'fresh' ? {} : { databaseLoginAt: '2026-01-01T00:00:00Z' }) } } });
   const accountId = '111122223333'; const region = 'us-west-2';
   const querySecretArn = `arn:aws:secretsmanager:${region}:${accountId}:secret:hypervibe/${env.id.toLowerCase()}/database-query-AbCd12`;
-  if (scenario === 'complete') ctx.repos.environments.updatePlatformBindings(env.id, { aws: { ...env.platformBindings.aws as object, database: { querySecretArn } } });
+  if (scenario === 'complete') ctx.repos.environments.updatePlatformBindings(env.id, { aws: { ...env.platformBindings.aws as object, database: { querySecretArn, accountId, region, clusterArn: `arn:aws:rds:${region}:${accountId}:cluster:hv-db-app-shared-postgres`, name: 'app_testing', owner: 'app_testing_owner' } } });
   const connection = ctx.repos.connections.create({ provider: 'aws', scope: project.name, credentialsEncrypted: getSecretStore().encryptObject({ accountId, region,
     roleArn: `arn:aws:iam::${accountId}:role/hypervibe/hypervibe-deploy`, accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'private-local-secret-32-characters' }) });
   ctx.repos.connections.updateStatus(connection.id, 'verified');

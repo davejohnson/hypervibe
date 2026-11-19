@@ -71,7 +71,7 @@ describe('one saved project setup plan', () => {
       storage: buildGcpPreparationConfiguration({ ...base, enableApis: ['storage.googleapis.com'], grantRoles: ['roles/storage.admin'], runtimeGrantRoles: ['roles/storage.objectUser'] }),
       workers: buildGcpPreparationConfiguration({ ...base, enableApis: ['run.googleapis.com', 'workflows.googleapis.com', 'cloudscheduler.googleapis.com'],
         grantRoles: ['roles/workflows.admin'], runtimeGrantRoles: ['roles/run.developer'], runtimeSelfGrantRoles: ['roles/iam.serviceAccountTokenCreator'] }),
-      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456', repository: 'owner/repository', runtimeServiceAccountEmail }),
+      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456', repository: 'owner/repository', repositoryId: '345', releases: [{ environmentName: 'staging', branch: 'main', autoDeploy: true }], runtimeServiceAccountEmail }),
     });
     expect(composed.resources).toHaveProperty('google_project.hypervibe');
     expect(composed.resources).toHaveProperty('google_storage_bucket.build_source');

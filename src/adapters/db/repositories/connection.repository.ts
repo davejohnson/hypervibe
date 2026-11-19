@@ -252,6 +252,36 @@ export class ConnectionRepository {
     return this.findById(id);
   }
 
+  /** Store the grant issued for this exact start, or preserve a newer pairing. */
+  savePendingPairing(expected: Connection | null, input: CreateConnectionInput): boolean {
+    const db = getDb();
+    return db.transaction(() => {
+      const current = this.findByProviderAndScope(input.provider, normalizeConnectionScope(input.scope));
+      if (!current && !expected) {
+        this.create(input);
+        return true;
+      }
+      if (!current || !expected || current.id !== expected.id || current.status === 'verified'
+        || current.status !== expected.status || current.credentialsEncrypted !== expected.credentialsEncrypted) return false;
+      this.updateCredentials(current.id, input.credentialsEncrypted);
+      return true;
+    }).immediate();
+  }
+
+  expirePendingPairing(expected: Connection): void {
+    getDb().prepare(`UPDATE connections SET status = 'failed', updated_at = ?
+      WHERE id = ? AND status = 'pending' AND credentials_encrypted = ?`)
+      .run(new Date().toISOString(), expected.id, expected.credentialsEncrypted);
+  }
+
+  /** Commit one exchanged device grant without overwriting a newer pairing. */
+  completePendingPairing(expected: Connection, encrypted: string): boolean {
+    const now = new Date().toISOString();
+    const update = getDb().prepare(`UPDATE connections SET credentials_encrypted = ?, status = 'verified',
+      last_verified_at = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND credentials_encrypted = ?`);
+    return update.run(encrypted, now, now, expected.id, expected.credentialsEncrypted).changes === 1;
+  }
+
   /** Preserve a concurrently rotated primary and commit role provenance with its verified value. */
   updateVerifiedCredentialsIfUnchanged(expected: Connection, credentialsEncrypted: string, audit: CreateAuditEventInput): Connection | null {
     const db = getDb();

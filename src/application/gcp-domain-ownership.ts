@@ -28,7 +28,7 @@ function projectMapping(state: unknown, address: string): MappingIdentity | unde
 }
 
 /** A matching hostname is insufficient: scoped engine state must own this immutable mapping UID. */
-export async function verifyGcpDomainEngineOwnership(context: EngineContext, domain: string, live: DomainMappingObservation): Promise<{ ready: boolean; reason?: string }> {
+export async function verifyGcpDomainEngineOwnership(context: EngineContext, domain: string, live: DomainMappingObservation, additional = false): Promise<{ ready: boolean; reason?: string }> {
   const stop = (reason: string) => ({ ready: false, reason });
   if (live.state !== 'present') return stop('The exact Cloud Run mapping is not present or could not be observed.');
   if (live.domain !== domain || !live.uid || !live.serviceName
@@ -39,7 +39,7 @@ export async function verifyGcpDomainEngineOwnership(context: EngineContext, dom
     const engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir() });
     const inspected = await engine.inspectState({ backend: gcpEngineBackend, configuration: { files: {}, resources: {} },
       auth: context.auth, state: context.state,
-      project: state => projectMapping(state, `google_cloud_run_domain_mapping.${domainEngineKey(domain)}`) });
+      project: state => projectMapping(state, `google_cloud_run_domain_mapping.${domainEngineKey(domain, additional)}`) });
     if (!inspected.ok || !inspected.present || !inspected.value) return stop('The private engine state does not establish ownership of this Cloud Run mapping. Preserve the claim and reconcile its exact state before changing DNS.');
     const saved = inspected.value;
     const expectedId = `locations/${context.region}/namespaces/${context.gcpProjectId}/domainmappings/${domain}`;

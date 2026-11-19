@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
+import * as domainPlanning from '../infrastructure-engine-domain.js';
 import { gcpSecretStore, planInfrastructureEngine } from '../infrastructure-engine.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -131,4 +132,41 @@ describe('outside keys under the engine container boundary', () => {
     f.setState('foreign');
     expect(await store.observe('API_KEY')).toHaveProperty('unknown');
   });
+});
+
+it('plans separate Cloud Run claims and keeps the exact DNS selection for each hostname', async () => {
+  const f = fixture();
+  const dns = (name: string, id: string) => ({ provider: 'gcp', connectionScope: `dns/${id}`, zone: { id, name, projectId: 'dns-project' } });
+  const desired = projectSpecSchema.parse({ ...f.spec, secrets: {}, environments: { staging: { ...f.spec.environments.staging,
+    domain: 'api-test.example.com', dns: dns('example.com', 'example-zone'),
+    domains: [{ domain: 'api.test-example.com', dns: dns('test-example.com', 'test-zone') }, { domain: 'app.other.org', dns: dns('other.org', 'other-zone') }] } } });
+  vi.spyOn(domainPlanning, 'planDomain').mockResolvedValue({ before: [], after: [], mappingPresent: false, ownershipPresent: true });
+  const plan = await planInfrastructureEngine(f.ctx, { project: f.project, spec: desired, specRevision: 1, environmentName: 'staging' });
+  if ('blocked' in plan) throw new Error(plan.blocked.join(' '));
+  const config = f.configurations.at(-1)!;
+  const mappings = (config.files['cloudrun.tf.json'] as any).resource.google_cloud_run_domain_mapping;
+  expect(Object.values(mappings).map((row: any) => row.name).sort()).toEqual(['api-test.example.com', 'api.test-example.com', 'app.other.org']);
+  expect(new Set(Object.values(mappings).map((row: any) => row.spec[0].route_name)).size).toBe(1);
+  expect(f.ctx.repos.runs.findById(plan.planRunId)?.plan).toMatchObject({ engine: { domainClaims: {
+    'api-test.example.com': { owner: 'gcp-domain', connectionScope: 'dns/example-zone', zone: { zoneId: 'example-zone' } },
+    'app.other.org': { owner: expect.stringMatching(/^gcp-domain-[a-f0-9]+$/), connectionScope: 'dns/other-zone', zone: { zoneId: 'other-zone' } },
+  } } });
+});
+
+it.each(['example.com', 'other.org'])('keeps an existing primary DNS owner when a new primary in %s is selected', async zoneName => {
+  const f = fixture();
+  const old = 'a.example.com'; const next = `b.${zoneName}`;
+  const selection = (name: string) => ({ provider: 'gcp', zone: { id: name.split('.')[0]!, name, projectId: 'dns-project' } });
+  f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { engine: { kind: 'opentofu', domains: [old], domainClaims: {
+    [old]: { zone: { provider: 'gcp', zoneName: 'example.com', zoneId: 'example', scope: { projectId: 'dns-project' } } },
+  } } });
+  const spec = projectSpecSchema.parse({ ...f.spec, secrets: {}, environments: { staging: { ...f.spec.environments.staging,
+    domain: next, dns: selection(zoneName), domains: [{ domain: old, dns: selection('example.com') }] } } });
+  vi.spyOn(domainPlanning, 'planDomain').mockResolvedValue({ before: [], after: [], ownershipPresent: true });
+  const plan = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 2, environmentName: 'staging' });
+  if ('blocked' in plan) throw new Error(plan.blocked.join(' '));
+  expect(f.ctx.repos.runs.findById(plan.planRunId)?.plan).toMatchObject({ engine: { domainClaims: {
+    [old]: { owner: 'gcp-domain', zone: { zoneName: 'example.com' } }, [next]: { owner: expect.stringMatching(/^gcp-domain-[a-f0-9]+$/), zone: { zoneName } },
+  } } });
+  expect(f.configurations.at(-1)!.resources['google_cloud_run_domain_mapping.domain_a_example_com']?.name).toBe(old);
 });

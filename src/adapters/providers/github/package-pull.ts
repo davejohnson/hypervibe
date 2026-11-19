@@ -21,6 +21,12 @@ export function githubConnectionRank(scope: string | null, repo?: string): numbe
   return null;
 }
 
+/** A secondary-only update preserves a verified primary at the same repository scope. */
+export function githubPackagePullSetupKeys(repository?: string): string[] {
+  const exact = repository && new ConnectionRepository().findByProviderAndScope('github', repository);
+  return exact && exact.status === 'verified' ? ['packageReadToken'] : ['apiToken', 'packageReadToken'];
+}
+
 /**
  * GHCR pull credentials (username + read:packages token) from the best
  * verified GitHub connection — the same pair declarative plan/apply syncs to

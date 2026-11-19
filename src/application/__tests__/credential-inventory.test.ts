@@ -396,7 +396,7 @@ describe('read-only credential inventory', () => {
     const connection = f.ctx.repos.connections.create({ provider: 'github', scope: 'owner/inventory-app',
       credentialsEncrypted: f.ctx.secretStore.encryptObject({ apiToken: 'api-management-private', packageReadToken: 'package-read-private', login: 'owner' }) });
     f.ctx.repos.connections.updateStatus(connection.id, 'verified');
-    writeFileSync(path.join(root, '.env'), 'NODE_AUTH_TOKEN=new-package-private\nHYPERVIBE_GITHUB_TOKEN=api-management-private\n');
+    writeFileSync(path.join(root, '.env'), 'HYPERVIBE_GITHUB_PACKAGES_TOKEN=new-package-private\nHYPERVIBE_GITHUB_TOKEN=api-management-private\n');
     f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { ci: { deployBranch: { 'deploy.yml': {
       syncedEnvironmentSecrets: ['IMAGE_REGISTRY_TOKEN'], syncedEnvironmentSecretHashes: { IMAGE_REGISTRY_TOKEN: hashEnvValue('old-package-private') }, updatedAt: '2026-10-18T00:00:00Z',
     } } } });
@@ -410,7 +410,7 @@ describe('read-only credential inventory', () => {
     const result = await f.read();
     const packages = result.data.roles.find((role: any) => role.source.credentialRole === 'packageReadToken');
     const api = result.data.roles.find((role: any) => role.source.credentialRole === 'apiToken');
-    expect(packages.aliases).toEqual(['IMAGE_REGISTRY_TOKEN', 'NODE_AUTH_TOKEN']);
+    expect(packages.aliases).toEqual(['HYPERVIBE_GITHUB_PACKAGES_TOKEN', 'IMAGE_REGISTRY_TOKEN']);
     expect(api.aliases).not.toContain('NODE_AUTH_TOKEN');
     expect(packages.localCandidates[0].comparisonToAccepted).toBe('different');
     expect(packages.consumers).toContainEqual(expect.objectContaining({ kind: 'github-actions', environment: 'production', repository: 'owner/inventory-app',

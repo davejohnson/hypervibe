@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
 import { applyInfrastructureEngine, planInfrastructureEngine, verifyGcpDnsSource } from '../infrastructure-engine.js';
+import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import * as dns from '../dns-engine.js';
 import * as absence from '../dns-absence.js';
 import { domainEngineKey } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
@@ -90,7 +91,206 @@ function fixture(options: { owned?: boolean; mapping?: boolean; remove?: boolean
   return { ctx, project, environment, spec, prepare, engine, inspect, requests, mapping };
 }
 
+function registrarFixture() {
+  const f = fixture();
+  const accountId = 'a'.repeat(32);
+  const name = 'example.com';
+  const env = f.spec.environments.staging!;
+  env.domain = name;
+  env.dns = { provider: 'cloudflare', zone: { id: 'b'.repeat(32), name, accountId } };
+  env.domainRegistration = { provider: 'cloudflare', register: true, years: 1, accountId };
+  const connection = f.ctx.repos.connections.create({ provider: 'cloudflare', scope: name,
+    credentialsEncrypted: f.ctx.secretStore.encryptObject({ accountId, apiToken: 'cfut_fixture' }) });
+  f.ctx.repos.connections.updateStatus(connection.id, 'verified');
+  const params = { ...f, specRevision: 1, environmentName: 'staging' };
+  const plan = async () => {
+    const planned = await planInfrastructureEngine(f.ctx, params);
+    if ('blocked' in planned) throw Error(planned.blocked.join(' '));
+    return planned;
+  };
+  const apply = (saved: Awaited<ReturnType<typeof plan>>, confirmActions = saved.confirmActions) =>
+    applyInfrastructureEngine(f.ctx, { ...params, planId: saved.planRunId, confirmActions });
+  const fixtureFetch = globalThis.fetch;
+  function registrarTransport(handle: (operation: 'purchase' | 'status' | 'registration') => Response) {
+    const registrations = `/client/v4/accounts/${accountId}/registrar/registrations`;
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit) => {
+      const url = new URL(input);
+      if (url.hostname !== 'api.cloudflare.com') return fixtureFetch(input, init);
+      if (url.pathname.endsWith('/domain-check') && init.method === 'POST') return Response.json({
+        success: true, result: { domains: [{ name, registrable: true, tier: 'standard',
+          pricing: { currency: 'USD', registration_cost: '10', renewal_cost: '11' } }] },
+      });
+      if (url.pathname === registrations && init.method === 'POST') return handle('purchase');
+      if (url.pathname === `${registrations}/${name}/registration-status` && init.method === 'GET') return handle('status');
+      if (url.pathname === `${registrations}/${name}` && init.method === 'GET') return handle('registration');
+      throw Error('Unexpected registrar request');
+    }));
+  }
+  return { f, name, accountId, plan, apply, registrarTransport };
+}
+
 describe('Google hosting and DNS stage composition', () => {
+  // Cloudflare's Create Registration examples distinguish immediate 4xx error envelopes
+  // (success: false, result: null) from a workflow. A later status 404 proves neither.
+  // https://developers.cloudflare.com/api/resources/registrar/subresources/registrations/methods/create/
+  it.each([
+    ['rejected contact', 400, true], ['rejected payment', 402, true],
+    ['lost response', 0, false], ['server error', 503, false], ['workflow conflict', 409, false],
+    ['malformed HTTP error', 400, false],
+  ] as const)('requires the right recovery after a registrar purchase: %s', async (scenario, status, rejected) => {
+    const { f, plan, apply, registrarTransport } = registrarFixture();
+    let purchases = 0;
+    let polls = 0;
+    const providerError = { success: false, result: null, errors: [{ code: 10000, message: 'private provider detail' }], messages: [] };
+    registrarTransport(operation => {
+      if (operation === 'purchase') {
+        purchases++;
+        if (status === 0) throw Error('network interruption');
+        if (purchases > 1) return Response.json({ success: true, result: { state: 'succeeded', completed: true,
+          created_at: '2026-01-02T03:04:05Z', updated_at: '2026-01-02T03:04:06Z' } }, { status: 201 });
+        return Response.json(scenario === 'malformed HTTP error' ? {message: 'unknown'} : providerError, {status});
+      }
+      if (operation === 'status') {
+        polls++;
+        return Response.json(providerError, {status: 404});
+      }
+      throw Error('Unexpected request in registrar fixture');
+    });
+    const first = await plan();
+    const firstResult = await apply(first);
+    expect(JSON.stringify(firstResult)).not.toContain('private provider detail');
+    expect(firstResult).toMatchObject({ kind: 'executed', result: { receipts: [
+      expect.objectContaining({ status: rejected ? 'failed' : 'pending' }),
+    ] } });
+    const fresh = await plan();
+    expect(fresh.actions[0]?.type).toBe(rejected ? 'create' : 'update');
+    if (rejected) {
+      await apply(first);
+      expect(purchases).toBe(1);
+      await apply(fresh, []);
+      expect(purchases).toBe(1);
+    }
+    const retried = await apply(fresh);
+    if (!rejected) {
+      expect(retried).toMatchObject({ kind: 'executed', result: { receipts: [
+        expect.objectContaining({ status: 'pending' }),
+      ] } });
+      const next = await plan();
+      expect(next.actions[0]?.type).toBe('update');
+      await apply(next);
+    }
+    expect([purchases, polls]).toEqual(rejected ? [2, 0] : [1, 2]);
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  // Reconstructed from Cloudflare's Get Registration Status and Get Registration contracts.
+  // https://developers.cloudflare.com/api/resources/registrar/subresources/registration_status/methods/get/
+  // https://developers.cloudflare.com/api/resources/registrar/subresources/registrations/methods/get/
+  // The status URL is scoped to the domain across attempts. Only the registration
+  // resource independently confirms that the account currently owns the active domain.
+  it.each(['lost acknowledgement', 'distinct workflow', 'same timestamp', 'replayed purchase failure'] as const)(
+    'keeps a previous terminal failure from authorizing a third purchase (%s)', async scenario => {
+      const { f, name, accountId, plan, apply, registrarTransport } = registrarFixture();
+      const firstCreated = '2026-01-02T03:04:05.000100Z';
+      const secondCreated = scenario === 'same timestamp' || scenario === 'replayed purchase failure' ? firstCreated : '2026-01-02T03:04:05.000101Z';
+      const expiresAt = new Date(Date.now() + 365 * 86_400_000).toISOString();
+      const status = (state: string, created_at: string) => ({ state,
+        completed: ['failed', 'succeeded'].includes(state), created_at, updated_at: created_at,
+        links: { self: `/accounts/${accountId}/registrar/registrations/${name}/registration-status` } });
+      let latest = status('failed', firstCreated);
+      let purchases = 0;
+      let registeredDomain = 'other.example';
+      registrarTransport(operation => {
+        const result = (value: unknown) => Response.json({ success: true, result: value });
+        if (operation === 'purchase') {
+          purchases++;
+          if (purchases === 1 || scenario === 'replayed purchase failure') return result(status('failed', firstCreated));
+          if (scenario === 'lost acknowledgement') throw Error('Lost acknowledgement');
+          return result(status('in_progress', secondCreated));
+        }
+        if (operation === 'status') return result(latest);
+        return result({ domain_name: registeredDomain, status: 'active', created_at: secondCreated, expires_at: expiresAt });
+      });
+      await apply(await plan());
+      const second = await plan();
+      expect(second.actions[0]?.type).toBe('create');
+      await apply(second);
+      const poll = await plan();
+      expect(poll.actions[0]?.type).toBe('update');
+      expect(await apply(poll)).toMatchObject({ kind: 'executed', result: { receipts: [{ status: 'pending' }] } });
+      expect((await plan()).actions[0]?.type).toBe('update');
+      if (scenario === 'distinct workflow') {
+        latest = status('failed', secondCreated);
+        await apply(await plan());
+        expect((await plan()).actions[0]).toMatchObject({ type: 'create', requiresConfirm: true });
+      } else {
+        latest = status('succeeded', secondCreated);
+        await apply(await plan());
+        expect((await plan()).actions[0]?.type).toBe('update');
+        registeredDomain = name;
+        await apply(await plan());
+        await plan();
+        expect(f.prepare).toHaveBeenCalledOnce();
+      }
+      expect(purchases).toBe(2);
+    });
+
+  it.each(['inconsistent status', 'legacy inconsistent receipt', 'legacy uncorrelated failure'] as const)(
+    'can recover an active registration after %s', async scenario => {
+      const { f, accountId, name, plan, apply, registrarTransport } = registrarFixture();
+      const created_at = '2026-01-02T03:04:05Z';
+      const response = { completed: true, state: 'succeeded', links: { self: '/status' }, created_at, updated_at: created_at };
+      const legacy = scenario !== 'inconsistent status';
+      if (legacy) {
+        f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { domainRegistrations: {
+          [name]: { provider: 'cloudflare', accountId, state: scenario === 'legacy uncorrelated failure' ? 'failed' : 'unknown', completed: true },
+        } });
+      }
+      let latest = { ...response, state: 'unknown' };
+      let purchases = 0;
+      registrarTransport(operation => {
+        const result = (value: unknown) => Response.json({ success: true, result: value });
+        if (operation === 'purchase') {
+          purchases++;
+          return result({ ...response, state: 'pending', completed: false });
+        }
+        if (operation === 'status') return result(latest);
+        return result({ domain_name: name, status: 'active', created_at, expires_at: new Date(Date.now() + 365 * 86_400_000).toISOString() });
+      });
+      if (!legacy) await apply(await plan());
+      const poll = await plan();
+      expect(poll.actions[0]?.type).toBe('update');
+      expect(await apply(poll)).toMatchObject({ kind: 'executed', result: { receipts: [{ status: 'pending' }] } });
+      latest = response;
+      await apply(await plan());
+      await plan();
+      expect(f.prepare).toHaveBeenCalledOnce();
+      expect(purchases).toBe(legacy ? 0 : 1);
+    });
+
+  it('stages a reviewed Cloudflare purchase before DNS or hosting work', async () => {
+    const { f, name } = registrarFixture();
+    vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([{ name, registrable: true,
+      tier: 'standard', pricing: { currency: 'USD', registration_cost: '10.00', renewal_cost: '11.00' } }]);
+    const purchase = vi.spyOn(CloudflareAdapter.prototype, 'createRegistrarRegistration').mockResolvedValue({
+      state: 'succeeded', completed: true, created_at: '2026-01-02T03:04:05Z', updated_at: '2026-01-02T03:04:06Z', links: { self: '/status' } });
+    const params = { ...f, specRevision: 1, environmentName: 'staging' };
+    const plan = await planInfrastructureEngine(f.ctx, params);
+    if ('blocked' in plan) throw Error(plan.blocked.join(' '));
+    expect(plan.actions.map(action => action.id)).toEqual(['domain:example.com:register']);
+    expect(plan.confirmActions).toEqual(['domain:example.com:register']);
+    const apply = (confirmActions: string[]) => applyInfrastructureEngine(f.ctx, { ...params, planId: plan.planRunId, confirmActions });
+    await apply([]);
+    expect(purchase).not.toHaveBeenCalled();
+    await apply(plan.confirmActions);
+    expect(purchase).toHaveBeenCalledOnce();
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.engine).not.toHaveBeenCalled();
+    const next = await planInfrastructureEngine(f.ctx, params);
+    expect(next).not.toHaveProperty('blocked');
+    expect(f.prepare).toHaveBeenCalledOnce();
+    expect(purchase).toHaveBeenCalledOnce();
+  });
   it('finishes cancellation explicitly when the mapping never reached the provider', async () => {
     const f = fixture({ owned: true, mapping: false, remove: true });
     f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { dnsEngine: undefined,

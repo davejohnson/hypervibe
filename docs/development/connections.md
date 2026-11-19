@@ -164,6 +164,12 @@ switch environments, mutate services or rotate credentials; the operator perform
 those actions explicitly and then renews the verified Hypervibe connection.
 
 
+## Credential roles during setup
+
+A GitHub management connection uses the explicitly selected repository PAT. Private image pulls use the separately assigned package-read role. Hypervibe suggests `HYPERVIBE_GITHUB_TOKEN` and `HYPERVIBE_GITHUB_PACKAGES_TOKEN` as reference names. Existing private references and explicitly mapped names still work, including an intentionally shared source mapped to both fields. A token with package permissions is assigned to the package role only when configured for that role. A build may receive a package credential as `NODE_AUTH_TOKEN`. GitHub itself issues the per-job `GITHUB_TOKEN`.
+
+For SendGrid, use a scoped private reference for the management connection and a separate `SENDGRID_API_KEY` runtime secret with `mail.send`. The suggested management reference name is `HYPERVIBE_SENDGRID_API_KEY`. Environments and repository secrets with the same destination name are separate consumers. Record the scope when reviewing their inventory. [GitHub package authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) and [SendGrid key permissions](https://www.twilio.com/docs/sendgrid/ui/account-and-settings/api-keys).
+
 ## Package tokens in managed builds
 
 Outside `NODE_AUTH_TOKEN` and `NPM_TOKEN` secrets are build credentials, excluded

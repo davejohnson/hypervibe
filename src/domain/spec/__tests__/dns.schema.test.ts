@@ -15,6 +15,15 @@ describe('DNS desired state at the environment boundary', () => {
     expect(parsed).toMatchObject({ hosting: environment.hosting, dns });
   });
 
+  it('accepts several Google domains with separate zone and connection selections', () => {
+    const extra = { domain: 'CLIENT.OTHER.ORG.', dns: { ...cloudflare, connectionScope: 'dns/other', zone: { ...cloudflare.zone, name: 'other.org', id: 'cf-zone-456' } } };
+    const target = { ...environment, hosting: { provider: 'cloudrun' }, dns: cloudflare, domains: [extra] };
+    expect(environmentSpecSchema.parse(target).domains?.[0]).toEqual({ ...extra, domain: 'client.other.org' });
+    expect(environmentSpecSchema.safeParse({ ...target, domains: [{ ...extra, dns: cloudflare }] }).success).toBe(false);
+    expect(environmentSpecSchema.safeParse({ ...target, domains: [{ domain: 'app.example.com', dns: cloudflare }] }).success).toBe(false);
+    expect(environmentSpecSchema.safeParse({ ...target, hosting: { provider: 'aws' } }).success).toBe(false);
+  });
+
   it('keeps old custom-domain specs without adding DNS ownership', () => {
     const parsed = environmentSpecSchema.parse({ ...environment, domainProxy: true });
     expect(parsed).not.toHaveProperty('dns');

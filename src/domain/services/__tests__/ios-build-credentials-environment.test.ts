@@ -72,11 +72,11 @@ describe('build-only credential environment rendering', () => {
   it('requires a reviewed iOS workflow update without migrating server-only workflows', () => {
     const target = { environmentName: 'staging', kind: 'staging' as const, branch: 'main', autoDeployOnPush: true, serviceNames: ['web'], providerServiceIds: ['web-id'] };
     const input = { provider: 'railway', target, migration: { includeStep: false } };
-    const previousContract = { version: 1, rendererRevision: 7, ...input };
+    const previousContract = { version: 1, rendererRevision: 9, ...input };
     const config = ios();
     expect(githubActionsWorkflowInputHash(input)).toBe(canonicalJsonSha256(previousContract));
     // Revision 8 could skip a rename with an unknown previous path.
-    for (const rendererRevision of [4, 5, 6, 7, 8]) {
+    for (const rendererRevision of [4, 5, 6, 7, 8, 9]) {
       expect(githubActionsWorkflowInputHash({ ...input, ios: config })).not.toBe(canonicalJsonSha256({
         ...previousContract,
         ios: { rendererRevision, buildContractFingerprint: iosBuildContractFingerprint(config), bundleId: config.bundleId, release: config.release },

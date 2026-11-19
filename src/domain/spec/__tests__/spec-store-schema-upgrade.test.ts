@@ -119,12 +119,14 @@ describe('schema-upgrade recovery from authoritative repository desired state', 
         name: 'hv_spec', arguments: { project: project.name, replace: true, spec: currentSpec },
       }));
       expect(replaced.ok).toBe(true);
-      expect(replaced.data).toMatchObject({
-        revision: 10, spec: { environments: { production: { deploy: currentSpec.environments.production.deploy } } },
-      });
+      expect(replaced.data).toMatchObject({ revision: 9, changed: { fields: [], environments: [] } });
+      expect(replaced.data).not.toHaveProperty('spec');
       const read = parseToolEnvelope(await client.callTool({ name: 'hv_spec', arguments: { project: project.name } }));
       expect(read.ok).toBe(true);
-      expect(read.data).toMatchObject({ revision: 10 });
+      expect(read.data).toMatchObject({
+        revision: 9, spec: { environments: { production: { deploy: currentSpec.environments.production.deploy } } },
+      });
+      expect(journal.findLatest(project.id)!.revision).toBe(9);
       expect(journal.findByRevision(project.id, 8)!.document).toEqual(previousSpec);
     } finally {
       await client.close();

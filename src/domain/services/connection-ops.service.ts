@@ -269,16 +269,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           login?: string;
           packageReadToken?: string;
         };
-        const tokenHasPackageRead =
-          result.scopes?.includes('read:packages') === true
-          || result.scopes?.includes('write:packages') === true;
-        const nextCreds = {
-          ...creds,
-          ...(creds.login !== result.login ? { login: result.login } : {}),
-          ...(tokenHasPackageRead && creds.apiToken && !creds.packageReadToken
-            ? { packageReadToken: creds.apiToken }
-            : {}),
-        };
+        const nextCreds = { ...creds, login: result.login };
         if (JSON.stringify(nextCreds) !== JSON.stringify(creds)) {
           const nextEncrypted = secretStore.encryptObject(nextCreds);
           connectionRepo.updateCredentials(connection.id, nextEncrypted);

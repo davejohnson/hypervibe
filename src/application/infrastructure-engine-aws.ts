@@ -95,26 +95,57 @@ export function awsBinding(environment: Environment): AwsEngineBinding {
 
 const awsAccess = (context: Pick<AwsEngineContext, 'connection' | 'credentials'>): AwsAccess => ({ region: context.connection.region, credentials: context.credentials });
 
-export async function resolveAwsEngineContext(ctx: CommandContext, project: Project, environmentName: string): Promise<AwsEngineContext | { blocked: string }> {
+export async function resolveAwsEngineContext(ctx: CommandContext, project: Project, environmentName: string, spec?: ProjectSpec): Promise<AwsEngineContext | { blocked: string; placement?: true }> {
   const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl ?? undefined) ?? project.name;
   const stored = new ConnectionRepository().findBestVerifiedMatch('aws', repository);
   if (!stored) return { blocked: 'This project has no AWS access yet. Run hv_connections provider="aws" action="connect" (one sign-in).' };
   const parsed = AwsEngineCredentialsSchema.safeParse(getSecretStore().decryptObject(stored.credentialsEncrypted));
   if (!parsed.success) return { blocked: 'The AWS connection is not Hypervibe\'s deploy access. Run hv_connections provider="aws" action="connect" again.' };
-  let auth: EngineAuthentication;
-  try { auth = await awsEngineAuthentication(parsed.data); } catch (error) {
-    return { blocked: `Hypervibe could not use its AWS deploy role: ${error instanceof Error ? error.name : String(error)}.` };
-  }
   const environment = ctx.repos.environments.findByProjectAndName(project.id, environmentName)
     ?? ctx.repos.environments.create({ projectId: project.id, name: environmentName });
+  const desired = spec?.environments[environmentName];
+  const bindings = environment.platformBindings;
+  const native = awsBinding(environment);
+  const savedRegion = bindings.provider === 'aws' ? bindings.environmentId : undefined;
+  const region = desired?.hosting.region ?? savedRegion ?? native.database?.region ?? native.finalSnapshot?.region ?? parsed.data.region;
+  const connection = AwsEngineCredentialsSchema.safeParse({ ...parsed.data, region });
+  const conflict = (blocked: string) => ({ blocked, placement: true as const });
+  if (!connection.success) return conflict('The AWS target region is missing or invalid.');
+  if ((bindings.provider && bindings.provider !== 'aws') ||
+      (bindings.provider === 'aws' && (bindings.projectId !== parsed.data.accountId || !savedRegion || savedRegion !== region)) ||
+      (native.database && (native.database.accountId !== parsed.data.accountId || native.database.region !== region ||
+        !native.database.clusterArn?.startsWith(`arn:aws:rds:${region}:${parsed.data.accountId}:cluster:`))) ||
+      (native.finalSnapshot && native.finalSnapshot.region !== region)) {
+    return conflict('The reviewed AWS account or region conflicts with the saved environment scope. Migrate the environment to change its placement.');
+  }
+  if (native.imageUri && !native.imageUri.startsWith(`${parsed.data.accountId}.dkr.ecr.${region}.amazonaws.com/`)) {
+    return conflict('The saved AWS image belongs to a different account or region. Review the existing placement before continuing.');
+  }
+  for (const [name, storage] of Object.entries(desired?.storage ?? {})) {
+    if (storage.region !== region) return conflict(`Storage ${name} requests ${storage.region}, but this AWS environment builds its buckets in ${region}. Choose one region before planning.`);
+  }
+  if (spec && desired?.database) {
+    for (const name of awsSharedDatabaseEnvironments(spec)) {
+      const sibling = ctx.repos.environments.findByProjectAndName(project.id, name);
+      const existing = sibling ? awsBinding(sibling).database : undefined;
+      const siblingRegion = spec.environments[name]!.hosting.region ?? existing?.region ?? parsed.data.region;
+      if (siblingRegion !== region || existing && (existing.accountId !== parsed.data.accountId || existing.region !== region)) {
+        return conflict(`AWS testing environments share a database cluster. ${name} and ${environmentName} must use the same account and region.`);
+      }
+    }
+  }
+  let auth: EngineAuthentication;
+  try { auth = await awsEngineAuthentication(connection.data); } catch (error) {
+    return { blocked: `Hypervibe could not use its AWS deploy role: ${error instanceof Error ? error.name : String(error)}.` };
+  }
   const prefix = `hv-${project.name}-${environmentName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 28).replace(/-+$/, '');
   const sharedPrefix = `hv-${project.name}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 21).replace(/-+$/, '') + '-shared';
   const databaseName = `app_${awsKey(environmentName)}`.slice(0, 40).replace(/_+$/, '');
   return {
-    connection: parsed.data, auth, environment, prefix,
+    connection: connection.data, auth, environment, prefix,
     shared: {
       prefix: sharedPrefix, clusterIdentifier: `${sharedPrefix}-postgres`,
-      clusterArn: awsSharedClusterArn({ accountId: parsed.data.accountId, region: parsed.data.region, prefix: sharedPrefix }),
+      clusterArn: awsSharedClusterArn({ accountId: parsed.data.accountId, region: connection.data.region, prefix: sharedPrefix }),
       state: { provider: 'aws', projectId: project.id, environmentId: 'shared-testing', partition: 'project-shared' },
     },
     database: { name: databaseName, owner: `${databaseName}_owner`, waker: `${databaseName}_waker` },
@@ -179,7 +210,9 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     environmentId: context.environment.id, parameterPath: context.parameterPath,
     ...(environmentSpec.database ? { database: { clusterArn: context.shared.clusterArn, name: context.database.name } } : {}),
-    storage: Object.keys(environmentSpec.storage ?? {}).sort().map((storage) => ({ name: storage, bucket: bucketName(storage) })),
+    storage: Object.entries(environmentSpec.storage ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, storage]) => ({
+      name, bucket: bucketName(name), ...(storage.versioning ? { versioning: true } : {}), ...(storage.browserUploads ? { browserUploads: true } : {}),
+    })),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
       env: envFor(logicalName), ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
@@ -199,8 +232,8 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
 }
 
 /** AWS Parameter Store as an environment's secret store. */
-export async function awsSecretStore(ctx: CommandContext, project: Project, environmentName: string): Promise<EngineSecretStore | { blocked: string }> {
-  const context = await resolveAwsEngineContext(ctx, project, environmentName);
+export async function awsSecretStore(ctx: CommandContext, project: Project, environmentName: string, spec?: ProjectSpec): Promise<EngineSecretStore | { blocked: string }> {
+  const context = await resolveAwsEngineContext(ctx, project, environmentName, spec);
   if ('blocked' in context) return context;
   const access = awsAccess(context);
   return {
@@ -267,7 +300,7 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
     if (!tornDown.finalSnapshot) return { blocked: [`${environmentName} was torn down and nothing of it remains on AWS.`] };
     if (!params.deleteFinalSnapshot) return { blocked: [`${environmentName} was torn down; only its final database snapshot (${tornDown.finalSnapshot.identifier}) remains. Plan again with deleteFinalSnapshot=true to delete it.`] };
   }
-  const context = await resolveAwsEngineContext(ctx, project, environmentName);
+  const context = await resolveAwsEngineContext(ctx, project, environmentName, spec);
   if ('blocked' in context) return { blocked: [context.blocked] };
   const access = await awsAccessCurrent(context.credentials, context.connection.accountId);
   if (access === 'outdated') return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
@@ -382,7 +415,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const environmentSpec = spec.environments[environmentName]!;
   const problems = awsEngineProblems(spec, environmentName);
   if (problems.length) return { blocked: problems };
-  const context = await resolveAwsEngineContext(ctx, project, environmentName);
+  const context = await resolveAwsEngineContext(ctx, project, environmentName, spec);
   if ('blocked' in context) return { blocked: [context.blocked] };
   const setup = await awsAccessCurrent(context.credentials, context.connection.accountId);
   if (setup === 'outdated') {
@@ -505,7 +538,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const reviewed = document.engine;
   const snapshotOnly = Boolean((reviewed as { teardown?: boolean } | undefined)?.teardown) && !params.spec.environments[environmentName];
   if (!reviewed?.aws || (!snapshotOnly && !isAwsEngineEnvironment(params.spec, environmentName))) return { kind: 'blocked', reason: 'This plan is not an AWS engine plan. Re-run hv_plan.' };
-  const context = await resolveAwsEngineContext(ctx, params.project, environmentName);
+  const context = await resolveAwsEngineContext(ctx, params.project, environmentName, params.spec);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || (reviewed.build && JSON.stringify(reviewed.build.state) !== JSON.stringify(context.buildState))
     || (reviewed.shared && JSON.stringify(reviewed.shared.state) !== JSON.stringify(context.shared.state))

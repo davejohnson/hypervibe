@@ -110,14 +110,13 @@ describe('contextual credential forms through MCP', () => {
     });
   });
 
-  it('uses selected-project context in provider discovery without changing credential scope', async () => {
+  it('uses selected-project context in provider guidance without changing credential scope', async () => {
     const project = new ProjectRepository().create({
       name: 'storefront', defaultPlatform: 'railway', gitRemoteUrl: 'git@github.com:acme/storefront.git',
     });
     await withClient(async client => {
-      const response = await client.callTool({ name: 'hv_connections', arguments: { project: project.name } });
-      const data = parseToolEnvelope(response).data as { availableProviders: Record<string, Array<{ name: string; setupHelpUrls: Array<{ url: string }> }>> };
-      const github = Object.values(data.availableProviders).flat().find(provider => provider.name === 'github')!;
+      const response = await client.callTool({ name: 'hv_connections', arguments: { project: project.name, provider: 'github', action: 'describe' } });
+      const { provider: github } = parseToolEnvelope(response).data as { provider: { setupHelpUrls: Array<{ url: string }> } };
       const fine = new URL(github.setupHelpUrls.find(link => link.url.includes('/personal-access-tokens/new'))!.url);
       expect(fine.searchParams.get('target_name')).toBe('acme');
       expect(fine.searchParams.get('description')).toContain('acme/storefront');

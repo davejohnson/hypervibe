@@ -1,3 +1,4 @@
+import { registerCoreTools } from '../core.tools.js';
 import { CommandRegistry } from '../../application/commands.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvObservabilityTools } from '../hv-observability.tools.js';
@@ -82,6 +83,25 @@ it('reads exact Azure native identity and scoped workspace logs, and rejects unh
   expect(health.state).toBe('failed');
 });
 
+it.each(['aws', 'azure'] as const)('shows observed workload counts and keeps unbound services unknown on %s', async provider => {
+  const { project } = fixture(provider);
+  const registry = new CommandRegistry();
+  registerCoreTools(registry, createToolContext());
+  new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name, environments: { staging: {
+    hosting: { provider }, services: { web: {}, missing: { workloadKind: 'worker' } },
+  } } }));
+  if (provider === 'aws') awsTransport(r => r.target.endsWith('DescribeServices') ? { data: { services: [{
+    serviceArn: webArn, clusterArn: webCluster, status: 'ACTIVE', runningCount: 0, pendingCount: 0, desiredCount: 0,
+    deployments: [{ status: 'PRIMARY', rolloutState: 'COMPLETED' }],
+  }] } } : undefined);
+  else azureTransport({ replicas: 0 });
+  const result = await registry.execute('hv_status', { project: project.name, env: 'staging' });
+  expect(result).toMatchObject({ ok: true, data: { workloads: expect.arrayContaining([
+    expect.objectContaining({ service: 'web', presence: 'present', activity: 'idle', running: 0 }),
+    expect.objectContaining({ service: 'missing', presence: 'unknown', activity: 'unknown' }),
+  ]), workers: [expect.objectContaining({ service: 'missing', activity: 'unknown' })] } });
+});
+
 it('exposes engine logs through the public command and observes worker-only environments without an HTTP URL', async () => {
   const { project } = fixture('aws');
   const registry = new CommandRegistry(); registerHvObservabilityTools(registry, createToolContext());
@@ -133,7 +153,7 @@ it('correlates a scheduled ECS execution to its exact cluster and current task d
   expect(health.state).toBe('failed'); expect(requests.find((r) => r.target.endsWith('DescribeTasks'))?.body).toEqual({ cluster: clusterArn, tasks: [taskArn] });
 });
 
-function azureTransport(options: { queryError?: boolean; resourceMissing?: boolean; readDenied?: boolean; mismatchedIdentity?: boolean; job?: boolean; jobStatus?: string; nextLink?: string } = {}) {
+function azureTransport(options: { replicas?: number; queryError?: boolean; resourceMissing?: boolean; readDenied?: boolean; mismatchedIdentity?: boolean; job?: boolean; jobStatus?: string; nextLink?: string } = {}) {
   const calls: string[] = []; const nativeId = options.job ? appId.replace('/containerApps/', '/jobs/') : appId;
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     calls.push(url);
@@ -143,8 +163,8 @@ function azureTransport(options: { queryError?: boolean; resourceMissing?: boole
     if (url.includes('/executions')) return Response.json({ value: [{ id: `${nativeId}/executions/exact-run`, properties: { status: options.jobStatus ?? 'Failed', startTime: '2026-11-01T00:00:00Z', template: { containers: [{ name: 'app', image: 'registry/app@sha256:exact' }] } } }], ...(options.nextLink ? { nextLink: options.nextLink } : {}) });
     if (options.readDenied) return Response.json({ error: { message: 'synthetic-token' } }, { status: 403 });
     if (options.resourceMissing) return Response.json({}, { status: 404 });
-    if (url.includes('/revisions/')) return Response.json({ id: `${nativeId}/revisions/current`, properties: { provisioningState: 'Provisioned', healthState: 'Healthy', runningState: 'Running' } });
-    return Response.json({ id: options.mismatchedIdentity ? `${nativeId}-other` : nativeId, location: 'northeurope', properties: { environmentId: managedEnvironmentId, template: { containers: [{ name: 'app', image: 'registry/app@sha256:exact' }] }, provisioningState: 'Succeeded', latestRevisionName: 'current', latestReadyRevisionName: 'current' } });
+    if (url.includes('/revisions/')) return Response.json({ id: `${nativeId}/revisions/current`, properties: { replicas: options.replicas, active: true, provisioningState: 'Provisioned', healthState: 'Healthy', runningState: 'Running' } });
+    return Response.json({ id: options.mismatchedIdentity ? `${nativeId}-other` : nativeId, location: 'northeurope', properties: { configuration: { activeRevisionsMode: 'Single' }, environmentId: managedEnvironmentId, template: { containers: [{ name: 'app', image: 'registry/app@sha256:exact' }] }, provisioningState: 'Succeeded', latestRevisionName: 'current', latestReadyRevisionName: 'current' } });
   }));
   return calls;
 }

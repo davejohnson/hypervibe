@@ -118,6 +118,11 @@ export function azureEngineProblems(spec: ProjectSpec, environmentName: string):
       problems.push(`${name}: Container Apps Jobs run schedules in UTC; write the schedule in UTC and remove timeZone.`);
     }
   }
+  for (const setting of ['versioning', 'browserUploads'] as const) {
+    if (new Set(Object.values(environment.storage ?? {}).map(storage => Boolean(storage[setting]))).size > 1) {
+      problems.push(`Azure containers in this environment share one storage account. Choose the same ${setting} setting for each container.`);
+    }
+  }
   for (const [name, storage] of Object.entries(environment.storage ?? {})) {
     if (storage.provider !== 'azureblob') problems.push(`Storage ${name}: the Azure engine manages containers only with provider "azureblob".`);
     if (storage.access === 's3') problems.push(`Storage ${name}: Azure Blob Storage has no S3-compatible API; use the Azure SDK (access "native").`);
@@ -243,7 +248,9 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer, appsEnvironmentId: context.shared.appsEnvironmentId },
     ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
     vault: { id: context.vault.id, uri: context.vault.uri },
-    storage: Object.keys(environmentSpec.storage ?? {}).sort().map((name) => ({ name, container: azureContainerName(name) })),
+    storage: Object.entries(environmentSpec.storage ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, storage]) => ({
+      name, container: azureContainerName(name), ...(storage.versioning ? { versioning: true } : {}), ...(storage.browserUploads ? { browserUploads: true } : {}),
+    })),
     services: services.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => {
       const env = envFor(logicalName);
       const port = Number(env.PORT);
