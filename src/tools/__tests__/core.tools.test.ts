@@ -2055,6 +2055,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
       requiresConfirm: true,
       billable: true,
     });
+    expect(register.reason).toContain('account acct-1');
+    expect(register.reason).toContain('1 year');
+    expect(register.reason).toContain('auto-renew off');
     expect(register.metadata).toBeUndefined();
     expect(JSON.stringify(storedPlanAction(plan.data.planId, register.id)?.metadata)).toContain('10.00');
     const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:apreskeys.com');
@@ -2335,7 +2338,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     if (lost) create.mockRejectedValueOnce(new Error('Connection closed after submission'));
     const poll = vi.spyOn(CloudflareAdapter.prototype, 'getRegistrarRegistrationStatus').mockResolvedValue({
       completed: false, created_at: '2026-06-15T00:00:00Z', updated_at: '2026-06-15T00:01:00Z',
-      links: { self: '/status' }, state: 'in_progress',
+      links: { self: '/status?token=private-registrar-response' }, state: 'in_progress', context: { token: 'private-registrar-response' },
     });
 
     const plan = await t.call('hv_plan', { project: 'domain-pending-app', env: 'production' });
@@ -2343,9 +2346,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com');
     expect(attach.dependsOn).toContain('domain:pending-example.com:register');
 
+    vi.spyOn(EnvironmentRepository.prototype, 'syncRepoBindingsForId').mockImplementationOnce(() => { throw Error('private-export-detail'); });
+    const beforeSend = await t.call('hv_apply', { project: 'domain-pending-app', planId: plan.data.planId,
+      confirmActions: ['domain:pending-example.com:register'] });
+    expect(JSON.stringify(beforeSend)).not.toContain('private-export-detail');
+    expect(create).not.toHaveBeenCalled();
+    const retryPlan = await t.call('hv_plan', { project: 'domain-pending-app', env: 'production' });
+    expect(retryPlan.data.actions).toContainEqual(expect.objectContaining({ id: 'domain:pending-example.com:register', type: 'create', requiresConfirm: true }));
     const apply = await t.call('hv_apply', {
       project: 'domain-pending-app',
-      planId: plan.data.planId,
+      planId: retryPlan.data.planId,
       confirmActions: ['domain:pending-example.com:register'],
     });
 
@@ -2382,6 +2392,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const purchase = next.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com:register');
     expect(purchase.type).toBe('update');
     await t.call('hv_apply', { project: project.name, planId: next.data.planId });
+    expect(JSON.stringify(new EnvironmentRepository().findByProjectAndName(project.id, 'production')?.platformBindings)).not.toContain('private-registrar-response');
     expect(poll).toHaveBeenCalledWith('acct-1', 'pending-example.com');
     expect(create).toHaveBeenCalledTimes(1);
     await t.close();
