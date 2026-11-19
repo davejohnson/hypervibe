@@ -34,7 +34,7 @@ provider status or assert that a live run has passed.
 | Profile | Declared disposable resources | Release and verification |
 | --- | --- | --- |
 | `gcp-engine` | One public Cloud Run web service and its public-invoker IAM member | Committed local fixture archive through the installed Hypervibe release path; exact JSON body and `create`/`update` revision; encrypted engine-state identity projection and exact Cloud Run GET after teardown |
-| `aws-engine`, `azure-engine` | One testing environment: public web service, worker and PostgreSQL database, plus whatever the project shares between testing environments (network, app environment, database cluster or server, registry) | Committed local fixture through `hv_plan` → `hv_apply` → `hv_deploy`; exact JSON body with the `create`/`update` revision, a database write from the web service and one from the worker; the database must refuse a connection from the test computer; `hv_plan scope="teardown"`; then everything in the dedicated account is compared with what was there before the run. **Azure: one passing run on 2026-11-18 in West US 2, at d4cf72a0. AWS: never run.** |
+| `aws-engine`, `azure-engine` | One testing environment: public web service, always-on worker, on-demand worker, scheduled job, file storage and PostgreSQL database, plus whatever the project shares between testing environments (network, app environment, database cluster or server, registry) | Committed local fixture through `hv_plan` → `hv_apply` → `hv_deploy`; exact JSON body with the `create`/`update` revision, a database write from the web service, recent ones from the worker, the scheduled job and the on-demand worker, and a file written to storage and read back; the database must refuse a connection from the test computer; `hv_plan scope="teardown"`; then everything in the dedicated account is compared with what was there before the run. **Azure: two passing runs on 2026-11-18 in West US 2, at d4cf72a0 without and at 4fa5ad13 with storage, the scheduled job and the on-demand worker. AWS: one run on 2026-11-18 stopped at the image build, because the new account's build limit was zero; no passing run.** |
 | `railway` | Web service, PostgreSQL, Redis, object bucket, associated volumes, PostgreSQL-backed queue wiring | Prepared repository and managed GitHub workflow, exact commit and release artifact; exact JSON revision and SQL probe; complete native project service/volume/bucket inventory before teardown and after deletion |
 
 The GCP profile is deliberately **web-only**. It does not prove Cloud SQL,
@@ -65,8 +65,10 @@ dedicated account, and after teardown the account must match that record:
 
 This needs an account or subscription that holds nothing else that changes during
 the run; another project created there mid-run reads as a leftover. Neither profile
-proves moving an older project to the current layout, storage, scheduled jobs,
-on-demand workers or CI releases.
+proves moving an older project to the current layout, a second environment sharing
+the project's pieces, CI releases, or that an on-demand worker starts only when work
+is queued and stops afterwards: the fixture sees that queued work gets done, not what
+started the worker. The AWS inventory does not yet list schedules.
 
 Legacy GCP adapter lifecycle registrations are planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
