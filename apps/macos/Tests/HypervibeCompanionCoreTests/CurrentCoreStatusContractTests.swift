@@ -135,4 +135,20 @@ struct CurrentCoreStatusContractTests {
         let catalog = try HypervibeResponseMapper.decodeConnectionCatalog(refreshFixture("catalog"))
         #expect(!catalog.providers.isEmpty)
     }
+
+    @Test
+    func otherScreensDecodeTheCurrentAnswers() throws {
+        let guidance = try HypervibeResponseMapper.decodeConnectionGuidance(refreshFixture("guidance"))
+        _ = guidance
+        let definitions = try HypervibeResponseMapper.decodeCIDefinitionCatalog(refreshFixture("ciDefinitions"))
+        #expect(definitions.definitions.map(\.id) == ["101"])
+        let variables = try HypervibeResponseMapper.decodeHostingVariables(refreshFixture("variables"))
+        _ = variables
+        let health = try HypervibeResponseMapper.decodePublicEndpointHealth(
+            refreshFixture("health"), fallbackService: "web", checkedAt: Date(timeIntervalSince1970: 500)
+        )
+        _ = health
+        let removed = try HypervibeResponseMapper.decodeConnectionMutation(refreshFixture("removed"))
+        _ = removed
+    }
 }
