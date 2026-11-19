@@ -122,11 +122,16 @@ describe('engine hv_plan command boundaries', () => {
     expect(f.scoped).not.toHaveBeenCalled();
   });
 
-  it('does not apply Cloud Run-only scope guards to AWS', async () => {
+  it('reports explicitly requested AWS backup coverage without creating a mutation plan', async () => {
     const f = fixture('aws');
+    const environment = f.spec.environments.staging!;
+    const spec = { ...f.spec, environments: { staging: { ...environment, backups: { mode: 'daily' } } } };
+    new ProjectSpecRepository().insert(f.project.id, 2, spec);
     const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'backups' });
-    expect(result).toMatchObject({ ok: false, error: { message: 'SCOPED_PLANNER_REACHED' } });
-    expect(f.scoped).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ ok: true, data: { mode: 'observation', scope: 'backups',
+      backupCoverage: { policy: { mode: 'daily', source: 'explicit' }, resources: [] } } });
+    expect(result.data).not.toHaveProperty('planId');
+    expect(f.scoped).not.toHaveBeenCalled();
     expect(f.infrastructure).not.toHaveBeenCalled();
     expect(f.teardown).not.toHaveBeenCalled();
   });

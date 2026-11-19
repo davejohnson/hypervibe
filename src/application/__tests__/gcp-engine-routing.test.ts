@@ -97,11 +97,20 @@ describe('GCP engine public routing', () => {
     expect(f.plan).not.toHaveBeenCalled();
   });
 
-  it.each(['retained-cleanup', 'secrets', 'database-credential-aliases', 'backups'])('rejects unsupported GCP scope=%s before either planner', async scope => {
+  it.each(['retained-cleanup', 'secrets', 'database-credential-aliases'])('rejects unsupported GCP scope=%s before either planner', async scope => {
     const f = fixture('cloudrun');
     new ProjectSpecRepository().insert(f.project.id, 1, f.spec);
     const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope });
     expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining(`scope="${scope}" is not supported`) } });
+    expect(f.plan).not.toHaveBeenCalled();
+    expect(f.infrastructure).not.toHaveBeenCalled();
+  });
+
+  it('requires explicit backup intent on GCP without admitting either infrastructure planner', async () => {
+    const f = fixture('cloudrun');
+    new ProjectSpecRepository().insert(f.project.id, 1, f.spec);
+    const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'backups' });
+    expect(result).toMatchObject({ ok: false, error: { code: 'VALIDATION', message: expect.stringContaining('explicit backups.mode') } });
     expect(f.plan).not.toHaveBeenCalled();
     expect(f.infrastructure).not.toHaveBeenCalled();
   });
