@@ -37,7 +37,7 @@ describe.skipIf(process.platform === 'win32')('agent installer subprocess and co
     const outputDirectory = path.join(packageDirectory, 'dist');
     mkdirSync(outputDirectory, { recursive: true });
     writeFileSync(path.join(packageDirectory, 'package.json'), JSON.stringify({ type: 'module', version }));
-    for (const relative of ['index.ts', 'entrypoint.ts', 'version.ts', 'interfaces/cli/install.ts', 'interfaces/cli/io.ts']) {
+    for (const relative of ['index.ts', 'entrypoint.ts', 'version.ts', 'utils/redact-sensitive-string.ts', 'interfaces/cli/install.ts', 'interfaces/cli/io.ts']) {
       const source = readFileSync(new URL(`../../../${relative}`, import.meta.url), 'utf8');
       const outputPath = path.join(outputDirectory, relative.replace(/\.ts$/, '.js'));
       mkdirSync(path.dirname(outputPath), { recursive: true });
