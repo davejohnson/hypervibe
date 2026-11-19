@@ -2522,14 +2522,26 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(JSON.stringify(new EnvironmentRepository().findByProjectAndName(project.id, 'production')?.platformBindings)).not.toContain('private-registrar-response');
     expect(poll).toHaveBeenCalledWith('acct-1', 'pending-example.com');
     expect(create).toHaveBeenCalledTimes(1);
-    poll.mockResolvedValueOnce({ completed: true, state: 'failed', links: { self: '/status' }, created_at: '', updated_at: '' });
+    const terminal = { completed: true, state: 'failed', links: { self: '/status' },
+      created_at: '2026-06-15T00:00:00Z', updated_at: '2026-06-15T00:02:00Z' };
+    poll.mockResolvedValueOnce(terminal);
     const statusPlan = await t.call('hv_plan', { project: project.name, env: 'production' });
     await t.call('hv_apply', { project: project.name, planId: statusPlan.data.planId });
     await t.call('hv_apply', { project: project.name, planId: retryPlan.data.planId, confirmActions: [purchase.id] });
     expect(create).toHaveBeenCalledTimes(1);
     const newPurchase = await t.call('hv_plan', { project: project.name, env: 'production' });
-    await t.call('hv_apply', { project: project.name, planId: newPurchase.data.planId, confirmActions: [purchase.id] });
-    expect(create).toHaveBeenCalledTimes(2);
+    const nextAction = newPurchase.data.actions.find((action: { id: string }) => action.id === purchase.id);
+    expect(nextAction.type).toBe(lost ? 'update' : 'create');
+    if (lost) {
+      poll.mockResolvedValueOnce({ ...terminal, state: 'succeeded' });
+      const active = vi.spyOn(CloudflareAdapter.prototype, 'hasActiveRegistrarRegistration').mockResolvedValue(true);
+      const recovered = await t.call('hv_apply', { project: project.name, planId: newPurchase.data.planId });
+      expect(active).toHaveBeenCalledWith('acct-1', 'pending-example.com');
+      expect(recovered.data.receipts).toContainEqual(expect.objectContaining({ actionId: purchase.id, status: 'succeeded' }));
+    } else {
+      await t.call('hv_apply', { project: project.name, planId: newPurchase.data.planId, confirmActions: [purchase.id] });
+    }
+    expect(create).toHaveBeenCalledTimes(lost ? 1 : 2);
     await t.close();
   });
 

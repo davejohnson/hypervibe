@@ -1076,6 +1076,16 @@ catch{return new Response("Temporarily unavailable for maintenance\\n",{status:5
     return response.result;
   }
 
+  async hasActiveRegistrarRegistration(accountId: string, domainName: string): Promise<boolean> {
+    const response = await this.request<unknown>('GET',
+      `/accounts/${accountId}/registrar/registrations/${encodeURIComponent(domainName)}`,
+      undefined, this.registrarToken(domainName));
+    const active = z.object({ domain_name: z.string(), status: z.literal('active'),
+      created_at: z.iso.datetime({ offset: true }), expires_at: z.iso.datetime({ offset: true }) }).safeParse(response.result);
+    return active.success && active.data.domain_name.toLowerCase() === domainName
+      && Date.parse(active.data.created_at) <= Date.now() && Date.parse(active.data.expires_at) > Date.now();
+  }
+
   async getEmailRoutingSettings(zoneId: string): Promise<CloudflareEmailRoutingSettings> {
     const response = await this.request<CloudflareEmailRoutingSettings>('GET', `/zones/${zoneId}/email/routing`);
     return response.result;

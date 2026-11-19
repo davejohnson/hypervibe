@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -17,6 +18,7 @@ import type { ActionResult } from '../plan/converge.executor.js';
 import { CLOUDFLARE_TOKEN_URLS, connectionSetupUrl } from './connection-guidance.js';
 
 const OPERATION = 'cloudflareRegistrarRegistration';
+const timestamp = z.iso.datetime({ offset: true });
 
 interface DomainRegistrationBinding {
   attemptId?: string;
@@ -24,6 +26,24 @@ interface DomainRegistrationBinding {
   accountId?: string;
   state?: string;
   completed?: boolean;
+  workflowCreatedAt?: string;
+  previousWorkflowCreatedAt?: string;
+}
+
+// Compare provider times without losing distinctions below millisecond precision.
+function workflowTimestamp(value: unknown): string | undefined {
+  const parsed = timestamp.safeParse(value);
+  if (!parsed.success) return undefined;
+  const time = Date.parse(parsed.data);
+  if (!Number.isFinite(time)) return undefined;
+  const second = new Date(time).toISOString().slice(0, 19);
+  const fraction = parsed.data.match(/\.(\d+)/)?.[1]?.replace(/0+$/, '');
+  return `${second}${fraction ? '.' + fraction : ''}Z`;
+}
+
+function laterWorkflowTime(current: string, previous: string): boolean {
+  // The normalized UTC seconds and fractional digits sort in time order.
+  return current.slice(0, -1) > previous.slice(0, -1);
 }
 
 function normalizeDomain(domain: string): string {
@@ -79,8 +99,16 @@ function registrationBinding(environment: Environment | null, domain: string): D
   const registrations = asRecord(environment?.platformBindings?.domainRegistrations);
   const binding = asRecord(registrations?.[domain]);
   if (registrations && Object.hasOwn(registrations, domain) && !binding) return { state: 'unknown' };
-  return binding ? { attemptId: typeof binding.attemptId === 'string' && /^[a-f0-9-]{36}$/.test(binding.attemptId) ? binding.attemptId : undefined, provider: 'cloudflare', accountId: typeof binding.accountId === 'string' ? binding.accountId : undefined,
-    state: safeState(binding.state), completed: binding.completed === true } : null;
+  if (!binding) return null;
+  const state = safeState(binding.state);
+  const attemptId = typeof binding.attemptId === 'string' && /^[a-f0-9-]{36}$/.test(binding.attemptId) ? binding.attemptId : undefined;
+  const failureConfirmed = state === 'failed' && binding.failureConfirmed === true && !!attemptId;
+  return {
+    attemptId, provider: 'cloudflare', accountId: typeof binding.accountId === 'string' ? binding.accountId : undefined,
+    state, completed: binding.completed === true && (state === 'succeeded' || failureConfirmed),
+    workflowCreatedAt: workflowTimestamp(binding.workflowCreatedAt),
+    previousWorkflowCreatedAt: workflowTimestamp(binding.previousWorkflowCreatedAt),
+  };
 }
 
 export interface CloudflareRegistrarCredentialRequirement {
@@ -144,7 +172,18 @@ export function cloudflareRegistrarCredentialProblem(domain: string): string | n
   return cloudflareRegistrarCredentialRequirement(domain)?.reason ?? null;
 }
 
-function workflowActionResult(domain: string, workflow: RegistrarWorkflowStatus, action: 'started' | 'polled'): ActionResult {
+type WorkflowOutcome = Pick<RegistrarWorkflowStatus, 'state' | 'completed'>;
+
+function workflowOutcome(workflow: RegistrarWorkflowStatus): WorkflowOutcome {
+  const state = safeState(workflow.state);
+  const terminal = state === 'succeeded' || state === 'failed';
+  if (workflow.completed !== terminal || state === 'submitted' || state === 'unknown') {
+    return { state: 'unknown', completed: false };
+  }
+  return { state, completed: terminal };
+}
+
+function workflowActionResult(domain: string, workflow: WorkflowOutcome, action: 'started' | 'polled'): ActionResult {
   const state = safeState(workflow.state);
   const data = { workflow: { state, completed: workflow.completed === true } };
   if (state === 'succeeded' && workflow.completed === true) {
@@ -367,8 +406,21 @@ export async function applyCloudflareDomainRegistration(params: {
   if (binding && !(binding.state === 'failed' && binding.completed === true)) {
     try {
       const workflow = await adapter.getRegistrarRegistrationStatus(accountId, domain);
-      persistWorkflow(envRepo, project, envName, domain, accountId, binding.attemptId, workflow);
-      return workflowActionResult(domain, workflow, 'polled');
+      const outcome = workflowOutcome(workflow);
+      const createdAt = workflowTimestamp(workflow.created_at);
+      // The status URL is shared by every attempt for the same account/domain.
+      // Only a timestamp from the purchase response can identify its workflow.
+      const matches = createdAt && createdAt === binding.workflowCreatedAt
+        && (!binding.previousWorkflowCreatedAt || laterWorkflowTime(createdAt, binding.previousWorkflowCreatedAt));
+      if (!matches) {
+        const active = outcome.state === 'succeeded' && await adapter.hasActiveRegistrarRegistration(accountId, domain);
+        if (!active) return { success: false, status: 'pending',
+          message: `Cloudflare has not confirmed the outcome of this purchase for ${domain}. The status could belong to another attempt. Check the registration on this account before continuing.` };
+        persistWorkflow(envRepo, project, envName, domain, accountId, binding.attemptId, outcome);
+        return { success: true, message: `Cloudflare confirms that ${domain} is actively registered on this account.` };
+      }
+      persistWorkflow(envRepo, project, envName, domain, accountId, binding.attemptId, outcome);
+      return workflowActionResult(domain, outcome, 'polled');
     } catch {
       return {
         success: false,
@@ -437,8 +489,15 @@ export async function applyCloudflareDomainRegistration(params: {
   const target = environment ?? envRepo.create({ projectId: project.id, name: envName });
   const registrations = asRecord(target.platformBindings.domainRegistrations) ?? {};
   const attemptId = randomUUID();
+  // Keep the latest earlier workflow across immediate HTTP declines, which have
+  // no workflow of their own. Equal or older times cannot identify a new attempt.
+  let previousWorkflowCreatedAt = binding?.previousWorkflowCreatedAt;
+  if (binding?.workflowCreatedAt && (!previousWorkflowCreatedAt || laterWorkflowTime(binding.workflowCreatedAt, previousWorkflowCreatedAt))) {
+    previousWorkflowCreatedAt = binding.workflowCreatedAt;
+  }
   const submitted = { ...target.platformBindings, domainRegistrations: {
-    ...registrations, [domain]: { provider: 'cloudflare', accountId, attemptId, state: 'submitted', completed: false },
+    ...registrations, [domain]: { provider: 'cloudflare', accountId, attemptId, state: 'submitted', completed: false,
+      ...(previousWorkflowCreatedAt ? { previousWorkflowCreatedAt } : {}) },
   } };
   if (!envRepo.replacePlatformBindingsIfUnchanged(target, submitted)) {
     return { success: false, status: 'blocked', message: 'The environment changed while preparing the purchase. Run hv_plan again.' };
@@ -459,8 +518,12 @@ export async function applyCloudflareDomainRegistration(params: {
       privacyMode: registrationSpec.privacyMode ?? 'redaction',
       years: registrationSpec.years ?? 1,
     });
-    persistWorkflow(envRepo, project, envName, domain, accountId, attemptId, workflow);
-    return workflowActionResult(domain, workflow, 'started');
+    const createdAt = workflowTimestamp(workflow.created_at);
+    const newWorkflow = createdAt && (!previousWorkflowCreatedAt || laterWorkflowTime(createdAt, previousWorkflowCreatedAt));
+    const outcome = newWorkflow ? workflowOutcome(workflow) : { state: 'unknown', completed: false };
+    persistWorkflow(envRepo, project, envName, domain, accountId, attemptId, outcome,
+      outcome.state !== 'unknown' ? createdAt : undefined);
+    return workflowActionResult(domain, outcome, 'started');
   } catch (error) {
     if (error instanceof RegistrarPurchaseRejected) {
       try {
@@ -487,7 +550,8 @@ function persistWorkflow(
   domain: string,
   accountId: string,
   attemptId: string | undefined,
-  workflow: Pick<RegistrarWorkflowStatus, 'state' | 'completed'>
+  workflow: WorkflowOutcome,
+  acknowledgedCreatedAt?: string,
 ): void {
   const environment = envRepo.findByProjectAndName(project.id, envName);
   const saved = registrationBinding(environment, domain);
@@ -503,6 +567,9 @@ function persistWorkflow(
         provider: 'cloudflare',
         accountId,
         attemptId,
+        workflowCreatedAt: acknowledgedCreatedAt ?? saved.workflowCreatedAt,
+        previousWorkflowCreatedAt: saved.previousWorkflowCreatedAt,
+        failureConfirmed: workflow.state === 'failed' && workflow.completed,
         state: safeState(workflow.state),
         completed: workflow.completed === true,
         updatedAt: new Date().toISOString(),
