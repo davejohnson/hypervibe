@@ -1609,6 +1609,8 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   ]).optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  /** Additional Cloud Run hostnames on the same public service, each with its own DNS authority. */
+  domains: z.array(z.object({ domain: dnsHostnameSchema, dns: dnsSpecSchema }).strict()).optional(),
   /** DNS authority is independent of hosting; an exact existing zone is required. */
   dns: dnsSpecSchema.optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
@@ -1659,6 +1661,17 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.domains?.length) {
+    if (environment.hosting.provider !== 'cloudrun') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domains'],
+      message: 'Multiple custom domains are currently supported on Google Cloud Run.' });
+    const seen = new Set([environment.domain?.trim().toLowerCase().replace(/\.$/, '')]);
+    for (const [index, item] of environment.domains.entries()) {
+      if (seen.has(item.domain) || !dnsHostnameBelongsToZone(item.domain, item.dns.zone.name) || item.dns.policy?.proxy === 'on') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domains', index], message: 'Each extra hostname must be unique and use its own DNS-only zone selection.' });
+      }
+      seen.add(item.domain);
+    }
+  }
   if (environment.dns) {
     const dns = environment.dns;
     const hostname = environment.domain?.toLowerCase().replace(/\.$/, '');

@@ -51,7 +51,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Always-on web service (`alwaysOn`) | yes | blocked (#625) | blocked (#625) |
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |
-| Custom domain | yes, DNS-only records | blocked (#606) | blocked (#606) |
+| Custom domains | Primary `domain` plus `domains: [{ domain, dns }]` on the same public service. Each hostname selects a DNS-only zone and connection. | blocked (#606) | blocked (#606) |
 | Buying a domain | reviewed Cloudflare purchase followed by Cloudflare DNS and Cloud Run attachment; offline coverage (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
 | Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |

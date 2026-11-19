@@ -80,7 +80,7 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   // Cloud Run cannot switch traffic to another environment yet; AWS and Azure can.
   if (present(environment.domainTarget)) problems.push('domainTarget is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.');
   if (environment.migrations?.mode === 'releaseCommand' && !environment.migrations.command?.trim()) problems.push('migrations.mode="releaseCommand" needs a command.');
-  if (environment.domain) {
+  if (environment.domain || environment.domains?.length) {
     if (environment.domainProxy) problems.push('domainProxy must be off: Google issues the certificate and needs DNS-only records.');
     if (domainServiceFor(environment) === undefined) problems.push('A custom domain needs exactly one public web service to point at.');
   }
@@ -121,3 +121,10 @@ export function domainServiceFor(environment: EnvironmentSpec): string | undefin
   return candidates.length === 1 ? candidates[0] : undefined;
 }
 
+
+
+/** Preserve the primary hostname used by existing specs and DNS integrations. */
+export function environmentDomains(environment: EnvironmentSpec) {
+  const primary = environment.domain?.trim().toLowerCase().replace(/\.$/, '');
+  return [...(primary ? [{ domain: primary, dns: environment.dns }] : []), ...(environment.domains ?? [])];
+}

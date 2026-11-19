@@ -89,6 +89,19 @@ function fixture(provider: 'gcp' | 'cloudflare' = 'gcp') {
 }
 
 describe('DNS shared application authority', () => {
+  it('isolates a second Google domain’s DNS state and refuses to claim an RRset already owned by the primary domain', async () => {
+    const f = fixture();
+    const primary = await f.prepare([desired], 'gcp-domain');
+    const owner = 'gcp-domain-12345678901234567890';
+    const extra = await f.prepare([desired], owner);
+    expect(extra.descriptor?.state.environmentId).not.toEqual(primary.descriptor?.state.environmentId);
+    const address = engineSegmentOf(primary.actions[0])!.addresses[0];
+    f.engineState(address, gcpNativeId); f.effects(() => f.observe(desired.values));
+    await f.execute(primary);
+    expect(hasOwnedDnsRecords(f.fresh(), 'gcp-domain')).toBe(true);
+    expect(hasOwnedDnsRecords(f.fresh(), owner)).toBe(false);
+    expect((await f.prepare([desired], owner)).blocked).toBeDefined();
+  });
   it.each(['before-write', 'after-write'] as const)('recovers an interrupted Cloudflare update with the authorized %s singleton', async stage => {
     const f = fixture('cloudflare'); const first = await f.prepare(); const address = engineSegmentOf(first.actions[0])!.addresses[0];
     f.engineState(address, cfRecordId); f.effects(() => f.observe(desired.values));
