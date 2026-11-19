@@ -10,7 +10,7 @@ import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory,
+import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
   readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -226,7 +226,19 @@ live('AWS and Azure engine disposable environment fixture', () => {
           await setEnvironment(revision);
           for (let attempt = 0; attempt < 8; attempt++) {
             const envelope = await plan();
-            if (!changesOf(envelope).length) { await cli(['deploy'], { project: projectName, env: environmentName, confirm: true }); return; }
+            if (!changesOf(envelope).length) {
+              try { await cli(['deploy'], { project: projectName, env: environmentName, confirm: true }); } catch (error) {
+                // Teardown follows a failed release, so record how AWS describes the web service first.
+                if (aws) {
+                  const auth = await awsEngineAuthentication(aws);
+                  const name = `hv-${projectName}-${environmentName}`;
+                  process.stdout.write(`\n${await sampleAwsWebRelease({ region: aws.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } },
+                    `arn:aws:ecs:${aws.region}:${aws.accountId}:service/${name}/${name}-web`)}\n`);
+                }
+                throw error;
+              }
+              return;
+            }
             if (!await apply(envelope)) {
               // Teardown deletes the services and their logs, so read why they are not running first.
               if (aws) {
