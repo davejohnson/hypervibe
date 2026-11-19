@@ -118,7 +118,10 @@ confirmation, and acceptance is durable only after the required consumer checks.
 
 An immutable secret cannot be replaced by confirmation alone. Its first write
 requires the target and every declared conflicting key to be confirmed absent;
-a partial write may be repaired only with the same accepted value. Changed
+a partial write may be repaired only with the same accepted value. Ordinary
+rotation skips immutable keys by default. An explicit selection, a required
+companion or an unfinished rotation that includes a protected key blocks before
+further changes and preserves the unfinished record for recovery. Changed
 policy, conflicting values or unknown observations block. Retirement of a legacy
 encryption key requires an explicit rewrap workflow, not ordinary env deletion.
 
