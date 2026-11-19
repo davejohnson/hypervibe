@@ -114,6 +114,11 @@ file an issue, and say in the pull request what was checked and how (read or run
 Preserve required independent reviews without inventing new gates or repeating
 settled checks.
 
+An upgrade must not break an unchanged app. Changes to generated output, recovery
+instructions, billable calls, the release pipeline or trust follow the
+[upgrade safety rules](docs/development/workflow.md#dg-137) and get
+[their own reviewed pull request](docs/development/workflow.md#dg-138).
+
 Before recommending chat closure, commit and push task changes, include them in a
 PR, and verify every task worktree is clean. Preserve unrelated edits; report any
 remaining blocker and who acts next. Never restart or kill the user's MCP/client

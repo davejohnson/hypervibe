@@ -91,4 +91,32 @@ struct CurrentCoreStatusContractTests {
             try HypervibeResponseMapper.decodeObservation(malformed, attemptedAt: Date(), previous: nil)
         }
     }
+
+    // The rest of a refresh: spec, recent runs and connections, captured from the
+    // current commands. A changed answer shape must fail here, not in the app.
+    private func refreshFixture(_ name: String) throws -> Data {
+        let url = try #require(Bundle.module.url(forResource: "current-core-refresh", withExtension: "json"))
+        let captured = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        return try JSONSerialization.data(withJSONObject: #require(captured[name]))
+    }
+
+    @Test
+    func refreshDecodesTheCurrentSpecRunsAndConnections() throws {
+        let topology = try HypervibeResponseMapper.decodeTopology(refreshFixture("spec"))
+        #expect(topology.projectName == "companion-refresh")
+        #expect(topology.environments.map(\.name) == ["production"])
+        #expect(topology.environments.first?.resources.contains { $0.name == "web" } == true)
+
+        let runs = try HypervibeResponseMapper.decodeRuns(refreshFixture("runs"))
+        #expect(runs.count == 1)
+        #expect(runs.first?.status == .succeeded)
+        #expect(runs.first?.environment == "production")
+
+        let connections = try HypervibeResponseMapper.decodeConnections(refreshFixture("connections"))
+        #expect(connections.map(\.provider) == ["github"])
+        #expect(connections.first?.scope == "example/companion-refresh")
+
+        let catalog = try HypervibeResponseMapper.decodeConnectionCatalog(refreshFixture("catalog"))
+        #expect(!catalog.providers.isEmpty)
+    }
 }

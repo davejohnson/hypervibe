@@ -115,3 +115,51 @@ not automatic permission to start another product project.
   Queued auto-merge remains queued; do not wait for it to complete.
 - Preserve required pre-merge checks, release validation for authorized deployment
   tasks, and independently scheduled reviewers.
+
+## DG-137
+
+An upgrade must not break an app that did not change. Existing users run the new
+version against what an earlier version produced: saved state and bindings,
+generated workflows, build configuration and deployed infrastructure.
+
+- When a change alters anything Hypervibe generates, or how it reads what it
+  generated, add a test that runs the new code against the previous version's
+  output. Testing new code against new output only does not cover an upgrade.
+  The unchanged app must keep working, or Hypervibe must detect the old output
+  and say what to do before any paid or irreversible step.
+- Clients decode command answers in a fixed shape: the macOS companion,
+  hypercloud and installed agents. Every answer a client decodes has a captured
+  contract that its own decoder reads in CI
+  (`src/tools/__tests__/macos-status.contract.test.ts` and
+  `CurrentCoreStatusContractTests`). Add the capture when a client starts
+  decoding a new answer. Changing the shape of an existing answer means updating
+  the client in the same change, or adding the new shape behind an explicit mode.
+- When a message tells the user how to get unblocked, a test follows that
+  instruction from a real starting configuration, such as an installer-written
+  one, and shows the block clears. Never refuse rollback or recovery with an
+  instruction that has not been tested this way.
+- Every billable or irreversible provider call has tests for three outcomes:
+  success, a definite rejection, and a lost or ambiguous response. Each must
+  leave the user with a next step. A lost response is unknown, not absent, and
+  never permits repeating the call.
+
+## DG-138
+
+Batching small fixes into one pull request is fine. These changes are not small:
+
+- the release or build pipeline;
+- trust, authentication or credentials;
+- purchases and other billable calls;
+- anything that can refuse an operation that worked before.
+
+Give each one its own pull request so it can be reviewed and reverted alone,
+with a live run where one is possible. Say plainly when no live run was done.
+
+For every behavior change, the pull request description names the existing
+callers (the macOS companion, hypercloud, generated workflows, installed
+clients) and says what happens to an unchanged app on upgrade. Put this under
+"Existing behavior or tests changed".
+
+Passing checks do not make a pull request ready. Before calling one ready that
+touches the areas above or changes more than about 500 runtime lines, have a
+reviewer with fresh context read the diff, and reproduce what it flags.
