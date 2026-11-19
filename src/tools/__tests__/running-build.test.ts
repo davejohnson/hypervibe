@@ -35,7 +35,6 @@ it('refuses a confirmed stale deletion while serving reads and refreshing the re
     for (const request of [
       { name: 'hv_apply', arguments: { planId: 'missing-plan' } },
       { name: 'hv_launch', arguments: {} },
-      { name: 'hv_rollback', arguments: { project: project.name, env: 'staging', confirm: true } },
       { name: 'hv_rollback', arguments: { project: project.name, env: 'staging', toSha: 'a'.repeat(40) } },
       { name: 'hv_connections', arguments: { provider: 'cloudrun', action: 'bootstrap', confirm: true } },
     ]) expect((await client.callTool(request)).structuredContent).toMatchObject({ error: { code: 'STALE_SERVER' } });

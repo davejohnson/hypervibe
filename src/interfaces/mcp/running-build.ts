@@ -68,10 +68,7 @@ export function buildNotice(build: BuildIdentity, clientName = ''): string | und
 }
 
 export function requiresCurrentServer(name: string, args: Record<string, unknown>): boolean {
-  if (name === 'hv_rollback') {
-    if (args.action === 'preview') return false;
-    return args.confirm !== true || typeof args.toSha !== 'string' || !/^[0-9a-f]{40}$/i.test(args.toSha);
-  }
+  if (name === 'hv_rollback') return args.action !== 'preview' && args.confirm !== true;
   if (name === 'hv_apply' || name === 'hv_launch' || (name === 'hv_migrate' && args.verifyOnly !== true)) return true;
   if (name === 'hv_connections' && args.action === 'connect' && (args.awsAccountId || args.azureApproved)) return true;
   return args.confirm === true || args.confirmNativeDeploy === true || args.confirmCutover === true

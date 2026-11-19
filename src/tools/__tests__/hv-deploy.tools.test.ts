@@ -1163,7 +1163,7 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
-  it('restores the latest known-good exact SHA after a failed production promotion', async () => {
+  it.each([false, true])('restores the latest known-good exact SHA after a failed production promotion (stale server: %s)', async stale => {
     const { project, workflow } = seedManagedCiRollbackProject('rollback-failed-promotion-app');
     const knownGoodSha = 'c'.repeat(40);
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
@@ -1184,14 +1184,15 @@ describe('hv_rollback', () => {
     });
     const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
 
-    const t = await makeClient();
+    const t = await makeClient(stale ? async () => '99.9.9' : undefined);
     const result = await t.call('hv_rollback', {
       project: project.name,
       env: 'production',
       confirm: true,
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok, result.error?.message).toBe(true);
+    if (stale) expect(result.warnings[0]).toContain('99.9.9');
     expect(result.data).toMatchObject({
       status: 'pending',
       rollbackToSha: knownGoodSha,

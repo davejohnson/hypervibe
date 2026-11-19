@@ -76,9 +76,9 @@ installation manages MCP, update the server through that installation. An MCP
 command using `@latest` can pick up the new version when it reconnects.
 
 A stale server continues to serve reads and rollback previews with a warning.
-It also accepts an immediately needed rollback when the user confirms the exact
-release (`hv_rollback` with its full `toSha` and `confirm=true`). The usual
-release evidence and authorization checks still apply. Other confirmation-gated
+With `confirm=true`, `hv_rollback` can restore the previous verified release
+or the verified release named by `toSha`. The usual release evidence and
+authorization checks still apply. Other confirmation-gated
 actions, including apply and launch, require the updated server.
 
 Foreign servers, changed launch commands, disabled entries, edited skills,
