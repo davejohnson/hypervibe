@@ -55,8 +55,6 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
   ].join('\n');
 }
 
-const AWS_LIMIT_INCREASE_URL = 'https://support.console.aws.amazon.com/support/home#/case/create?issueType=service-limit-increase';
-
 /** One packaged commit: its SHA and the source archive to build. */
 export interface AwsBuildSource { commitSha: string; archive: Buffer }
 
@@ -86,7 +84,9 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
     // AWS starts some new accounts with a build limit of zero and raises it only on request.
     const refused = error as { name?: string; message?: string };
     if (refused.name !== 'AccountLimitExceededException' || !/more than 0 /.test(refused.message ?? '')) throw error;
-    return { error: `AWS does not let this account run builds yet: its limit in ${region} is zero, which is common for a new account. Ask AWS to raise "concurrently running builds" for CodeBuild at ${AWS_LIMIT_INCREASE_URL} (free; a limit of 5 is plenty), then run this again.` };
+    // The quota page for small Linux builds, the size Hypervibe uses. The general support form leads to a chat assistant instead.
+    const quotaUrl = `https://${region}.console.aws.amazon.com/servicequotas/home/services/codebuild/quotas/L-9D07B6EF`;
+    return { error: `AWS does not let this account run builds yet: its limit in ${region} is zero, which is common for a new account. Open ${quotaUrl}, choose "Request increase at account level" and ask for 5 (free), then run this again once AWS approves it.` };
   }
   const id = started.build?.id;
   if (!id) return { error: 'CodeBuild did not start the build.' };

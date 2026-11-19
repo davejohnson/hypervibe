@@ -40,7 +40,7 @@ describe('CodeBuild private package token HTTP contract', () => {
     } };
     const result = await buildImage({ ...base, credentials: { accessKeyId: 'test', secretAccessKey: 'test', sessionToken: 'test' } },
       { commitSha: 'a'.repeat(40), archive: Buffer.from('source') }, { requestHandler: handler });
-    expect(result).toEqual({ error: expect.stringMatching(/AWS does not let this account run builds yet.*support\.console\.aws\.amazon\.com.*service-limit-increase/s) });
+    expect(result).toEqual({ error: expect.stringContaining('https://us-west-2.console.aws.amazon.com/servicequotas/home/services/codebuild/quotas/L-9D07B6EF') });
   });
 
   it.each([false, true])('executes the generated build command without placing the token in arguments (%s)', (hasToken) => {

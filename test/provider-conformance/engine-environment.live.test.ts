@@ -10,7 +10,7 @@ import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsDatabaseExposure, readAwsInventory,
+import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory,
   readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -169,7 +169,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
         const { [environmentName]: _removed, ...others } = original.environments;
         await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
-          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
+          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, marker.region, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
       };
       const plan = async (input: Json = {}) => {
         const envelope = await cli(['plan'], { project: projectName, env: environmentName, ...input });
@@ -227,7 +227,14 @@ live('AWS and Azure engine disposable environment fixture', () => {
           for (let attempt = 0; attempt < 8; attempt++) {
             const envelope = await plan();
             if (!changesOf(envelope).length) { await cli(['deploy'], { project: projectName, env: environmentName, confirm: true }); return; }
-            if (!await apply(envelope)) throw new Error('Fixture apply is incomplete; no dependent release is authorized.');
+            if (!await apply(envelope)) {
+              // Teardown deletes the services and their logs, so read why they are not running first.
+              if (aws) {
+                const auth = await awsEngineAuthentication(aws);
+                process.stdout.write(`\n${await readAwsContainerTrouble({ region: aws.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } }, `/hypervibe/hv-${projectName}-${environmentName}/tasks`)}\n`);
+              }
+              throw new Error('Fixture apply is incomplete; no dependent release is authorized.');
+            }
           }
           throw new Error('Fixture convergence exceeded its bounded apply steps.');
         },
@@ -239,7 +246,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
           if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('Hypervibe recorded no HTTPS address for the web service.');
           // A new revision and the worker's first write take a few minutes to show.
           let problem: string | undefined = 'the web service did not answer';
-          for (let attempt = 0; attempt < 30 && problem; attempt++) {
+          for (let attempt = 0; attempt < 45 && problem; attempt++) {
             if (attempt) await sleep(20_000);
             try {
               const response = await fetch(new URL('/', url), { signal: AbortSignal.timeout(30_000), redirect: 'error' });
