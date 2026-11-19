@@ -17,8 +17,11 @@ export interface FixtureJournal {
   resources: NativeFixtureResource[];
   /** Exact pre-existing resources proved retained, never reported as natively absent. */
   retainedResources?: NativeFixtureResource[];
-  /** databaseClosed: the database refused a connection from outside while the app was using it. */
-  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean; databaseClosed?: boolean };
+  /**
+   * databaseClosed: the database refused a connection from outside while the app was using it.
+   * sibling: a second environment joined the project's shared pieces, worked and left while the first kept working.
+   */
+  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean; databaseClosed?: boolean; sibling?: boolean };
 }
 
 export interface LifecycleFixtureDriver {
