@@ -38,6 +38,8 @@ import {
 } from '../github-infrastructure.service.js';
 
 import * as managedBackups from '../managed-backup-workflows.service.js';
+import { compileBackupWorkflow } from '../backup-workflow.service.js';
+import { managedBackupTargetHash } from '../managed-backup-target.service.js';
 
 const REPOSITORY = 'owner/example';
 const project = {
@@ -823,6 +825,52 @@ describe('GitHub infrastructure plan/apply', () => {
     });
     expect(updateRef).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
+  });
+
+  it('identifies a superseded open backup proposal and can publish after its owner preserves work and removes it', async () => {
+    const fixture = new URL('./fixtures/backup-program-v0.1.52/', import.meta.url);
+    const contractPath = '.github/hypervibe/backups-production.json';
+    const workflowPath = '.github/workflows/hypervibe-backup-production.yml';
+    const proposed = new Map([contractPath, workflowPath].map(file => [
+      file, fs.readFileSync(new URL(path.basename(file), fixture), 'utf8'),
+    ]));
+    const target = { ...JSON.parse(proposed.get(contractPath)!), runnerImage: 'ghcr.io/example/backup@sha256:' + 'b'.repeat(64) };
+    const files = compileBackupWorkflow({ project: target.project, environment: target.environment, contractHash: managedBackupTargetHash(target),
+      runnerImage: target.runnerImage, providerCredentialNames: ['RAILWAY_API_TOKEN'], contract: target });
+    vi.spyOn(managedBackups, 'compileManagedBackupFiles').mockResolvedValue({ files, issues: [], requiredSecrets: [] });
+    const desired = spec();
+    desired.environments.production.backups = { mode: 'daily', runnerImage: target.runnerImage };
+    const plan = () => planGitHubInfrastructure({ project: { ...project, name: target.project }, spec: desired,
+      environmentName: 'production', backupEnvironment: 'production' });
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    const baseSha = 'a'.repeat(40);
+    let branchSha: string | null = 'c'.repeat(40);
+    const pull = infrastructurePull({ state: 'open', merged_at: null, head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: branchSha } });
+    let open = true;
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockImplementation(async () => open ? [pull] : []);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({ status: 'ahead', ahead_by: 1, behind_by: 0 });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockImplementation(async (_owner, _repo, ref) => {
+      const sha = ref === 'heads/main' ? baseSha : branchSha;
+      return sha ? { ref: 'refs/' + ref, object: { sha } } : null;
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, file, ref) =>
+      ref === GITHUB_INFRASTRUCTURE_BRANCH ? proposed.get(file) ?? null : null);
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    const createBranch = vi.spyOn(GitHubAdapter.prototype, 'createRef').mockImplementation(async (_owner, _repo, _ref, sha) => { branchSha = sha; });
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false });
+    const createPull = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({ number: 57, html_url: 'https://github.com/owner/example/pull/57' });
+
+    const result = await applyGitHubInfrastructure({ action: (await plan()).actions[0] });
+    expect(result).toMatchObject({ success: false, status: 'blocked', data: { pullRequestUrl: pull.html_url } });
+    expect(result.message).toContain(pull.html_url);
+    expect(result.message).toMatch(/close.*delete.*branch.*hv_plan scope="backups"/i);
+    expect(createBranch).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled(); expect(createPull).not.toHaveBeenCalled();
+
+    open = false; branchSha = null; proposed.clear();
+    const retry = await applyGitHubInfrastructure({ action: (await plan()).actions[0] });
+    expect(retry).toMatchObject({ status: 'pending', data: { pullRequestNumber: 57 } });
+    expect(write.mock.calls.map(call => call[2]).sort()).toEqual([contractPath, workflowPath, GITHUB_INFRASTRUCTURE_MANIFEST].sort());
   });
 
   it('continues the single canonical open infrastructure pull request', async () => {

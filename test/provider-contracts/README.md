@@ -183,9 +183,9 @@ that a private database worker can receive every provider's native credentials.
 
 Shared recovery tests exercise completion-last SHA256 readback, isolated restore,
 bounded streaming, joint database/file references, controller cleanup markers
-and retention of exact owned keys. Hourly health checks read committed manifests
-and object inventories; they report prior restore proof and matching retained revisions,
-not a fresh full-byte audit. Partial executions never certify health or count
+and retention of exact owned keys. On-demand health checks read committed manifests
+and object inventories to compare prior restore proof with current retained revisions.
+Partial executions never certify health or count
 toward the seven complete sets required before retention deletion.
 
 `railway/storage-credentials.observation.json` records a value-free current

@@ -3,7 +3,6 @@ import { stringify } from 'yaml';
 import { canonicalizeJson, canonicalJsonSha256 } from '../../lib/canonical-json.js';
 import type { ManagedGitHubFile } from './github-infrastructure.service.js';
 
-import { backupOperationReceiptValidatorSource } from './backup-operation-receipt.js';
 export { BACKUP_HEALTH_REASON_CODES } from './backup-operation-receipt.js';
 
 export function managedBackupFilePaths(environment: string): [string, string] {
@@ -29,71 +28,6 @@ export function parseBackupRetirementFiles(value: unknown, environment: string):
 export function isManagedBackupFilePath(path: string): boolean {
   return /^\.github\/hypervibe\/backups-[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.json$/.test(path)
     || /^\.github\/workflows\/hypervibe-backup-[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.yml$/.test(path);
-}
-
-function alertScript(): string {
-  return `const fs = require('node:fs');
-const env = process.env.HYPERVIBE_BACKUP_ENVIRONMENT;
-if (!/^[a-zA-Z0-9_-]{1,96}$/.test(env || '')) throw new Error('Invalid backup alert scope.');
-${backupOperationReceiptValidatorSource()}
-let status = 'unknown';
-let reasons = ['receipt-missing'];
-let diagnostic;
-try {
-  const file = process.env.HYPERVIBE_BACKUP_RECEIPT_PATH;
-  const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.size > 16384) throw new Error('Invalid receipt size.');
-  const receipt = parseBackupOperationReceipt(JSON.parse(fs.readFileSync(file, 'utf8')), backupReceiptRules);
-  if (!receipt || receipt.environment !== env) throw new Error('Invalid backup receipt.');
-  status = receipt.status; reasons = receipt.reasonCodes; diagnostic = receipt.diagnostic;
-} catch { reasons = ['receipt-invalid']; }
-if (process.env.HYPERVIBE_BACKUP_JOB_RESULT !== 'success') { status = 'unknown'; reasons = [...new Set([...reasons, 'execution-failed'])]; }
-const marker = '<!-- hypervibe:backup-health:' + env + ' -->';
-const title = '[Hypervibe] Backup protection needs attention (' + env + ')';
-const base = 'https://api.github.com/repos/' + encodeURIComponent(context.repo.owner) + '/' + encodeURIComponent(context.repo.repo);
-const request = async (path, method, body) => {
-  let response;
-  try { response = await fetch(base + path, { method, headers: {
-    Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + process.env.GITHUB_TOKEN,
-    'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'
-  }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
-  catch { throw new Error('Backup alert API request failed.'); }
-  if (!response.ok) throw new Error('Backup alert API request failed.');
-  try { return await response.json(); } catch { throw new Error('Backup alert response is invalid.'); }
-};
-const alerts = [];
-for (let page = 1; ; page++) {
-  if (page > 50) throw new Error('Backup alert inventory exceeded its bound.');
-  const items = await request('/issues?state=open&per_page=100&page=' + page, 'GET');
-  if (!Array.isArray(items)) throw new Error('Backup alert inventory is invalid.');
-  for (const item of items) {
-    if (!item.pull_request && item.user?.login === 'github-actions[bot]' && Number.isSafeInteger(item.number)
-      && typeof item.body === 'string' && item.body.split('\\n')[0] === marker) alerts.push(item);
-  }
-  if (items.length < 100) break;
-}
-const run = 'https://github.com/' + encodeURIComponent(context.repo.owner) + '/' + encodeURIComponent(context.repo.repo) + '/actions/runs/' + context.runId;
-const body = marker + '\\n\\n' + (status === 'healthy' ? 'Current retained backup and restore evidence is healthy.'
-  : 'Backup protection is ' + status + '. Reason codes: ' + (reasons.length ? reasons.join(', ') : 'observation-unavailable') + '.')
-  + (diagnostic ? '\\n\\nStage: ' + diagnostic.stage + '; category: ' + diagnostic.category
-    + (diagnostic.httpStatus === undefined ? '' : '; HTTP status: ' + diagnostic.httpStatus)
-    + (diagnostic.localCleanupFailed ? '; local cleanup: failed' : '')
-    + (diagnostic.task ? '; task: ' + JSON.stringify(diagnostic.task) : '') + '.' : '')
-  + '\\n\\n[Inspect the managed recovery run](' + run + ').';
-let applied = 0; let skipped = 0;
-if (status === 'healthy') {
-  for (const item of alerts) { await request('/issues/' + item.number, 'PATCH', { state: 'closed', body }); applied++; }
-  if (alerts.length === 0) skipped++;
-} else if (alerts.length === 0) {
-  await request('/issues', 'POST', { title, body }); applied++;
-} else {
-  for (const item of alerts) {
-    if (item.body === body && item.title === title) { skipped++; continue; }
-    await request('/issues/' + item.number, 'PATCH', { state: 'open', title, body }); applied++;
-  }
-}
-core.notice('Backup alert reconciliation: applied=' + applied + ', skipped=' + skipped + ', status=' + status);
-return { applied, skipped, status };`;
 }
 
 export function compileBackupWorkflow(input: {
@@ -123,11 +57,8 @@ export function compileBackupWorkflow(input: {
     'set -euo pipefail',
     'case "$GITHUB_EVENT_NAME" in',
     '  schedule)',
-    '    case "$HYPERVIBE_BACKUP_TRIGGER_SCHEDULE" in',
-    '      "17 3 * * *") export HYPERVIBE_BACKUP_OPERATION=backup ;;',
-    '      "47 * * * *") export HYPERVIBE_BACKUP_OPERATION=health ;;',
-    '      *) exit 1 ;;',
-    '    esac ;;',
+    '    [ "$HYPERVIBE_BACKUP_TRIGGER_SCHEDULE" = "17 3 * * *" ] || exit 1',
+    '    export HYPERVIBE_BACKUP_OPERATION=backup ;;',
     '  workflow_dispatch)',
     '    case "$HYPERVIBE_BACKUP_INPUT_OPERATION" in backup|health) export HYPERVIBE_BACKUP_OPERATION="$HYPERVIBE_BACKUP_INPUT_OPERATION" ;; *) exit 1 ;; esac ;;',
     '  *) exit 1 ;;',
@@ -154,7 +85,7 @@ export function compileBackupWorkflow(input: {
   ].join('\n');
   const workflow = {
     name: `Hypervibe backups (${input.environment})`,
-    on: { schedule: [{ cron: '17 3 * * *' }, { cron: '47 * * * *' }], workflow_dispatch: { inputs: {
+    on: { schedule: [{ cron: '17 3 * * *' }], workflow_dispatch: { inputs: {
       operation: { description: 'Create a retained recovery set or inspect its health', type: 'choice', required: true, default: 'health', options: ['backup', 'health'] },
     } } },
     permissions: { contents: 'read' },
@@ -179,30 +110,14 @@ export function compileBackupWorkflow(input: {
           } },
         ],
       },
-      alert: {
-        needs: ['backup'], if: "always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
-        'runs-on': 'ubuntu-latest', 'timeout-minutes': 5,
-        permissions: { contents: 'read', actions: 'read', issues: 'write' },
-        steps: [
-          { name: 'Load safe backup receipt', uses: 'actions/download-artifact@v8', 'continue-on-error': true, with: {
-            name: 'hypervibe-backup-receipt-' + input.environment + '-${{ github.run_id }}-${{ github.run_attempt }}',
-            path: '${{ runner.temp }}/' + output,
-          } },
-          { name: 'Reconcile backup health alert', uses: 'actions/github-script@v9', env: {
-            HYPERVIBE_BACKUP_ENVIRONMENT: input.environment,
-            HYPERVIBE_BACKUP_RECEIPT_PATH: '${{ runner.temp }}/' + output + '/receipt.json',
-            HYPERVIBE_BACKUP_JOB_RESULT: '${{ needs.backup.result }}', GITHUB_TOKEN: '${{ github.token }}',
-          }, with: { script: alertScript() } },
-        ],
-      },
     },
   };
   return [
     { path, content: `${JSON.stringify(canonicalizeJson(input.contract), null, 2)}\n` },
     { path: workflowPath, content: '# Managed by Hypervibe. Change desired state with hv_spec.\n' + stringify(workflow, { lineWidth: 0 }) },
   ].map(file => ({ ...file, hash: createHash('sha256').update(file.content).digest('hex'), review: {
-    title: `Manage ${input.environment} backups and health alerts`,
-    summary: `Daily retained recovery sets and hourly health observation for ${input.project}/${input.environment}.`,
-    mergeEffect: 'Future backup runs use the reviewed helper digest and may incur hosting and storage charges; unhealthy or unknown evidence maintains a GitHub issue.',
+    title: `Manage ${input.environment} daily backups`,
+    summary: `Create a retained recovery set daily for ${input.project}/${input.environment}.`,
+    mergeEffect: 'Future backup runs use the reviewed helper digest and may incur hosting and storage charges. Each run records its outcome in GitHub Actions.',
   } }));
 }

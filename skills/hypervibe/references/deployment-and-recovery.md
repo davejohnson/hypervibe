@@ -71,6 +71,16 @@ disabled. That scoped proposal changes only its selected backup program. To
 retire a managed program, declare backups disabled and review a backup-scoped
 removal; retained data and native snapshots remain untouched.
 
+The managed workflow schedules one backup per day. Each backup verifies its
+restore and reports its outcome in GitHub Actions. Inspect the run with
+`hv_ci_status` and its receipt artifact when available. To inspect retained
+evidence between runs, dispatch the backup workflow with `hv_ci_trigger` and
+`inputs: { "operation": "health" }`. The daily-only workflow has no separate
+scheduled health checks or GitHub issue alerts. To upgrade an older workflow
+that still runs hourly, select the matching published helper digest and
+reconcile that environment through `hv_plan scope="backups"`, confirmed
+`hv_apply` and review and merge of the proposed files.
+
 The existing environment policy and reviewed deployment bindings determine the
 release path. Portable managed CI is the normal push-deploy path where
 implemented. Do not change deploy-source settings or workflow content outside

@@ -32,6 +32,7 @@ import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.servi
 import { compileManagedBackupFiles } from './managed-backup-workflows.service.js';
 import { isManagedBackupFilePath, managedBackupFilePaths, parseBackupRetirementFiles, type BackupRetirementFile } from './backup-workflow.service.js';
 import { managedBackupTargetSchema } from './managed-backup-target.service.js';
+import { isMonitoredBackupRelease, needsPrivateBackupRunnerUpgrade } from './previous-backup-workflow.js';
 import { missingManagedCiReleaseBindings, resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
@@ -1695,6 +1696,11 @@ async function planBackupRepositoryPublication(params: {
   if (environment !== params.environmentName || !params.spec.environments[environment]?.backups) {
     return { ...empty, actions: [], warnings: ['Backup publication requires the selected environment and an explicit backup declaration.'] };
   }
+  const policy = params.spec.environments[environment].backups;
+  const upgradeReason = 'This pinned helper requires the older backup workflow. Use hv_spec to set backups.runnerImage to the digest from a release with daily-only workflows, then run hv_plan scope="backups" to review the upgrade.';
+  if (policy?.mode === 'daily' && policy.runnerImage && isMonitoredBackupRelease(policy.runnerImage)) {
+    return { ...empty, actions: [], blocked: [{ provider: 'github', reason: upgradeReason, policy: 'hard' as const }] };
+  }
   const compiled = await compileManagedBackupFiles({ project: params.project, spec: params.spec, environmentName: environment });
   const warnings = [...compiled.issues];
   const paths = new Set(managedBackupFilePaths(environment));
@@ -1702,6 +1708,7 @@ async function planBackupRepositoryPublication(params: {
   let verified = !('error' in adapterResult);
   let blockedReason = compiled.issues.length ? 'managed_backup_prerequisites_incomplete' : undefined;
   let retiredManagedFiles: BackupRetirementFile[] | undefined;
+  const reviewedFileHashes: Record<string, string | null> = {};
   const drift: string[] = [];
   if ('error' in adapterResult) {
     blockedReason = 'github_observation_unavailable';
@@ -1730,9 +1737,18 @@ async function planBackupRepositoryPublication(params: {
       }
       drift.push(...present.map(file => file.path));
     }
+    const [contractPath, workflowPath] = managedBackupFilePaths(environment);
+    const published = new Map<string, string | null>();
     for (const file of compiled.files) {
       const current = await adapterResult.adapter.getFileContent(params.owner, params.repo, file.path);
+      published.set(file.path, current);
+      reviewedFileHashes[file.path] = current === null ? null : sha256(current);
       if (current !== file.content) drift.push(file.path);
+    }
+    const currentWorkflow = published.get(workflowPath);
+    if (policy?.mode === 'daily' && policy.runnerImage && currentWorkflow
+      && needsPrivateBackupRunnerUpgrade(policy.runnerImage, currentWorkflow, published.get(contractPath), params.project.name, environment)) {
+      return { ...empty, actions: [], warnings, blocked: [{ provider: 'github', reason: upgradeReason, policy: 'hard' as const }] };
     }
     if (JSON.stringify([...previousPaths].sort()) !== JSON.stringify(desiredPaths)) drift.push(GITHUB_INFRASTRUCTURE_MANIFEST);
   } catch {
@@ -1743,6 +1759,7 @@ async function planBackupRepositoryPublication(params: {
   if (!drift.length && !blockedReason) return { ...empty, actions: [], warnings };
   const action = infrastructureAction({ repository: params.repository, files: compiled.files,
     type: 'update', verified, drift,
+    ...(compiled.files.length ? { reviewedFileHashes } : {}),
     backupEnvironment: environment, backupWorkflowPublicationRequired: drift.length > 0,
     ...(retiredManagedFiles ? { retiredManagedFiles } : {}),
     billable: !blockedReason && drift.length > 0 && compiled.files.length > 0,
@@ -2726,7 +2743,16 @@ export async function proposeGitHubInfrastructureFiles(params: {
   });
   if (!branch.success) return branch.result;
   const existingPull = branch.existingPull;
-  if (!await matchesReviewedFiles(proposalBranch, true)) return staleFiles;
+  if (!await matchesReviewedFiles(proposalBranch, true)) {
+    if (existingPull && params.managedPathScope?.length) {
+      return {
+        success: false, status: 'blocked',
+        message: `The open infrastructure pull request ${existingPull.html_url} contains different backup files. Review its changes and preserve any work you want to keep. If this proposal is superseded, close it and delete its ${proposalBranch} branch. Then run hv_plan scope="backups" and apply the new plan.`,
+        data: { repository, pullRequestNumber: existingPull.number, pullRequestUrl: existingPull.html_url },
+      };
+    }
+    return staleFiles;
+  }
   if (params.retiredManagedFiles && await retirementChanged(proposalBranch)) return retirementBlocked;
 
   const oldManifest = params.reconcileManifest
