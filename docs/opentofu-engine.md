@@ -164,6 +164,15 @@ for project/billing setup, APIs, identities, IAM, private build storage, image
 repositories and keyless CI trust. Billing choice does not approve these changes;
 the saved setup plan has its own confirmation.
 
+To put production in its own Google Cloud project, set
+`environments.production.hosting.gcpProjectId` alongside `provider: "cloudrun"`.
+With `hv_migrate`, pass `gcpProjectId` when proposing the new target environment.
+Subsequent calls use that saved selection. Run `hv_launch` for that environment,
+or select the same environment in `hv_connections` for bootstrap and preparation.
+The selected project has its own deployment credentials, setup state and access
+checks. Environments that omit the field keep using the repository connection.
+Moving a deployed environment requires a separate migration target.
+
 Environment resources use environment-owned engine state. Operational helpers
 verify prerequisites and stop if they are absent or unknown. Builds do not
 create repositories; one-off tasks do not create runner infrastructure. Preserve

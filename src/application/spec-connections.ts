@@ -5,6 +5,8 @@ import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
+import { usesGcpEnvironmentConnection } from '../domain/services/adapter.factory.js';
+import { gcpConnectionScope, gcpCredentialsMatchProject } from '../domain/services/gcp-environment-target.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 
 type ConnectionUse = { environment: string; reason: string; packagePull: boolean };
@@ -27,12 +29,17 @@ function summarizeUses(uses: ConnectionUse[]) {
   };
 }
 
-export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec, selected?: readonly string[]) {
-  const required = new Map<string, { provider: string; scopeHints: string[]; uses: ConnectionUse[] }>();
+export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec, options: {
+  environments?: readonly string[];
+  gitRemoteUrl?: string;
+} = {}) {
+  const repository = parseGitHubRepoFromRemote(options.gitRemoteUrl ?? spec.gitRemoteUrl);
+  const required = new Map<string, { provider: string; gcpProjectId?: string; scopeHints: string[]; uses: ConnectionUse[] }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = [], packagePull = false) => {
-    if (selected && !selected.includes(environment)) return;
-    const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
-    const entry = required.get(key) ?? { provider, scopeHints, uses: [] };
+    if (options.environments && !options.environments.includes(environment)) return;
+    const gcpProjectId = usesGcpEnvironmentConnection(provider) ? spec.environments[environment]?.hosting.gcpProjectId : undefined;
+    const key = `${provider}:${gcpProjectId ?? ''}:${scopeHints.join('|')}`;
+    const entry = required.get(key) ?? { provider, gcpProjectId, scopeHints, uses: [] };
     entry.uses.push({ environment, reason, packagePull });
     required.set(key, entry);
   };
@@ -81,10 +88,28 @@ export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSp
     .sort((a, b) => a.provider.localeCompare(b.provider))
     .flatMap((entry): ChecklistItem[] => {
       const connectionProviders = providerRegistry.connectionProviders(entry.provider);
-      const connections = connectionProviders.flatMap((connectionProvider) =>
+      const candidates = connectionProviders.flatMap((connectionProvider) =>
         ctx.repos.connections.findAllByProvider(connectionProvider)
       );
-      const { scopeHints } = entry;
+      const { gcpProjectId, scopeHints } = entry;
+      if (gcpProjectId) {
+        const scope = repository ? gcpConnectionScope(repository, gcpProjectId) : undefined;
+        const scoped = scope ? candidates.filter(connection => connection.scope === scope) : [];
+        const verified = scoped.some(connection => {
+          if (connection.status !== 'verified') return false;
+          try {
+            const credentials = ctx.secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+            return gcpCredentialsMatchProject(credentials, gcpProjectId);
+          } catch {
+            return false;
+          }
+        });
+        const status = verified ? 'verified' : scoped.length ? 'unverified' : 'missing';
+        return [{ provider: entry.provider, status, ...(scope ? { scope } : {}), ...summarizeUses(entry.uses) }];
+      }
+      const connections = usesGcpEnvironmentConnection(entry.provider)
+        ? candidates.filter(connection => !connection.scope?.includes('#gcp:'))
+        : candidates;
       const scopedConnection = scopeHints.length > 0
         ? connectionProviders
           .map((connectionProvider) => ctx.repos.connections.findBestMatchFromHints(connectionProvider, scopeHints))

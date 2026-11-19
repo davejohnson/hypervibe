@@ -84,7 +84,7 @@ export async function observeDomainTarget(params: {
         && Object.values(sourceBindings.services ?? {}).some(service => service.serviceId === serviceBinding.serviceId)) {
       return unknown('The selected target has no distinct, complete hosting identity or still has maintenance recovery state.');
     }
-    const result = await adapterFactory.getProviderAdapter(bindings.provider, params.project);
+    const result = await adapterFactory.getProviderAdapter(bindings.provider, params.project, undefined, { environment: target, hosting: targetSpec.hosting });
     const adapter = result.adapter;
     if (!result.success || !adapter || adapter.name !== bindings.provider
       || !adapter.capabilities.supportsObserve || typeof adapter.observe !== 'function') {

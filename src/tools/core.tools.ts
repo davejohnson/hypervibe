@@ -491,7 +491,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ctx.repos.environments.findByProjectId(project.id).flatMap(environment => ctx.repos.components.findByEnvironmentId(environment.id))),
           repositoryRuntime,
           runtimeReview,
-          connections: requiredConnectionChecklist(ctx, result.spec),
+          connections: requiredConnectionChecklist(ctx, result.spec, { gitRemoteUrl: project.gitRemoteUrl }),
         }, { warnings });
       }
 
@@ -612,7 +612,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         throw new Error('Project initialization completed without a project record.');
       }
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
-      const connections = requiredConnectionChecklist(ctx, result.spec, changed.fields.every(key => key === 'environments') ? changed.environments : undefined);
+      const connections = requiredConnectionChecklist(ctx, result.spec, {
+        environments: changed.fields.every(key => key === 'environments') ? changed.environments : undefined,
+        gitRemoteUrl: project.gitRemoteUrl,
+      });
       const localEnv = mergeLocalEnvWrites(
         result.localEnv,
         ensureProjectLocalEnv({

@@ -8,8 +8,9 @@ import { artifactRegistryRepositoryName, buildArtifactRegistryConfiguration } fr
  * Images outlive any one environment, so the repository never lives in an
  * environment's state: each region has one project-shared state.
  */
-export function imageRepositoryState(projectId: string, region: string): EngineStateIdentity {
-  return { provider: 'gcp', projectId, environmentId: `image-repository-${region}`, partition: 'project-shared' };
+export function imageRepositoryState(projectId: string, region: string, environmentProjectId?: string): EngineStateIdentity {
+  const environmentId = environmentProjectId ? `image_repository_${environmentProjectId}_${region}` : `image-repository-${region}`;
+  return { provider: 'gcp', projectId, environmentId, partition: 'project-shared' };
 }
 
 export function imageRepositoryConfiguration(gcpProjectId: string, region: string): EngineConfiguration {

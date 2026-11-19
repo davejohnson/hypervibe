@@ -82,6 +82,19 @@ export class ProjectRepository {
     return this.findById(id);
   }
 
+  /** Merge into current policy state under a write lock so concurrent preparations retain each other's evidence. */
+  updatePolicies(id: string, transform: (project: Project) => Project['policies']): Project {
+    const db = getDb();
+    return db.transaction(() => {
+      const current = this.findById(id);
+      if (!current) throw new Error('The Hypervibe project no longer exists.');
+      const policies = transform(current);
+      db.prepare('UPDATE projects SET policies = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(policies), new Date().toISOString(), id);
+      return this.findById(id)!;
+    }).immediate();
+  }
+
   delete(id: string): boolean {
     const db = getDb();
     const result = db.prepare('DELETE FROM projects WHERE id = ?').run(id);

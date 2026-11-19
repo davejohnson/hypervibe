@@ -232,6 +232,7 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     expect(first.blockers).toEqual([]);
     expect(first.actions.map((a) => [a.id, a.type])).toEqual([['service:app', 'create']]);
     expect(fs.readFileSync(first.planFile).includes(SECRET)).toBe(false);
+    expect(fs.existsSync(paths.statePath)).toBe(false);
 
     const segment = first.actions[0]!.metadata!.engineSegment as any;
     const applied = await engine.apply({ backend: builtinBackend, auth, state, planId: 'plan-1', segment, approvedAddresses: segment.addresses });
