@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { CommandRegistry } from '../../../application/commands.js';
@@ -117,6 +117,32 @@ describe('Hypervibe CLI', () => {
 
     expect(exitCode).toBe(0);
     expect(JSON.parse(output.stdout()).data.project).toBe('stdin-project');
+  });
+
+  // Malformed credential input must not be quoted back: the JSON parser's own
+  // message contains an excerpt of the text it failed on.
+  it.each([
+    ['unquoted value', '{"apiToken": S3CR3T-VALUE}'],
+    ['missing closing quote', '{"apiToken": "S3CR3T-VALUE}'],
+    ['trailing text', '{"apiToken": "x"} S3CR3T-VALUE'],
+    ['not JSON at all', 'S3CR3T-VALUE'],
+  ])('reports malformed input without echoing it (%s)', async (_name, malformed) => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'hv-cli-malformed-'));
+    const file = path.join(directory, 'input.json'); writeFileSync(file, malformed);
+    try {
+      for (const args of [['--input', '-'], ['--input', file], ['--file', file]]) {
+        for (const json of [true, false]) {
+          const output = makeIo({ stdin: malformed });
+          const exitCode = await runCli(['spec', ...args, ...(json ? ['--json'] : [])], { registry: makeRegistry(), io: output.io, initialize: false });
+          const shown = output.stdout() + output.stderr();
+          expect(exitCode).toBe(2);
+          expect(shown).toContain('is not valid JSON');
+          expect(shown).toContain(args[1] === '-' ? 'stdin' : file);
+          expect(shown).not.toContain('S3CR');
+          expect(shown).not.toContain('apiToken');
+        }
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('rejects unknown fields in complete JSON input instead of silently dropping typos', async () => {
