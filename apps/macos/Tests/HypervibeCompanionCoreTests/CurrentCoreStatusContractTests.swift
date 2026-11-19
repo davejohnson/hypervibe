@@ -150,5 +150,7 @@ struct CurrentCoreStatusContractTests {
         _ = health
         let removed = try HypervibeResponseMapper.decodeConnectionMutation(refreshFixture("removed"))
         _ = removed
+        let dispatched = try HypervibeResponseMapper.decodeCIDeployment(refreshFixture("ciDeployment"))
+        #expect(dispatched.status == "pending")
     }
 }
