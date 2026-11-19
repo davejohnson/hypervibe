@@ -1,3 +1,4 @@
+import { githubPackagePullSource } from '../adapters/providers/github/package-pull.js';
 import type { CommandContext } from './context.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
@@ -7,8 +8,8 @@ import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.j
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 
 export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec, selected?: readonly string[]) {
-  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
-  const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
+  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string>; packagePull: boolean }>();
+  const add = (provider: string, environment: string, reason: string, scopeHints: string[] = [], packagePull = false) => {
     if (selected && !selected.includes(environment)) return;
     const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
     const existing = required.get(key) ?? {
@@ -16,9 +17,11 @@ export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSp
       environments: new Set<string>(),
       reasons: new Set<string>(),
       scopeHints: new Set<string>(),
+      packagePull: false,
     };
     existing.environments.add(environment);
     existing.reasons.add(reason);
+    existing.packagePull ||= packagePull;
     scopeHints.forEach((scopeHint) => existing.scopeHints.add(scopeHint));
     required.set(key, existing);
   };
@@ -42,11 +45,13 @@ export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSp
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
     if (envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native' && devops?.ci) {
       const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
+      const packagePull = devops.ci.provider === 'github-actions'
+        && providerRegistry.getMetadata(envSpec.hosting.provider)?.orchestration?.ci?.requiresGitHubPackagePull === true;
       add(
         registration?.connectionProvider ?? devops.ci.provider,
         envName,
         `${devops.ci.provider} deploy workflow`,
-        [devops.code.scope]
+        [devops.code.scope], packagePull
       );
     }
     if (envSpec.ios) add('appstoreconnect', envName, 'iOS bundle ID / TestFlight', [envSpec.ios.bundleId]);
@@ -91,13 +96,25 @@ export function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSp
       } else if (scopeHints.length === 0 && connections.length > 0) {
         status = 'unverified';
       }
+      let guidance: string | undefined;
+      if (entry.packagePull) {
+        try {
+          if (!githubPackagePullSource({ githubRepo: scope })) {
+            status = 'missing';
+            guidance = 'This deploy pulls a private GitHub Container Registry image. Assign a GitHub token with read:packages to packageReadToken for this repository. A combined classic token can be mapped to both apiToken and packageReadToken.';
+          }
+        } catch {
+          status = 'unverified';
+          guidance = 'Hypervibe could not read the saved GitHub package credential. Check local credential access before deploying.';
+        }
+      }
       return {
         provider: entry.provider,
         status,
         environments: Array.from(entry.environments).sort(),
         reasons: Array.from(entry.reasons).sort(),
         ...(scope ? { scope } : {}),
-
+        ...(guidance ? { guidance, ...(status === 'missing' ? { missingCredentialKeys: ['packageReadToken'] } : {}) } : {}),
       };
     });
 

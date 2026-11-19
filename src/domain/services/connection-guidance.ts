@@ -512,7 +512,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: [
       'Select the repository owner and only the repositories Hypervibe should manage. Grant Metadata read; Administration read/write; Actions read/write; Contents read/write; Issues read/write; Pull requests read/write; Secrets read/write; and Workflows read/write.',
       'When enabled in desired state, also grant Dependabot alerts read/write, Code scanning alerts read/write, and Secret scanning alerts read/write. Organization policy and product entitlement can still block these settings; Hypervibe reports that without claiming success.',
-      'For the one-token classic PAT setup, grant repo, workflow, and read:packages. Hypervibe uses it for API management and package/image reads.',
+      'For the one-token classic PAT setup, grant repo, workflow, and read:packages. Map the same source to both apiToken and packageReadToken in credentialsMap. A single credentialsRef assigns only the API role.',
       `For private GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
     ],
     credentialExample: 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"',

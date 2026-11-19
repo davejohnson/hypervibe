@@ -213,23 +213,22 @@ than claiming success. GitHub Advanced Security/code scanning can also require
 an eligible paid plan for private repositories; enabling it is confirmation-
 gated. See [GitHub's fine-grained permission reference](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
 
-Store the combined classic token in an exported environment variable or local
-`.env` file—not in chat or the repository:
-
-```bash
-export NODE_AUTH_TOKEN='ghp_...'
-```
-
-Then connect it for exactly one repository:
+To use one classic token with `repo`, `workflow` and `read:packages`, save it
+as `HYPERVIBE_GITHUB_TOKEN` in a local, gitignored dotenv file. Assign that
+one value to both roles for the repository.
 
 ```text
-hv_connections provider="github" scope="OWNER/REPOSITORY" credentialsRef="env:NODE_AUTH_TOKEN"
+hv_connections provider="github" scope="OWNER/REPOSITORY" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_TOKEN"}
 ```
 
-`NODE_AUTH_TOKEN`, `HYPERVIBE_GITHUB_TOKEN`, and
-`HYPERVIBE_GITHUB_PACKAGES_TOKEN` are accepted as aliases by Hypervibe; exact
-references win and conflicting fallback values block. `NODE_AUTH_TOKEN` is the
-recommended single name because npm requires it directly.
+An existing `NODE_AUTH_TOKEN` works with the same mapping. Use its name for
+both values in `credentialsMap`. A single reference with the default role gives
+Hypervibe repository access only. If this repository already has API access,
+you can assign the existing token to the package role alone.
+
+```text
+hv_connections provider="github" scope="OWNER/REPOSITORY" credentialsKey="packageReadToken" credentialsRef="env:NODE_AUTH_TOKEN"
+```
 
 For least privilege, a fine-grained repository token can still be supplied as
 `apiToken`, with a separate classic `read:packages` PAT as

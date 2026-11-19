@@ -1364,6 +1364,43 @@ describe('hv_spec', () => {
     await t.close();
   });
 
+  it('checks the package role before a managed private image pull, including a combined PAT', async () => {
+    const t = await makeClient();
+    const scope = 'acme/private-image-app';
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, 'NODE_AUTH_TOKEN=fixture-combined-pat\n');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true, login: 'acme-owner', scopes: ['repo', 'workflow', 'read:packages'],
+    });
+    const connect = (repo: string, both: boolean) => t.call('hv_connections', {
+      provider: 'github', scope: repo, credentialsRef: `dotenv:${envPath}`,
+      credentialsMap: { apiToken: 'NODE_AUTH_TOKEN', ...(both ? { packageReadToken: 'NODE_AUTH_TOKEN' } : {}) },
+    });
+    expect((await connect(scope, false)).ok).toBe(true);
+    expect((await connect('another/repo', true)).ok).toBe(true);
+    const environment = { hosting: { provider: 'railway' }, services: { web: {} } };
+    const project = 'private-image-app';
+    const saved = await t.call('hv_spec', { spec: {
+      project, gitRemoteUrl: `https://github.com/${scope}.git`,
+      environments: {
+        production: { ...environment, deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
+        staging: environment,
+      },
+    } });
+    expect(saved.ok).toBe(true);
+    const missing = saved.data.connections.missing.find((item: { provider: string }) => item.provider === 'github');
+    expect(missing).toMatchObject({
+      scope, environments: ['production'], missingCredentialKeys: ['packageReadToken'],
+      guidance: expect.stringContaining('packageReadToken'),
+    });
+    expect(JSON.stringify(missing)).not.toContain('fixture-combined-pat');
+    expect((await connect(scope, true)).ok).toBe(true);
+    const read = await t.call('hv_spec', { project });
+    expect(read.data.connections.required).toContainEqual(expect.objectContaining({ provider: 'github', scope, status: 'verified' }));
+    expect(read.data.connections.missing).not.toContainEqual(expect.objectContaining({ provider: 'github' }));
+    await t.close();
+  });
+
   it('returns required connection setup immediately from the desired spec', async () => {
     const t = await makeClient();
     const set = await t.call('hv_spec', {
