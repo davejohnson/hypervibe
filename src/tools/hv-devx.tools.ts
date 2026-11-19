@@ -4,6 +4,7 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
+import { findSavedSetupReport } from '../adapters/storage/plan-report-files.js';
 
 /**
  * Redact secret-bearing fields when returning stored run plans to chat.
@@ -41,18 +42,22 @@ function redactRunPlan(plan: unknown): unknown {
 export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_runs',
-    'Inspect run history. action="list" (default) shows recent deployment/apply runs (with the latest run\'s status surfaced); action="get" returns full details (plan, receipts) for one run; action="audit" lists recent audit events.',
+    'Inspect run history. action="list" (default) shows recent deployment/apply runs. action="get" returns the plan and receipts for one run. action="report" writes a local HTML review of an exact saved plan and returns htmlPath. action="audit" lists recent audit events.',
     {
-      action: z.enum(['list', 'get', 'audit']).optional().describe('Operation (default: list)'),
-      runId: z.string().optional().describe('Run id (required for action="get")'),
-      project: projectField.describe('Filter or constrain runs by project (action="list" or action="get")'),
-      env: envField.describe('Filter or constrain runs by environment name (action="list" or action="get")'),
+      action: z.enum(['list', 'get', 'audit', 'report']).optional().describe('Operation (default: list)'),
+      runId: z.string().optional().describe('Exact run id for action="get" or saved plan id for action="report".'),
+      project: projectField.describe('Filter or constrain runs by project. Required with gcpProjectId for a Google Cloud setup report.'),
+      env: envField.describe('Filter or constrain ordinary runs by environment name.'),
+      gcpProjectId: z.string().min(1).optional().describe('Google Cloud project ID for a saved setup plan. Only used with action="report" and project.'),
       limit: z.number().int().min(1).max(100).optional().describe('action=list/audit: max items to return (default: 20 runs, 50 audit events; maximum 100). action=get returns one run and ignores limit with a warning.'),
       resourceType: z.string().optional().describe('Audit filter: resource type (project, environment, run, ...)'),
       resourceId: z.string().optional().describe('Audit filter: resource id (used with resourceType)'),
       auditAction: z.string().optional().describe('Audit filter: action name (e.g. deploy.started)'),
     },
-    wrapCommandHandler(async ({ action = 'list', runId, project: projectRef, env, limit, resourceType, resourceId, auditAction }) => {
+    wrapCommandHandler(async ({ action = 'list', runId, project: projectRef, env, gcpProjectId, limit, resourceType, resourceId, auditAction }) => {
+      if (gcpProjectId !== undefined && action !== 'report') {
+        throw new HvError('VALIDATION', 'gcpProjectId is only used for a Google Cloud setup report.');
+      }
       if (action === 'audit') {
         const invalid = [
           runId !== undefined ? 'runId' : undefined,
@@ -102,7 +107,7 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
         error: run.error,
       });
 
-      if (action === 'get') {
+      if (action === 'get' || action === 'report') {
         const invalid = [
           resourceType !== undefined ? 'resourceType' : undefined,
           resourceId !== undefined ? 'resourceId' : undefined,
@@ -111,13 +116,25 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
         if (invalid.length > 0) {
           throw new HvError('VALIDATION', 'Run detail received selectors for another action.', {
             details: { invalid },
-            hint: 'Use runId with optional project and env constraints for action="get".',
+            hint: `Use runId with optional project and env constraints for action="${action}".`,
           });
         }
         if (!runId) {
-          throw new HvError('VALIDATION', 'runId is required for action="get".');
+          throw new HvError('VALIDATION', `runId is required for action="${action}".`);
         }
-        const warnings = ignoredOptionWarnings('hv_runs', 'action="get"', { limit });
+        const warnings = ignoredOptionWarnings('hv_runs', `action="${action}"`, { limit });
+        if (action === 'report' && runId.startsWith('setup-')) {
+          if (!projectRef || !gcpProjectId || env !== undefined) {
+            return commandError('VALIDATION', 'A Google Cloud setup report requires project and gcpProjectId. Setup plans are scoped to the project, so omit env.');
+          }
+          const project = ctx.resolveProjectOrThrow({ project: projectRef });
+          const report = findSavedSetupReport(project.id, gcpProjectId, runId, project.name);
+          if (!report) return commandError('NOT_FOUND', `Setup plan ${runId} was not found in this project.`);
+          return commandSuccess({ planId: runId, ...report }, { warnings });
+        }
+        if (gcpProjectId !== undefined) {
+          return commandError('VALIDATION', 'gcpProjectId is only used for Google Cloud setup plan IDs.');
+        }
         const run = ctx.repos.runs.findById(runId);
         if (!run) {
           return commandError('NOT_FOUND', `Run not found: ${runId}`, { hint: 'List runs with hv_runs action="list".' });
@@ -137,6 +154,11 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
               hint: 'List runs for the selected environment with hv_runs action="list".',
             });
           }
+        }
+        if (action === 'report') {
+          const report = ctx.repos.runs.planReport(run.id, true);
+          if (!report) return commandError('VALIDATION', `Run ${run.id} is not a saved plan.`);
+          return commandSuccess({ planId: run.id, ...report }, { warnings });
         }
         return commandSuccess(
           {

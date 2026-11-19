@@ -216,7 +216,7 @@ function commandPresentation(commandId: string, value: unknown): CommandPresenta
     : '';
   const summary = data ? stringValue(data.message) : undefined;
   const details = data
-    ? genericLines(data, new Set(['project', 'environment', 'service', 'repository', 'provider', 'message']))
+    ? genericLines(data, new Set(['project', 'environment', 'service', 'repository', 'provider', 'message', 'htmlPath']))
     : value === undefined ? [] : formatCommandDataLines(value);
 
   return {
@@ -270,7 +270,7 @@ function planPresentation(data: DataRecord): CommandPresentation {
     sections.push({ title: '🚧  BLOCKED', lines: formatCommandDataLines(blockerData) });
   }
   const details = genericLines(data, new Set([
-    'environment', 'planId', 'pendingActionCount', 'noopActionCount', 'totalActionCount',
+    'environment', 'planId', 'htmlPath', 'pendingActionCount', 'noopActionCount', 'totalActionCount',
     'actions', 'blocked', 'actionScopedBlocked', 'summary',
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
@@ -845,6 +845,8 @@ function renderPresentation(presentation: CommandPresentation, envelope: Command
   const lines = [formatHypervibeHeader(presentation.icon, presentation.title)];
   if (presentation.context) lines.push(presentation.context);
   if (presentation.summary) lines.push('', presentation.summary);
+  const reportPath = stringValue(record(envelope.data)?.htmlPath);
+  if (reportPath) lines.push('', 'Open the plan in a browser', reportPath);
 
   for (const section of presentation.sections) {
     if (section.lines.length === 0) continue;

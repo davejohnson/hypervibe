@@ -1,8 +1,11 @@
 import { randomUUID } from 'crypto';
+import { lstatSync } from 'node:fs';
+import { runPlanReportPath, writeRunPlanReport } from '../../storage/plan-report-files.js';
 import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { runPlanColumnSchema, runReceiptsColumnSchema } from '../column.schemas.js';
 import type { Run, CreateRunInput, RunStatus, RunReceipt } from '../../../domain/entities/run.entity.js';
+import type { PlanAction } from '../../../domain/plan/plan.types.js';
 
 export interface ReserveApplyInput {
   projectId: string;
@@ -24,6 +27,10 @@ export type ReserveApplyResult =
     conflictingRunId: string;
   };
 
+function isSavedPlan(run: Run): boolean {
+  return run.type === 'plan' && 'kind' in run.plan && run.plan.kind === 'hv_plan';
+}
+
 export class RunRepository {
   create(input: CreateRunInput): Run {
     if (input.type === 'apply') {
@@ -34,21 +41,26 @@ export class RunRepository {
     const id = randomUUID();
     const now = new Date().toISOString();
 
-    db.prepare(`
-      INSERT INTO runs (id, project_id, environment_id, type, status, plan, receipts, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      input.projectId,
-      input.environmentId,
-      input.type,
-      'pending',
-      JSON.stringify(input.plan ?? {}),
-      JSON.stringify([]),
-      now
-    );
+    // A report write failure must not leave an undisclosed executable plan.
+    return db.transaction(() => {
+      db.prepare(`
+        INSERT INTO runs (id, project_id, environment_id, type, status, plan, receipts, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        input.projectId,
+        input.environmentId,
+        input.type,
+        'pending',
+        JSON.stringify(input.plan ?? {}),
+        JSON.stringify([]),
+        now
+      );
 
-    return this.findById(id)!;
+      const run = this.findById(id)!;
+      if (isSavedPlan(run)) writeRunPlanReport(run);
+      return run;
+    })();
   }
 
   /**
@@ -243,11 +255,31 @@ export class RunRepository {
 
   updatePlan(id: string, plan: Record<string, unknown>): Run | null {
     const db = getDb();
-    db.prepare(`
-      UPDATE runs SET plan = ? WHERE id = ?
-    `).run(JSON.stringify(plan), id);
+    return db.transaction(() => {
+      db.prepare('UPDATE runs SET plan = ? WHERE id = ?').run(JSON.stringify(plan), id);
+      const run = this.findById(id);
+      if (run && isSavedPlan(run)) writeRunPlanReport(run);
+      return run;
+    })();
+  }
 
-    return this.findById(id);
+  /** Preserve other plan fields, including frozen inputs, when the command finishes its review. */
+  updatePlanReview(id: string, review: { actions?: PlanAction[]; reviewBlockers: string[] }): void {
+    getDb().transaction(() => {
+      const run = this.findById(id);
+      if (run && isSavedPlan(run)) this.updatePlan(id, { ...run.plan, ...review });
+    }).immediate();
+  }
+
+  /** Read and export one exact saved plan without racing a revision to its actions. */
+  planReport(id: string, regenerate = false): { htmlPath: string } | undefined {
+    return getDb().transaction(() => {
+      const run = this.findById(id);
+      if (!run || !isSavedPlan(run)) return undefined;
+      const htmlPath = runPlanReportPath(id);
+      if (!regenerate && lstatSync(htmlPath, { throwIfNoEntry: false })?.isFile()) return { htmlPath };
+      return writeRunPlanReport(run);
+    }).immediate();
   }
 
   private mapRow(row: Record<string, unknown>): Run {

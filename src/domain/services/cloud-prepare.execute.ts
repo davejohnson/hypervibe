@@ -294,7 +294,7 @@ export async function runCloudPrepare(params: {
     const adoption = basePreparation ? await reviewGcpPreparationAdoption({ project: projectRepo.findById(project.id) ?? project,
       target: plan, token, contributionId, configuration }) : undefined;
     if (adoption) configuration = adoption.configuration;
-    const setup = await runGcpProjectSetup({ projectId: project.id, gcpProjectId: resolved.gcpProjectId,
+    const setup = await runGcpProjectSetup({ projectId: project.id, projectName: project.name, gcpProjectId: resolved.gcpProjectId,
       auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: token, GOOGLE_PROJECT: resolved.gcpProjectId }, redact: [token] },
       contribution: { id: contributionId, configuration }, confirm,
       ...(adoption ? { allowImportAddresses: adoption.allowImportAddresses, existingResourceAddresses: adoption.existingResourceAddresses } : {}),
@@ -383,6 +383,8 @@ export async function runCloudPrepare(params: {
       message: removalOnly
         ? 'Cloud access cleanup completed.'
         : 'Cloud prepared for Hypervibe deploys.',
+      planId: setup.planId,
+      htmlPath: setup.htmlPath,
       project: project.name,
       provider: profile.provider,
       version: profile.version,

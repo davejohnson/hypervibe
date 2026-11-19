@@ -44,6 +44,11 @@ export interface PlanAction {
   metadata?: Record<string, unknown>;
 }
 
+/** Approval applies to actual changes with an explicit, billable or data-bearing effect. */
+export function requiresActionConfirmation(action: Pick<PlanAction, 'type' | 'requiresConfirm' | 'billable' | 'dataBearing'>): boolean {
+  return action.type !== 'noop' && (action.requiresConfirm === true || action.billable === true || action.dataBearing === true);
+}
+
 /** Local (SQLite) view of an environment, input to the diff. */
 export interface LocalSnapshot {
   projectExists: boolean;

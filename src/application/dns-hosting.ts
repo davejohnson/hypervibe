@@ -6,7 +6,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
 import type { DnsRecordType } from '../domain/ports/dns.port.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import { ConvergeExecutor, type PlanRunDocument, type ConvergeResult } from '../domain/plan/converge.executor.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { normalizeProviderDnsRecord, providerDnsRecordShouldBeProxied } from '../domain/services/domain-dns-records.js';
@@ -41,7 +41,7 @@ export function persistDnsPlanRun(ctx: CommandContext, params: {
   ctx.repos.runs.updateStatus(run.id, 'succeeded');
   return { planRunId: run.id, environmentName: params.environmentName, specRevision: params.specRevision,
     actions: document.actions,
-    confirmActions: document.actions.filter(action => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map(action => action.id),
+    confirmActions: document.actions.filter(requiresActionConfirmation).map(action => action.id),
     warnings: ['DNS changes use the saved OpenTofu plan. Run hv_plan again after apply to continue hosting readiness.'] };
 }
 

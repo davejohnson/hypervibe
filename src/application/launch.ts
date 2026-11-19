@@ -9,7 +9,7 @@ import { buildTokenKey, collectOutsideKeys } from './engine-secrets.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import { ConvergeExecutor, type ActionReceipt } from '../domain/plan/converge.executor.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
@@ -58,12 +58,12 @@ export type LaunchResult =
   | { status: 'needs_access'; accessId: LaunchAccessId; access: string; grants: Record<string, unknown> }
   | { status: 'needs_subscription'; subscriptions: Array<{ subscriptionId: string; displayName: string }>; message: string }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
-  | { status: 'needs_confirmation'; planId: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
+  | { status: 'needs_confirmation'; planId: string; htmlPath?: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
   | { status: 'blocked'; message: string; details?: unknown }
   | { status: 'needs_secrets'; keys: string[]; url?: string; message: string }
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
-  | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; confirmActions?: string[] }
+  | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; htmlPath?: string; confirmActions?: string[] }
   | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; domains?: Array<{ name: string; status: 'serving' | 'certificate_pending' }>; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
@@ -231,7 +231,7 @@ async function runLaunch(ctx: CommandContext, params: {
     if (loaded.document.specRevision !== params.specRevision) return { status: 'blocked', message: 'The spec changed after this plan was reviewed. Run hv_launch without confirmation inputs to review the current changes.' };
     reviewedPlan = { planRunId: params.planId, environmentName: loaded.document.environmentName,
       specRevision: loaded.document.specRevision, actions: loaded.document.actions,
-      confirmActions: loaded.document.actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
+      confirmActions: loaded.document.actions.filter(requiresActionConfirmation).map(action => action.id),
       warnings: loaded.document.warnings ?? [] };
     if (params.confirmActions?.length) {
       const expected = reviewedPlan.actions.filter((action) => reviewedPlan!.confirmActions.includes(action.id)).map(approvalToken).sort();
@@ -285,7 +285,7 @@ async function runLaunch(ctx: CommandContext, params: {
     if (tokens.length && !approvedExactly) {
       return {
         status: 'needs_confirmation',
-        planId: planned.planRunId,
+        planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId),
         confirmActions: tokens,
         changes: pending.map(summarize),
         estimatedMonthlyCost: environmentSpec.hosting.provider === 'azure' ? estimateAzureMonthlyCost(environmentSpec)
@@ -303,7 +303,7 @@ async function runLaunch(ctx: CommandContext, params: {
       });
     } catch (error) {
       if (!isNetworkError(error)) throw error;
-      return { status: 'pending', planId: planned.planRunId, confirmActions: tokens,
+      return { status: 'pending', planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId), confirmActions: tokens,
         message: 'The infrastructure apply lost its connection. Continue with this same planId and its approved confirmActions so the saved operation can be checked.', receipts: [] };
     }
     if (applied.kind === 'blocked') return { status: 'blocked', message: applied.reason };
@@ -315,7 +315,7 @@ async function runLaunch(ctx: CommandContext, params: {
     if (!applied.result.success && !stillPending.length) return { status: 'blocked', message: 'The saved infrastructure plan did not complete. Inspect its results before continuing.', details: receipts };
     // A slow certificate must not hold back the app itself; anything else stops here.
     if (stillPending.some((receipt) => !receipt.actionId.startsWith('domain-ready:'))) {
-      return { status: 'pending', planId: planned.planRunId, confirmActions: tokens, message: 'Some changes are still settling. Continue with this same planId and its approved confirmActions.', receipts };
+      return { status: 'pending', planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId), confirmActions: tokens, message: 'Some changes are still settling. Continue with this same planId and its approved confirmActions.', receipts };
     }
     pendingCertificates.clear();
     for (const receipt of stillPending) pendingCertificates.add(receipt.actionId.slice('domain-ready:'.length));
@@ -569,13 +569,14 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
     try {
       const confirm = params.approveAccess?.includes('ci-release') === true;
       const granted = await grantCiReleaseAccess({
-        projectId: params.project.id, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository: observed.full_name!, repositoryId, releases,
+        projectId: params.project.id, projectName: params.project.name, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository: observed.full_name!, repositoryId, releases,
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, confirm,
       });
       if (!confirm) return {
         status: 'needs_access', accessId: 'ci-release',
         access: `Let GitHub Actions in ${repository} push images and release this app without storing a key in GitHub.`,
-        grants: { ...previewCiReleaseAccess(context.gcpProjectId, observed.full_name!, context.runtimeServiceAccountEmail, releases), planId: granted.planId, actions: granted.actions },
+        grants: { ...previewCiReleaseAccess(context.gcpProjectId, observed.full_name!, context.runtimeServiceAccountEmail, releases),
+          gcpProjectId: context.gcpProjectId, planId: granted.planId, htmlPath: granted.htmlPath, actions: granted.actions },
       };
       ci = { repository, trust, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
     } catch (error) {

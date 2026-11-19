@@ -253,7 +253,7 @@ export async function runGcpBootstrap(
       const configuration = buildGcpBootstrapConfiguration({ projectId: projectId.value,
         billingAccountName: params.billingAccountName.trim(), deployServiceAccountEmail: serviceAccountEmail,
         runtimeServiceAccountEmail, region: params.region });
-      infrastructure = await dependencies.setupProject({ projectId: params.project.id, gcpProjectId: projectId.value,
+      infrastructure = await dependencies.setupProject({ projectId: params.project.id, projectName: params.project.name, gcpProjectId: projectId.value,
         auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: accessToken, GOOGLE_PROJECT: projectId.value }, redact: [accessToken] },
         contribution: { id: 'bootstrap', configuration }, confirm: mode === 'confirm' });
       if (!infrastructure.success) throw new Error(infrastructure.error ?? 'Google project setup did not converge.');
@@ -273,7 +273,7 @@ export async function runGcpBootstrap(
             ...(displayName ? { displayName } : {}),
           })),
         plannedSteps: plannedBootstrapSteps(observation),
-        ...(infrastructure ? { planId: infrastructure.planId, actions: infrastructure.actions } : { needsBillingSelection: true }),
+        ...(infrastructure ? { planId: infrastructure.planId, htmlPath: infrastructure.htmlPath, actions: infrastructure.actions } : { needsBillingSelection: true }),
         requiresConfirmation: true,
       };
       recordBootstrapAudit(params.project, 'gcp.bootstrap.previewed', {
@@ -408,6 +408,8 @@ export async function runGcpBootstrap(
       scope: scope.value,
       target,
       message: 'GCP is ready for Hypervibe Cloud Run and Cloud SQL deploys.',
+      planId: infrastructure.planId,
+      htmlPath: infrastructure.htmlPath,
       partialProgress: progress,
       auditRecorded,
     };

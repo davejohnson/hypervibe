@@ -9,6 +9,7 @@ import { buildCiReleaseConfiguration } from '../../../adapters/providers/gcp/tof
 import type { EngineConfiguration } from '../../ports/infrastructure-engine.port.js';
 import type { EnginePlanResult } from '../../../adapters/engine/opentofu/engine.js';
 import { engineStatePaths, ensureEngineStateDirectories } from '../../../adapters/engine/opentofu/workspace.js';
+import { findSavedSetupReport } from '../../../adapters/storage/gcp-setup-report.js';
 
 let directory: string;
 beforeEach(() => { directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hv-shared-setup-')); });
@@ -84,9 +85,14 @@ describe('one saved project setup plan', () => {
     const managed = engine();
     const params = parameters('storage');
     const preview = await runGcpProjectSetup(params, { engine: managed });
-    expect(preview.success).toBe(true);
+    expect(preview, preview.error).toMatchObject({ success: true, htmlPath: expect.stringMatching(/setup-.*\.html$/) });
+    const reportPath = preview.htmlPath!;
+    const html = fs.readFileSync(reportPath, 'utf8');
+    expect(html).toContain('access:storage');
+    expect(html).not.toContain('GOOGLE_OAUTH_ACCESS_TOKEN');
     const confirmed = await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed });
-    expect(confirmed).toMatchObject({ success: true, planId: preview.planId });
+    expect(confirmed).toMatchObject({ success: true, planId: preview.planId, htmlPath: reportPath });
+    expect(fs.readFileSync(reportPath, 'utf8')).toBe(html);
     expect(managed.plan).toHaveBeenCalledTimes(1);
     expect(managed.apply).toHaveBeenCalledWith(expect.objectContaining({ planId: preview.planId, approvedAddresses: ['google_project_iam_member.storage'] }));
     expect((await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed })).success).toBe(false);
@@ -100,6 +106,121 @@ describe('one saved project setup plan', () => {
     expect(result.success).toBe(false);
     expect(managed.plan).toHaveBeenCalledTimes(1);
     expect(managed.apply).not.toHaveBeenCalled();
+  });
+  it('opens the exact report after supersession and consumption without another plan or approval', async () => {
+    const managed = engine();
+    const params = parameters('storage');
+    const first = await runGcpProjectSetup(params, { engine: managed });
+    const second = await runGcpProjectSetup(params, { engine: managed });
+    expect(first.planId).not.toBe(second.planId);
+    expect((await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed })).planId).toBe(second.planId);
+    for (const preview of [first, second]) {
+      fs.writeFileSync(preview.htmlPath!, 'damaged');
+      const reopened = findSavedSetupReport(params.projectId, params.gcpProjectId, preview.planId!, 'renamed project', directory);
+      expect(reopened?.htmlPath).toBe(preview.htmlPath);
+      expect(fs.readFileSync(reopened!.htmlPath, 'utf8')).toContain(preview.planId);
+    }
+    expect(findSavedSetupReport('other', params.gcpProjectId, first.planId!, undefined, directory)).toBeUndefined();
+    expect(findSavedSetupReport(params.projectId, 'other-project', first.planId!, undefined, directory)).toBeUndefined();
+    expect(findSavedSetupReport(params.projectId, params.gcpProjectId, '../' + first.planId, undefined, directory)).toBeUndefined();
+    expect((await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed })).success).toBe(false);
+    expect(managed.plan).toHaveBeenCalledTimes(2);
+    expect(managed.apply).toHaveBeenCalledTimes(1);
+  });
+  it('keeps an unviewed pre-upgrade plan when the next preview supersedes its intent', async () => {
+    const params = parameters('storage');
+    const managed = engine();
+    const first = await runGcpProjectSetup(params, { engine: managed });
+    const plans = path.dirname(first.htmlPath!);
+    const file = path.join(plans, fs.readdirSync(plans).find(name => /^setup-[0-9a-f]{64}\.json$/.test(name))!);
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const { intent, planId, baseline, planned, manifest, configuration } = saved;
+    fs.writeFileSync(file, JSON.stringify({ planId, intent, baseline, planned, manifest, configuration }));
+    fs.unlinkSync(first.htmlPath!);
+    fs.unlinkSync(path.join(plans, `${planId}.report.json`));
+
+    const next = await runGcpProjectSetup(params, { engine: managed });
+    expect(next.success, next.error).toBe(true);
+    expect(next.planId).not.toBe(planId);
+    const prior = findSavedSetupReport(params.projectId, params.gcpProjectId, planId, undefined, directory);
+    expect(prior?.htmlPath).toBe(first.htmlPath);
+    expect(fs.readFileSync(prior!.htmlPath, 'utf8')).toContain(planId);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).planId).toBe(next.planId);
+    expect(managed.plan).toHaveBeenCalledTimes(2);
+    expect(managed.apply).not.toHaveBeenCalled();
+  });
+  it('reconstructs a legacy setup report using only saved actions, actual dependencies and the selected billing account', async () => {
+    const params = parameters('bootstrap');
+    const projectId = params.gcpProjectId;
+    params.contribution.configuration = buildGcpBootstrapConfiguration({ projectId, billingAccountName: 'billingAccounts/123456-ABCDEF-789012',
+      deployServiceAccountEmail: 'deploy@example-project.iam.gserviceaccount.com', runtimeServiceAccountEmail: 'runtime@example-project.iam.gserviceaccount.com' });
+    const preview = await runGcpProjectSetup(params, { engine: engine() });
+    const plans = path.dirname(preview.htmlPath!);
+    const file = path.join(plans, fs.readdirSync(plans).find(name => /^setup-[0-9a-f]{64}\.json$/.test(name))!);
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const privateValue = 'sensitive-fixture-marker';
+    saved.configuration.files['decoy.tf.json'] = { resource: { google_project: { other: { billing_account: 'FFFFFF-000000-000000' } } }, privateKey: privateValue };
+    const action = saved.planned.actions.find((entry: { id: string }) => entry.id === 'project-setup:google_storage_bucket_iam_member:build_source');
+    action.metadata.extra = privateValue;
+    action.diff = [{ field: 'role', from: privateValue, to: privateValue }];
+    delete saved.createdAt;
+    fs.writeFileSync(file, JSON.stringify(saved));
+    fs.unlinkSync(preview.htmlPath!);
+    const snapshot = path.join(plans, `${preview.planId}.report.json`);
+    fs.unlinkSync(snapshot);
+    const opened = findSavedSetupReport(params.projectId, projectId, preview.planId!, 'The project', directory);
+    const html = fs.readFileSync(opened!.htmlPath, 'utf8');
+    expect(html).toContain('The project');
+    expect(html).toContain('123456-ABCDEF-789012');
+    expect(html).not.toContain('FFFFFF-000000-000000');
+    const archived = fs.readFileSync(snapshot, 'utf8');
+    expect(html).not.toContain(privateValue);
+    expect(archived).not.toContain(privateValue);
+    const { report } = JSON.parse(archived);
+    expect(report.approval).toBe('whole-plan');
+    const reportActions = report.actions as Array<{ id: string; dependsOn: string[] }>;
+    const grant = reportActions.find(entry => entry.id === action.id);
+    expect(grant?.dependsOn.sort()).toEqual(['project-setup:google_service_account.deploy', 'project-setup:google_service_account.runtime',
+      'project-setup:google_storage_bucket:build_source'].sort());
+    expect(reportActions.map(entry => entry.id)).toEqual(saved.planned.actions.map((entry: { id: string }) => entry.id));
+  });
+  it('stops before apply when report output is unsafe, preserving the reviewed plan for retry', async () => {
+    const managed = engine();
+    const params = parameters('storage');
+    const preview = await runGcpProjectSetup(params, { engine: managed });
+    const unrelated = path.join(directory, 'other-report');
+    fs.writeFileSync(unrelated, 'original');
+    fs.unlinkSync(preview.htmlPath!);
+    fs.symlinkSync(unrelated, preview.htmlPath!);
+    expect((await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed })).success).toBe(false);
+    expect(fs.readFileSync(unrelated, 'utf8')).toBe('original');
+    expect(managed.apply).not.toHaveBeenCalled();
+    fs.unlinkSync(preview.htmlPath!);
+    const retried = await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed });
+    expect(retried).toMatchObject({ success: true, planId: preview.planId });
+    expect(managed.plan).toHaveBeenCalledTimes(1);
+  });
+  it('retains the prior approval when publishing a new preview fails', async () => {
+    const params = parameters('storage');
+    const managed = engine();
+    const first = await runGcpProjectSetup(params, { engine: managed });
+    const plans = path.dirname(first.htmlPath!);
+    const plan = managed.plan.getMockImplementation()!;
+    managed.plan.mockImplementationOnce(async input => {
+      fs.mkdirSync(path.join(plans, `${input.planId}.html`));
+      return plan(input);
+    });
+    expect((await runGcpProjectSetup(params, { engine: managed })).success).toBe(false);
+    const confirmed = await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed });
+    expect(confirmed).toMatchObject({ success: true, planId: first.planId });
+    expect(managed.apply).toHaveBeenCalledOnce();
+  });
+  it('rejects historical lookup through an intervening symlink before opening another project', async () => {
+    const params = parameters('storage');
+    const preview = await runGcpProjectSetup(params, { engine: engine() });
+    const parent = path.join(directory, 'engine', 'gcp');
+    fs.symlinkSync(path.join(parent, params.projectId), path.join(parent, 'alternate-owner'));
+    expect(() => findSavedSetupReport('alternate-owner', params.gcpProjectId, preview.planId!, undefined, directory)).toThrow(/directory/);
   });
   it('preserves previous add-ons and blocks unrelated drift in their resources', async () => {
     const managed = engine();
