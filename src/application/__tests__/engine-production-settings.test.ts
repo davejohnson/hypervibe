@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
-import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { buildCloudRunConfiguration, planWithCloudRunRevisionMinimums } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
 import { ciReleaseTargets } from '../launch.js';
 import { startCommandFields } from '../../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -25,13 +25,16 @@ function specFor(provider: 'cloudrun' | 'aws' | 'azure') {
   } } });
 }
 
-function configuration() {
-  const spec = specFor('cloudrun');
-  const input = buildEngineInput(spec, 'staging', {
+function engineInput(spec = specFor('cloudrun')) {
+  return buildEngineInput(spec, 'staging', {
     gcpProjectId: 'demo-project', region: 'us-west1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
     resourceNameFor: (service) => `${service}-staging`,
   });
-  return buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
+}
+
+function configuration() {
+  const spec = specFor('cloudrun');
+  return buildCloudRunConfiguration({ ...engineInput(spec), runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
     storage: Object.entries(spec.environments.staging!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: `demo-${name}`, location: storage.region, injectInto: storage.injectInto,
       ...(storage.versioning ? { versioning: true } : {}), ...(storage.browserUploads ? { browserUploads: true } : {}),
@@ -46,8 +49,32 @@ describe('production settings on Google Cloud', () => {
   it('keeps an always-on web service running with its CPU available, and leaves others to scale to zero', () => {
     expect(services.web.template[0].scaling[0].min_instance_count).toBe(1);
     expect(services.web.template[0].containers[0].resources[0]).toEqual({ limits: { cpu: '2', memory: '2Gi' }, cpu_idle: false });
-    expect(services.plain.template[0].scaling[0].min_instance_count).toBe(0);
+    // Cloud Run reports no revision scaling block for the default zero minimum.
+    expect(services.plain.template[0]).not.toHaveProperty('scaling');
     expect(services.plain.template[0].containers[0].resources[0].cpu_idle).toBe(true);
+  });
+
+  it('rejects the second candidate when another rollout clears the floor during planning', async () => {
+    const { services } = engineInput();
+    const accepted: boolean[] = [];
+    const result = await planWithCloudRunRevisionMinimums(services, async verify => {
+      const scaling = accepted.length === 0 ? [{ min_instance_count: 2 }] : [];
+      const matches = verify({ resource_changes: [{ address: 'google_cloud_run_v2_service.plain',
+        change: { actions: ['update'], before: { template: [{ scaling }] } } }] });
+      accepted.push(matches);
+      return matches;
+    });
+    expect(accepted).toEqual([false, false]);
+    expect(result).toBe(false);
+  });
+
+  it('requires a readable prior minimum or an explicit create before accepting a candidate', async () => {
+    const { services } = engineInput();
+    const candidate = (actions: string[], before: unknown) => planWithCloudRunRevisionMinimums(services,
+      async verify => verify({ resource_changes: [{ address: 'google_cloud_run_v2_service.plain', change: { actions, before } }] }));
+    await expect(candidate(['create'], null)).resolves.toBe(true);
+    await expect(candidate(['update'], null)).rejects.toThrow('Missing prior');
+    await expect(candidate(['update'], { template: [{ scaling: [{ min_instance_count: 'unknown' }] }] })).rejects.toThrow('Invalid prior');
   });
 
   // A service is created with a placeholder image that cannot run the app's command, so the
@@ -80,7 +107,7 @@ describe('production settings on Google Cloud', () => {
       hosting: { provider: 'cloudrun' }, migrations: { mode: 'releaseCommand', command: 'npm run migrate' },
       services: { web: {}, nightly: { workloadKind: 'cron', cronSchedule: '0 3 * * *', startCommand: 'npm run nightly' } },
     } } });
-    const input = buildEngineInput(spec, 'staging', { gcpProjectId: 'demo-project', region: 'us-west1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', resourceNameFor: (service) => `${service}-staging` });
+    const input = engineInput(spec);
     const jobs = (buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' }).files as Record<string, any>)['jobs.tf.json'].resource.google_cloud_run_v2_job;
     expect(jobs.release_command.template[0].template[0].max_retries).toBe(0);
     expect(jobs.nightly.template[0].template[0].max_retries).toBe(1);

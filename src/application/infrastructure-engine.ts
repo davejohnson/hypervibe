@@ -41,6 +41,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { CloudRunAdapter } from '../adapters/providers/gcp/cloudrun.adapter.js';
 import {
   buildCloudRunConfiguration,
+  planWithCloudRunRevisionMinimums,
   gcpEngineAuthentication,
   gcpEngineBackend,
   type GcpCloudRunEngineInput,
@@ -1008,18 +1009,19 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { blocked: [engine.blocked] };
   const boundServices = Object.keys((context.environment.platformBindings as { services?: Record<string, unknown> }).services ?? {});
+  const input = buildEngineInput(spec, environmentName, {
+    ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
+    databaseWired: databaseCredentialReady,
+    cacheWired: cacheReady,
+    s3WiredStorage: s3Ready,
+    importedSecrets,
+    secretVersions,
+  });
   const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
     adopt: { ...adopt, secrets: adoptSecrets },
     secrets: containers, retiredSecrets,
     environmentId: context.environment.id,
-    ...buildEngineInput(spec, environmentName, {
-      ...context, resourceNameFor: (service) => serviceResourceName(context, environmentName, service),
-      databaseWired: databaseCredentialReady,
-      cacheWired: cacheReady,
-      s3WiredStorage: s3Ready,
-      importedSecrets,
-      secretVersions,
-    }),
+    ...input,
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
     ...(databaseSpec && databaseShape ? { database: { instanceName, databaseName: ENGINE_DATABASE_NAME, wireServices: databaseCredentialReady,
       tier: databaseShape.tier, deletionProtection: databaseShape.deletionProtection,
@@ -1050,9 +1052,11 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
-  let configuration = configure();
   let planId = crypto.randomUUID();
-  let planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+  const planEnvironment = (adopt?: { databaseInstance?: string; buckets?: string[] }) => planWithCloudRunRevisionMinimums(input.services,
+    verifyPlannedChanges => engine.plan({ backend: gcpEngineBackend, configuration: configure(adopt), auth: context.auth,
+      state: context.state, planId, verifyPlannedChanges }));
+  let planned = await planEnvironment();
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   // A create for something that already exists means engine state lost track of it (for example,
   // an apply interrupted mid-create). Adopt it only with proof it is ours; otherwise block.
@@ -1060,9 +1064,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     Object.keys(environmentSpec!.storage ?? {}));
   if ('blocked' in leftovers) return { blocked: [leftovers.blocked] };
   if (leftovers.databaseInstance || leftovers.buckets.length) {
-    configuration = configure({ ...(leftovers.databaseInstance ? { databaseInstance: leftovers.databaseInstance } : {}), buckets: leftovers.buckets });
     planId = crypto.randomUUID();
-    planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+    planned = await planEnvironment(leftovers);
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
   // Queues recorded only in engine state (for example, created before Hypervibe recorded queue
@@ -1073,9 +1076,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (strayQueues.length && planned.unmanagedDeletes.every((address) => address.startsWith('google_pubsub_'))
     && strayQueues.every((name) => !environmentSpec!.queues?.[name])) {
     engineBinding.queues = [...new Set([...(engineBinding.queues ?? []), ...strayQueues])];
-    configuration = configure(leftovers.databaseInstance || leftovers.buckets.length ? { ...(leftovers.databaseInstance ? { databaseInstance: leftovers.databaseInstance } : {}), buckets: leftovers.buckets } : undefined);
     planId = crypto.randomUUID();
-    planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+    planned = await planEnvironment(leftovers);
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
