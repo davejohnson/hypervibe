@@ -13,11 +13,13 @@ import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repos
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { mergeRepoPlatformBindings } from '../../domain/spec/repo-bindings-file.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
+import { parseEnginePlan, translateEnginePlan } from '../../adapters/engine/opentofu/plan-mapping.js';
 import { OpenTofuEngine } from '../../adapters/engine/opentofu/engine.js';
 import * as install from '../../adapters/engine/opentofu/install.js';
 import type { EngineConfiguration } from '../../domain/ports/infrastructure-engine.port.js';
-import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { buildCloudRunConfiguration, secretEngineKey } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 
 let directory: string;
 beforeEach(() => { directory = mkdtempSync(path.join(tmpdir(), 'hv-engine-secrets-')); SqliteAdapter.resetInstance(); SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate(); });
@@ -31,6 +33,23 @@ function owned() {
 const ownedLabels = () => ({ labels: owned().labels });
 const secret = 'hv-staging-jwt-secret';
 const base = `https://secretmanager.googleapis.com/v1/projects/demo-project/secrets/${secret}`;
+
+function engineFixture(perSecret = false) {
+  const { ctx, project, environment, labels } = owned();
+  project.gitRemoteUrl = 'https://github.com/example/secrets';
+  const connection = new ConnectionRepository().create({ provider: 'cloudrun', scope: 'example/secrets', credentialsEncrypted: getSecretStore().encryptObject({
+    projectId: 'demo-project', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
+    credentials: JSON.stringify({ type: 'service_account', private_key: 'test-private-key', client_email: 'deploy@demo-project.iam.gserviceaccount.com' }),
+  }) });
+  new ConnectionRepository().updateStatus(connection.id, 'verified');
+  const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
+    staging: { hosting: { provider: 'cloudrun', ...(perSecret ? { gcpRuntimeSecretGrants: 'per-secret' } : {}) }, services: { web: {} } },
+  }, secrets: { JWT_SECRET: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1, environments: ['staging'] } } });
+  vi.spyOn(CloudRunAdapter.prototype, 'engineAccessToken').mockResolvedValue('test-token');
+  vi.spyOn(install, 'ensureEngineBinary').mockResolvedValue({ ok: true, binary: '/not-executed' });
+  vi.spyOn(install, 'enginePluginCacheDir').mockReturnValue(directory);
+  return { ctx, project, environment, labels, spec };
+}
 
 describe('engine-owned Secret Manager containers', () => {
   it('never creates a missing container while writing a value', async () => {
@@ -74,20 +93,52 @@ describe('engine-owned Secret Manager containers', () => {
     expect(JSON.stringify(configuration)).not.toContain('private-value');
   });
 
+  it('stages only consumed runtime grants from the saved environment spec', () => {
+    const runtime = 'runtime@demo-project.iam.gserviceaccount.com';
+    const keys = ['JWT_SECRET', 'PARTNER_TOKEN', 'DATABASE_URL', 'REDIS_URL', 'files_AWS_ACCESS_KEY_ID', 'files_AWS_SECRET_ACCESS_KEY'];
+    const spec = projectSpecSchema.parse({ version: 1, project: 'example', environments: { staging: {
+      hosting: { provider: 'cloudrun', gcpRuntimeSecretGrants: 'per-secret' }, services: {
+        web: {}, worker: { workloadKind: 'worker' }, schedule: { workloadKind: 'cron', cronSchedule: '0 1 * * *', startCommand: 'node task.js' },
+      }, migrations: { mode: 'releaseCommand', command: 'node migrate.js' },
+      storage: { files: { provider: 'gcs', type: 'bucket', region: 'us-central1', access: 's3', injectInto: ['web'] } },
+    } }, secrets: { JWT_SECRET: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1, environments: ['staging'] } } });
+    const input = infrastructure.buildEngineInput(spec, 'staging', { gcpProjectId: 'demo-project', region: 'us-central1',
+      runtimeServiceAccountEmail: runtime, resourceNameFor: name => name, databaseWired: true, cacheWired: true, s3WiredStorage: ['files'],
+      importedSecrets: ['PARTNER_TOKEN', 'NODE_AUTH_TOKEN'], secretVersions: Object.fromEntries([...keys, 'NODE_AUTH_TOKEN'].map(key => [key, '2'])) });
+    const ids = keys.map(key => `hv-staging-${key.toLowerCase().replaceAll('_', '-')}`);
+    const allIds = [...ids, 'hv-staging-node-auth-token', 'unused-transfer-location', 'pending-import'];
+    const labels = { 'managed-by': 'hypervibe', 'hv-environment': 'env-123' };
+    const config = buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: runtime, environmentId: 'env-123',
+      secrets: allIds.map(secretId => ({ secretId, labels })) });
+    const grants = (config.files['secrets.tf.json'] as any).resource.google_secret_manager_secret_iam_member;
+    expect(grants).toEqual(Object.fromEntries(ids.map(id => [secretEngineKey(id), {
+      project: 'demo-project', secret_id: `\${google_secret_manager_secret.${secretEngineKey(id)}.secret_id}`,
+      member: `serviceAccount:${runtime}`, role: 'roles/secretmanager.secretAccessor',
+    }])));
+    for (const id of ids) expect(config.resources[`google_secret_manager_secret_iam_member.${secretEngineKey(id)}`]).toMatchObject({
+      actionId: `secret-runtime-access:${id}`, requiresConfirm: true,
+    });
+    expect(JSON.stringify(config.files)).not.toContain('google_project_iam_member');
+    const resources = (file: string) => (config.files[file] as { resource: Record<string, Record<string, { depends_on: string[] }>> }).resource;
+    const grantsFor = (selected: string[]) => selected.sort().map(id => `google_secret_manager_secret_iam_member.${secretEngineKey(id)}`);
+    const app = ids.filter(id => !id.includes('files-aws'));
+    expect(resources('cloudrun.tf.json').google_cloud_run_v2_service!.web!.depends_on).toEqual(grantsFor([...ids]));
+    expect(resources('workerpools.tf.json').google_cloud_run_v2_worker_pool!.worker!.depends_on).toEqual(grantsFor([...app]));
+    expect(resources('jobs.tf.json').google_cloud_run_v2_job!.schedule!.depends_on).toEqual(grantsFor([...app]));
+    expect(resources('jobs.tf.json').google_cloud_run_v2_job!.release_command!.depends_on).toEqual(grantsFor([...ids]));
+  });
+
+  it.each(['aws', 'azure'])('accepts ordinary %s hosting and rejects the Cloud Run grant setting', (provider) => {
+    const spec = { version: 1, project: 'example', environments: { staging: { hosting: { provider }, services: { web: {} } } } };
+    expect(projectSpecSchema.safeParse(spec).success).toBe(true);
+    const result = projectSpecSchema.safeParse({ ...spec, environments: { staging: {
+      ...spec.environments.staging, hosting: { provider, gcpRuntimeSecretGrants: 'per-secret' },
+    } } });
+    expect(result.error?.issues.map(issue => issue.path)).toEqual([['environments', 'staging', 'hosting', 'gcpRuntimeSecretGrants']]);
+  });
+
   it('plans containers before value writes and wires services only after enabled versions exist', async () => {
-    const { ctx, project, environment, labels } = owned();
-    project.gitRemoteUrl = 'https://github.com/example/secrets';
-    const connection = new ConnectionRepository().create({ provider: 'cloudrun', scope: 'example/secrets', credentialsEncrypted: getSecretStore().encryptObject({
-      projectId: 'demo-project', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com',
-      credentials: JSON.stringify({ type: 'service_account', private_key: 'test-private-key', client_email: 'deploy@demo-project.iam.gserviceaccount.com' }),
-    }) });
-    new ConnectionRepository().updateStatus(connection.id, 'verified');
-    const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
-      staging: { hosting: { provider: 'cloudrun' }, services: { web: {} } },
-    }, secrets: { JWT_SECRET: { ownership: 'hypervibe', generator: 'random-base64url-32-v1', generation: 1, environments: ['staging'] } } });
-    vi.spyOn(CloudRunAdapter.prototype, 'engineAccessToken').mockResolvedValue('test-token');
-    vi.spyOn(install, 'ensureEngineBinary').mockResolvedValue({ ok: true, binary: '/not-executed' });
-    vi.spyOn(install, 'enginePluginCacheDir').mockReturnValue(directory);
+    const { ctx, project, environment, labels, spec } = engineFixture();
     const configurations: EngineConfiguration[] = [];
     const enginePlan = vi.spyOn(OpenTofuEngine.prototype, 'plan').mockImplementation(async ({ configuration }) => {
       configurations.push(configuration);
@@ -132,6 +183,114 @@ describe('engine-owned Secret Manager containers', () => {
     const calls = enginePlan.mock.calls.length;
     expect(await planInfrastructureEngine(ctx, { project, spec, specRevision: 1, environmentName: environment.name })).toMatchObject({ blocked: [expect.stringContaining('did not confirm')] });
     expect(enginePlan.mock.calls.length).toBe(calls + 1);
+  });
+
+  it('reviews a scoped grant and rechecks the secret and its policy before the saved apply', async () => {
+    const { ctx, project, environment, labels, spec } = engineFixture(true);
+    const member = 'serviceAccount:runtime@demo-project.iam.gserviceaccount.com';
+    const name = `projects/12345/secrets/${secret}`;
+    const role = 'roles/secretmanager.secretAccessor';
+    const address = `google_secret_manager_secret_iam_member.${secretEngineKey(secret)}`;
+    const requested = `secret-runtime-access:${secret}`;
+    const params = { project, spec, specRevision: 2, environmentName: environment.name };
+    const actor = { project: 'demo-project', secret_id: secret, member, role };
+    const originalTime = '2026-01-02T00:00:00Z';
+    let createTime = originalTime;
+    let projectNumber = '12345';
+    let removing = false;
+    const otherMember = 'serviceAccount:other@demo-project.iam.gserviceaccount.com';
+    const independent = { role, members: [member], condition: { expression: 'false' } };
+    let policy: unknown = { version: 3, bindings: [independent, { role, members: [otherMember] }] };
+    const read = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method && init.method !== 'GET') throw new Error('Review attempted a write.');
+      if (url === 'https://cloudresourcemanager.googleapis.com/v3/projects/demo-project') return Response.json({ projectId: 'demo-project', name: `projects/${projectNumber}` });
+      if (url.includes('/services/collision')) return Response.json({ generation: '1' });
+      if (url === base) return Response.json({ name, labels, createTime });
+      if (url === `${base}/versions/latest`) return Response.json({ name: `${name}/versions/2`, state: 'ENABLED' });
+      if (url === `${base}:getIamPolicy?options.requestedPolicyVersion=3`) return Response.json(policy);
+      if (url.includes('/secrets?')) return Response.json({ secrets: [{ name }] });
+      if (url.includes('artifactregistry.googleapis.com')) return Response.json({ name: 'projects/demo-project/locations/us-central1/repositories/hypervibe', format: 'DOCKER' });
+      throw new Error('Unexpected provider request');
+    });
+    vi.stubGlobal('fetch', read);
+    vi.spyOn(OpenTofuEngine.prototype, 'plan').mockImplementation(async ({ configuration, planId, verifyPlannedChanges }) => {
+      const segment = { id: `opentofu:${planId}`, engine: 'opentofu' as const, planDigest: 'a'.repeat(64),
+        configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
+      const seen = { format_version: '1.2', resource_changes: [
+        { address, type: 'google_secret_manager_secret_iam_member', change: removing ? { actions: ['delete'], before: actor, after: null } : { actions: ['create'], before: null, after: actor } },
+        { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service',
+          change: { actions: ['no-op'], before: { template: [{ scaling: [] }] }, after: { template: [{ scaling: [] }] } } },
+      ] };
+      expect(verifyPlannedChanges?.(seen)).toBe(true);
+      return { ok: true, segment, segmentId: segment.id, planFile: 'synthetic', ...translateEnginePlan({
+        provider: 'gcp', parsed: parseEnginePlan(JSON.stringify(seen)), configuration, segment,
+      }) };
+    });
+    const applyEngine = vi.spyOn(OpenTofuEngine.prototype, 'apply').mockResolvedValue({ outcomes: { [address]: 'succeeded' }, diagnostics: [] });
+    const plan = async () => {
+      const result = await planInfrastructureEngine(ctx, params);
+      if ('blocked' in result) throw new Error(result.blocked.join(' '));
+      expect(result.confirmActions).toEqual([requested]);
+      expect(result.actions.find(action => action.id === requested)?.reason).toContain(member);
+      return result.planRunId;
+    };
+    const apply = (planId: string, confirmActions = [requested]) => infrastructure.applyInfrastructureEngine(ctx, { ...params, planId, confirmActions });
+    const initial = await plan();
+    await apply(initial, []);
+    expect(applyEngine).not.toHaveBeenCalled();
+    createTime = '2026-02-02T00:00:00Z';
+    await apply(initial);
+    expect(applyEngine).not.toHaveBeenCalled();
+    createTime = originalTime;
+    const reviewed = await plan();
+    policy = { bindings: [{ role, members: [member] }] };
+    await apply(reviewed);
+    expect(applyEngine).not.toHaveBeenCalled();
+    await expect(planInfrastructureEngine(ctx, params)).resolves.toMatchObject({ blocked: [expect.stringContaining('existing grant')] });
+    policy = { bindings: 'malformed' };
+    await expect(planInfrastructureEngine(ctx, params)).resolves.toMatchObject({ blocked: [expect.stringContaining('could not be verified')] });
+    policy = {};
+    projectNumber = '99999';
+    await expect(planInfrastructureEngine(ctx, params)).resolves.toMatchObject({ blocked: [expect.stringContaining('could not be verified')] });
+    projectNumber = '12345';
+    const firstGrant = await plan();
+    const original = CloudRunAdapter.prototype.engineConnection;
+    const changed = vi.spyOn(CloudRunAdapter.prototype, 'engineConnection').mockImplementation(function (this: CloudRunAdapter) {
+      return { ...original.call(this), runtimeServiceAccountEmail: 'another@demo-project.iam.gserviceaccount.com' };
+    });
+    await apply(firstGrant);
+    expect(applyEngine).not.toHaveBeenCalled();
+    changed.mockRestore();
+    const result = await apply(await plan());
+    expect(result).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(applyEngine).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ approvedAddresses: [address] }));
+    expect(read.mock.calls.some(([url]) => url.endsWith(':access'))).toBe(false);
+    const grantBinding = ctx.repos.environments.findById(environment.id)!.platformBindings;
+    expect(() => mergeRepoPlatformBindings({}, { engine: { runtimeSecretGrantOrigins: { [secret]: { name, createTime } } } })).toThrow(/local/);
+    expect(() => mergeRepoPlatformBindings(grantBinding, { engine: null })).toThrow(/local/);
+    expect(mergeRepoPlatformBindings(grantBinding, { engine: { kind: 'opentofu' } }).engine).toMatchObject({
+      runtimeSecretGrantOrigins: { [secret]: { name, createTime } },
+    });
+    // An unsuccessful create on a replacement cannot transfer ownership of a later independent grant.
+    createTime = '2026-03-02T00:00:00Z';
+    applyEngine.mockResolvedValueOnce({ outcomes: { [address]: 'not_started' }, diagnostics: ['Stale state'] });
+    expect(await apply(await plan())).toMatchObject({ kind: 'executed', result: { success: false } });
+    expect(ctx.repos.environments.findById(environment.id)?.platformBindings.engine).toMatchObject({
+      runtimeSecretGrantOrigins: { [secret]: { name, createTime: originalTime } },
+    });
+    // Opting out removes the engine-owned IAM member without retiring an unrelated service of the same name.
+    removing = true;
+    delete params.spec.environments.staging!.hosting.gcpRuntimeSecretGrants;
+    policy = { bindings: [{ role, members: [member, otherMember] }] };
+    const services = { [secret]: { serviceId: 'collision' } };
+    ctx.repos.environments.updatePlatformBindings(environment.id, { services });
+    createTime = '2026-03-02T00:00:00Z';
+    await expect(planInfrastructureEngine(ctx, params)).resolves.toMatchObject({ blocked: [expect.stringContaining('original secret')] });
+    createTime = originalTime;
+    const withdrawn = await apply(await plan());
+    expect(withdrawn).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(ctx.repos.environments.findById(environment.id)?.platformBindings.services).toEqual(services);
+    expect(ctx.repos.environments.findById(environment.id)?.platformBindings.engine).toMatchObject({ runtimeSecretGrantOrigins: {} });
   });
 
   it('blocks unknown or foreign containers without writing versions', async () => {

@@ -95,10 +95,10 @@ describe('Azure environment configuration', () => {
 
   it('lets the app identity read only its own secrets, pull images and use its own storage', () => {
     const assignments = resourcesOf(config, 'base.tf.json').azurerm_role_assignment!;
-    const scopes = Object.values(assignments).map((assignment) => String(assignment.scope));
-    expect(scopes).toContain(`${fullEnvironmentInput.vault.id}/secrets/test--database-url`);
-    expect(scopes).toContain(`${fullEnvironmentInput.vault.id}/secrets/test--hv-waker-url`);
-    expect(scopes).not.toContain(fullEnvironmentInput.vault.id);
+    const secretReaders = Object.values(assignments).filter(assignment => String(assignment.role_definition_id).endsWith('/4633458b-17de-408a-b874-0445c86b69e6'));
+    expect(secretReaders.map(assignment => assignment.scope).sort()).toEqual(['database-url', 'hv-waker-url', 'jwt-secret']
+      .map(name => `${fullEnvironmentInput.vault.id}/secrets/test--${name}`));
+    for (const assignment of secretReaders) expect(assignment.principal_id).toBe('${azurerm_user_assigned_identity.runtime.principal_id}');
     expect(new Set(Object.values(assignments).map((assignment) => String(assignment.role_definition_id).split('/').pop()))).toEqual(new Set([
       '4633458b-17de-408a-b874-0445c86b69e6', '7f951dda-4ed3-4680-a7ca-43fe172d538d', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe',
     ]));

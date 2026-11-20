@@ -180,6 +180,49 @@ sign-in, credential values, image builds/releases, logs, health, SQL and object
 transfer operations. Existing Railway infrastructure continues through its
 retained lifecycle.
 
+### Prepare the target app's secret access
+
+In the target environment's existing Cloud Run hosting settings, set
+`gcpRuntimeSecretGrants` to `"per-secret"` with `hv_spec`. Run `hv_plan` with
+`scope="infrastructure"` and review each `secret-runtime-access:` action. It
+names the Google secret and the service account that will receive Secret
+Accessor on that secret's enabled versions. Confirm the desired actions with `hv_apply`. The environment owns
+these grants, so removing a secret reference from every workload or removing
+the setting produces a reviewed removal.
+
+Only secrets referenced by a service, worker, scheduled job or release job
+qualify. A build-only token, an empty import slot or a container merely found
+in the project receives no grant from this preparation. Existing direct grants
+outside the environment's engine state block implicit adoption. Hypervibe also
+preserves an existing grant if its local apply record cannot confirm the
+original secret, including after an interrupted apply. Project-wide
+grants still apply, and the private transfer still needs its own reviewed job
+and isolated credentials.
+
+### App secret access on AWS and Azure
+
+The Cloud Run setting applies only to Google Cloud. The other engines grant app
+access as part of the environment's existing infrastructure plan.
+
+- **AWS.** ECS uses one environment role for task execution and for running
+  containers. Its app-secret policy names individual Parameter Store parameters.
+  With an on-demand worker, that same role can read any Secrets Manager secret
+  under `hypervibe/<environment-prefix>/`, where the worker's database login
+  lives. The account deploy role can manage
+  parameters and secrets across Hypervibe's namespace. The setup permissions
+  boundary caps what an app role can receive. [AWS engine](opentofu-engine-aws.md)
+  · [AWS permissions boundaries](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html)
+- **Azure.** Container Apps and jobs share an environment identity with Key Vault
+  Secrets User on each named app secret, including the query credential for an
+  on-demand worker. The project's deployment identity holds Key Vault Secrets
+  Officer on the resource group. Permissions inherited from a parent scope
+  still apply alongside individual secret grants. [Azure engine](opentofu-engine-azure.md)
+  · [Azure role scopes](https://learn.microsoft.com/en-us/azure/role-based-access-control/scope-overview)
+
+These identities live with the environment or its deployment setup. Neither
+engine provisions a temporary identity to copy a private database or files.
+`hv_migrate` can copy runtime settings to AWS. Azure migration is unavailable.
+
 ## Flow exercised by the early GCP implementation
 
 1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun" }`.
