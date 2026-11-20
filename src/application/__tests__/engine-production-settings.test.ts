@@ -3,7 +3,7 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
 import { buildCloudRunConfiguration, planWithCloudRunRevisionMinimums } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
-import { ciReleaseTargets } from '../launch.js';
+import { ciReleaseTargets, estimateMonthlyCost } from '../launch.js';
 import { startCommandFields } from '../../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { RELEASE_SCRIPT } from '../../adapters/providers/gcp/gcp-ci-release-script.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from '../gcp-database-shape.js';
@@ -51,6 +51,9 @@ describe('production settings on Google Cloud', () => {
       hosting: { provider: 'cloudrun' }, services: { web: {}, worker: { workloadKind: 'worker', workerPaused } },
     } } });
     const input = engineInput(spec);
+    const estimate = estimateMonthlyCost(spec.environments.staging!).find(line => line.item.startsWith('Worker worker'));
+    expect(estimate?.item).toContain(workerPaused ? 'paused' : 'always on');
+    if (workerPaused) expect(estimate?.estimate).toContain('$0');
     const files = buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' }).files as Record<string, any>;
     const resources = files['workerpools.tf.json'].resource;
     const pool = resources.google_cloud_run_v2_worker_pool.worker;

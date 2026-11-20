@@ -17,15 +17,6 @@ The application pause and forwarding flow below is a separate capability.
 Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
 and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
 
-Before restoring queued work onto an already running Google Cloud target, let
-its current work finish. For a fixed-size worker pool, set
-`services.<name>.workerPaused` to `true` on the target through `hv_spec`.
-Review and apply the infrastructure plan. Use `hv_status` to check that the
-pool has zero configured instances. Independently check that jobs have drained
-and that other writers, including the web service, are quiet. To resume, set
-`workerPaused` to `false`, review the plan for one running instance, and apply
-when the target should process jobs. On-demand workers use a separate scheduler.
-
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,
 then write a new record there and verify that a restored copy contains it.
@@ -40,6 +31,15 @@ serialize migration work per destination environment. A refresh can reconcile
 a recorded, completed Cloud Run execution after an interruption. If its
 ownership, completion, or cleanup is uncertain, the next copy remains blocked.
 Independent installations do not share this local execution lock.
+
+Before restoring queued work onto an already running Google Cloud target, let
+its current work finish. For a fixed-size worker pool, set
+`services.<name>.workerPaused` to `true` on the target through `hv_spec`.
+Review and apply the infrastructure plan. Use `hv_status` to check that the
+pool has zero configured instances. Independently check that jobs have drained
+and that other writers, including the web service, are quiet. To resume, set
+`workerPaused` to `false`, review the plan for one running instance, and apply
+when the target should process jobs. On-demand workers use a separate scheduler.
 
 ## Pause the app for a manual move
 

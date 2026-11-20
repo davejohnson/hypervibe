@@ -120,6 +120,10 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
   // Workers run one always-on instance (us-central1 instance pricing: ~$0.0000180/vCPU-s, ~$0.0000020/GiB-s).
   for (const [name, service] of Object.entries(environment.services)) {
     if (service.workloadKind !== 'worker') continue;
+    if (service.workerPaused) {
+      lines.push({ item: `Worker ${name} (paused)`, estimate: '$0 for worker compute while paused' });
+      continue;
+    }
     const cpu = Number(service.cpu ?? '1');
     const memory = service.memory ?? '512Mi';
     const memoryGiB = memory.endsWith('Gi') ? parseInt(memory, 10) : parseInt(memory, 10) / 1024;

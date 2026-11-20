@@ -1859,7 +1859,6 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
       if (pool.state === 'present') {
         const scaling = pool.value.scaling;
         if (Number.isSafeInteger(scaling?.manualInstanceCount) && scaling.manualInstanceCount >= 0) status.instances = scaling.manualInstanceCount;
-        else if (scaling?.scalingMode === 'MANUAL' && scaling.manualInstanceCount === undefined) status.instances = 0;
       }
       if (service.onDemand) {
         const response = await latestWakerExecution(token, context, resource);
