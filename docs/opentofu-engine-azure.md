@@ -273,11 +273,22 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     environment, registry and server, builds the image, creates the login
     through the window (address from the address service) and creates the web
     service and worker. Both reach the database through the private endpoint.
-    Afterwards the server reports public access `Disabled` with no firewall
+    (Since replaced by the job; see the 2026-11-20 run below.) Afterwards the server reports public access `Disabled` with no firewall
     rule, and a connection from the test computer does not reach a password
     check. An unchanged plan is a noop, an environment-variable change and a
     release update in place, and teardown leaves the resource group as it was
     (the log workspace sometimes needs a second teardown pass).
+  - **Setup inside the network verified live 2026-11-20 (West US 2), one passing
+    run of the wider fixture.** The login was created by the job, the web service
+    and workers used it, the server stayed at public access `Disabled` with no
+    firewall rule throughout, and teardown left the resource group as it was
+    with no job behind. The run before it failed at the job: the image trusts
+    only a short Microsoft certificate list, so `psql` is now given the roots
+    these servers chain to. That cause was inferred (the failed job's output was
+    deleted with the test resources) and the fix passed on the next run. The
+    passing run used this change merged locally with the failed-app-environment
+    repair (#795), not this branch alone. Dropping one environment's database
+    from a server that other environments still use has not been run live.
   - **Verified live 2026-11-18 (West US 2), one passing run at 2cdcb6a9 with a
     wider fixture:** all of the above, plus the web service writing a file to
     Blob storage with its managed identity and reading it back, the scheduled
