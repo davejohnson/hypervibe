@@ -48,6 +48,21 @@ export function readBucket(token: string, bucket: string): Promise<Response> {
   return fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
+/** One page of a bucket's objects, every stored version included. */
+export function listBucketObjects(token: string, bucket: string, pageToken?: string): Promise<Response> {
+  const url = new URL(`https://storage.googleapis.com/storage/v1/b/${bucket}/o`);
+  url.searchParams.set('versions', 'true');
+  url.searchParams.set('fields', 'items(name,generation),nextPageToken');
+  if (pageToken) url.searchParams.set('pageToken', pageToken);
+  return fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+}
+
+/** Deletes one exact stored version of an object. */
+export function deleteBucketObject(token: string, bucket: string, name: string, generation: string): Promise<Response> {
+  return fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(name)}?generation=${encodeURIComponent(generation)}`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+}
+
 /** Reads a project by id; its `name` carries the project number. */
 export function readGcpProject(token: string, gcpProjectId: string): Promise<Response> {
   return fetchWithRetry(`https://cloudresourcemanager.googleapis.com/v3/projects/${gcpProjectId}`, { headers: { Authorization: `Bearer ${token}` } });
