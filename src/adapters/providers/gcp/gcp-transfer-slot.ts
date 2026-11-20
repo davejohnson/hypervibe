@@ -1,28 +1,29 @@
-import type { Project } from '../entities/project.entity.js';
-import type { Environment } from '../entities/environment.entity.js';
-import { readTransferSlotEvidence, TransferEvidenceError } from '../../adapters/providers/gcp/gcp-transfer-slot-evidence.js';
-import { emptySlotWarning, transferSlot } from '../../adapters/providers/gcp/tofu/transfer-slot.js';
-import { hasGcpProjectSetup, runGcpProjectSetup } from './gcp-project-setup.service.js';
+import type { EmptyTransferSlotCapability } from '../../../domain/registry/provider.registry.js';
+import { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
+import { readTransferSlotEvidence, TransferEvidenceError } from './gcp-transfer-slot-evidence.js';
+import { emptySlotWarning, transferSlot } from './tofu/transfer-slot.js';
+import { hasGcpProjectSetup, runGcpProjectSetup } from '../../../domain/services/gcp-project-setup.service.js';
 
-export async function prepareEmptyTransferSlot(input: {
-  project: Project;
-  source: Environment;
-  target: Environment;
-  gcpProjectId: string;
-  region: string;
-  runtimeEmail: string;
-  deployEmail: string;
-  token: () => Promise<string>;
-  planId?: string;
-}): Promise<Record<string, unknown> & { success: boolean }> {
-  const { project, source, target, region, gcpProjectId } = input;
+export const gcpEmptyTransferSlot: EmptyTransferSlotCapability = {
+  sourceProvider: 'railway',
+  prepare: prepareEmptyTransferSlot,
+};
+
+async function prepareEmptyTransferSlot(input: Parameters<EmptyTransferSlotCapability['prepare']>[0]) {
+  const { project, region, targetProjectId: gcpProjectId } = input;
+  const environments = new EnvironmentRepository();
+  const source = environments.findByProjectAndName(project.id, input.sourceEnvironment);
+  const target = environments.findByProjectAndName(project.id, input.targetEnvironment);
+  if (!source || !target) {
+    return { success: false, error: 'An existing bound source and target are required to prepare the migration slot.' };
+  }
   const railway = source.platformBindings,
     gcp = target.platformBindings;
   if (
     source.projectId !== project.id ||
     target.projectId !== project.id ||
     source.id === target.id ||
-    railway.provider !== 'railway' ||
+    railway.provider !== gcpEmptyTransferSlot.sourceProvider ||
     typeof railway.projectId !== 'string' ||
     !railway.projectId ||
     typeof railway.environmentId !== 'string' ||

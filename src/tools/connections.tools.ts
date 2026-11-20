@@ -41,7 +41,7 @@ const EMPTY_TRANSFER_SLOT_OPTIONS = new Set(['action', 'provider', 'project', 'e
 /** Resolve an environment's declared GCP target before admin secrets or provider operations. */
 function gcpSetupSelection(ctx: CommandContext, project: Project, input: {
   environment?: string; gcpProjectId?: string; scope?: string; region?: string; planningOrConfirming?: boolean;
-  migrationSourceEnvironment?: string;
+  migrationSourceEnvironment?: string; transferSourceProvider?: string;
 }): { environmentProjectId?: string; region?: string } {
   const { environment, gcpProjectId, planningOrConfirming } = input;
   if (environment === undefined && !(planningOrConfirming && gcpProjectId !== undefined)) {
@@ -50,8 +50,8 @@ function gcpSetupSelection(ctx: CommandContext, project: Project, input: {
   const environments = new SpecStore().get(project)?.spec.environments ?? {};
   if (input.migrationSourceEnvironment !== undefined && (input.migrationSourceEnvironment === environment
     || !Object.hasOwn(environments, input.migrationSourceEnvironment)
-    || environments[input.migrationSourceEnvironment].hosting.provider !== 'railway')) {
-    throw new HvError('VALIDATION', 'Select an existing Railway source environment and a separate Cloud Run destination in this project.');
+    || environments[input.migrationSourceEnvironment].hosting.provider !== input.transferSourceProvider)) {
+    throw new HvError('VALIDATION', `Select an existing source environment hosted by ${input.transferSourceProvider} and a separate Cloud Run destination in this project.`);
   }
   if (environment !== undefined && !Object.hasOwn(environments, environment)) {
     throw new HvError('VALIDATION', 'The selected environment is missing from this project’s spec. Choose an existing environment.');
@@ -189,7 +189,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
       migrationAccess: z.literal('empty-transfer-slot').optional().describe('With action="prepare" and provider="cloudrun", preview one transfer service account, an empty global Secret Manager secret and read access for that account on that secret. Select project, migrationSourceEnvironment and destination environment. Uses existing Google Application Default Credentials.'),
-      migrationSourceEnvironment: z.string().min(1).optional().describe('Existing Railway source environment in the selected project for migrationAccess="empty-transfer-slot".'),
+      migrationSourceEnvironment: z.string().min(1).optional().describe('Existing source environment in the selected project for migrationAccess="empty-transfer-slot".'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('Filter view="requirements" by environment or select the environment for setup guidance. For GCP bootstrap and prepare, this selects the declared hosting.gcpProjectId and default region. For connect, the environment appears on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
@@ -240,8 +240,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         adminAccessTokenRef,
         confirm,
       } = input;
+      const transferSlot = migrationAccess && provider ? providerRegistry.get(provider)?.emptyTransferSlot : undefined;
       if (migrationAccess !== undefined) {
-        if (action !== 'prepare' || provider !== 'cloudrun') {
+        if (action !== 'prepare' || !transferSlot) {
           return commandError('VALIDATION', 'Use migrationAccess only with action="prepare" and provider="cloudrun".');
         }
         if (!projectRef?.trim() || !environment?.trim() || !migrationSourceEnvironment?.trim()) {
@@ -599,7 +600,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
       if (requestedAction === 'prepare') {
         const targetProject = project ?? ctx.resolveProjectOrThrow();
-        const selection = gcpSetupSelection(ctx, targetProject, { environment, gcpProjectId, region, planningOrConfirming: true, migrationSourceEnvironment });
+        const selection = gcpSetupSelection(ctx, targetProject, { environment, gcpProjectId, region, planningOrConfirming: true, migrationSourceEnvironment,
+          transferSourceProvider: transferSlot?.sourceProvider });
         const resolvedAdminCredentialsJson = adminCredentialsJsonRef
           ? resolveLocalSecretRef(adminCredentialsJsonRef)
           : adminCredentialsJson;

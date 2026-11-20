@@ -5,8 +5,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
 import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { prepareEmptyTransferSlot } from './gcp-transfer-slot.service.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
 import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { getGcpProjectSetupContribution, runGcpProjectSetup } from './gcp-project-setup.service.js';
@@ -175,15 +174,21 @@ export async function runCloudPrepare(params: {
     if (!params.environmentName || !params.migrationSourceEnvironment || params.environmentName === params.migrationSourceEnvironment ||
       !resolved.runtimeServiceAccountEmail || gcsAccess || memorystoreAccess || queueAccess || workerAccess || deployServiceAccountEmail ||
       adminCredentialsJson || adminAccessToken || (confirm !== !!params.gcpSetupPlanId)) {
-      return { success: false, error: 'Select distinct Railway source and Cloud Run target environments. Confirm only with the saved migration setup plan ID.' };
+      return { success: false, error: 'Select distinct source and target environments for the transfer slot. Confirm only with the saved migration setup plan ID.' };
     }
-    const environments = new EnvironmentRepository();
-    const source = environments.findByProjectAndName(project.id, params.migrationSourceEnvironment);
-    const target = environments.findByProjectAndName(project.id, params.environmentName);
-    if (!source || !target) return { success: false, error: 'An existing bound source and target are required to prepare the migration slot.' };
-    return prepareEmptyTransferSlot({ project, source, target, gcpProjectId: resolved.gcpProjectId, region: params.region ?? 'us-central1',
-      runtimeEmail: resolved.runtimeServiceAccountEmail, deployEmail: resolved.deployServiceAccountEmail,
-      token: params.defaultAdminAccessTokenProvider ?? getExistingAdminAccessToken, planId: params.gcpSetupPlanId });
+    const capability = providerRegistry.get(provider)?.emptyTransferSlot;
+    if (!capability) return { success: false, error: 'This provider cannot prepare an empty transfer slot.' };
+    return capability.prepare({
+      project,
+      sourceEnvironment: params.migrationSourceEnvironment,
+      targetEnvironment: params.environmentName,
+      targetProjectId: resolved.gcpProjectId,
+      region: params.region ?? 'us-central1',
+      runtimeEmail: resolved.runtimeServiceAccountEmail,
+      deployEmail: resolved.deployServiceAccountEmail,
+      token: params.defaultAdminAccessTokenProvider ?? getExistingAdminAccessToken,
+      planId: params.gcpSetupPlanId,
+    });
   }
 
   const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;

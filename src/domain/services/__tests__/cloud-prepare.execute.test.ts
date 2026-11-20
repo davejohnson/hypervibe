@@ -7,6 +7,7 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { GoogleAuth } from 'google-auth-library';
 import * as googleSignIn from '../../../adapters/providers/gcp/google-browser-signin.js';
 import { runCloudPrepare, verifyAndRecordBootstrapPreparation } from '../cloud-prepare.execute.js';

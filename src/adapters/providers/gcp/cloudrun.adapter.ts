@@ -10,6 +10,7 @@ import type {
 } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
+import { gcpEmptyTransferSlot } from './gcp-transfer-slot.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import { parseHostingBindings, type EnvironmentTaskOptions, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
@@ -3280,6 +3281,7 @@ export class CloudRunAdapter implements
 
 // Self-register with provider registry
 providerRegistry.register({
+  emptyTransferSlot: gcpEmptyTransferSlot,
   metadata: {
     name: 'cloudrun',
     displayName: 'GCP Cloud Run',
