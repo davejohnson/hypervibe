@@ -27,13 +27,30 @@ saved HTML plan. To create the listed resources, repeat that request with
 copy account Secret Accessor on that container. Hypervibe retains these
 resources in the target's managed project setup.
 
-Hypervibe leaves the container empty. Before storing any Railway connection
-details, Hypervibe must verify that the copy job can read the selected secret
-and the app cannot, including through inherited permissions. The permission
-review must use the container’s recorded native identity, exclude it from app
-grants, and verify that the app cannot read the staged database dump.
-Credential publication, dump isolation and single-use job execution still
-require a separate reviewed workflow.
+Once the empty secret and copy account exist, preview the next change with the
+same project, source and target and `migrationAccess="restrict-app-access"`.
+Review its saved HTML and supply its own `gcpSetupPlanId` to approve it.
+The plan narrows two project-level grants held by the app's runtime account.
+It excludes the transfer secret and its versions from the secret reader grant.
+It excludes objects under `migrations/<destination>/` in the build-source
+bucket from the storage grant. Object names can still appear in bucket lists.
+
+Hypervibe creates each conditional grant before removing its broad predecessor.
+If one grant was fully replaced and the other is still broad, preview the
+restrictions again and review the remaining change. An interruption within
+one replacement needs separate recovery. If Google still lists both grants
+for the same role, or OpenTofu still tracks the previous grant, the app may
+retain broad access. Keep the transfer secret empty and pause the copy.
+Request recovery of that grant through Hypervibe’s managed Google Cloud setup,
+then preview the restrictions again.
+
+Hypervibe checks the direct bindings and the identities of the
+account, secret and bucket. A successful change to these two grants is only
+one part of verifying access. Other grants, inherited permissions and anyone
+holding a signed download URL can affect who can read an export. The transfer
+secret stays empty. A separate reviewed workflow must verify the app's
+effective denial, the copy job's access, and dump isolation before handling any
+source data. [Google IAM resource attributes](https://docs.cloud.google.com/iam/docs/conditions-resource-attributes) · [Cloud Storage signed URLs](https://docs.cloud.google.com/storage/docs/access-control/signed-urls)
 
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,

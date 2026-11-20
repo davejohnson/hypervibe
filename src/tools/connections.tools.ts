@@ -35,7 +35,7 @@ import { currentWorkspaceDirectories, primaryWorkspaceDirectory, runWithWorkspac
 
 const CONTEXTUAL_SETUP_HINT = 'Provider-owned bootstrap takes precedence. When the provider is known and a human form is needed, call hv_connections with action="describe", provider and the known non-secret scope before presenting a credential form; include project only if already known, and omit unknown optional fields. Do not supply credentials, credentialsRef or confirmation to describe; the read-only contextual call returns connectionSetup guidance. Copy the returned recommendedSetupUrl verbatim with its complete query string; do not construct or edit credential URLs yourself. Do not repeat a generic provider list as a substitute. Do not initialize a project solely to obtain setup guidance.';
 
-const EMPTY_TRANSFER_SLOT_OPTIONS = new Set(['action', 'provider', 'project', 'environment', 'migrationAccess',
+const MIGRATION_ACCESS_OPTIONS = new Set(['action', 'provider', 'project', 'environment', 'migrationAccess',
   'migrationSourceEnvironment', 'gcpProjectId', 'region', 'confirm', 'gcpSetupPlanId']);
 
 /** Resolve an environment's declared GCP target before admin secrets or provider operations. */
@@ -183,20 +183,20 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       region: z.string().trim().min(1).optional().describe('GCP bootstrap/prepare target region for shared build resources; defaults to us-central1. Each region is reviewed and retained independently.'),
       billingAccountName: z.string().optional().describe('action="bootstrap": exact open billing account name chosen from discovery. Preview again with this account, then confirm the saved infrastructure plan separately.'),
       recoverProjectState: z.string().trim().min(1).optional().describe('For a Google Cloud bootstrap preview that returned projectRecovery, pass its exact recovery reference to repair the local project record and preview again. Omit confirm.'),
-      gcpSetupPlanId: z.string().min(1).optional().describe('Confirm an empty transfer slot or a Google Cloud bootstrap preview that returns requiresPlanId with the exact saved planId.'),
+      gcpSetupPlanId: z.string().min(1).optional().describe('Confirm a migration access plan or a Google Cloud bootstrap preview that returns requiresPlanId with the exact saved planId.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
-      gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser across this GCP project; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
+      gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser in this GCP project with any approved migration exclusions preserved; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
-      migrationAccess: z.literal('empty-transfer-slot').optional().describe('With action="prepare" and provider="cloudrun", preview one transfer service account, an empty global Secret Manager secret and read access for that account on that secret. Select project, migrationSourceEnvironment and destination environment. Uses existing Google Application Default Credentials.'),
-      migrationSourceEnvironment: z.string().min(1).optional().describe('Existing source environment in the selected project for migrationAccess="empty-transfer-slot".'),
+      migrationAccess: z.enum(['empty-transfer-slot', 'restrict-app-access']).optional().describe('With action="prepare" and provider="cloudrun", reserve an empty secret and a copy-job account or restrict the app’s two existing project grants for the approved secret and dump location. Select project, migrationSourceEnvironment and destination environment. Uses existing Google Application Default Credentials.'),
+      migrationSourceEnvironment: z.string().min(1).optional().describe('Existing source environment in the selected project for migration access preparation.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('Filter view="requirements" by environment or select the environment for setup guidance. For GCP bootstrap and prepare, this selects the declared hosting.gcpProjectId and default region. For connect, the environment appears on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
       azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
       azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
       workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
-      adminAuth: z.literal('default').optional().describe('Use existing Google Application Default Credentials for bootstrap or confirmed ordinary prepare. Empty transfer slot preparation uses these credentials automatically.'),
+      adminAuth: z.literal('default').optional().describe('Use existing Google Application Default Credentials for bootstrap or confirmed ordinary prepare. Migration access preparation uses these credentials automatically.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
       adminAccessToken: z.string().optional().describe('action="prepare": one-time OAuth admin access token. Not stored.'),
@@ -240,27 +240,27 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         adminAccessTokenRef,
         confirm,
       } = input;
-      const transferSlot = migrationAccess && provider ? providerRegistry.get(provider)?.emptyTransferSlot : undefined;
+      const transferAccess = migrationAccess && provider ? providerRegistry.get(provider)?.migrationAccess : undefined;
       if (migrationAccess !== undefined) {
-        if (action !== 'prepare' || !transferSlot) {
+        if (action !== 'prepare' || !transferAccess) {
           return commandError('VALIDATION', 'Use migrationAccess only with action="prepare" and provider="cloudrun".');
         }
         if (!projectRef?.trim() || !environment?.trim() || !migrationSourceEnvironment?.trim()) {
-          return commandError('VALIDATION', 'Empty transfer slot preparation requires project, migrationSourceEnvironment and destination environment.');
+          return commandError('VALIDATION', 'Migration access preparation requires project, migrationSourceEnvironment and destination environment.');
         }
-        const extra = suppliedOptionNames(input).filter(name => !EMPTY_TRANSFER_SLOT_OPTIONS.has(name));
+        const extra = suppliedOptionNames(input).filter(name => !MIGRATION_ACCESS_OPTIONS.has(name));
         if (extra.length) {
-          return commandError('VALIDATION', `Empty transfer slot preparation does not accept ${extra.join(', ')}.`);
+          return commandError('VALIDATION', `Migration access preparation does not accept ${extra.join(', ')}.`);
         }
         if (confirm && !gcpSetupPlanId?.trim()) {
-          return commandError('VALIDATION', 'Confirm the empty transfer slot with the exact gcpSetupPlanId from its preview.');
+          return commandError('VALIDATION', 'Confirm this migration access change with the exact gcpSetupPlanId from its preview.');
         }
       } else if (migrationSourceEnvironment !== undefined) {
-        return commandError('VALIDATION', 'Use migrationSourceEnvironment with migrationAccess="empty-transfer-slot".');
+        return commandError('VALIDATION', 'Use migrationSourceEnvironment with a migrationAccess mode.');
       }
       if (gcpSetupPlanId !== undefined && (!confirm || provider !== 'cloudrun' || recoverProjectState !== undefined
         || (action !== 'bootstrap' && migrationAccess === undefined))) {
-        return commandError('VALIDATION', 'Use gcpSetupPlanId with confirm=true for a Cloud Run bootstrap or empty transfer slot plan. Omit recoverProjectState.');
+        return commandError('VALIDATION', 'Use gcpSetupPlanId with confirm=true for a Cloud Run bootstrap or migration access plan. Omit recoverProjectState.');
       }
       if (recoverProjectState !== undefined && (action !== 'bootstrap' || provider !== 'cloudrun'
         || confirm === true || !billingAccountName?.trim() || !gcpProjectId?.trim())) {
@@ -601,7 +601,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction === 'prepare') {
         const targetProject = project ?? ctx.resolveProjectOrThrow();
         const selection = gcpSetupSelection(ctx, targetProject, { environment, gcpProjectId, region, planningOrConfirming: true, migrationSourceEnvironment,
-          transferSourceProvider: transferSlot?.sourceProvider });
+          transferSourceProvider: transferAccess?.sourceProvider });
         const resolvedAdminCredentialsJson = adminCredentialsJsonRef
           ? resolveLocalSecretRef(adminCredentialsJsonRef)
           : adminCredentialsJson;
@@ -641,9 +641,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
         if (migrationAccess && !confirm) {
           if (payload.mode !== 'preview' || typeof payload.planId !== 'string' || !payload.planId.trim()) {
-            return commandError('PROVIDER_ERROR', 'The empty transfer slot preview did not return a saved plan ID. Preview again.');
+            return commandError('PROVIDER_ERROR', 'The migration access preview did not return a saved plan ID. Preview again.');
           }
-          const message = `Apply plan ${payload.planId} to prepare access for a future data copy from ${migrationSourceEnvironment} to ${environment} in ${targetProject.name}?`;
+          const restrictApp = migrationAccess === 'restrict-app-access';
+          const message = restrictApp
+            ? `Apply plan ${payload.planId} to restrict the app’s access to the transfer secret and database dump location in ${environment} for ${targetProject.name}?`
+            : `Apply plan ${payload.planId} to prepare access for a future data copy from ${migrationSourceEnvironment} to ${environment} in ${targetProject.name}?`;
           const retryInput = {
             action: 'prepare', provider, project: projectRef!, environment: environment!,
             migrationSourceEnvironment: migrationSourceEnvironment!, migrationAccess,
@@ -652,7 +655,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           };
           return {
             ...commandSuccess({ ...projectContext, ...payload }, {
-              hint: `Review the copy job’s account and its permission to read the empty secret reserved for connection details. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`,
+              hint: restrictApp
+                ? `Review the two project IAM grants for the app runtime. The plan excludes the selected transfer secret and dump location. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`
+                : `Review the copy job’s account and its permission to read the empty secret reserved for connection details. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`,
               agentInstruction: { action: 'ask_user', message },
             }),
             confirmation: { message, retryInput, completeInput: true },

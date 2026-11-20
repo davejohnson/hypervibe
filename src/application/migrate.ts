@@ -30,6 +30,7 @@ import {
   type MigrationCopyEvidence,
 } from './infrastructure-engine.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
+import { railwayExportPrefix } from '../domain/services/railway-export-prefix.js';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import {
@@ -643,7 +644,7 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
 
   const key = JSON.parse(context.adapter.engineConnection().credentials) as { client_email: string; private_key: string };
   const bucket = buildSourceBucketName(context.gcpProjectId);
-  const object = `migrations/${params.to}/${Date.now()}.dump`;
+  const object = `${railwayExportPrefix(params.to)}${Date.now()}.dump`;
   const sign = (method: 'PUT' | 'GET') => signedObjectUrl({ clientEmail: key.client_email, privateKey: key.private_key, bucket, object, method, expiresSeconds: 3600 });
   // The newest client reads every supported older server.
   const exported = await railway.adapter.runPrivateTask({

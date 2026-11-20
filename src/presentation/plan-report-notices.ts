@@ -1,4 +1,4 @@
-import { gcpInfrastructureNotes, railwayTransferSetupNote } from '../domain/plan/gcp-infrastructure-notes.js';
+import { gcpInfrastructureNotes, railwayTransferIsolationNote, railwayTransferSetupNote } from '../domain/plan/gcp-infrastructure-notes.js';
 import type { PlanReport } from '../domain/plan/plan-report.js';
 
 // Recognize only the complete database summary recorded by the planner. If it
@@ -12,6 +12,9 @@ export function groupPlanNotices(report: PlanReport) {
   const warnings: string[] = [];
   const costs: string[] = [];
   const next: string[] = [];
+  if (report.scope === 'Google Cloud project setup' && report.setupPurpose === 'railway-transfer-isolation') {
+    return { warnings: report.warnings, costs, next: [railwayTransferIsolationNote] };
+  }
   if (report.scope === 'Google Cloud project setup' && (report.setupPurpose === 'railway-transfer'
     || report.actions.some(action => action.id.startsWith('transfer-slot:') && action.type !== 'noop'))) {
     const secrets = report.actions.filter(action => action.kind === 'secret' && action.id.startsWith('transfer-slot:secret:'));

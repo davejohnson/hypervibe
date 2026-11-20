@@ -262,6 +262,7 @@ describe('connection guidance', () => {
         'gcsAccess="inspect"',
         'roles/storage.viewer',
         'gcsAccess="lifecycle"',
+        'preserves reviewed exclusions',
         'roles/storage.admin',
         'memorystoreAccess="inspect"',
         'roles/redis.viewer',
