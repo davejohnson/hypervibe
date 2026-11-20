@@ -1100,12 +1100,6 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
 
   const domainBefore = [...new Map([...domainPlans.values()].flatMap(plan => plan.before).map(action => [action.id, action])).values()];
   const serviceActions = planned.actions.map(action => {
-    const worker = environmentSpec!.services[action.resource.name];
-    if (action.type === 'update' && worker?.workloadKind === 'worker' && !worker.onDemand
-      && action.diff?.some(change => change.field === 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count')) {
-      const effect = worker.workerPaused ? 'pause this worker by setting its instance count to zero' : 'run one instance of this worker';
-      return { ...action, reason: `Hypervibe will ${effect}. ${action.reason}` };
-    }
     if (!action.id.startsWith('domain:') || !['create', 'update', 'replace'].includes(action.type)) return action;
     const extra = domainPlans.get(action.resource.name)?.before.filter(before => before.type !== 'noop').map(before => before.id) ?? [];
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
@@ -1178,6 +1172,14 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }] : [];
   // The complete engine segment creates containers before operational value writes.
   const actions = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  for (const action of serviceActions) {
+    const worker = environmentSpec!.services[action.resource.name];
+    if (action.type === 'update' && worker?.workloadKind === 'worker' && !worker.onDemand
+      && action.diff?.some(change => change.field === 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count')) {
+      const effect = worker.workerPaused ? 'pause this worker by setting its instance count to zero' : 'run one instance of this worker';
+      action.reason = `Hypervibe will ${effect}. ${action.reason}`;
+    }
+  }
   const warnings = [
     gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
