@@ -27,7 +27,7 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
-  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, entraSqlRunner, purgeVaultSecrets, taggedResources, withAzureSetupAccess,
+  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, deleteFailedAppEnvironment, emptyContainer, ensureEnvironmentDatabase, observeFailedAppEnvironment, entraSqlRunner, purgeVaultSecrets, taggedResources, withAzureSetupAccess,
   type AzureKeyVaultSecretStore, type SqlRunner,
 } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
@@ -52,6 +52,7 @@ export const AZURE_IMAGE_BUILD_OPERATION = 'azureImageBuild';
 export const AZURE_STORAGE_EMPTY_OPERATION = 'azureStorageEmpty';
 export const AZURE_DATABASE_DROP_OPERATION = 'azureDatabaseDrop';
 export const AZURE_TEARDOWN_CLEANUP_OPERATION = 'azureTeardownCleanup';
+export const AZURE_FAILED_ENVIRONMENT_OPERATION = 'azureFailedAppEnvironment';
 
 export type AzureProfile = EnvironmentProfile;
 export const azureProfileFor = environmentProfile;
@@ -324,6 +325,21 @@ const withDependencies = (actions: PlanAction[], dependencies: string[]) => depe
 const changing = (actions: PlanAction[]) => actions.filter((action) => action.type !== 'noop').map((action) => action.id);
 
 /**
+ * The step that removes a shared app environment Azure failed to create, when one is in the way.
+ * Nothing is planned for a working environment, one Hypervibe did not tag, or an unreadable answer.
+ */
+export async function azureFailedEnvironmentAction(context: Pick<AzureEngineContext, 'tokens' | 'shared' | 'connection'>): Promise<PlanAction | undefined> {
+  const observed = await observeFailedAppEnvironment(context.tokens, context.shared.appsEnvironmentId, context.shared.label).catch(() => 'other' as const);
+  if (observed !== 'failed') return undefined;
+  const name = context.shared.appsEnvironmentId.split('/').at(-1)!;
+  return {
+    id: 'shared-repair:apps', type: 'destroy', verified: true, requiresConfirm: true, resource: { kind: 'service', name: 'failed shared app environment', provider: 'azure' },
+    reason: `Azure failed to create the shared app environment ${name} in an earlier attempt and left it behind unusable. Hypervibe will delete it so it can be created again. It never ran anything.`,
+    metadata: { operation: AZURE_FAILED_ENVIRONMENT_OPERATION, subscriptionId: context.connection.subscriptionId },
+  };
+}
+
+/**
  * Role assignments the plan would create that already exist in Azure for the
  * environment's runtime identity, with the same scope and role: an earlier
  * apply created them and lost the reply. Unknown reads block the plan.
@@ -409,7 +425,9 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const sharedPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
   if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
   if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
-  const sharedActions = sharedPlanned.actions;
+  // A failed earlier attempt can leave the app environment in Azure but not in the engine's state.
+  const repair = sharedPlanned.actions.some((action) => action.id === 'shared:apps' && action.type === 'create') ? await azureFailedEnvironmentAction(context) : undefined;
+  const sharedActions = repair ? [repair, ...withDependencies(sharedPlanned.actions, [repair.id])] : sharedPlanned.actions;
   const sharedChanging = changing(sharedActions);
   // Connections made before 2026-11-17 never turned on Azure networking; only the subscription Owner can.
   let networkingUnchecked = false;
@@ -534,6 +552,9 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
     sharedActions = withDependencies(sharedPlanned.actions.filter((action) => action.type !== 'noop'), [...changing(environmentActions), ...changing(buildActions)]);
+    // The engine cannot destroy an app environment it never recorded; a failed one is removed directly.
+    const repair = sharedActions.some((action) => action.id === 'shared:apps') ? undefined : await azureFailedEnvironmentAction(context);
+    if (repair) sharedActions = [repair, ...sharedActions];
     shared = { shared: { planId: sharedPlanId, state: context.shared.state } };
   }
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
@@ -565,6 +586,8 @@ export interface AzureApplyDependencies {
   sqlRunner?: (context: AzureEngineContext, host: string) => SqlRunner;
   /** Runs setup SQL while the closed server accepts this computer; tests replace it. */
   setupAccess?: <T>(context: AzureEngineContext, sql: SqlRunner, work: () => Promise<T>) => Promise<T>;
+  /** Milliseconds between checks while waiting on Azure; tests use 0. */
+  pollMs?: number;
   buildImage?: (context: AzureEngineContext, source: { directory: string; commitSha: string }) => Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }>;
 }
 
@@ -641,6 +664,15 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       const runner = sql(String(metadata.host));
       await setupAccess(context, runner, () => dropEnvironmentDatabase(runner, context.environmentName));
       return { success: true, message: `Deleted ${context.environmentName}'s database and logins.` };
+    }
+    case AZURE_FAILED_ENVIRONMENT_OPERATION: {
+      // Checked again now: only an environment that is still failed, and still Hypervibe's, is deleted.
+      const observed = await observeFailedAppEnvironment(context.tokens, context.shared.appsEnvironmentId, context.shared.label);
+      if (observed === 'absent') return { success: true, message: 'The failed shared app environment is already gone.' };
+      if (typeof observed === 'object') return { success: false, status: 'blocked', message: observed.unknown };
+      if (observed !== 'failed') return { success: false, status: 'blocked', message: 'The shared app environment is no longer in a failed state, so Hypervibe did not delete it. Run hv_plan again.' };
+      const failed = await deleteFailedAppEnvironment(context.tokens, context.shared.appsEnvironmentId, { pollMs: deps.pollMs });
+      return failed ? { success: false, message: failed } : { success: true, message: 'Deleted the shared app environment Azure had failed to create.' };
     }
     case AZURE_TEARDOWN_CLEANUP_OPERATION: {
       const purged = await purgeVaultSecrets(context.tokens, context.vault.uri, azureVaultSecretName(context.environmentName, 'x').slice(0, -1));
