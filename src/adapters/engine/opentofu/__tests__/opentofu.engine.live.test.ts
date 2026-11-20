@@ -280,6 +280,9 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     expect(workflow).not.toMatch(/[^$]\$\{/);
     expect(files['jobs.tf.json'].resource.google_cloud_scheduler_job.worker_waker.schedule).toBe('* * * * *');
     expect(files['cloudsql.tf.json'].resource.google_sql_user.worker_waker).toMatchObject({ name: 'runtime@demo-project.iam', type: 'CLOUD_IAM_SERVICE_ACCOUNT' });
+    // Google refuses to delete a PostgreSQL login that holds grants (live 2026-11-20: "cannot be dropped because
+    // some objects depend on it"), which stopped the database from being removed. The login goes with its instance instead.
+    expect(files['cloudsql.tf.json'].resource.google_sql_user.worker_waker.deletion_policy).toBe('ABANDON');
     expect(configuration.resources['google_workflows_workflow.worker_waker']).toMatchObject({ actionId: 'service:worker' });
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
