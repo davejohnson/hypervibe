@@ -5,9 +5,8 @@ import { azureCiRegistry } from '../../adapters/providers/azure/azure-ci-registr
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
 import {
-  AZURE_DATABASE_LOGIN_OPERATION, AZURE_IMAGE_BUILD_OPERATION, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureBindingToSave, azureEngineLayout, azureLegacyNames, azureResourceName, azureEngineProblems,
-  azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext,
-} from '../infrastructure-engine-azure.js';
+  AZURE_DATABASE_LOGIN_OPERATION, AZURE_FAILED_ENVIRONMENT_OPERATION, AZURE_IMAGE_BUILD_OPERATION, azureFailedEnvironmentAction, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureBindingToSave, azureEngineLayout, azureLegacyNames, azureResourceName, azureEngineProblems,
+  azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext, withRepairFirst } from '../infrastructure-engine-azure.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -196,6 +195,71 @@ describe('Azure apply actions', () => {
     expect(buildImage).toHaveBeenCalledTimes(present ? 1 : 0);
   });
 
+  /**
+   * Azure as it behaved live on 2026-11-20 (West US 2): creating the shared app environment failed with
+   * ManagedEnvironmentProvisioningError ("creation of the managed cluster failed, please retry later") and
+   * left the environment behind in state Failed, with the tags Hypervibe sent. OpenTofu did not record it,
+   * so the next apply refused with "a resource with the ID ... already exists".
+   */
+  const leftover = (properties: Record<string, unknown>, tags: Record<string, string> = { 'managed-by': 'hypervibe', 'hv-shared': 'testing' }) => {
+    const state = { present: true, deletes: 0 };
+    const azure = setup((method, url) => {
+      if (!new URL(url).pathname.endsWith('/providers/Microsoft.App/managedEnvironments/hv-billforge-shared-apps')) throw new Error(`Unexpected call ${method} ${url}`);
+      if (method === 'DELETE') { state.deletes++; state.present = false; return json(202); }
+      return state.present ? json(200, { tags, properties }) : json(404, { error: { code: 'ResourceNotFound' } });
+    });
+    return { azure, state };
+  };
+  const params = () => ({ project: project as never, spec: spec({ test: testing() }) });
+
+  it('plans to remove a shared app environment that Azure failed to create, and removes it', async () => {
+    const { azure, state } = leftover({ provisioningState: 'Failed' });
+    const planned = await azureFailedEnvironmentAction(azure.context);
+    expect(planned).toMatchObject({ id: 'shared-repair:apps', type: 'destroy', requiresConfirm: true, reason: expect.stringContaining('Azure failed to create'), metadata: { operation: AZURE_FAILED_ENVIRONMENT_OPERATION } });
+    expect(azure.calls.filter((call) => call.method !== 'GET' && !call.url.startsWith('https://login.'))).toEqual([]);
+    await expect(runAzureAction(azure.ctx, azure.context, planned as never, params(), { pollMs: 0 })).resolves.toMatchObject({ success: true });
+    expect(state).toEqual({ present: false, deletes: 1 });
+  });
+
+  it('leaves a working app environment, and one Hypervibe did not create, alone', async () => {
+    for (const { azure, state } of [leftover({ provisioningState: 'Succeeded' }), leftover({ provisioningState: 'Failed' }, { 'managed-by': 'someone' }), leftover({ provisioningState: 'Failed' }, { 'managed-by': 'hypervibe', 'hv-shared': 'production' })]) {
+      await expect(azureFailedEnvironmentAction(azure.context)).resolves.toBeUndefined();
+      // Even a plan made while it was failed must not delete it once it is not.
+      const stale = action(AZURE_FAILED_ENVIRONMENT_OPERATION);
+      await expect(runAzureAction(azure.ctx, azure.context, stale, params(), { pollMs: 0 })).resolves.toMatchObject({ success: false, status: 'blocked' });
+      expect(state.deletes).toBe(0);
+    }
+  });
+
+  it('plans nothing when the app environment is absent or unreadable, and reports an already removed one as done', async () => {
+    const gone = leftover({ provisioningState: 'Failed' }); gone.state.present = false;
+    await expect(azureFailedEnvironmentAction(gone.azure.context)).resolves.toBeUndefined();
+    await expect(runAzureAction(gone.azure.ctx, gone.azure.context, action(AZURE_FAILED_ENVIRONMENT_OPERATION), params(), { pollMs: 0 })).resolves.toMatchObject({ success: true });
+    const unreadable = setup(() => json(403, { error: { code: 'AuthorizationFailed' } }));
+    await expect(azureFailedEnvironmentAction(unreadable.context)).resolves.toBeUndefined();
+    await expect(runAzureAction(unreadable.ctx, unreadable.context, action(AZURE_FAILED_ENVIRONMENT_OPERATION), params(), { pollMs: 0 })).resolves.toMatchObject({ success: false, status: 'blocked' });
+    expect(unreadable.calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+  });
+
+  it('removes a failed app environment before the shared steps, including the log workspace the engine did record', () => {
+    const repair = { id: 'shared-repair:apps', type: 'destroy' } as never;
+    const shared = [{ id: 'shared:apps', type: 'destroy', dependsOn: ['web:app'] }, { id: 'shared:network', type: 'noop' }] as never[];
+    expect(withRepairFirst(repair, shared, ['web:app'])).toEqual([
+      { id: 'shared-repair:apps', type: 'destroy', dependsOn: ['web:app'] },
+      { id: 'shared:apps', type: 'destroy', dependsOn: ['web:app', 'shared-repair:apps'] },
+      { id: 'shared:network', type: 'noop' },
+    ]);
+    expect(withRepairFirst(undefined, shared)).toBe(shared);
+  });
+
+  it('keeps the environment in the spec when a shared leftover the engine never recorded remains after the last teardown', async () => {
+    const azure = setup((_method, url) => url.includes("vault.azure.net/secrets?") ? json(200, { value: [] })
+      : json(200, { value: decodeURIComponent(url).includes('hv-shared') ? [{ name: 'hv-billforge-shared-apps' }] : [] }));
+    const result = await runAzureAction(azure.ctx, azure.context, action(AZURE_TEARDOWN_CLEANUP_OPERATION, { sharedRemoved: true }), { project: project as never, spec: spec({ test: testing() }) });
+    expect(result).toMatchObject({ success: false, message: expect.stringContaining('hv-billforge-shared-apps') });
+    expect(azure.bindings().azure).toBeUndefined();
+  });
+
   it('keeps the environment in the spec when anything tagged for it remains after teardown', async () => {
     const azure = setup((_method, url) => url.includes("vault.azure.net/secrets?") ? json(200, { value: [] }) : json(200, { value: [{ name: 'hv-billforge-test-web' }] }));
     const result = await runAzureAction(azure.ctx, azure.context, action(AZURE_TEARDOWN_CLEANUP_OPERATION, { sharedRemoved: false }), { project: project as never, spec: spec({ test: testing() }) });
@@ -209,7 +273,7 @@ describe('saved Azure plans', () => {
     const { planRunDocumentSchema } = await import('../../domain/plan/converge.executor.js');
     const azure = await import('../infrastructure-engine-azure.js');
     const operations = [azure.AZURE_SECRET_OPERATION, azure.AZURE_DATABASE_LOGIN_OPERATION, azure.AZURE_IMAGE_BUILD_OPERATION,
-      azure.AZURE_STORAGE_EMPTY_OPERATION, azure.AZURE_DATABASE_DROP_OPERATION, azure.AZURE_TEARDOWN_CLEANUP_OPERATION];
+      azure.AZURE_STORAGE_EMPTY_OPERATION, azure.AZURE_DATABASE_DROP_OPERATION, azure.AZURE_TEARDOWN_CLEANUP_OPERATION, azure.AZURE_FAILED_ENVIRONMENT_OPERATION];
     const document = {
       kind: 'hv_plan', scope: 'infrastructure-engine', environmentName: 'test', specRevision: 1, observedFingerprint: null, unmanaged: [], warnings: [],
       engine: { planId: 'p1', azure: { subscriptionId: 's', resourceGroup: 'g', prefix: 'hv-x' } },

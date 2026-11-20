@@ -356,6 +356,34 @@ export async function emptyContainer(tokens: AzureTokenProvider, account: string
   }
 }
 
+/**
+ * Azure can fail to create a Container Apps environment ("creation of the managed cluster failed, please
+ * retry later", observed live 2026-11-20) and leave it behind in state Failed. OpenTofu never recorded it,
+ * so every later apply stops on "already exists" and teardown has nothing to destroy. `failed` means
+ * exactly that remnant: present, in state Failed, and carrying the tags Hypervibe gave this shared layer.
+ */
+export async function observeFailedAppEnvironment(tokens: AzureTokenProvider, environmentId: string, label: string): Promise<'failed' | 'other' | 'absent' | { unknown: string }> {
+  const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${environmentId}?api-version=2024-03-01`);
+  if (read.status === 404) return 'absent';
+  if (read.status !== 200) return { unknown: `Hypervibe could not read the shared app environment (${azureError(read)}).` };
+  const tags = (read.body.tags ?? {}) as Record<string, string>;
+  const state = (read.body.properties as { provisioningState?: string } | undefined)?.provisioningState;
+  return state === 'Failed' && tags['managed-by'] === 'hypervibe' && tags['hv-shared'] === label ? 'failed' : 'other';
+}
+
+/** Deletes the failed remnant and waits until Azure confirms it is gone; returns what went wrong, if anything. */
+export async function deleteFailedAppEnvironment(tokens: AzureTokenProvider, environmentId: string, options: { pollMs?: number } = {}): Promise<string | undefined> {
+  const url = `${ARM}${environmentId}?api-version=2024-03-01`;
+  const deleted = await azureRest(tokens, AZURE_SCOPES.arm, 'DELETE', url);
+  if (![200, 202, 204, 404].includes(deleted.status)) return `Azure refused to delete the failed shared app environment (${azureError(deleted)}).`;
+  for (let attempt = 0; attempt < 240; attempt++) {
+    const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', url).catch(() => undefined);
+    if (read?.status === 404) return undefined;
+    await new Promise((done) => setTimeout(done, options.pollMs ?? 5000));
+  }
+  return 'Azure did not confirm that the failed shared app environment is gone. Plan again to see whether it still exists.';
+}
+
 /** Resources in the group still tagged for this environment; an unreadable answer is never "none". */
 export async function taggedResources(tokens: AzureTokenProvider, subscriptionId: string, resourceGroup: string, tag: string, value: string): Promise<string[] | { unknown: string }> {
   const filter = encodeURIComponent(`tagName eq '${tag}' and tagValue eq '${value}'`);

@@ -358,6 +358,15 @@ every destructive action confirmed separately:
    tagged for the environment (or the shared group, if removed) remains, clears the
    bindings and removes the environment from the spec.
 
+**A failed app environment.** When Azure fails to create the shared Container Apps
+environment it leaves one behind in the `Failed` state that OpenTofu never recorded,
+so the next apply stops at "already exists" and a destroy cannot see it. Both the
+apply plan and the last teardown plan then show a separate confirmed step that
+deletes it first. The step applies only to an environment that is `Failed` and
+carries Hypervibe's tags for this project's shared group, and it reads the
+environment again right before deleting. Seen and removed in a live run on
+2026-11-19.
+
 **No final snapshot.** Flexible Server has no manual snapshot of one database: a
 dropped database is gone, and the server's automatic backups (7 days) cover it only
 while the server exists. `deleteFinalSnapshot` is therefore refused on Azure, and the
