@@ -88,6 +88,8 @@ export interface GcpCloudRunServiceInput {
   pendingWorkQuery?: string;
   minInstances?: number;
   maxInstances?: number;
+  /** A positive existing revision minimum needs an explicit zero to clear it. */
+  observedMinInstances?: number;
   /** web: keep one instance running with CPU available between requests. */
   alwaysOn?: boolean;
   /** Non-secret runtime configuration only. */
@@ -273,6 +275,45 @@ function engineKey(logicalName: string): string {
   return key;
 }
 
+type CloudRunPlanRow = {
+  address: string;
+  deposed?: string;
+  change: { actions: string[]; before: { template: Array<{ scaling: Array<{ min_instance_count: number | null }> }> } | null };
+};
+
+/** Only a refreshed plan knows whether omitting revision scaling would retain a paid minimum. */
+export async function planWithCloudRunRevisionMinimums<T>(services: GcpCloudRunServiceInput[],
+  plan: (verify: (shownPlan: unknown) => boolean) => Promise<T>): Promise<T> {
+  const defaults = services.filter(service => service.workload === 'web'
+    && (service.minInstances ?? (service.alwaysOn ? 1 : 0)) === 0 && service.maxInstances === undefined);
+  let replan = false;
+  const verify = (shown: unknown) => {
+    const { resource_changes } = shown as { resource_changes?: CloudRunPlanRow[] };
+    let changed = false;
+    for (const service of defaults) {
+      const address = `google_cloud_run_v2_service.${engineKey(service.logicalName)}`;
+      const row = resource_changes?.find(change => change.address === address && !change.deposed);
+      const before = row?.change.before;
+      const creating = before === null && row?.change.actions.includes('create');
+      const scaling = creating ? [] : before?.template?.[0]?.scaling;
+      if (!Array.isArray(scaling) || scaling.length > 1) throw new Error('Missing prior Cloud Run revision scaling.');
+      const minimum = scaling.length === 0 ? 0 : scaling[0]?.min_instance_count;
+      if (minimum !== null && (typeof minimum !== 'number' || !Number.isInteger(minimum) || minimum < 0)) {
+        throw new Error('Invalid prior Cloud Run revision minimum.');
+      }
+      if (((minimum ?? 0) > 0) !== ((service.observedMinInstances ?? 0) > 0)) {
+        service.observedMinInstances = minimum ?? 0;
+        changed = true;
+      }
+    }
+    replan = changed;
+    return !changed;
+  };
+  // A rejected candidate is never saved. Recheck the refreshed state in the second plan too.
+  const first = await plan(verify);
+  return replan ? plan(verify) : first;
+}
+
 function assertImmutableImage(image: string): void {
   if (!/@sha256:[0-9a-f]{64}$/.test(image)) {
     throw new Error('Cloud Run images managed by the engine must be pinned by digest (image@sha256:...).');
@@ -302,6 +343,10 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
     }),
   ];
   const isWorker = service.workload === 'worker';
+  const minInstances = service.minInstances ?? (isWorker || service.alwaysOn ? 1 : 0);
+  // The provider retains an existing minimum when the optional/computed block is omitted.
+  // Cloud Run omits the block after clearing it, so emit zero only while it is needed.
+  const configureScaling = minInstances !== 0 || service.maxInstances !== undefined || (service.observedMinInstances ?? 0) > 0;
   const buckets = (input.storage ?? []).filter((bucket) => bucket.injectInto.includes(service.logicalName));
   if (buckets.length > 1) throw new Error(`Service ${service.logicalName} can receive only one bucket's variables.`);
   for (const bucket of buckets) {
@@ -350,10 +395,10 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
     labels: { 'managed-by': 'hypervibe', 'hv-service': engineKey(service.logicalName).replace(/_/g, '-') },
     template: [{
       service_account: service.runtimeServiceAccountEmail,
-      scaling: [{
-        min_instance_count: service.minInstances ?? (isWorker || service.alwaysOn ? 1 : 0),
+      ...(configureScaling ? { scaling: [{
+        min_instance_count: minInstances,
         ...(service.maxInstances !== undefined ? { max_instance_count: service.maxInstances } : {}),
-      }],
+      }] } : {}),
       containers: [container],
       ...(wired ? { volumes: [{ name: 'cloudsql', cloud_sql_instance: [{ instances: ['${google_sql_database_instance.db.connection_name}'] }] }] } : {}),
       // Direct VPC egress reaches the private Redis address; everything else still leaves normally.
