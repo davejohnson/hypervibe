@@ -8,10 +8,11 @@ import { AwsEngineCredentialsSchema } from '../../src/adapters/providers/aws/aws
 import { awsEngineAuthentication } from '../../src/adapters/providers/aws/tofu/aws-engine.backend.js';
 import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure/azure-engine.adapter.js';
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
+import { CloudRunAdapter, CloudRunCredentialsSchema } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { ENGINE_FIXTURE_ENTRYPOINT, engineFixtureEntrypointDockerfile, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
-  readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
+import { ENGINE_FIXTURE_ENTRYPOINT, engineFixtureEmptiedEnvironment, engineFixtureEntrypointDockerfile, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
+  readAzureDatabaseExposure, readAzureInventory, readGcpDatabaseExposure, readGcpInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
 
@@ -44,12 +45,12 @@ async function processOutput(executable: string, args: string[], cwd: string, da
 }
 
 /**
- * AWS and Azure testing environment with a web service, a worker and a database.
- * Every change goes through the installed CLI; the provider calls here only read.
- * Leftovers are found by comparing everything in the dedicated account region
- * (AWS) or project resource group (Azure) with what was there before the run.
+ * AWS, Azure and Google Cloud testing environment with a web service, workers, a scheduled job,
+ * file storage and a database. Every change goes through the installed CLI; the provider calls
+ * here only read. Leftovers are found by comparing what the dedicated account region (AWS),
+ * project resource group (Azure) or Google project holds with what was there before the run.
  */
-live('AWS and Azure engine disposable environment fixture', () => {
+live('AWS, Azure and Google Cloud engine disposable environment fixture', () => {
   it(process.env.HYPERVIBE_LIVE_CLEANUP_ONLY === '1' ? 'resumes teardown without claiming full lifecycle proof'
     : process.env.HYPERVIBE_LIVE_MODE !== 'run' ? 'shows the first plan without applying or claiming live lifecycle proof'
     : 'creates, serves, keeps the database off the internet, noops, updates and leaves nothing behind', async () => {
@@ -77,23 +78,38 @@ live('AWS and Azure engine disposable environment fixture', () => {
     try {
       const project = db.prepare('SELECT id, git_remote_url FROM projects WHERE name = ?').get(projectName) as { id: string; git_remote_url?: string } | undefined;
       if (!project) throw new Error('The dedicated test project does not exist in HYPERVIBE_LIVE_DATA_DIR.');
+      // Google connections belong to a GitHub repository. A project that has not applied yet carries that identity only in its spec.
+      if (!project.git_remote_url) {
+        const stored = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
+        const remote = stored ? (JSON.parse(stored.document) as Json).gitRemoteUrl : undefined;
+        if (typeof remote === 'string' && remote) project.git_remote_url = remote;
+      }
       const repository = project.git_remote_url?.replace(/^.*github\.com[/:]/, '').replace(/\.git$/, '').replace(/\/$/, '') || projectName;
 
       // The saved deploy access, matched to the marker's exact account or subscription before any call.
       process.env.HYPERVIBE_DATA_DIR = dataDir; SecretStore.resetInstance();
       const marker = JSON.parse(readFileSync(markerFile, 'utf8')) as Json;
-      const connections = (db.prepare('SELECT credentials_encrypted FROM connections WHERE provider = ? AND status = ?').all(cloud, 'verified') as Array<{ credentials_encrypted: string }>)
+      const connections = (db.prepare('SELECT credentials_encrypted FROM connections WHERE provider = ? AND status = ?').all(cloud === 'gcp' ? 'cloudrun' : cloud, 'verified') as Array<{ credentials_encrypted: string }>)
         .map((row) => { try { return getSecretStore().decryptObject(row.credentials_encrypted) as Json; } catch { return undefined; } });
       const aws = cloud === 'aws' ? connections.map((value) => AwsEngineCredentialsSchema.safeParse(value)).find((parsed) => parsed.success && parsed.data.accountId === marker.nativeProjectId)?.data : undefined;
       const azure = cloud === 'azure' ? connections.map((value) => AzureEngineCredentialsSchema.safeParse(value)).find((parsed) => parsed.success && parsed.data.subscriptionId === marker.nativeProjectId)?.data : undefined;
-      const connection = aws ?? azure;
+      const gcp = cloud === 'gcp' ? connections.map((value) => CloudRunCredentialsSchema.safeParse(value)).find((parsed) => parsed.success && parsed.data.projectId === marker.nativeProjectId)?.data : undefined;
+      const connection = aws ?? azure ?? gcp;
       if (!connection) throw new Error(`No verified Hypervibe ${cloud} connection matches the marker's account. Connect the dedicated test account through Hypervibe first.`);
       readFixtureTarget(markerFile, { profile: profile.id, project: projectName, internalProjectId: project.id, repository,
-        nativeProjectId: aws?.accountId ?? azure!.subscriptionId, region: aws?.region ?? azure!.location });
+        // A Google connection has no region of its own; the marker names the one the fixture uses.
+        nativeProjectId: aws?.accountId ?? azure?.subscriptionId ?? gcp!.projectId, region: aws?.region ?? azure?.location ?? marker.region });
+
+      let google: { projectId: string; region: string; token: () => Promise<string> } | undefined;
+      if (gcp) {
+        const adapter = new CloudRunAdapter(); await adapter.connect(gcp); adapter.configureTarget({ region: marker.region });
+        google = { projectId: gcp.projectId, region: marker.region, token: () => adapter.engineAccessToken() };
+      }
 
       const tokens = azure ? new AzureTokens(azure) : undefined;
       const inventoryNow = async (): Promise<NativeFixtureResource[]> => {
         if (azure) return readAzureInventory(tokens!, azure.subscriptionId, azure.resourceGroup);
+        if (google) return readGcpInventory(google);
         const auth = await awsEngineAuthentication(aws!); // One-hour role credentials; taken fresh for each read.
         return readAwsInventory({ region: aws!.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } });
       };
@@ -103,6 +119,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
           if (servers.length !== 1) throw new Error(`The fixture should have created exactly one database server; found ${servers.length}.`);
           return readAzureDatabaseExposure(tokens!, servers[0]!.id);
         }
+        if (google) return readGcpDatabaseExposure(google, created, environmentName);
         const auth = await awsEngineAuthentication(aws!);
         return readAwsDatabaseExposure({ region: aws!.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } }, created);
       };
@@ -213,6 +230,19 @@ live('AWS and Azure engine disposable environment fixture', () => {
       if (!cleanupOnly) assertFixtureLifecycleConsent(process.env.HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE);
 
       const tearDown = async (name: string) => {
+        if (cloud === 'gcp') {
+          // No teardown plan on Google Cloud: empty the environment, apply until nothing is left to change, then drop it from the spec.
+          if (!inSpec(name)) return;
+          await setSpecEnvironment(name, engineFixtureEmptiedEnvironment(marker.region));
+          for (let attempt = 0; ; attempt++) {
+            if (attempt === 6) throw new Error(`Emptying ${name} did not finish within its bounded attempts.`);
+            const envelope = await plan({}, name);
+            if (!changesOf(envelope).length) break;
+            await apply(envelope);
+          }
+          await setSpecEnvironment(name, undefined);
+          return;
+        }
         // A teardown that reports leftovers is planned again, as its own message asks.
         for (let attempt = 0; attempt < 4 && inSpec(name); attempt++) {
           await apply(await plan({ scope: 'teardown', ...(cloud === 'aws' && name === environmentName ? { deleteFinalSnapshot: true } : {}) }, name));

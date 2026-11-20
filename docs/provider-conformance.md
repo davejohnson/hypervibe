@@ -34,10 +34,11 @@ provider status or assert that a live run has passed.
 | Profile | Declared disposable resources | Release and verification |
 | --- | --- | --- |
 | `gcp-engine` | One public Cloud Run web service and its public-invoker IAM member | Committed local fixture archive through the installed Hypervibe release path; exact JSON body and `create`/`update` revision; encrypted engine-state identity projection and exact Cloud Run GET after teardown |
+| `gcp-environment` | One testing environment in a dedicated Google project: public web service, always-on worker, on-demand worker, scheduled job, a bucket and a Cloud SQL database; a second environment with its own database for part of the run | Same fixture and checks as `aws-engine` and `azure-engine`, with two differences. The database keeps a public address (#799), so the check is that no network is allowed to connect and that a connection from the test computer is refused. Google Cloud has no teardown plan (#103), so the environment is emptied in the spec, applied and then dropped from the spec; the fixture app deletes its own test file because a bucket that holds a file cannot be removed |
 | `aws-engine`, `azure-engine` | One testing environment: public web service, always-on worker, on-demand worker, scheduled job, file storage and PostgreSQL database, plus whatever the project shares between testing environments (network, app environment, database cluster or server, registry) | Committed local fixture through `hv_plan` → `hv_apply` → `hv_deploy`; exact JSON body with the `create`/`update` revision, a database write from the web service, recent ones from the worker, the scheduled job and the on-demand worker, and a file written to storage and read back; the database must refuse a connection from the test computer; `hv_plan scope="teardown"`; between create and update a second environment with its own web service and database is added, must answer from its own database on the same shared server or cluster, and is removed again while the first keeps answering with no pending changes; on AWS the image has its own entrypoint and the web service starts as the image says, gains a start command, changes it and drops it, reporting each time how it was started, with no changes left to plan at the end; then everything in the dedicated account is compared with what was there before the run. **Azure: two passing runs on 2026-11-18 in West US 2, at d4cf72a0 without and at 2cdcb6a9 with storage, the scheduled job and the on-demand worker; one passing run with the second environment on 2026-11-19 at 3cec56fd, after an attempt whose two environment names were cut to the same cloud name (fixed in #773, not yet run live). AWS: one passing run with the second environment and the wider leftover inventory on 2026-11-19 in us-east-1 at 070adb62, after an attempt that mistook a restarted container's new network interface for a new resource; one passing run with the web start-command steps the same day at 048f9852 (126 minutes); before that, one passing run on 2026-11-19 in us-east-1, with the changes in b129c5a6, after seven attempts that found a zero build limit and two ordering faults.** |
 | `railway` | Web service, PostgreSQL, Redis, object bucket, associated volumes, PostgreSQL-backed queue wiring | Prepared repository and managed GitHub workflow, exact commit and release artifact; exact JSON revision and SQL probe; complete native project service/volume/bucket inventory before teardown and after deletion |
 
-The GCP profile is deliberately **web-only**. It does not prove Cloud SQL,
+The `gcp-engine` profile is deliberately **web-only** (`gcp-environment` is the wide one). It does not prove Cloud SQL,
 Memorystore, storage, queues, secret containers, scheduled jobs, or their complete
 live teardown. Adding one to its fixture must first add an exact native absence
 reader; unknown resource types fail closed. Its project-level APIs, IAM,
@@ -55,6 +56,10 @@ The AWS and Azure profiles check leftovers differently from the GCP profile. The
 do not read engine state. Before the first change they record everything in the
 dedicated account, and after teardown the account must match that record:
 
+- **Google Cloud (`gcp-environment`):** in the marker's project and region, Cloud Run
+  services, jobs and worker pools, database instances, buckets, secrets, schedules
+  and workflows. Not covered: images in the shared repository, build storage and
+  the project's own setup, which stay. Passed once, 2026-11-20 (`us-central1`).
 - **Azure:** every resource in the project's resource group, whatever its tags.
 - **AWS:** in the connection's region, networks, their endpoints and NAT gateways,
   database clusters, instances and kept snapshots, container clusters, image
@@ -177,6 +182,25 @@ configuration before apply, then projects only allowlisted `address`, `type`
 and native `id` from readable encrypted engine state after attempted applies.
 It independently checks those native identities afterward. Missing, ambiguous
 or unreadable evidence stops cleanup and preserves recovery state.
+
+## Google Cloud wide profile (`gcp-environment`)
+
+Runs like the AWS and Azure profiles below, with `HYPERVIBE_LIVE_PROFILE=gcp-environment`.
+Prepare once, through Hypervibe:
+
+- A Google connection belongs to a GitHub repository, so the test project's spec
+  must carry `gitRemoteUrl` (a repository name used only as an identity; nothing
+  contacts GitHub). A project shared with AWS or Azure tests that has no remote
+  cannot be used; make a separate one.
+- `hv_connections provider="cloudrun" action="bootstrap"` with that project, the
+  repository as `scope` and a dedicated `gcpProjectId`, then `action="prepare"`
+  with `gcsAccess="lifecycle"` and `workerAccess="lifecycle"`.
+- In the marker, `nativeProjectId` is the Google project ID, `region` the region
+  to use (the connection has none) and `repository` the `owner/name` of the
+  identity above. Omit `runtimeServiceAccountEmail`.
+
+An apply that is cut off can leave the environment unable to be emptied until the
+full environment is applied again (fixed in #802).
 
 ## AWS and Azure preview, run and cleanup
 

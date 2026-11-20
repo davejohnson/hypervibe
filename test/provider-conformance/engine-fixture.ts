@@ -14,7 +14,14 @@ import type { AwsAccess } from '../../src/adapters/providers/aws/aws-engine.clie
 import { ARM, AZURE_SCOPES, azureRest, type AzureTokenProvider } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { resourceKey, type NativeFixtureResource } from './lifecycle-live-harness.js';
 
-export type EngineFixtureCloud = 'aws' | 'azure';
+export type EngineFixtureCloud = 'aws' | 'azure' | 'gcp';
+
+/** What the spec calls each cloud's hosting, database and file storage. */
+const SPEC_NAMES = {
+  aws: { hosting: { provider: 'aws', engine: 'opentofu' }, database: { provider: 'rds' }, storage: 's3' },
+  azure: { hosting: { provider: 'azure', engine: 'opentofu' }, database: { provider: 'azure-postgres', version: 17 }, storage: 'azureblob' },
+  gcp: { hosting: { provider: 'cloudrun' }, database: { provider: 'cloudsql' }, storage: 'gcs' },
+} as const;
 
 /**
  * The disposable environment: a public web service, an always-on worker, a worker
@@ -25,9 +32,9 @@ export type EngineFixtureCloud = 'aws' | 'azure';
 export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', connectionRegion: string, region?: string, webStart: string | null = 'node server.mjs'): Record<string, unknown> {
   return {
     // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
-    hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
-    database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
-    storage: { files: { provider: cloud === 'aws' ? 's3' : 'azureblob', type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
+    hosting: { ...SPEC_NAMES[cloud].hosting, ...(region ? { region } : cloud === 'gcp' ? { region: connectionRegion } : {}) },
+    database: SPEC_NAMES[cloud].database,
+    storage: { files: { provider: SPEC_NAMES[cloud].storage, type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
     services: {
       web: { workloadKind: 'web', ...(webStart ? { startCommand: webStart } : {}), healthCheckPath: '/health', public: true },
       worker: { workloadKind: 'worker', startCommand: 'node server.mjs worker' },
@@ -68,8 +75,8 @@ export function engineFixtureEntrypointDockerfile(dockerfile: string): string {
 /** A second environment for the same project: a web service and its own database, nothing else. */
 export function engineFixtureSiblingEnvironment(cloud: EngineFixtureCloud, region?: string): Record<string, unknown> {
   return {
-    hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
-    database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
+    hosting: { ...SPEC_NAMES[cloud].hosting, ...(region ? { region } : {}) },
+    database: SPEC_NAMES[cloud].database,
     services: { web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true } },
     email: { enabled: false }, envVars: { CONFORMANCE_APP_REVISION: 'sibling' }, deploy: { strategy: 'manual' },
   };
@@ -150,6 +157,79 @@ export async function readAzureDatabaseExposure(tokens: AzureTokenProvider, serv
   const names = (rules.body.value as Array<{ name?: unknown }>).map((rule) => String(rule.name));
   if (names.length) problems.push(`firewall rules remain: ${names.join(', ')}`);
   return { host: properties.fullyQualifiedDomainName, problems };
+}
+
+/** Google Cloud has no teardown plan: an environment is emptied (no services, database or storage), applied, then dropped from the spec. */
+export function engineFixtureEmptiedEnvironment(region: string): Record<string, unknown> {
+  return { hosting: { ...SPEC_NAMES.gcp.hosting, region }, services: {}, email: { enabled: false }, envVars: {}, deploy: { strategy: 'manual' } };
+}
+
+export interface GcpFixtureAccess { projectId: string; region: string; token: () => Promise<string> }
+
+async function gcpList(access: GcpFixtureAccess, url: string, key: string): Promise<Array<Record<string, unknown>>> {
+  const all: Array<Record<string, unknown>> = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < 200; page++) {
+    const target = new URL(url);
+    if (pageToken) target.searchParams.set('pageToken', pageToken);
+    const response = await fetch(target, { headers: { authorization: `Bearer ${await access.token()}` }, signal: AbortSignal.timeout(30_000) });
+    if (response.status !== 200) throw new Error(`Google Cloud could not list ${key} (HTTP ${response.status}); what exists is unknown.`);
+    const body = await response.json() as Record<string, unknown>;
+    all.push(...((body[key] ?? []) as Array<Record<string, unknown>>));
+    if (typeof body.nextPageToken !== 'string' || !body.nextPageToken) return all;
+    pageToken = body.nextPageToken;
+  }
+  throw new Error('Google Cloud inventory did not end; what exists is unknown.');
+}
+
+/**
+ * What an environment can create in the fixture's Google project and region: Cloud Run
+ * services, jobs and worker pools, database instances, buckets, secrets, schedules and
+ * workflows. Images in the project's shared repository are not listed. A failed read throws.
+ */
+export async function readGcpInventory(access: GcpFixtureAccess): Promise<NativeFixtureResource[]> {
+  const place = `projects/${access.projectId}/locations/${access.region}`;
+  const kinds: Array<[type: string, url: string, key: string]> = [
+    ['run-service', `https://run.googleapis.com/v2/${place}/services`, 'services'],
+    ['run-job', `https://run.googleapis.com/v2/${place}/jobs`, 'jobs'],
+    ['run-worker-pool', `https://run.googleapis.com/v2/${place}/workerPools`, 'workerPools'],
+    ['sql-instance', `https://sqladmin.googleapis.com/v1/projects/${access.projectId}/instances`, 'items'],
+    ['bucket', `https://storage.googleapis.com/storage/v1/b?project=${access.projectId}`, 'items'],
+    ['secret', `https://secretmanager.googleapis.com/v1/projects/${access.projectId}/secrets`, 'secrets'],
+    ['schedule', `https://cloudscheduler.googleapis.com/v1/${place}/jobs`, 'jobs'],
+    ['workflow', `https://workflows.googleapis.com/v1/${place}/workflows`, 'workflows'],
+  ];
+  const found: NativeFixtureResource[] = [];
+  for (const [type, url, key] of kinds) {
+    for (const entry of await gcpList(access, url, key)) {
+      if (typeof entry.name !== 'string' || !entry.name) throw new Error(`Google Cloud listed a ${type} without a name.`);
+      found.push({ provider: 'gcp', type, id: entry.name, address: `${type}/${entry.name}` });
+    }
+  }
+  return found;
+}
+
+/**
+ * Google's database instances keep a public address; what closes them is an empty list of
+ * networks allowed to connect, so only Google's own authenticated connector gets in.
+ * Every instance the fixture created is checked; the address returned is the first environment's.
+ */
+export async function readGcpDatabaseExposure(access: GcpFixtureAccess, created: NativeFixtureResource[], environmentName: string): Promise<DatabaseExposure> {
+  const names = created.filter((resource) => resource.type === 'sql-instance').map((resource) => resource.id);
+  const own = names.filter((name) => name.startsWith(`hv-${environmentName}-db-`));
+  if (own.length !== 1) throw new Error(`The fixture should have created exactly one database instance for ${environmentName}; found ${own.length}.`);
+  const problems: string[] = []; let host: string | undefined;
+  for (const name of names) {
+    const response = await fetch(`https://sqladmin.googleapis.com/v1/projects/${access.projectId}/instances/${name}`, { headers: { authorization: `Bearer ${await access.token()}` }, signal: AbortSignal.timeout(30_000) });
+    if (response.status !== 200) throw new Error('The Google database instance could not be read; its exposure is unknown.');
+    const instance = await response.json() as { settings?: { ipConfiguration?: { authorizedNetworks?: Array<{ value?: string }> } }; ipAddresses?: Array<{ type?: string; ipAddress?: string }> };
+    if (!instance.settings?.ipConfiguration) throw new Error('The Google database instance reported no network settings; its exposure is unknown.');
+    const allowed = instance.settings.ipConfiguration.authorizedNetworks ?? [];
+    if (allowed.length) problems.push(`instance ${name} allows connections from ${allowed.map((network) => network.value).join(', ')}`);
+    if (name === own[0]) host = instance.ipAddresses?.find((address) => address.type === 'PRIMARY')?.ipAddress;
+  }
+  if (!host) throw new Error('The Google database instance reported no address to test.');
+  return { host, problems };
 }
 
 async function pages<T>(read: (token?: string) => Promise<{ items: T[]; next?: string }>): Promise<T[]> {
