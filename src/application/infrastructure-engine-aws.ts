@@ -5,6 +5,8 @@ import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagno
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
+import fs from 'fs';
+import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
 import { execFileSync } from 'child_process';
 import { AwsEngineCredentialsSchema, type AwsEngineCredentials } from '../adapters/providers/aws/aws-engine.adapter.js';
 import {
@@ -70,6 +72,8 @@ export interface AwsEngineBinding {
   /** Set once a teardown removed the environment; its database's final snapshot, while it exists. */
   tornDownAt?: string;
   finalSnapshot?: { identifier: string; region: string };
+  /** 2: long names end in a distinguishing mark. Absent on environments made before that. */
+  naming?: 2;
 }
 
 export interface AwsEngineContext {
@@ -84,6 +88,8 @@ export interface AwsEngineContext {
   /** This environment's database and logins on the shared cluster. */
   database: AwsEnvironmentDatabase;
   prefix: string;
+  /** Names are cut plainly, as this environment was created with. */
+  legacyNames: boolean;
   parameterPath: string;
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string };
 }
@@ -95,6 +101,33 @@ export function isAwsEngineEnvironment(spec: ProjectSpec, environmentName: strin
 
 export function awsBinding(environment: Environment): AwsEngineBinding {
   return ((environment.platformBindings as { aws?: AwsEngineBinding }).aws) ?? {};
+}
+
+/**
+ * The name every resource of one environment starts with. One that had to be cut ends in a mark of the whole name,
+ * so two environments with long names never share resources.
+ */
+export function awsPrefix(project: string, environmentName: string, legacy = false): string {
+  const full = `hv-${project}-${environmentName}`;
+  const slug = full.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  if (legacy || slug.length <= 28) return slug.slice(0, 28).replace(/-+$/, '');
+  return `${slug.slice(0, 21).replace(/-+$/, '')}-${crypto.createHash('sha256').update(full).digest('hex').slice(0, 6)}`;
+}
+
+/**
+ * Environments made before long names got a distinguishing mark keep their plain cut names: renaming would replace their resources.
+ * Any trace counts as made: a saved binding, identities recorded after an apply, or state left by an apply that failed before saving anything.
+ * A new environment records `naming: 2` before its first apply changes anything.
+ */
+export function awsLegacyNames(environment: Pick<Environment, 'platformBindings'>, stateExists: boolean): boolean {
+  const bindings = environment.platformBindings as { provider?: string; aws?: AwsEngineBinding };
+  if (bindings.aws?.naming === 2) return false;
+  return stateExists || bindings.provider === 'aws' || Object.keys(bindings.aws ?? {}).length > 0;
+}
+
+function awsStateExists(projectId: string, environmentId: string): boolean {
+  return [environmentId, `${environmentId}-build`].some((id) =>
+    fs.existsSync(engineStatePaths({ provider: 'aws', projectId, environmentId: id, partition: 'environment' }).statePath));
 }
 
 const awsAccess = (context: Pick<AwsEngineContext, 'connection' | 'credentials'>): AwsAccess => ({ region: context.connection.region, credentials: context.credentials });
@@ -142,11 +175,12 @@ export async function resolveAwsEngineContext(ctx: CommandContext, project: Proj
   try { auth = await awsEngineAuthentication(connection.data); } catch (error) {
     return { blocked: `Hypervibe could not use its AWS deploy role: ${error instanceof Error ? error.name : String(error)}.` };
   }
-  const prefix = `hv-${project.name}-${environmentName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 28).replace(/-+$/, '');
+  const legacyNames = awsLegacyNames(environment, awsStateExists(project.id, environment.id));
+  const prefix = awsPrefix(project.name, environmentName, legacyNames);
   const sharedPrefix = `hv-${project.name}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 21).replace(/-+$/, '') + '-shared';
   const databaseName = `app_${awsKey(environmentName)}`.slice(0, 40).replace(/_+$/, '');
   return {
-    connection: connection.data, auth, environment, prefix,
+    connection: connection.data, auth, environment, prefix, legacyNames,
     shared: {
       prefix: sharedPrefix, clusterIdentifier: `${sharedPrefix}-postgres`,
       clusterArn: awsSharedClusterArn({ accountId: parsed.data.accountId, region: connection.data.region, prefix: sharedPrefix }),
@@ -596,6 +630,10 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   clearEngineCiBinding(ctx, context.environment);
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
+  // Recorded before anything is created, so a failed first apply cannot turn a new environment into an old-named one.
+  if (!snapshotOnly && !context.legacyNames && awsBinding(context.environment).naming !== 2) {
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { aws: { ...awsBinding(context.environment), naming: 2 } });
+  }
   const access = awsAccess(context);
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
@@ -635,7 +673,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
             const { aws: _aws, engine: _engine, ...rest } = current.platformBindings as Record<string, unknown>;
             const kept = (action.metadata as { finalSnapshot?: string }).finalSnapshot;
             ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, engine: {},
-              aws: { tornDownAt: new Date().toISOString(), ...(kept ? { finalSnapshot: { identifier: kept, region: context.connection.region } } : {}) } });
+              aws: { naming: 2, tornDownAt: new Date().toISOString(), ...(kept ? { finalSnapshot: { identifier: kept, region: context.connection.region } } : {}) } });
             // The environment is gone; removing it from the spec keeps the next plan from recreating it.
             new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, environmentName));
           }

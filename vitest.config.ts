@@ -12,6 +12,7 @@ const heavyTests = [
   'src/__tests__/packaged-mcp.test.ts',
   'src/adapters/dns/tofu/__tests__/dns-provider-validation.test.ts',
   'src/adapters/engine/opentofu/__tests__/build-token-config.test.ts',
+  'src/adapters/engine/opentofu/__tests__/cloud-run-scaling-plan.test.ts',
   'src/adapters/engine/opentofu/__tests__/database-backup-preservation.test.ts',
   'src/adapters/engine/opentofu/__tests__/engine-ci-config.test.ts',
   'src/adapters/engine/opentofu/__tests__/opentofu.engine.live.test.ts',

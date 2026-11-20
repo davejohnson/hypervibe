@@ -72,6 +72,16 @@ describe('engine plan translation', () => {
     expect((actions[0]!.metadata!.engineSegment as any).addresses).toHaveLength(2);
   });
 
+  it('names the changed setting inside a block, not only the block, and never its value', () => {
+    const container = (image: string) => ({ template: [{ template: [{ containers: [{ image, args: ['migrate'] }] }] }] });
+    const { actions } = translateEnginePlan({ provider: 'gcp', configuration, segment, parsed: parseEnginePlan(plan([
+      { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['update'],
+        before: container('registry/app:one'), after: container('registry/app:two') },
+    ])) });
+    expect(actions[0]!.diff).toEqual([{ field: 'google_cloud_run_v2_service.template.0.template.0.containers.0.image' }]);
+    expect(JSON.stringify(actions[0]!.diff)).not.toContain('registry');
+  });
+
   it('requires confirmation for replacement and reports no-ops as noop without a segment', () => {
     const replace = translateEnginePlan({ provider: 'gcp', configuration, segment, parsed: parseEnginePlan(plan([
       { address: 'google_cloud_run_v2_service.web', type: 'google_cloud_run_v2_service', actions: ['delete', 'create'], before: { name: 'a' }, after: { name: 'b' } },
