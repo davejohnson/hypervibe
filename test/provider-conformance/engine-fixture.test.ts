@@ -143,3 +143,20 @@ describe('leftover inventory', () => {
     await expect(run([])).resolves.toMatchObject({ phase: 'cleaned', checks: { created: true, updated: true, absent: true } });
   });
 });
+
+describe('web start command checks', () => {
+  it('leaves the image in charge when no start command is given, and reports how the web service was started', async () => {
+    const { engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureEntrypointDockerfile } = await import('./engine-fixture.js');
+    const services = (webStart?: string | null) => (engineFixtureEnvironment('aws', 'create', 'us-east-1', undefined, webStart) as { services: Record<string, { startCommand?: string }> }).services;
+    expect(services(null).web).not.toHaveProperty('startCommand');
+    expect(services().web!.startCommand).toBe('node server.mjs');
+    expect(services('node server.mjs gained').web!.startCommand).toBe('node server.mjs gained');
+    const body = { service: 'hypervibe-provider-conformance', revision: 'create', database: true, worker: true, storage: true, scheduled: true, onDemand: true, entrypoint: false, startedWith: 'gained' };
+    expect(engineFixtureResponseProblem(200, body, 'create', { entrypoint: false, startedWith: 'gained' })).toBeUndefined();
+    expect(engineFixtureResponseProblem(200, body, 'create', { entrypoint: true, startedWith: null })).toContain("without the image's entrypoint");
+    expect(engineFixtureResponseProblem(200, body, 'create')).toBeUndefined();
+    const dockerfile = engineFixtureEntrypointDockerfile('FROM node:22-alpine\nCMD ["node", "server.mjs"]\n');
+    expect(dockerfile).toContain('ENTRYPOINT ["/app/entry.sh"]\nCMD ["node", "server.mjs"]');
+    expect(() => engineFixtureEntrypointDockerfile('FROM scratch\n')).toThrow();
+  });
+});

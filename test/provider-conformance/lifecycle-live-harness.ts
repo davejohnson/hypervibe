@@ -21,7 +21,7 @@ export interface FixtureJournal {
    * databaseClosed: the database refused a connection from outside while the app was using it.
    * sibling: a second environment joined the project's shared pieces, worked and left while the first kept working.
    */
-  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean; databaseClosed?: boolean; sibling?: boolean };
+  checks: { created: boolean; noop: boolean; updated: boolean; absent: boolean; retained?: boolean; databaseClosed?: boolean; sibling?: boolean; webCommand?: boolean };
 }
 
 export interface LifecycleFixtureDriver {
