@@ -412,6 +412,7 @@ export function parseHostingBindings(
  * Hosting adapters handle deploying services to cloud platforms.
  */
 export interface IHostingAdapter {
+  readonly privateMigrationSourceInspection?: import('../plan/migration-version.contract.js').PrivateMigrationSourceInspection;
   readonly serviceInstances?: import('./service-instance.port.js').IServiceInstances;
   /** Read-only admission for an explicitly reviewed private database task. */
   readonly databaseInitialization?: import('./database-initialization-bootstrap.port.js').IDatabaseInitializationBootstrap;

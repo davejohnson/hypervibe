@@ -5,6 +5,8 @@ import { isAbsolute } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { gql, type GraphQLClient } from 'graphql-request';
 import { z } from 'zod';
+import { migrationSourceInventorySchema, type MigrationSourceInventory, type MigrationVersionSource } from '../../../domain/plan/migration-version.contract.js';
+import { versionProgram } from './railway-version-program.js';
 import { POSTGRES_AUTHENTICATION_PROGRAM_SOURCE } from '../../../domain/services/database-initialization-program.js';
 
 export type RailwayRuntimeTarget = { projectId: string; environmentId: string; serviceId: string; deploymentId: string };
@@ -62,7 +64,20 @@ async function main(request) {
 }
 `;
 
-async function execute(instanceId: string, credentials: Required<RailwayRuntimeCredentials>, input: string): Promise<unknown> {
+const runtimeCommand = 'test -z "$NODE_OPTIONS" && test -z "$NODE_EXTRA_CA_CERTS" && node -';
+export async function trustedRailwaySshCredentials(credentials?: RailwayRuntimeCredentials | null): Promise<Required<RailwayRuntimeCredentials> | undefined> {
+  if (!credentials?.sshIdentityFile || !credentials.sshKnownHostsFile) return;
+  const files = [credentials.sshIdentityFile, credentials.sshKnownHostsFile];
+  if (files.some(path => !isAbsolute(path) || /[%\x00-\x1f\x7f]|\$\{/.test(path))) return;
+  const [key, hosts] = await Promise.all(files.map(path => lstat(path)));
+  const uid = process.getuid?.();
+  if (!key.isFile() || !hosts.isFile() || (key.mode & 0o077) !== 0 || (hosts.mode & 0o022) !== 0
+    || uid === undefined || [key, hosts].some(file => file.uid !== uid && file.uid !== 0)) return;
+  return { sshIdentityFile: files[0]!, sshKnownHostsFile: files[1]! };
+}
+
+async function executeRailwayEvidence(instanceId: string, credentials: Required<RailwayRuntimeCredentials>, input: string,
+  interpreter: 'runtime-node' | 'database-sh' = 'runtime-node'): Promise<unknown> {
   // No user ssh config, forwarding, prompts, host-key writes or implicit key
   // discovery. CLI source documents exact deployment-instance SSH usernames.
   const quotedHosts = `"${credentials.sshKnownHostsFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
@@ -71,20 +86,40 @@ async function execute(instanceId: string, credentials: Required<RailwayRuntimeC
     '-o', 'RequestTTY=no', '-o', 'PermitLocalCommand=no', '-o', 'ConnectTimeout=5', '-o', 'ConnectionAttempts=1',
     '-o', 'LogLevel=ERROR', '-o', `UserKnownHostsFile=${quotedHosts}`, '-o', 'GlobalKnownHostsFile=/dev/null',
     '-i', credentials.sshIdentityFile, `${instanceId}@ssh.railway.com`,
-    'test -z "$NODE_OPTIONS" && test -z "$NODE_EXTRA_CA_CERTS" && node -'];
+    interpreter === 'runtime-node' ? runtimeCommand : '/bin/sh -s'];
   return new Promise(resolve => {
-    let output = '', settled = false;
-    const process = childProcess.spawn('/usr/bin/ssh', args, { stdio: ['pipe', 'pipe', 'ignore'], shell: false });
-    const finish = (value: unknown) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
-    const timer = setTimeout(() => { process.kill('SIGKILL'); finish(null); }, 60_000);
-    process.on('error', () => finish(null)); process.stdin.on('error', () => finish(null));
-    process.stdout.on('data', (data: Buffer) => {
+    let output = '', rejected = false;
+    const child = childProcess.spawn('/usr/bin/ssh', args, { stdio: ['pipe', 'pipe', 'ignore'], shell: false });
+    const abort = () => {
+      if (rejected) return;
+      rejected = true;
+      child.kill('SIGKILL');
+    };
+    const timer = setTimeout(abort, 60_000);
+    child.on('error', () => { rejected = true; });
+    child.stdin.on('error', abort);
+    child.stdout.on('data', (data: Buffer) => {
+      if (rejected) return;
       output += data.toString('utf8');
-      if (Buffer.byteLength(output) > 65_536) { process.kill('SIGKILL'); finish(null); }
+      if (Buffer.byteLength(output) > 65_536) abort();
     });
-    process.on('close', code => { try { finish(code === 0 ? JSON.parse(output) : null); } catch { finish(null); } });
-    process.stdin.end(input);
+    // Node emits close after exit or spawn error and after the stdio streams close.
+    child.once('close', code => {
+      clearTimeout(timer);
+      try { resolve(!rejected && code === 0 ? JSON.parse(output) : null); } catch { resolve(null); }
+    });
+    child.stdin.end(input);
   });
+}
+
+export async function readRailwayServerVersion(source: MigrationVersionSource, credentials?: RailwayRuntimeCredentials | null): Promise<MigrationSourceInventory> {
+  const trusted = await trustedRailwaySshCredentials(credentials);
+  if (!trusted) throw new Error('The exact running Railway database and its private version reply could not be verified.');
+  const nonce = randomBytes(16).toString('hex');
+  const value = await executeRailwayEvidence(source.replicaId, trusted, versionProgram(source, nonce), 'database-sh');
+  const receipt = z.object({ nonce: z.literal(nonce), inventory: migrationSourceInventorySchema }).strict().safeParse(value);
+  if (!receipt.success) throw new Error('The exact running Railway database and its private version reply could not be verified.');
+  return receipt.data.inventory;
 }
 
 /** Existing-key-only workload evidence; no provider mutation or access setup. */
@@ -117,16 +152,13 @@ export function createRailwayRuntimeEvidence(clientFor: () => GraphQLClient | nu
       request = requestSchema.parse(request);
       if (new Set(request.keys).size !== request.keys.length
         || [request.expectedHashes, request.connectionConfigurationHashes].some(hashes => hashes && (Object.keys(hashes).length !== request.keys.length || request.keys.some(key => !hashes[key])))) return unknown();
-      const credentials = credentialsFor();
-      if (!credentials?.sshIdentityFile || !credentials.sshKnownHostsFile || !isAbsolute(credentials.sshIdentityFile) || !isAbsolute(credentials.sshKnownHostsFile)) return unknown();
-      if ([credentials.sshIdentityFile, credentials.sshKnownHostsFile].some(path => /[%\x00-\x1f\x7f]/.test(path))) return unknown();
-      const [key, hosts] = await Promise.all([lstat(credentials.sshIdentityFile), lstat(credentials.sshKnownHostsFile)]);
-      if (!key.isFile() || !hosts.isFile() || key.isSymbolicLink() || hosts.isSymbolicLink() || (key.mode & 0o077) !== 0) return unknown();
+      const credentials = await trustedRailwaySshCredentials(credentialsFor());
+      if (!credentials) return unknown();
       const before = await inventory(target);
       const results = await Promise.all(before.ids.map(async instanceId => {
         const nonce = randomBytes(16).toString('hex');
         const input = { ...request, target: { ...target, instanceId }, nonce };
-        const result = responseSchema.parse(await execute(instanceId, credentials as Required<RailwayRuntimeCredentials>, `${RAILWAY_RUNTIME_PROGRAM}\nmain(${JSON.stringify(input)});\n`));
+        const result = responseSchema.parse(await executeRailwayEvidence(instanceId, credentials, `${RAILWAY_RUNTIME_PROGRAM}\nmain(${JSON.stringify(input)});\n`));
         if (result.nonce !== nonce || !isDeepStrictEqual(Object.keys(result.envVarHashes).sort(), [...request.keys].sort())
           || request.expectedHashes && !isDeepStrictEqual(result.envVarHashes, request.expectedHashes)) throw new Error();
         return result;

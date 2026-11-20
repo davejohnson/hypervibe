@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import type { Component } from '../../../../domain/entities/component.entity.js';
 import { databaseCredentialLifecycle } from '../../../../domain/ports/database-credential.port.js';
 import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
+import { versionProgram } from '../railway-version-program.js';
 import { createRailwayDatabaseAdapter } from '../railway-database.factory.js';
 import { railwayHttpFixture, projectId, stagingId } from './railway-http.fixture.js';
 
@@ -53,6 +54,41 @@ describe('Railway complete database password rotation', () => {
     await admin?.end();
     if (started) await execute('pg_ctl', ['-D', join(directory, 'data'), '-m', 'immediate', '-w', 'stop'], { env });
     if (directory) await rm(directory, { recursive: true, force: true });
+  });
+
+  it('runs the fixed migration inventory against a real local database and rejects a redirected issuer URL', async () => {
+    const target = { projectId, environmentId: stagingId, serviceId: 'db-source', deploymentId: 'release', serviceInstanceId: 'instance',
+      replicaId: 'replica', volumeId: 'volume', volumeInstanceId: 'volume-instance', imageDigest: 'sha256:' + 'a'.repeat(64) };
+    const nonce = 'c'.repeat(32);
+    const script = versionProgram(target, nonce);
+    // Substitute only the disposable local socket/port and the installation's binary directory.
+    // All SQL, sanitized client options, in-container scope checks and receipt encoding are unchanged.
+    const localScript = script.replace('export PATH=/usr/local/bin:/usr/bin:/bin', 'export PATH="$TEST_PATH"')
+      .replace('--host=/var/run/postgresql --port=5432', '--host="$TEST_SOCKET" --port="$TEST_PORT"');
+    expect(localScript).not.toContain('/var/run/postgresql');
+    const runtime = { TEST_PATH: env.PATH, TEST_SOCKET: directory, TEST_PORT: String(portNumber),
+      RAILWAY_PROJECT_ID: projectId, RAILWAY_ENVIRONMENT_ID: stagingId, RAILWAY_SERVICE_ID: target.serviceId,
+      RAILWAY_DEPLOYMENT_ID: target.deploymentId, RAILWAY_REPLICA_ID: target.replicaId,
+      POSTGRES_USER: 'auth_admin', POSTGRES_DB: 'postgres', PGDATABASE: 'postgres', RAILWAY_PRIVATE_DOMAIN: 'db.railway.internal',
+      DATABASE_URL: 'postgresql://auth_admin:fixture-secret@db.railway.internal:5432/postgres' };
+    await admin.query('CREATE TABLE migration_inventory_fixture (v integer)');
+    try {
+      await admin.query('INSERT INTO migration_inventory_fixture VALUES (1), (2)');
+      await admin.query('ANALYZE migration_inventory_fixture');
+      // The statistics collector can publish ANALYZE asynchronously (notably PostgreSQL 14).
+      await expect.poll(async () => (await admin.query(
+        "SELECT n_live_tup FROM pg_catalog.pg_stat_user_tables WHERE relname = 'migration_inventory_fixture'"
+      )).rows[0]?.n_live_tup, { timeout: 8000 }).toBe('2');
+      const version = Number((await admin.query('SHOW server_version_num')).rows[0].server_version_num);
+      const reply = await execute('/bin/sh', ['-c', localScript], { env: runtime });
+      expect(JSON.parse(reply.stdout)).toEqual({ nonce, inventory: { versionNumber: version, tables: 1, estimatedRows: '2' } });
+      for (const overrides of [{ DATABASE_URL: 'postgresql://db:secret@different.railway.internal/postgres' },
+        { DATABASE_URL: 'postgresql://db:secret@different.railway.internal/admin/@db.railway.internal:5432/postgres' },
+        { DATABASE_URL: 'postgresql://db:secret@different.railway.internal/admin?x=@db.railway.internal:5432/postgres' },
+        { POSTGRES_DB: 'postgresql://unexpected/db' }, { PGDATABASE: 'different' }, { RAILWAY_PROJECT_ID: 'another-project' }]) {
+        await expect(execute('/bin/sh', ['-c', localScript], { env: { ...runtime, ...overrides } })).rejects.toMatchObject({ stdout: '' });
+      }
+    } finally { await admin.query('DROP TABLE migration_inventory_fixture'); }
   });
 
   async function fixture(options: Parameters<typeof railwayHttpFixture>[0] = {}) {

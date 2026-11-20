@@ -126,9 +126,16 @@ The worker then runs only while that count is above zero and starts within
 about a minute of new work. Keep a worker always on only when it must react
 instantly or does not use the app database.
 
-`hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
-and bucket transfers require a planned private credential handoff that is still
-unavailable. A fresh comparison of private Railway and Cloud SQL databases also
+For a new destination, `hv_migrate` proposes an OpenTofu-managed GCP target.
+It can import runtime settings into an existing AWS target. Guided migration
+to Azure is unavailable. Railway database and bucket transfers require a planned
+private credential handoff that is still unavailable. For private PostgreSQL source inventory, use `hv_migrate` with
+`inspectSource=true` to plan one fixed query on the exact running Railway database
+using the connection's pre-registered SSH identity and trusted host keys. The
+named destination may use any cloud or may be undeclared. The inspection
+accesses only the source. Show the saved action before applying it. It returns
+a version, user-table count and estimated live rows. Verifying a copy of
+private Railway and Cloud SQL databases
 requires reviewed verification jobs. Historical receipts record what matched at
 the time of the copy. Report these limits before requesting a maintenance window.
 For supported operations the workflow also stops at

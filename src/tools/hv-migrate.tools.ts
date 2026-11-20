@@ -11,11 +11,11 @@ import { projectField } from './schemas.js';
 export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_migrate',
-    'Move an app from one environment (for example a staging environment on another hosting provider) to a new OpenTofu-managed Google Cloud environment in one guided command. Private-source database and file copies may require a planned credential handoff, and fresh verification may require reviewed native jobs. The command reports unavailable prerequisites before attempting the transfer. Set gcpProjectId on a new target to use its own Google Cloud project. Initial preparation keeps the source serving. Hypervibe proposes the target from the source, connects Google Cloud, copies runtime secrets into Secret Manager, builds the infrastructure, copies the database and files inside Google Cloud, verifies per-table row counts and content checksums and the downloaded contents of every selected file, then releases the app. It stops for: needs_billing_choice, needs_access, needs_confirmation (as hv_launch), needs_secret_import (show the setting names, then call again with importSecrets=true), and needs_copy_approval (show what will be copied and that target data is replaced, then call again with copyData=true). Call it again after pending. A re-run after a verified copy releases without copying again unless refreshData=true; verifyOnly=true compares source and copy without changing anything. cutover=true is the final move: it pauses the source behind its maintenance page, copies and verifies the data again, then forwards the source domain to the target.',
+    'Inspect a Railway PostgreSQL source before choosing or preparing a cloud destination, or guide a migration between named environments. A new migration destination defaults to Google Cloud. An existing AWS destination supports runtime settings only. Guided migration to Azure is unavailable. For the Google Cloud migration, review each request for access, infrastructure, runtime settings and data copying. The source keeps serving during preparation. Transferring private Railway data and verifying a fresh copy require provider jobs and credential handoff that are not yet available. Resume pending work with the same plan. After a verified copy, use refreshData to request a new copy, verifyOnly to compare the data or cutover to review moving traffic.',
     {
       project: projectField,
       from: z.string().min(1).describe('Source environment name, for example "staging".'),
-      to: z.string().min(1).describe('Target environment name; proposed from the source when it does not exist yet.'),
+      to: z.string().min(1).describe('Destination environment name. Source inspection binds its receipt to this name and does not access or create the destination.'),
       gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN).optional().describe('Google Cloud project ID for a new target environment. Saved on the target for subsequent calls. Omit to use the repository connection.'),
       region: z.string().min(1).optional().describe('Google Cloud region for a new target (default us-central1).'),
       domain: z.string().min(1).optional().describe('Hostname for the new target, for example gcp.example.com.'),
@@ -24,6 +24,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       approveAccess: z.array(z.enum(['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional(),
       planId: z.string().min(1).optional().describe('Exact saved planId returned by needs_confirmation or pending. Required when supplying infrastructure confirmActions.'),
       confirmActions: z.array(z.string().min(1)).optional(),
+      inspectSource: z.boolean().optional().describe('Review one query of the running Railway PostgreSQL version, user-table count and estimated live rows over existing trusted Railway SSH. Works with any named destination, including one that has not been created.'),
       importSecrets: z.boolean().optional().describe('true only after the user approved copying the listed runtime settings.'),
       copyData: z.boolean().optional().describe('true only after the user approved copying the data, replacing anything in the target.'),
       cutover: z.boolean().optional().describe('Final move after the copy was checked: pause the source behind its maintenance page, copy and verify the data again, then forward its domain to the target. Returns needs_cutover_approval first.'),
@@ -31,7 +32,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       verifyOnly: z.boolean().optional().describe('Read-only: compare the source and the copy (row counts, per-table content checksums and downloaded file contents) without copying or releasing anything. Returns verified, differs, or blocked when required access or verification jobs are unavailable.'),
       refreshData: z.boolean().optional().describe('true only after the user approved copying the data again over an earlier verified copy. Without it, a re-run releases using the existing copy.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, approveAccess, planId, confirmActions, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
+    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, approveAccess, planId, confirmActions, inspectSource, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
       if (gcpSetupPlanId && (!approveAccess?.includes('gcp-setup') || !billingAccountName)) {
         return commandError('VALIDATION', 'Use gcpSetupPlanId with the selected billing account and approval for gcp-setup.');
       }
@@ -39,7 +40,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
       const result = await migrateEnvironment(ctx, {
-        project, from, to, gcpProjectId,
+        project, from, to, gcpProjectId, ...(inspectSource ? { inspectSource } : {}),
         ...(region ? { region } : {}), ...(domain ? { domain } : {}),
         ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
         ...(billingAccountName ? { billingAccountName } : {}), ...(approveAccess ? { approveAccess } : {}),
@@ -65,6 +66,8 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
           return commandSuccess(result, ask('Ask which billing account should pay for the new environment, then call again with billingAccountName. Billing selection does not approve infrastructure or permissions; review the saved plan at needs_access.'));
         case 'needs_access':
           return commandSuccess(result, ask(result.confirmationHint ?? `Explain this Google Cloud access, then call again with approveAccess including "${result.accessId}".`));
+        case 'source_inspected':
+          return commandSuccess(result);
         case 'needs_confirmation':
           return commandSuccess(result, ask(`Show the changes and estimated monthly cost, then call again with planId ${JSON.stringify(result.planId)} and confirmActions ${JSON.stringify(result.confirmActions)}.`));
         case 'needs_connection':

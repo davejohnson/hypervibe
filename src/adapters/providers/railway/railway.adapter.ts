@@ -28,7 +28,9 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } from '../../../domain/ports/service-volume.port.js';
 import { railwayDeployedConfiguration } from './railway-runtime-configuration.js';
-import { createRailwayRuntimeEvidence } from './railway-runtime-evidence.js';
+import { railwayInspectionProgramHash } from './railway-version-program.js';
+import { createRailwayVersionInspection } from './railway-version-inspection.js';
+import { createRailwayRuntimeEvidence, readRailwayServerVersion, trustedRailwaySshCredentials } from './railway-runtime-evidence.js';
 import { createRailwayDatabaseRotationConfiguration } from './railway-database-rotation.js';
 import { createRailwayDatabaseInitialization } from './railway-database-initialization.js';
 import { railwayReplicaConfiguration } from './railway-replica-configuration.js';
@@ -256,6 +258,12 @@ export class RailwayAdapter implements
     inspectPersistence: (target, options) => this.observeDatabasePersistence(target, options),
     aliases: this.railwayCredentialAliases,
   });
+  readonly privateMigrationSourceInspection = {
+    programHash: railwayInspectionProgramHash,
+    ...createRailwayVersionInspection(() => this.client, target => this.resolveBackupVolume(target),
+      source => readRailwayServerVersion(source, this.credentials)),
+    hasTrustedAccess: async () => Boolean(await trustedRailwaySshCredentials(this.credentials)),
+  };
   readonly railwayRuntimeEvidence = createRailwayRuntimeEvidence(() => this.client, () => this.credentials);
   readonly railwayDatabaseRotationConfiguration = createRailwayDatabaseRotationConfiguration(() => this.client, this.railwayRuntimeEvidence);
   readonly databaseInitialization = createRailwayDatabaseInitializationInspection(() => this.client, async source => {
@@ -8220,6 +8228,7 @@ providerRegistry.register({
       hosting: { workloadKinds: ['web', 'worker', 'cron'], customDomains: 'managed', customDomainRetarget: 'managed', maintenance: 'managed', teardownBoundary: 'environment',
         environmentTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live' },
         recoveryTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
+        privateMigrationSourceInspection: 'railway-postgres-ssh',
         databaseInitializationTasks: { variableMode: 'references', execution: 'temporary-workload', status: 'ready-for-live', databaseProviders: ['railway'] },
         serviceVolumes: { workloadKinds: ['web'], retention: 'retain-only' } },
       databaseEngines: ['postgres'],
