@@ -669,6 +669,9 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
         project: input.projectId,
         instance: '${google_sql_database_instance.db.name}',
         type: 'CLOUD_IAM_SERVICE_ACCOUNT',
+        // Google cannot delete a PostgreSQL login that holds grants, and this one is granted read access.
+        // It is left in place when it leaves the plan and goes with the instance when the database is removed.
+        deletion_policy: 'ABANDON',
       } };
     }
   }
