@@ -162,7 +162,9 @@ export function translateEnginePlan(params: {
     // Field lists help review changes to existing resources; for creates and deletes they are noise.
     const diff: PlanFieldDiff[] = changes
       .filter((change) => change.action === 'update' || change.action === 'replace')
-      .flatMap((change) => change.changedAttributes.map((field) => ({ field: `${change.type}.${field}` })));
+      // Name the changed leaf (never its value), so "template" does not hide which setting inside it moves.
+      .flatMap((change) => [...new Set(change.changedAttributePaths.map((path) => path.join('.') || '*'))].sort()
+        .map((field) => ({ field: `${change.type}.${field}` })));
     const mutating = changes.filter((change) => change.action !== 'noop').map((change) => change.address);
     actions.push({
       id: actionId,
