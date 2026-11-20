@@ -21,14 +21,15 @@ export type EngineFixtureCloud = 'aws' | 'azure';
  * that runs only while it has work, a scheduled job and file storage, all using
  * one database.
  */
-export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', connectionRegion: string, region?: string): Record<string, unknown> {
+/** `webStart` is the web service's start command; null leaves the image's own startup in charge. */
+export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', connectionRegion: string, region?: string, webStart: string | null = 'node server.mjs'): Record<string, unknown> {
   return {
     // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
     hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
     database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
     storage: { files: { provider: cloud === 'aws' ? 's3' : 'azureblob', type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
     services: {
-      web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true },
+      web: { workloadKind: 'web', ...(webStart ? { startCommand: webStart } : {}), healthCheckPath: '/health', public: true },
       worker: { workloadKind: 'worker', startCommand: 'node server.mjs worker' },
       ondemand: { workloadKind: 'worker', startCommand: 'node server.mjs ondemand', onDemand: {
         pendingWorkQuery: "SELECT count(*) FROM conformance_jobs WHERE status = 'queued'",
@@ -41,16 +42,27 @@ export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'c
 }
 
 /** The app's answer must show the revision and recent proof from every workload and from storage. */
-export function engineFixtureResponseProblem(status: number, value: unknown, revision: string): string | undefined {
-  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean; onDemand?: boolean; scheduled?: boolean; storage?: boolean } | null;
+export function engineFixtureResponseProblem(status: number, value: unknown, revision: string, start?: { entrypoint: boolean; startedWith: string | null }): string | undefined {
+  const body = value as { entrypoint?: boolean; startedWith?: string | null; service?: string; revision?: string; database?: boolean; worker?: boolean; onDemand?: boolean; scheduled?: boolean; storage?: boolean } | null;
   if (status !== 200 || body?.service !== 'hypervibe-provider-conformance') return `the web service did not answer as the fixture (HTTP ${status})`;
   if (body.revision !== revision) return `the web service is not serving the ${revision} revision`;
+  if (start && (body.entrypoint !== start.entrypoint || (body.startedWith ?? null) !== start.startedWith)) {
+    return `the web service was started ${body.entrypoint ? 'through' : 'without'} the image's entrypoint with ${JSON.stringify(body.startedWith ?? null)}, not ${start.entrypoint ? 'through' : 'without'} it with ${JSON.stringify(start.startedWith)}`;
+  }
   if (body.database !== true) return 'the web service could not use its database';
   if (body.worker !== true) return 'the worker has not written to the database in the last two minutes';
   if (body.storage !== true) return 'the web service could not write a file to its storage and read it back';
   if (body.scheduled !== true) return 'the scheduled job has not run in the last five minutes';
   if (body.onDemand !== true) return 'the on-demand worker has not finished queued work in the last five minutes';
   return undefined;
+}
+
+/** An image with its own entrypoint: it marks the process and runs what it is given, as many real images do. */
+export const ENGINE_FIXTURE_ENTRYPOINT = '#!/bin/sh\nexport CONFORMANCE_ENTRYPOINT=1\nexec "$@"\n';
+export function engineFixtureEntrypointDockerfile(dockerfile: string): string {
+  const start = 'CMD ["node", "server.mjs"]';
+  if (!dockerfile.includes(start)) throw new Error('The fixture Dockerfile no longer ends in the expected start line.');
+  return dockerfile.replace(start, `COPY entry.sh ./\nRUN chmod +x entry.sh\nENTRYPOINT ["/app/entry.sh"]\n${start}`);
 }
 
 /** A second environment for the same project: a web service and its own database, nothing else. */

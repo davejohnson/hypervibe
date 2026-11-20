@@ -10,7 +10,7 @@ import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
+import { ENGINE_FIXTURE_ENTRYPOINT, engineFixtureEntrypointDockerfile, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
   readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -142,6 +142,11 @@ live('AWS and Azure engine disposable environment fixture', () => {
       };
       if (!existsSync(path.join(workspace, '.git'))) {
         cpSync(path.join(import.meta.dirname, 'fixture-database'), workspace, { recursive: true });
+        if (cloud === 'aws') {
+          // AWS runs the web start-command checks, which need an image with its own entrypoint.
+          writeFileSync(path.join(workspace, 'entry.sh'), ENGINE_FIXTURE_ENTRYPOINT);
+          writeFileSync(path.join(workspace, 'Dockerfile'), engineFixtureEntrypointDockerfile(readFileSync(path.join(workspace, 'Dockerfile'), 'utf8')));
+        }
         writeFileSync(path.join(workspace, '.gitignore'), '.hypervibe/\nnode_modules/\nfixture-evidence.json\nfixture-baseline.json\n.env*\n');
         // Hypervibe builds from the repository that holds the project's spec file. Without it a plan has no
         // source, builds no image and creates no workloads (live 2026-11-18: the release was then refused).
@@ -151,7 +156,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
         writeFileSync(repoSpecFile, `${JSON.stringify(JSON.parse(stored.document), null, 2)}\n`);
         for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Hypervibe fixture'], ['config', 'user.email', 'fixture@hypervibe.invalid'],
           ...(project.git_remote_url ? [['remote', 'add', 'origin', project.git_remote_url]] : []),
-          ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore'], ['commit', '-m', 'Disposable engine conformance fixture']]) {
+          ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore', ...(cloud === 'aws' ? ['entry.sh'] : [])], ['commit', '-m', 'Disposable engine conformance fixture']]) {
           await processOutput('git', args, workspace, dataDir);
         }
       }
@@ -175,8 +180,10 @@ live('AWS and Azure engine disposable environment fixture', () => {
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
           environments: environment ? { ...others, [name]: environment } : others } });
       };
-      const setEnvironment = (revision: 'create' | 'update' | undefined) =>
-        setSpecEnvironment(environmentName, revision ? engineFixtureEnvironment(cloud, revision, marker.region, region) : undefined);
+      // On AWS the web service starts as its image says, gains a start command, changes it and drops it again.
+      const imageStart = cloud === 'aws' ? { entrypoint: true, startedWith: null } : undefined;
+      const setEnvironment = (revision: 'create' | 'update' | undefined, webStart: string | null | undefined = cloud === 'aws' ? null : undefined) =>
+        setSpecEnvironment(environmentName, revision ? engineFixtureEnvironment(cloud, revision, marker.region, region, webStart) : undefined);
       const plan = async (input: Json = {}, name = environmentName) => {
         const envelope = await cli(['plan'], { project: projectName, env: name, ...input });
         if (!Array.isArray(envelope.data?.actions) || (envelope.data.blocked ?? []).length) throw new Error('The fixture plan is blocked or incomplete.');
@@ -281,7 +288,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
           }
           // Between the first environment's checks and its update, a second one comes and goes.
           if (revision === 'update' && !journal.checks.sibling) await siblingJoinsAndLeaves();
-          await setEnvironment(revision);
+          const settle = async () => {
           for (let attempt = 0; attempt < 8; attempt++) {
             const envelope = await plan();
             if (!changesOf(envelope).length) {
@@ -307,9 +314,22 @@ live('AWS and Azure engine disposable environment fixture', () => {
             }
           }
           throw new Error('Fixture convergence exceeded its bounded apply steps.');
+          };
+          if (revision === 'update' && cloud === 'aws' && !journal.checks.webCommand) {
+            for (const word of ['gained', 'changed']) {
+              await setEnvironment('create', `node server.mjs ${word}`);
+              await settle();
+              await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, 'create', { entrypoint: false, startedWith: word }));
+            }
+            journal.checks.webCommand = true; save(journal);
+          }
+          await setEnvironment(revision);
+          await settle();
         },
         verifyRunning: async (revision) => {
-          await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, revision));
+          await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, revision, imageStart));
+          // After the start command is dropped the image's own startup is back, and nothing is left to change.
+          if (revision === 'update' && cloud === 'aws') await assertUnchanged(environmentName);
           // The app reached its database above. From this computer the same database must be closed.
           const database = await exposure(await inventory());
           if (database.problems.length) throw new Error(`The database is exposed: ${database.problems.join('; ')}.`);

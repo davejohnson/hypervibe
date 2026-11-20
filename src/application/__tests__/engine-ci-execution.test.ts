@@ -1,3 +1,4 @@
+import { awsImageBuildspec } from '../../adapters/providers/aws/aws-buildspec.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -14,6 +15,7 @@ import type { EngineCiBinding } from '../../domain/spec/engine-ci-binding.js';
 
 const account = '111122223333'; const region = 'eu-west-1'; const prefix = 'hv-app-preview'; const repository = 'example/app';
 const webArn = `arn:aws:ecs:${region}:${account}:service/${prefix}/${prefix}-web`; const deploymentArn = `arn:aws:ecs:${region}:${account}:service-deployment/${prefix}/${prefix}-web/release1`; const digest = `sha256:${'a'.repeat(64)}`;
+const webDigest = `sha256:${'b'.repeat(64)}`;
 let directory: string;
 beforeEach(() => { directory = mkdtempSync(`${tmpdir()}/hv-ci-execution-`); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); rmSync(directory, { recursive: true, force: true }); process.exitCode = 0; });
@@ -26,7 +28,7 @@ function fixture(options: { marker?: boolean; path?: string; migrations?: unknow
     aws: { accountId: account, roleArn: `arn:aws:iam::${account}:role/hypervibe/app/${prefix}-ci`, buildProjectArn: `arn:aws:codebuild:${region}:${account}:project/${prefix}-images`, sourceBucket: `${prefix}-build-${account}`, repositoryUrl: `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}` } };
   const bindings = { version: 1, project: 'app', environments: { preview: { platformBindings: options.marker === false ? {} : { engineCi: binding } } } };
   mkdirSync(`${directory}/.hypervibe`); writeFileSync(`${directory}/.hypervibe/spec.json`, JSON.stringify(rawSpec)); writeFileSync(`${directory}/.hypervibe/bindings.json`, JSON.stringify(bindings));
-  if (options.dockerfile !== false) writeFileSync(`${directory}/Dockerfile`, 'FROM node:22\nCMD ["node", "app.js"]\n'); writeFileSync(`${directory}/app.js`, 'console.log("fixture")');
+  if (options.dockerfile !== false) writeFileSync(`${directory}/Dockerfile`, 'FROM node:22\nENTRYPOINT ["node", "a.js"]\nCMD ["serve"]\n'); writeFileSync(`${directory}/app.js`, 'console.log("fixture")');
   const git = (...args: string[]) => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Synthetic Test'); git('remote', 'add', 'origin', `https://github.com/${repository}`); git('add', '.'); git('commit', '-m', 'fixture');
   const github: GitHubOidcContext = { repository, ref: 'refs/heads/main', sha: git('rev-parse', 'HEAD'), eventName: 'push', runId: '123', runAttempt: '1', requestUrl: 'https://pipelines.actions.githubusercontent.com/oidctoken?api-version=2.0', requestToken: 'github-private-request-token' };
@@ -35,8 +37,8 @@ function fixture(options: { marker?: boolean; path?: string; migrations?: unknow
 function assertion(github: GitHubOidcContext, audience: string, patch: Record<string, unknown> = {}) {
   return `header.${Buffer.from(JSON.stringify({ iss: 'https://token.actions.githubusercontent.com', aud: audience, sub: `repo:${repository}:ref:refs/heads/main`, repository, ref: github.ref, sha: github.sha, event_name: github.eventName, run_id: github.runId, run_attempt: github.runAttempt, exp: Math.floor(Date.now() / 1000) + 300, ...patch })).toString('base64url')}.signature`;
 }
-function transport(github: GitHubOidcContext, options: { wrongIdentity?: boolean; buildFailed?: boolean; alreadyRunning?: boolean; projectStatus?: 403 | 404; extraWebArn?: string; rolledBack?: boolean; privateHealth?: boolean; oldLingers?: number; settlingAtStart?: number } = {}) {
-  const calls: Array<{ method: string; host: string; path: string; target: string; body: any }> = []; let images = 0; let updated = false; let readsAfterUpdate = 0; let startReads = 0; let currentImage = options.alreadyRunning ? `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}` : 'old';
+function transport(github: GitHubOidcContext, options: { wrongIdentity?: boolean; buildFailed?: boolean; alreadyRunning?: boolean; projectStatus?: 403 | 404; legacyBuildProject?: boolean; extraWebArn?: string; previousCommand?: string[]; rolledBack?: boolean; privateHealth?: boolean; oldLingers?: number; settlingAtStart?: number } = {}) {
+  const calls: Array<{ method: string; host: string; path: string; target: string; body: any }> = []; const active = new Map<string, { image: string; command: string[] }>(); let built = false; let readsAfterUpdate = 0; let startReads = 0; const originalImage = options.alreadyRunning ? `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}` : 'old';
   vi.stubGlobal('fetch', vi.fn(async (raw: string | URL) => {
     const url = new URL(String(raw));
     if (url.hostname.endsWith('actions.githubusercontent.com')) return Response.json({ value: assertion(github, url.searchParams.get('audience')!) });
@@ -50,21 +52,25 @@ function transport(github: GitHubOidcContext, options: { wrongIdentity?: boolean
     const observedWebArn = options.extraWebArn && body?.serviceArn === options.extraWebArn ? options.extraWebArn : webArn;
     if (r.hostname.startsWith('sts.')) data = `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleWithWebIdentityResult><AssumedRoleUser><Arn>arn:aws:sts::${account}:assumed-role/${prefix}-ci/hv-ci-123-1</Arn><AssumedRoleId>ID:hv-ci-123-1</AssumedRoleId></AssumedRoleUser><Credentials><AccessKeyId>AKIACI000000000000</AccessKeyId><SecretAccessKey>private-cloud-secret</SecretAccessKey><SessionToken>private-cloud-session</SessionToken><Expiration>2030-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>`;
     else if (target.endsWith('BatchGetProjects')) {
-      data = options.projectStatus ? { __type: options.projectStatus === 403 ? 'AccessDeniedException' : 'ResourceNotFoundException', message: 'private-cloud-secret' } : { projects: [{ arn: `arn:aws:codebuild:${region}:${account}:project/${prefix}-images`, tags: [{ key: 'managed-by', value: 'hypervibe' }, { key: 'hv-environment', value: 'env1' }] }] };
+      data = options.projectStatus ? { __type: options.projectStatus === 403 ? 'AccessDeniedException' : 'ResourceNotFoundException', message: 'private-cloud-secret' } : { projects: [{ arn: `arn:aws:codebuild:${region}:${account}:project/${prefix}-images`, source: { type: 'S3', location: `${prefix}-build-${account}/source.zip`, buildspec: JSON.stringify(awsImageBuildspec(!options.legacyBuildProject)) },
+        serviceRole: `arn:aws:iam::${account}:role/hypervibe/app/${prefix}-build`,
+        environment: { type: 'LINUX_CONTAINER', privilegedMode: true, environmentVariables: [{ name: 'REGISTRY', value: `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}` }] },
+        tags: [{ key: 'managed-by', value: 'hypervibe' }, { key: 'hv-environment', value: 'env1' }] }] };
       statusCode = options.projectStatus ?? 200;
     }
     else if (target.endsWith('DescribeImages')) {
-      if (images++ === 0) { data = { __type: 'ImageNotFoundException', message: 'No image' }; statusCode = 400; }
-      else data = { imageDetails: [{ imageDigest: digest }] };
-    } else if (target.endsWith('StartBuild')) data = { build: { id: `${prefix}-images:run`, buildStatus: options.buildFailed ? 'FAILED' : 'SUCCEEDED' } };
-    else if (target.endsWith('UpdateExpressGatewayService')) { if (!options.rolledBack) currentImage = body.primaryContainer.image; updated = true; data = { service: { serviceArn: body.serviceArn } }; }
+      if (!built) { data = { __type: 'ImageNotFoundException', message: 'No image' }; statusCode = 400; }
+      else data = { imageDetails: [{ imageDigest: body.imageIds[0].imageTag.endsWith('-hv-web1') ? webDigest : digest, imageTags: [body.imageIds[0].imageTag] }] };
+    } else if (target.endsWith('StartBuild')) { built = true; data = { build: { id: `${prefix}-images:run`, buildStatus: options.buildFailed ? 'FAILED' : 'SUCCEEDED' } }; }
+    else if (target.endsWith('UpdateExpressGatewayService')) { active.set(body.serviceArn, { image: options.rolledBack ? originalImage : body.primaryContainer.image, command: body.primaryContainer.command ?? [] }); data = { service: { serviceArn: body.serviceArn } }; }
     else if (target.endsWith('DescribeExpressGatewayService')) {
-      const configuration = (image: string) => ({ primaryContainer: { image, containerPort: 8080, environment: [{ name: 'UNCHANGED', value: 'retained' }] }, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'app.example' }] });
+      const now = active.get(observedWebArn); const updated = active.has(observedWebArn);
+      const configuration = (image: string, command: string[]) => ({ primaryContainer: { image, command, containerPort: 8080, environment: [{ name: 'UNCHANGED', value: 'retained' }] }, ingressPaths: [{ accessType: 'PUBLIC', endpoint: 'app.example' }] });
       // Observed live 2026-11-19: once a deployment succeeds AWS stops naming it as current, and for up to a minute still lists the old configuration after the new one.
       const lingering = options.oldLingers !== undefined && updated && readsAfterUpdate++ <= options.oldLingers;
       data = { service: { serviceArn: options.wrongIdentity ? webArn.replace('-web', '-other') : observedWebArn, status: { statusCode: 'ACTIVE' },
         ...(updated && (options.oldLingers === undefined || readsAfterUpdate === 1) ? { currentDeployment: deploymentArn } : {}),
-        activeConfigurations: [configuration(currentImage), ...(lingering || (!updated && (options.settlingAtStart ?? 0) > startReads++) ? [configuration('old')] : [])] } };
+        activeConfigurations: [configuration(now?.image ?? originalImage, now?.command ?? options.previousCommand ?? []), ...(lingering || (!updated && (options.settlingAtStart ?? 0) > startReads++) ? [configuration('old', [])] : [])] } };
     }
     else if (target.endsWith('DescribeServiceDeployments')) data = { serviceDeployments: [{ serviceDeploymentArn: deploymentArn, status: options.rolledBack ? 'ROLLBACK_SUCCESSFUL' : 'SUCCESSFUL', ...(options.rolledBack ? { statusReason: 'health checks failed' } : {}) }] };
     return { response: { statusCode, headers: { 'content-type': typeof data === 'string' ? 'text/xml' : 'application/json' }, body: Readable.from([typeof data === 'string' ? data : JSON.stringify(data)]) } };
@@ -108,6 +114,22 @@ it.each([403, 404] as const)('blocks unreadable applied AWS build projects (%s) 
   const f = fixture(); const calls = transport(f.github, { projectStatus }); const result = await executeEngineCiRelease(f);
   expect(result.status).toBe('blocked'); expect(calls.some((r) => r.target.endsWith('StartBuild') || r.host.includes('.s3.'))).toBe(false);
   expect(JSON.stringify(result)).not.toContain('private-cloud');
+});
+it('rejects a public AWS web command bound to an ordinary private ECS service before authentication', async () => {
+  const base = fixture({ startCommand: 'node web.js' });
+  const binding = { ...base.binding, services: { web: { ...base.binding.services.web, resourceType: 'ecs-service',
+    clusterArn: `arn:aws:ecs:${region}:${account}:cluster/${prefix}`, taskDefinitionArn: `arn:aws:ecs:${region}:${account}:task-definition/${prefix}-web:1` } } };
+  const f = replaceCommitted(base, base.rawSpec, binding);
+  const calls = transport(f.github);
+  expect((await executeEngineCiRelease(f)).status).toBe('blocked');
+  expect(calls).toEqual([]);
+  expect(fetch).not.toHaveBeenCalled();
+});
+it('blocks web commands on a legacy CI build project before uploading source or starting CodeBuild', async () => {
+  const f = fixture({ startCommand: 'npm start' });
+  const calls = transport(f.github, { legacyBuildProject: true });
+  expect(await executeEngineCiRelease(f)).toMatchObject({ status: 'blocked', message: expect.stringMatching(/build project/) });
+  expect(calls.some(call => call.method === 'PUT' || /StartBuild|UpdateExpress/.test(call.target))).toBe(false);
 });
 it('stops a failed build before any workload update and emits a safe process receipt', async () => {
   const f = fixture(); const calls = transport(f.github, { buildFailed: true }); const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -216,6 +238,15 @@ it('reports a release AWS rolled back as failed, never as released', async () =>
   expect(result).toMatchObject({ status: 'failed', message: expect.stringContaining('AWS kept the previous one running') });
   expect(fetch).not.toHaveBeenCalled();
 });
+it.each(['node b.js', undefined])('reconciles a same-image AWS command change or removal (%s)', async startCommand => {
+  const { releaseWebService } = await import('../../adapters/providers/aws/aws-release.client.js');
+  const f = fixture(); const calls = transport(f.github, { alreadyRunning: true, previousCommand: ['sh', '-c', 'node a.js'] });
+  const result = await releaseWebService({ region, accountId: account, prefix, credentials: { accessKeyId: 'AKIAFIXTURE', secretAccessKey: 'synthetic', sessionToken: 'synthetic' } },
+    'web', webArn, `${account}.dkr.ecr.${region}.amazonaws.com/${prefix}@${digest}`, '/health', false, 0, startCommand);
+  expect(result.status).toBe('released');
+  expect(calls.find(call => call.target.endsWith('UpdateExpressGatewayService'))?.body.primaryContainer.command).toEqual(startCommand ? ['sh', '-c', startCommand] : []);
+});
+
 it('waits for AWS to drop the old configuration after a successful deployment', async () => {
   const { releaseWebService } = await import('../../adapters/providers/aws/aws-release.client.js');
   const f = fixture(); transport(f.github, { oldLingers: 2 });
@@ -246,20 +277,34 @@ it.each([[true, 'failed'], [false, 'released']] as const)('treats HTTP 403 from 
   expect(result).toMatchObject({ status: expected, health: { status: 403, path: '/health' } });
 });
 
-it.each([true, false])('admits AWS web startCommand only with its generated Dockerfile (repository Dockerfile: %s)', async (dockerfile) => {
+it.each([true, false])('releases the per-service AWS command alongside the image (repository Dockerfile: %s)', async (dockerfile) => {
   const f = fixture({ startCommand: 'npm start', dockerfile }); const calls = transport(f.github);
   const result = await executeEngineCiRelease(f);
-  expect(result.status).toBe(dockerfile ? 'blocked' : 'released');
-  if (dockerfile) { expect(calls).toEqual([]); expect(fetch).not.toHaveBeenCalled(); }
+  expect(result.status).toBe('released');
+  expect(calls.find(call => call.target.endsWith('UpdateExpressGatewayService'))?.body.primaryContainer.command).toEqual(['sh', '-c', 'npm start']);
+});
+
+it.each([true, false])('requires a Dockerfile default for a commandless web peer before building (override first %s)', async overrideFirst => {
+  const base = fixture({ dockerfile: false });
+  const plain = base.rawSpec.environments.preview.services.web;
+  const override = { ...plain, startCommand: 'node admin.js' };
+  const services = overrideFirst ? { admin: override, web: plain } : { web: plain, admin: override };
+  const extraWebArn = webArn.replace(/-web$/, '-admin');
+  const binding = { ...base.binding, services: { ...base.binding.services, admin: { ...base.binding.services.web, serviceId: extraWebArn } } };
+  const rawSpec = { ...base.rawSpec, environments: { preview: { ...base.rawSpec.environments.preview, services } } };
+  const f = replaceCommitted(base, rawSpec, binding);
+  const calls = transport(f.github, { extraWebArn });
+  expect(await executeEngineCiRelease(f)).toMatchObject({ status: 'blocked', message: expect.stringMatching(/startCommand.*Dockerfile/) });
+  expect(calls.some(call => call.method === 'PUT' || /StartBuild|UpdateExpress/.test(call.target))).toBe(false);
 });
 
 it.each([
-  ['npm run public', 'npm run admin', 'blocked'],
-  ['npm start', undefined, 'blocked'],
-  [undefined, 'npm start', 'blocked'],
+  ['npm run public', 'npm run admin', 'released'],
+  ['npm start', undefined, 'released'],
+  [undefined, 'npm start', 'released'],
   ['npm start', 'npm start', 'released'],
-] as const)('admits a shared AWS web image only when start commands agree (%s / %s)', async (first, second, status) => {
-  const base = fixture({ dockerfile: false, startCommand: first });
+] as const)('runs two workloads from one repository image with their own commands (%s / %s)', async (first, second, status) => {
+  const base = fixture({ dockerfile: true, startCommand: first });
   const extraWebArn = `arn:aws:ecs:${region}:${account}:service/${prefix}/${prefix}-admin`;
   const rawSpec = { ...base.rawSpec, environments: { preview: { ...base.rawSpec.environments.preview, services: {
     ...base.rawSpec.environments.preview.services, admin: { workloadKind: 'web', public: true, healthCheckPath: '/health', ...(second === undefined ? {} : { startCommand: second }) },
@@ -268,8 +313,12 @@ it.each([
   const f = replaceCommitted(base, rawSpec, binding); const calls = transport(f.github, { extraWebArn });
   const result = await executeEngineCiRelease(f);
   expect(result.status).toBe(status);
-  if (status === 'blocked') { expect(calls).toEqual([]); expect(fetch).not.toHaveBeenCalled(); }
-  else expect(result.results).toMatchObject([{ service: 'web', status: 'released' }, { service: 'admin', status: 'released' }]);
+  for (const [arn, command] of [[webArn, first], [extraWebArn, second]] as const) {
+    const container = calls.find(call => call.target.endsWith('UpdateExpressGatewayService') && call.body.serviceArn === arn)?.body.primaryContainer;
+    expect(container.command).toEqual(command ? ['sh', '-c', command] : []);
+    expect(container.image).toContain(`@${command ? webDigest : digest}`);
+  }
+  expect(result.results).toMatchObject([{ service: 'web', status: 'released' }, { service: 'admin', status: 'released' }]);
 });
 
 it('refuses a private AWS web target before OIDC because CI cannot sign its HTTP health check', async () => {

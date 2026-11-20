@@ -13,6 +13,7 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { ConvergeExecutor } from '../../domain/plan/converge.executor.js';
 import { applyAwsInfrastructureEngine, resolveAwsEngineContext } from '../infrastructure-engine-aws.js';
 import { applyAzureInfrastructureEngine, resolveAzureEngineContext } from '../infrastructure-engine-azure.js';
+import type { PlanAction } from '../../domain/plan/plan.types.js';
 import * as shared from '../engine-shared.js';
 import * as awsBackend from '../../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { environmentDeploymentContractHashForApply } from '../../domain/services/deployment-contract.service.js';
@@ -80,7 +81,7 @@ async function fixture(provider: 'aws' | 'azure') {
   let nativeMissing = false;
   const inspectState = vi.fn(async (request: any) => nativeMissing ? { ok: true, present: false } : { ok: true, present: true, value: request.project(request.state.environmentId === `${env.id}-build` ? buildState : environmentState) });
   vi.spyOn(shared, 'openTofuEngine').mockResolvedValue({ inspectState } as never);
-  const document = { environmentName: env.name, specRevision: 1, engine: { planId: 'native-plan', state: context.state, build: { planId: 'native-build', state: context.buildState }, [provider]: provider === 'aws' ? { accountId, region, prefix } : { subscriptionId, resourceGroup: 'hv-ci-app', prefix } } };
+  const document = { actions: [] as PlanAction[], environmentName: env.name, specRevision: 1, engine: { planId: 'native-plan', state: context.state, build: { planId: 'native-build', state: context.buildState }, [provider]: provider === 'aws' ? { accountId, region, prefix } : { subscriptionId, resourceGroup: 'hv-ci-app', prefix } } };
   vi.spyOn(ConvergeExecutor.prototype, 'loadPlan').mockReturnValue({ run: {}, document } as never);
   const execute = vi.spyOn(ConvergeExecutor.prototype, 'execute').mockResolvedValue({ success: true, applyRunId: 'accepted-apply', receipts: [] });
   const apply = () => (provider === 'aws' ? applyAwsInfrastructureEngine : applyAzureInfrastructureEngine)(ctx, { project, spec, specRevision: 1, planId: 'plan', confirmActions: [] });
@@ -90,6 +91,15 @@ async function fixture(provider: 'aws' | 'azure') {
     environmentState, buildState,
   };
 }
+it('requires a fresh AWS plan when an older build action covered only the ordinary image', async () => {
+  const f = await fixture('aws');
+  f.spec.environments.test!.services.web!.startCommand = 'node web.js';
+  const sha = 'a'.repeat(40);
+  f.document.actions.push({ id: 'build:image', type: 'create', verified: true, reason: 'Build', resource: { kind: 'service', name: 'image', provider: 'aws' },
+    metadata: { operation: 'awsImageBuild', commitSha: sha, image: `${accountId}.dkr.ecr.${region}.amazonaws.com/${f.prefix}:${sha}-hv3` } });
+  expect(await f.apply()).toMatchObject({ kind: 'blocked', reason: expect.stringContaining('Run hv_plan again') });
+  expect(f.execute).not.toHaveBeenCalled();
+});
 describe.each(['aws', 'azure'] as const)('%s CI binding publication through reviewed apply', provider => {
   it('publishes only exact native public identities after complete apply and successful noop', async () => {
     const f = await fixture(provider); await f.apply();

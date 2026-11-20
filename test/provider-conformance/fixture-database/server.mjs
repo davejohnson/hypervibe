@@ -84,6 +84,8 @@ if (role === 'worker') {
       return;
     }
     const body = { service: 'hypervibe-provider-conformance', revision: process.env.CONFORMANCE_APP_REVISION || 'unknown',
+      // How this process was started: through the image's own entrypoint or not, and with which first argument.
+      entrypoint: process.env.CONFORMANCE_ENTRYPOINT === '1', startedWith: process.argv[2] ?? null,
       database: false, worker: false, scheduled: false, onDemand: false, storage: false };
     // Errors can carry connection details; the booleans are the whole answer.
     try {
