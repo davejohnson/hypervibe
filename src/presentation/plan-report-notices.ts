@@ -1,5 +1,5 @@
 import { gcpInfrastructureNotes, railwayTransferIsolationNote, railwayTransferSetupNote } from '../domain/plan/gcp-infrastructure-notes.js';
-import type { PlanReport } from '../domain/plan/plan-report.js';
+import { transferAccessCheckScope, type PlanReport } from '../domain/plan/plan-report.js';
 
 // Recognize only the complete database summary recorded by the planner. If it
 // gains a new qualification, keep the full message visible as a warning.
@@ -12,6 +12,12 @@ export function groupPlanNotices(report: PlanReport) {
   const warnings: string[] = [];
   const costs: string[] = [];
   const next: string[] = [];
+  if (report.scope === transferAccessCheckScope) {
+    const cleanup = report.actions.find(action => action.id === 'cleanup')?.reason;
+    next.push('This plan runs two temporary Cloud Run jobs with test data. The copy account must read the test secret and use its short-lived link to download the file. The app must be denied direct access to both. Google Cloud may charge for the jobs and storage.');
+    if (cleanup) next.push(cleanup);
+    return { warnings: report.warnings, costs, next };
+  }
   if (report.scope === 'Google Cloud project setup' && report.setupPurpose === 'railway-transfer-isolation') {
     return { warnings: report.warnings, costs, next: [railwayTransferIsolationNote] };
   }

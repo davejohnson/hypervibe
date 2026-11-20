@@ -8,6 +8,7 @@ import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { getDb, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { probeActions, storeProbe, type ProbePlan } from '../../adapters/storage/transfer-access-probe.js';
 import { runPlanReportPath } from '../../adapters/storage/plan-report-files.js';
 import { engineStatePaths } from '../../adapters/engine/opentofu/workspace.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
@@ -191,6 +192,55 @@ describe('hv_runs', () => {
     } finally {
       vi.unstubAllEnvs();
       await t.close();
+    }
+  });
+
+  it('reopens the exact access check report after another preview without exposing the private run record', async () => {
+    const { project, environment } = await seedRuns();
+    const other = new ProjectRepository().create({ name: 'other-app' });
+    const gcpProjectId = 'transfer-project';
+    const planId = 'probe-35875d09-6a92-494b-97da-e0c3950df30c';
+    const later = 'probe-81234567-814d-41e7-aeb9-f55cdd6709d3';
+    const { plans } = engineStatePaths({ provider: 'gcp', projectId: project.id, environmentId: gcpProjectId,
+      partition: 'project-shared' }, tempDir);
+    mkdirSync(plans, { recursive: true });
+    const createdAt = '2026-04-01T01:01:01Z';
+    const layout: Omit<ProbePlan,'actions'> = {
+      planId, createdAt, projectId: project.id, projectName: project.name, sourceName: 'railway-source',
+      scope: {
+        target: { projectId: gcpProjectId, targetRegion: 'us-central1', sourceEnvironmentId: 'source',
+          targetEnvironmentId: environment.id, sourceRailwayProjectId: 'railway-project', sourceRailwayEnvironmentId: 'railway-env' },
+        targetEnvironmentName: environment.name, projectNumber: '14241314', copyUniqueId: '100001',
+        runtimeEmail: 'app@transfer-project.iam.gserviceaccount.com', runtimeUniqueId: '100002',
+        bucket: 'transfer-project-hv-build-source', bucketTimeCreated: createdAt, secretCreateTime: createdAt,
+      },
+      deployEmail: 'deploy@transfer-project.iam.gserviceaccount.com', evidenceDigest: 'a'.repeat(64),
+      inventoryDigest: 'b'.repeat(64), softDeleteSeconds: 604800, workloadDigest: 'c'.repeat(64),
+      objectName: 'migrations/staging/access-check-A',
+    };
+    const plan = {...layout, actions:probeActions(layout)};
+    vi.stubEnv('HYPERVIBE_DATA_DIR', tempDir);
+    const client = await makeClient();
+    try {
+      storeProbe(plan, { status: 'passed', marker: 'private-probe-marker' }, true);
+      storeProbe({ ...plan, planId: later, objectName: 'migrations/staging/access-check-B' }, { status: 'ready' }, true);
+      const input = { action: 'report', runId: planId, project: project.name, gcpProjectId };
+      for (const wrong of [{ project: other.name }, { gcpProjectId: 'another-project' }]) {
+        expect(await client.call('hv_runs', { ...input, ...wrong })).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+      }
+      for (const invalid of [{ project: undefined }, { gcpProjectId: undefined }, { env: environment.name }]) {
+        expect(await client.call('hv_runs', { ...input, ...invalid })).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+      }
+      const opened = await client.call('hv_runs', input);
+      expect(opened.data).toEqual({ planId, htmlPath: path.join(plans, planId + '.html') });
+      const html = readFileSync(opened.data.htmlPath, 'utf8');
+      for (const text of [planId, plan.objectName, plan.scope.runtimeEmail, 'Resource map', 'Transfer access check', '7 days']) {
+        expect(html).toContain(text);
+      }
+      expect(html).not.toMatch(/Infrastructure plan|verified at planning time|OpenTofu|private-probe-marker|access-check-B/);
+    } finally {
+      vi.unstubAllEnvs();
+      await client.close();
     }
   });
 

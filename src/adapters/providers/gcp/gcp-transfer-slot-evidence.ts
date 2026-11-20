@@ -9,6 +9,15 @@ const versionsPage = z.strictObject({
   versions: z.array(z.unknown()).optional(), totalSize: z.number().int().nonnegative().optional(), nextPageToken: z.string().max(4096).optional(),
 });
 
+const nativeDestroyedVersion = z.strictObject({
+  name: z.string().regex(/^projects\/[1-9][0-9]*\/secrets\/[A-Za-z0-9_-]{1,255}\/versions\/[1-9][0-9]*$/),
+  createTime: z.iso.datetime({ offset: true }), state: z.literal('DESTROYED'),
+});
+export const destroyedProbeVersionSchema = nativeDestroyedVersion.extend({
+  projectNumber: z.string().regex(/^[1-9][0-9]*$/), secretCreateTime: z.iso.datetime({ offset: true }),
+});
+export type DestroyedProbeVersion = z.infer<typeof destroyedProbeVersionSchema>;
+
 export interface TransferSlotTarget { projectId: string; accountEmail: string; secretId: string }
 export interface TransferSlotEvidence {
   projectNumber: string;
@@ -20,19 +29,41 @@ export interface TransferSlotEvidence {
 export class TransferEvidenceError extends Error {}
 function reject(reason: string): never { throw new TransferEvidenceError(reason); }
 
-async function verifyEmptyVersions(base: string, read: (url: URL) => Promise<Response>) {
-  const url = new URL(base + '/versions');
-  url.searchParams.set('fields', 'versions(name),nextPageToken,totalSize');
-  url.searchParams.set('pageSize', '1');
+async function verifyEmptyVersions(name: string, secretCreateTime: string, projectNumber: string,
+  destroyed: readonly DestroyedProbeVersion[], read: (url: URL) => Promise<Response>) {
+  const expected = new Map<string, string>();
+  for (const record of destroyed) {
+    const proof = destroyedProbeVersionSchema.safeParse(record);
+    if (!proof.success || proof.data.projectNumber !== projectNumber || proof.data.secretCreateTime !== secretCreateTime
+        || !proof.data.name.startsWith(name + '/versions/') || expected.has(proof.data.name)) {
+      reject('The saved probe cleanup record does not match the selected transfer secret.');
+    }
+    expected.set(proof.data.name, proof.data.createTime);
+  }
+  const url = new URL('https://secretmanager.googleapis.com/v1/' + name + '/versions');
+  url.searchParams.set('fields', 'versions(name,createTime,state),nextPageToken,totalSize');
+  url.searchParams.set('pageSize', expected.size ? '100' : '1');
   const seen = new Set<string>();
   for (let page = 0; page < 100; page++) {
     const response = await read(url);
     if (!response.ok) reject('Google could not verify the transfer secret version inventory.');
     const result = versionsPage.safeParse(await response.json());
     if (!result.success) reject('Google returned an unreadable transfer secret version inventory.');
-    if (result.data.versions?.length || result.data.totalSize) reject('The transfer credential secret already has a version. Only an empty container can be prepared.');
+    for (const version of result.data.versions ?? []) {
+      const row = nativeDestroyedVersion.safeParse(version);
+      if (!row.success || expected.get(row.data.name) !== row.data.createTime) {
+        reject('The transfer credential secret already has a version outside the recorded destroyed probes.');
+      }
+      expected.delete(row.data.name);
+    }
+    if (result.data.totalSize !== undefined && result.data.totalSize !== destroyed.length) {
+      reject('The transfer secret version count differs from its recorded probe cleanups.');
+    }
     const token = result.data.nextPageToken;
-    if (!token) return;
+    if (!token) {
+      if (expected.size) reject('Google did not return every recorded destroyed probe version.');
+      return;
+    }
     if (seen.has(token)) reject('Google repeated a page in the transfer secret version inventory.');
     seen.add(token);
     url.searchParams.set('pageToken', token);
@@ -55,7 +86,8 @@ function directAccessor(value: unknown, email: string): boolean {
 }
 
 /** Read exact Google identities and directly attached policy. Never read a secret payload. */
-export async function readTransferSlotEvidence(token: string, target: TransferSlotTarget): Promise<TransferSlotEvidence> {
+export async function readTransferSlotEvidence(token: string, target: TransferSlotTarget,
+  destroyed: readonly DestroyedProbeVersion[] = []): Promise<TransferSlotEvidence> {
   const { projectId, accountEmail, secretId } = target;
   const accountId = accountEmail.split('@')[0]!;
   if (!token.trim() || !projectIdPattern.test(projectId) || !projectIdPattern.test(accountId)
@@ -83,13 +115,16 @@ export async function readTransferSlotEvidence(token: string, target: TransferSl
     const name = project + '/secrets/' + secretId;
     const base = 'https://secretmanager.googleapis.com/v1/' + name;
     const secretResponse = await read(base + '?fields=name,createTime,labels');
-    if (secretResponse.status === 404) return { projectNumber, account, secret: null, directAccessor: false };
+    if (secretResponse.status === 404) {
+      if (destroyed.length) reject('The transfer secret from the saved probe cleanup record is missing.');
+      return { projectNumber, account, secret: null, directAccessor: false };
+    }
     if (!secretResponse.ok) reject('Google could not verify the transfer credential secret.');
     const metadata = secretSchema.safeParse(await secretResponse.json());
     if (!metadata.success || ![name, 'projects/' + projectId + '/secrets/' + secretId].includes(metadata.data.name)) {
       reject('Google did not return the exact transfer credential secret and its creation time.');
     }
-    await verifyEmptyVersions(base, read);
+    await verifyEmptyVersions(name, metadata.data.createTime, projectNumber, destroyed, read);
     const policy = await read(base + ':getIamPolicy?options.requestedPolicyVersion=3');
     if (!policy.ok) reject('Google could not verify the direct transfer secret IAM policy.');
     const granted = directAccessor(await policy.json(), accountEmail);

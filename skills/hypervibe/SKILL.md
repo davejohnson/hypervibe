@@ -134,8 +134,14 @@ plan for its service account, empty container and secret-level read grant.
 After approval, confirm with its exact `gcpSetupPlanId`. Keep the container
 empty. After this setup, use the same source, target and project with
 `migrationAccess="restrict-app-access"` to review the two app permission
-changes. Confirm only the exact saved plan after approval. Effective access
-checks on the secret and database export still precede any private handoff.
+changes. Confirm the exact saved plan after approval. Once applied, preview
+`migrationAccess="verify-copy-access"` for the same source and destination. Show the saved HTML before confirming its
+exact `gcpSetupPlanId`. This one-time check runs two temporary Cloud Run jobs
+and may incur charges. Using disposable data, it verifies the copy account
+can read the test version and download the file through its short-lived link,
+and requires both direct reads by the app account to be denied. Report the outcome and cleanup,
+including any period when the deleted file stays recoverable. The private
+handoff and actual data copy require a separate plan.
 
 `hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
 and bucket transfers require a planned private credential handoff that is still

@@ -124,6 +124,16 @@ describe('standalone infrastructure plan report', () => {
     expect(html).not.toContain('class="map-canvas"');
   });
 
+  it('presents the reviewed access check without attributing future results to an infrastructure plan', () => {
+    const html = renderPlanReportHtml(report([action('app-read', 'App read check')], {
+      scope: 'Google Cloud transfer access check', approval: 'whole-plan',
+    }));
+    expect(html).toContain('<span class="brand-topic">Transfer access check</span>');
+    expect(html).toContain('Google Cloud transfer access check');
+    expect(html).toContain('<span class="node-title">App read check</span>');
+    expect(html).not.toMatch(/infrastructure plan|verified at planning time/i);
+  });
+
   it('explains how approval works when reviewing a saved project setup', () => {
     const setup = report([action('create-project', 'Google Cloud project')], { approval: 'whole-plan' });
     expect(renderPlanReportHtml(setup)).toContain('Approve the whole plan in the chat or terminal where you requested it.');

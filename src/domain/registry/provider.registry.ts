@@ -362,7 +362,8 @@ export interface ProviderCredentialUpdateCapability {
   >;
 }
 
-export type MigrationAccess = 'empty-transfer-slot' | 'restrict-app-access';
+export const migrationAccessModes = ['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access'] as const;
+export type MigrationAccess = (typeof migrationAccessModes)[number];
 
 export interface MigrationAccessCapability {
   sourceProvider: string;

@@ -7,7 +7,7 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
-  providerRegistry,
+  migrationAccessModes, providerRegistry,
   type ProviderMetadata,
 } from '../domain/registry/provider.registry.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
@@ -188,7 +188,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser in this GCP project with any approved migration exclusions preserved; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
-      migrationAccess: z.enum(['empty-transfer-slot', 'restrict-app-access']).optional().describe('With action="prepare" and provider="cloudrun", reserve an empty secret and a copy-job account or restrict the app’s two existing project grants for the approved secret and dump location. Select project, migrationSourceEnvironment and destination environment. Uses existing Google Application Default Credentials.'),
+      migrationAccess: z.enum(migrationAccessModes).optional().describe('With action="prepare" and provider="cloudrun", reserve an empty secret and copy account, restrict app access, or test the app and copy accounts with disposable data. Select project, migrationSourceEnvironment and destination environment. Each operation has its own saved plan and uses existing Google Application Default Credentials.'),
       migrationSourceEnvironment: z.string().min(1).optional().describe('Existing source environment in the selected project for migration access preparation.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('Filter view="requirements" by environment or select the environment for setup guidance. For GCP bootstrap and prepare, this selects the declared hosting.gcpProjectId and default region. For connect, the environment appears on the connect page.'),
@@ -643,10 +643,29 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           if (payload.mode !== 'preview' || typeof payload.planId !== 'string' || !payload.planId.trim()) {
             return commandError('PROVIDER_ERROR', 'The migration access preview did not return a saved plan ID. Preview again.');
           }
-          const restrictApp = migrationAccess === 'restrict-app-access';
-          const message = restrictApp
-            ? `Apply plan ${payload.planId} to restrict the app’s access to the transfer secret and database dump location in ${environment} for ${targetProject.name}?`
-            : `Apply plan ${payload.planId} to prepare access for a future data copy from ${migrationSourceEnvironment} to ${environment} in ${targetProject.name}?`;
+          let message: string;
+          let review: string;
+          switch (migrationAccess) {
+            case 'verify-copy-access': {
+              if (typeof payload.htmlPath !== 'string' || !payload.htmlPath.trim()) {
+                return commandError('PROVIDER_ERROR', 'The access check preview did not return its saved HTML report. Preview again.');
+              }
+              const retention = typeof payload.softDeleteSeconds === 'number' && payload.softDeleteSeconds > 0
+                ? ` Google keeps the deleted test object recoverable for ${payload.softDeleteSeconds / 86400} days.`
+                : '';
+              message = `Run two temporary Cloud Run jobs in ${environment} for ${targetProject.name} to test access to a disposable secret version and export object? Google Cloud charges may apply. Cleanup removes the jobs and test data.${retention}`;
+              review = 'Review the saved HTML for the exact app and copy accounts, test data, cleanup and retention. This approval covers one access check.';
+              break;
+            }
+            case 'restrict-app-access':
+              message = `Apply plan ${payload.planId} to restrict the app’s access to the transfer secret and database dump location in ${environment} for ${targetProject.name}?`;
+              review = 'Review the two project IAM grants for the app runtime. The plan excludes the selected transfer secret and dump location.';
+              break;
+            case 'empty-transfer-slot':
+              message = `Apply plan ${payload.planId} to prepare access for a future data copy from ${migrationSourceEnvironment} to ${environment} in ${targetProject.name}?`;
+              review = 'Review the copy job’s account and its permission to read the empty secret reserved for connection details.';
+              break;
+          }
           const retryInput = {
             action: 'prepare', provider, project: projectRef!, environment: environment!,
             migrationSourceEnvironment: migrationSourceEnvironment!, migrationAccess,
@@ -655,9 +674,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           };
           return {
             ...commandSuccess({ ...projectContext, ...payload }, {
-              hint: restrictApp
-                ? `Review the two project IAM grants for the app runtime. The plan excludes the selected transfer secret and dump location. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`
-                : `Review the copy job’s account and its permission to read the empty secret reserved for connection details. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`,
+              hint: `${review} After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`,
               agentInstruction: { action: 'ask_user', message },
             }),
             confirmation: { message, retryInput, completeInput: true },
