@@ -254,7 +254,7 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
           name: names.server, ...placed, version: String(input.database.version),
           sku_name: input.database.skuName ?? 'B_Standard_B1ms', storage_mb: input.database.storageMb ?? 32768, auto_grow_enabled: true,
           backup_retention_days: 7, geo_redundant_backup_enabled: false,
-          // Not reachable from the internet. Hypervibe opens it to one address for the moments it creates a login (withAzureSetupAccess).
+          // Never reachable from the internet. Hypervibe creates logins from a job inside the network (runAzureSetupSql).
           public_network_access_enabled: false,
           administrator_login: 'hvadmin', administrator_password_wo: '${ephemeral.random_password.postgres_admin.result}', administrator_password_wo_version: 1,
           authentication: [{ active_directory_auth_enabled: true, password_auth_enabled: true, tenant_id: input.tenantId }],
