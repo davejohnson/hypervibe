@@ -223,8 +223,9 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     administrator, from the job inside the network described under
     [database network](#database-network). It uses a short-lived Entra token as the password, so no password
     is stored, and TLS with the certificate verified against the host name. The job
-    is given the three roots Microsoft documents for these servers, taken from Node's
-    bundled list, because the image trusts only a short Microsoft list without them.
+    is given the three roots Microsoft documents for these servers
+    (`azure-database-roots.ts`), because the image trusts only a short Microsoft
+    list without them and Node.js builds do not all ship the same list.
   - It creates `app_<env>` (login and database owner) and, for on-demand workers, a
     read-only `waker_<env>`. Only those logins may connect to the environment's
     database. Passwords travel only as SCRAM verifiers.

@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { AZURE_DATABASE_ROOTS } from '../azure-database-roots.js';
 import { AZURE_SETUP_IMAGE, AzureTokens, azureDatabaseNames, azureDatabaseRoots, azureKeyVaultSecretStore, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, purgeVaultSecrets, runAzureSetupSql, taggedResources } from '../azure-ops.client.js';
 
 const access = { tenantId: 't', clientId: 'c', clientSecret: 'client-secret-value' };
@@ -151,7 +153,14 @@ describe('Azure database setup inside the private network', () => {
     expect(roots).toBe(azureDatabaseRoots());
     expect(container.env).toContainEqual({ name: 'PGSSLROOTCERT', value: '/tmp/hv-ca.pem' });
     expect(container.command.at(-1)).toMatch(/^printf "%s" "\$HV_SETUP_CA" > \/tmp\/hv-ca\.pem;/);
-    expect(() => azureDatabaseRoots([])).toThrow(/lacks a certificate authority/);
+    // Each is the certificate it claims to be: a self-signed root with the recorded fingerprint, not close to expiry.
+    for (const root of AZURE_DATABASE_ROOTS) {
+      const certificate = new crypto.X509Certificate(root.pem);
+      expect(certificate.subject.split('\n')).toContain(`CN=${root.name}`);
+      expect(certificate.fingerprint256).toBe(root.sha256);
+      expect(certificate.checkIssued(certificate)).toBe(true);
+      expect(new Date(certificate.validTo).getTime()).toBeGreaterThan(Date.now() + 365 * 24 * 3600_000);
+    }
     expect(container.command.at(-1)).toContain('psql -q -v ON_ERROR_STOP=1 -f -');
     // Nothing is left behind.
     expect(state.job).toBeUndefined();

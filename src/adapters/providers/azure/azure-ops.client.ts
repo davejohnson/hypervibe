@@ -1,6 +1,6 @@
 import { scramVerifier } from '../../../utils/scram.js';
 import crypto from 'crypto';
-import tls from 'tls';
+import { AZURE_DATABASE_ROOTS } from './azure-database-roots.js';
 import type { AzureEngineCredentials } from './azure-engine.adapter.js';
 import { azureSecretName } from './tofu/azure-engine.config.js';
 
@@ -188,19 +188,9 @@ export function azureDatabaseNames(environmentName: string): { database: string;
 export const AZURE_SETUP_IMAGE = 'mcr.microsoft.com/azurelinux/base/postgres@sha256:c1a4225eedf956a6ec2152efcf250aee3fec8281ffb3db6ee2b2a2b8b5a69f21';
 const APPS_API = 'api-version=2024-03-01';
 /** A new server's Entra administrator takes a minute to be usable, so the job waits for a connection before it runs the script. */
-/**
- * The roots Microsoft documents for Flexible Server certificates. The setup image
- * trusts only a short Microsoft list that leaves out the DigiCert roots, so the
- * job is given these from Node's bundled list instead of relying on the image.
- */
-const SETUP_ROOT_NAMES = ['DigiCert Global Root G2', 'DigiCert Global Root CA', 'Microsoft RSA Root Certificate Authority 2017'];
-export function azureDatabaseRoots(certificates: readonly string[] = tls.rootCertificates): string {
-  const found = certificates.filter((pem) => {
-    const subject = new crypto.X509Certificate(pem).subject;
-    return SETUP_ROOT_NAMES.some((name) => subject.split('\n').includes(`CN=${name}`));
-  });
-  if (found.length !== SETUP_ROOT_NAMES.length) throw new Error('This Node.js build lacks a certificate authority that Azure databases use, so the database connection cannot be verified.');
-  return found.join('\n') + '\n';
+/** The certificate authorities the setup job trusts for the database connection; see azure-database-roots.ts. */
+export function azureDatabaseRoots(): string {
+  return AZURE_DATABASE_ROOTS.map((root) => root.pem).join('');
 }
 const SETUP_COMMAND = 'printf "%s" "$HV_SETUP_CA" > /tmp/hv-ca.pem; n=0; until psql -qAtc "select 1" >/dev/null 2>&1 || [ "$n" -ge 12 ]; do n=$((n+1)); sleep 10; done; printf "%s" "$HV_SETUP_SQL" | psql -q -v ON_ERROR_STOP=1 -f -';
 
