@@ -126,6 +126,14 @@ The worker then runs only while that count is above zero and starts within
 about a minute of new work. Keep a worker always on only when it must react
 instantly or does not use the app database.
 
+For an existing Railway source and Cloud Run target, prepare the empty copy
+credential container with `hv_connections` action `prepare`, provider
+`cloudrun`, `migrationAccess="empty-transfer-slot"`, the project, Railway
+`migrationSourceEnvironment` and destination `environment`. Show the saved
+plan for its service account, empty container and secret-level read grant.
+After approval, confirm with its exact `gcpSetupPlanId`. Keep the container
+empty until a later reviewed private handoff verifies effective access.
+
 `hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
 and bucket transfers require a planned private credential handoff that is still
 unavailable. A fresh comparison of private Railway and Cloud SQL databases also
