@@ -4,7 +4,7 @@ import { azureEngineProblems } from '../../src/application/infrastructure-engine
 import type { AzureTokenProvider } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import { environmentProfile } from '../../src/domain/services/infrastructure-engine-selection.js';
-import { classifyDatabaseProbe, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
+import { classifyDatabaseProbe, engineFixtureEmptiedEnvironment, engineFixtureEnvironment, readGcpDatabaseExposure, readGcpInventory, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
   readAzureInventory, sinceBaseline } from './engine-fixture.js';
 import { resourceKey, runDisposableFixture, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -158,5 +158,37 @@ describe('web start command checks', () => {
     const dockerfile = engineFixtureEntrypointDockerfile('FROM node:22-alpine\nCMD ["node", "server.mjs"]\n');
     expect(dockerfile).toContain('ENTRYPOINT ["/app/entry.sh"]\nCMD ["node", "server.mjs"]');
     expect(() => engineFixtureEntrypointDockerfile('FROM scratch\n')).toThrow();
+  });
+});
+
+describe('Google Cloud fixture readers', () => {
+  const access = { projectId: 'p1', region: 'us-central1', token: async () => 'token' };
+  const instance = (networks: Array<{ value: string }>) => ({ settings: { ipConfiguration: { ipv4Enabled: true, authorizedNetworks: networks } }, ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.7' }] });
+  const created: NativeFixtureResource[] = ['hv-fx-1-db-aaaaaa', 'hv-fs-1-db-bbbbbb'].map((id) => ({ provider: 'gcp', type: 'sql-instance', id, address: `sql-instance/${id}` }));
+
+  it('builds a spec the schema accepts, and an emptied one with nothing to run or keep', () => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: {
+      one: engineFixtureEnvironment('gcp', 'create', 'us-central1'), two: engineFixtureSiblingEnvironment('gcp'), gone: engineFixtureEmptiedEnvironment('us-central1') } });
+    expect(spec.environments.one).toMatchObject({ hosting: { provider: 'cloudrun', region: 'us-central1' }, database: { provider: 'cloudsql' }, storage: { files: { provider: 'gcs' } } });
+    expect(spec.environments.gone).toMatchObject({ services: {} });
+    expect(spec.environments.gone!.database).toBeUndefined();
+  });
+
+  it('reports any network allowed to connect, on either environment, and refuses an unreadable or missing answer', async () => {
+    const original = globalThis.fetch;
+    const answer = (byName: Record<string, unknown>, status = 200) => { globalThis.fetch = (async (url: string | URL) => new Response(JSON.stringify(byName[String(url).split('/').pop()!] ?? {}), { status })) as typeof fetch; };
+    try {
+      answer({ 'hv-fx-1-db-aaaaaa': instance([]), 'hv-fs-1-db-bbbbbb': instance([]) });
+      expect(await readGcpDatabaseExposure(access, created, 'fx-1')).toEqual({ host: '203.0.113.7', problems: [] });
+      answer({ 'hv-fx-1-db-aaaaaa': instance([]), 'hv-fs-1-db-bbbbbb': instance([{ value: '0.0.0.0/0' }]) });
+      expect((await readGcpDatabaseExposure(access, created, 'fx-1')).problems).toEqual(['instance hv-fs-1-db-bbbbbb allows connections from 0.0.0.0/0']);
+      answer({}, 403);
+      await expect(readGcpDatabaseExposure(access, created, 'fx-1')).rejects.toThrow(/exposure is unknown/);
+      answer({ 'hv-fx-1-db-aaaaaa': {}, 'hv-fs-1-db-bbbbbb': instance([]) });
+      await expect(readGcpDatabaseExposure(access, created, 'fx-1')).rejects.toThrow(/no network settings/);
+      await expect(readGcpDatabaseExposure(access, created, 'fx-9')).rejects.toThrow(/exactly one database instance/);
+      answer({}, 500);
+      await expect(readGcpInventory(access)).rejects.toThrow(/what exists is unknown/);
+    } finally { globalThis.fetch = original; }
   });
 });
