@@ -1,5 +1,4 @@
 import { isDeepStrictEqual } from 'node:util';
-import { runGcpTransferAccessProbe } from '../../../application/gcp-transfer-access-probe.js';
 import { readDestroyedTransferProbeVersions } from '../../storage/transfer-access-probe.js';
 import type { MigrationAccessCapability } from '../../../domain/registry/provider.registry.js';
 import { railwayTransferIsolationNote, railwayTransferSetupNote } from '../../../domain/plan/gcp-infrastructure-notes.js';
@@ -57,6 +56,7 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
   if ([input.runtimeEmail, input.deployEmail].includes(slot.accountEmail))
     return { success: false, error: 'The copy job must use a separate service account.' };
   if (input.mode === 'verify-copy-access') {
+    const { runGcpTransferAccessProbe } = await import('../../../application/gcp-transfer-access-probe.js');
     return runGcpTransferAccessProbe({
       project, target: scope, targetEnvironmentName: target.name, sourceEnvironmentName: source.name,
       runtimeEmail: input.runtimeEmail, deployEmail: input.deployEmail, token: input.token,
