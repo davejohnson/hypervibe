@@ -73,7 +73,7 @@ describe('existing-access Railway runtime evidence', () => {
     expect(f.contractErrors).toEqual([]); expect(f.mutations).toEqual([]);
   });
 
-  it.each(['missing-key', 'missing-host-trust', 'absent-files', 'relative-path', 'public-key-file-mode'])('does not spawn SSH with %s', async kind => {
+  it.each(['missing-key', 'missing-host-trust', 'absent-files', 'relative-path', 'public-key-file-mode', 'writable-host-trust'])('does not spawn SSH with %s', async kind => {
     const credentials: RailwayRuntimeCredentials = { sshIdentityFile: join(directory, 'existing-key'), sshKnownHostsFile: join(directory, 'existing-host-trust') };
     if (kind === 'missing-key') delete credentials.sshIdentityFile;
     if (kind === 'missing-host-trust') delete credentials.sshKnownHostsFile;
@@ -81,6 +81,7 @@ describe('existing-access Railway runtime evidence', () => {
     if (kind === 'relative-path') credentials.sshIdentityFile = 'relative-key';
     const f = await fixture({ credentials });
     if (kind === 'public-key-file-mode') await chmod(credentials.sshIdentityFile!, 0o644);
+    if (kind === 'writable-host-trust') await chmod(credentials.sshKnownHostsFile!, 0o666);
     expect(await f.read()).toEqual(unknown); expect(f.spawn).not.toHaveBeenCalled(); expect(f.mutations).toEqual([]);
   });
 
@@ -93,9 +94,9 @@ describe('existing-access Railway runtime evidence', () => {
     }
   });
 
-  it.each(['key-percent', 'trust-percent', 'key-control', 'trust-control'])('rejects %s path interpretation before spawning SSH', async kind => {
+  it.each(['key-percent', 'trust-percent', 'key-control', 'trust-control', 'trust-env'])('rejects %s path interpretation before spawning SSH', async kind => {
     const f = await fixture();
-    const value = join(directory, kind.includes('percent') ? '%r-existing-file' : 'existing\nfile');
+    const value = join(directory, kind.includes('percent') ? '%r-existing-file' : kind === 'trust-env' ? '${HOME}' : 'existing\nfile');
     await writeFile(value, 'synthetic-existing-file', { mode: 0o600 });
     if (kind.startsWith('key')) f.credentials.sshIdentityFile = value;
     else f.credentials.sshKnownHostsFile = value;

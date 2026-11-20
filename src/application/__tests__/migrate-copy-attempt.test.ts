@@ -4,6 +4,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import * as access from '../../domain/services/database-access.service.js';
@@ -365,17 +366,22 @@ describe('current source credential handoff', () => {
       exitCode: 0, output: command.includes('HV_SERVER_VERSION') ? 'HV_SERVER_VERSION 160000'
         : 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: true, source: manifest, sourceIdentity: '42:123' }),
     }));
-    const adapter = Object.assign(Object.create(RailwayAdapter.prototype), {
+    const versionSource = { ...scope, serviceId: 'source-postgres', serviceInstanceId: 'source-instance', replicaId: 'active-replica',
+      deploymentId: 'active-deployment', volumeId: 'source-volume', volumeInstanceId: 'source-volume-instance', imageDigest: 'sha256:' + 'a'.repeat(64) };
+    const versionInspection = { programHash: () => '7'.repeat(64), observe: vi.fn(async () => ({ ...versionSource })), inspect: vi.fn(async () => ({ versionNumber: 170002, tables: 4, estimatedRows: '20' })),
+      hasTrustedAccess: vi.fn(async () => false) };
+    const adapter = Object.assign(Object.create(RailwayAdapter.prototype), { name: 'railway', privateMigrationSourceInspection: versionInspection,
       serviceName: async () => 'source-postgres', runPrivateTask, lastPrivateTaskCleanup: true,
     });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter } as any);
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({ success: true, adapter } as any);
     vi.spyOn(transfer, 'signedObjectUrl').mockReturnValue('https://fixture.invalid/private-dump');
     vi.mocked(engine.resolveEngineContext).mockResolvedValue({
       environment: f.target, gcpProjectId: 'fixture-project', region: 'us-central1', adapter: {
         engineAccessToken: async () => 'fixture', engineConnection: () => ({ credentials: '{}' }),
       },
     } as any);
-    return { ...f, store, runPrivateTask };
+    return { ...f, store, runPrivateTask, versionInspection, versionSource };
   }
 
   it('stops before exporting a private Railway dump and keeps the previous receipt', async () => {
@@ -413,6 +419,67 @@ describe('current source credential handoff', () => {
     await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
     expect(f.runPrivateTask).not.toHaveBeenCalled();
     expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
+  });
+
+  it('saves the exact private version inspection for review without reading SQL or starting a service', async () => {
+    const f = railwayFixture();
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: {
+      ...f.target.platformBindings.engine as engine.EngineBinding, migration: { from: 'source' },
+    } });
+    f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
+    const result = await f.migrate();
+    if (result.status !== 'needs_confirmation') throw new Error('Expected a saved source version plan.');
+    expect(result.confirmActions).toEqual([expect.stringContaining('version')]);
+    expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+    expect(f.runPrivateTask).not.toHaveBeenCalled();
+    const plan = f.ctx.repos.runs.findById(result.planId)!;
+    expect(plan.plan).toMatchObject({ scope: 'migration-source-version', actions: [{ metadata: { source: f.versionSource } }] });
+    const document = planRunDocumentSchema.parse(plan.plan);
+    expect(planRunDocumentSchema.safeParse({ ...document, scope: 'full' }).success).toBe(false);
+    expect(planRunDocumentSchema.safeParse({ ...document, actions: [document.actions[0], document.actions[0]] }).success).toBe(false);
+    const changed = structuredClone(document);
+    changed.actions[0].metadata!.programHash = '0'.repeat(64);
+    expect(planRunDocumentSchema.safeParse(changed).success).toBe(false);
+    const applied = await f.migrate({ planId: result.planId, confirmActions: result.confirmActions });
+    expect(applied).toMatchObject({ status: 'source_inspected', inventory: { versionNumber: 170002, tables: 4, estimatedRows: '20' } });
+    expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
+    expect(await f.migrate()).toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+    expect(f.store.get(f.project)?.spec.environments.target.database?.version).toBe(17);
+    expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
+    expect(f.current().sourceMajor).toBeUndefined();
+    f.versionSource.replicaId = 'replacement-replica';
+    expect(await f.migrate()).toMatchObject({ status: 'needs_confirmation' });
+    expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not substitute a bare historical version for source identity and a successful receipt', async () => {
+    const f = railwayFixture();
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: {
+      ...f.target.platformBindings.engine as engine.EngineBinding, migration: { from: 'source', sourceMajor: 12 },
+    } });
+    f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
+    expect(await f.migrate()).toMatchObject({ status: 'needs_confirmation' });
+    expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+  });
+
+  it('reviews the source before asking Google Cloud for a target, and requires the exact approval', async () => {
+    const f = railwayFixture();
+    const fresh = () => f.migrate({ inspectSource: true, to: 'future-target' });
+    const prior = f.store.get(f.project)!;
+    expect(await fresh()).toMatchObject({ status: 'blocked', message: expect.stringContaining('sshKnownHostsFile') });
+    expect(f.versionInspection.observe).not.toHaveBeenCalled();
+    f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
+    const review = await fresh();
+    if (review.status !== 'needs_confirmation') throw new Error('Expected source review');
+    expect(await f.migrate({ inspectSource: true, to: 'future-target', planId: review.planId })).toMatchObject({ status: 'blocked' });
+    expect(await f.migrate({ inspectSource: true, to: 'wrong-target', planId: review.planId, confirmActions: review.confirmActions })).toMatchObject({ status: 'blocked' });
+    expect(await f.migrate({ inspectSource: true, copyData: true })).toMatchObject({ status: 'blocked' });
+    f.versionSource.imageDigest = 'sha256:' + 'b'.repeat(64);
+    expect(await f.migrate({ inspectSource: true, to: 'future-target', planId: review.planId, confirmActions: review.confirmActions })).toMatchObject({ status: 'blocked' });
+    expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+    expect(f.store.get(f.project)).toEqual(prior);
+    expect(launch.launchEnvironment).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
   });
 
   it('directs empty-target qualification to hv_launch when no observed source major is available', async () => {

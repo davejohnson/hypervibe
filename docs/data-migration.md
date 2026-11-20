@@ -17,6 +17,10 @@ The application pause and forwarding flow below is a separate capability.
 Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
 and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
 
+Before preparing the target, use `hypervibe migrate --from production --to rehearsal --inspect-source` to review an inspection of the source PostgreSQL database. The saved action identifies the Railway project, environment, database deployment, image digest, replica and volume. It requires an existing Railway connection with the absolute paths `sshIdentityFile` and `sshKnownHostsFile` for an already registered key and independently trusted host keys.
+
+After approval, Hypervibe runs one fixed catalog query over the local PostgreSQL socket in that running replica. It reports the server version, number of user tables and estimated live rows. The database must use a supported PostgreSQL image, a single running replica and a private database URL matching the local database name and standard port. The check opens no ports and creates no services. Hypervibe can reuse the version for target sizing while the reviewed identity still matches. An explicit `--inspect-source` review asks for fresh statistics. The estimates describe the selected database at inspection time and supply no copy or cutover authority.
+
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,
 then write a new record there and verify that a restored copy contains it.

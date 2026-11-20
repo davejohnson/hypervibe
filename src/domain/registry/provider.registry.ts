@@ -240,6 +240,8 @@ export interface ProviderMetadata {
         /** Native database references the private helper can actually resolve. */
         databaseProviders: readonly string[];
       };
+      /** Fixed read-only PostgreSQL inventory using the existing exact replica's SSH transport. */
+      privateMigrationSourceInspection?: 'railway-postgres-ssh';
       /** Fresh-generation SQL verification and reviewed schema bootstrap only. */
       databaseInitializationTasks?: {
         variableMode: 'references';

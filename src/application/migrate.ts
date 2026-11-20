@@ -16,6 +16,8 @@ import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-datab
 import { isDeepStrictEqual } from 'node:util';
 import { finalCopyReceipt, migrationCutoverReadiness, protectForwardingTarget, targetWriteRecovery } from './migration-cutover-readiness.js';
 import { desiredDomainServiceName } from '../domain/services/domain-attach-policy.js';
+import { migrationVersionReceiptSchema, type MigrationSourceInventory } from '../domain/plan/migration-version.contract.js';
+import { planMigrationSourceVersion } from './migration-version-inspection.js';
 import { migrationDatabaseBindingConflict } from './migration-database-binding.js';
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { bucketSummaries, compareMigrationBucket, hasVerifiedBuckets, missingDeployedBucket, prepareMigrationBuckets, selectMigrationBuckets } from './migration-storage.js';
@@ -65,6 +67,7 @@ import {
  */
 export type MigrateResult =
   | LaunchResult
+  | { status: 'source_inspected'; source: string; inventory: MigrationSourceInventory }
   | { status: 'needs_secret_import'; keys: string[]; leftOut?: string[]; message: string }
   | { status: 'needs_copy_approval'; database?: { tables: number; rows: string; version: string }; storage: string[]; message: string }
   | {
@@ -243,6 +246,7 @@ interface MigrateParams {
   approveAccess?: string[];
   confirmActions?: string[];
   planId?: string;
+  inspectSource?: boolean;
   importSecrets?: boolean;
   copyData?: boolean;
   /** Copy the data again even though a verified copy exists (refresh before cutover). */
@@ -286,6 +290,31 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   }
   const sourceEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.from);
   if (!sourceEnvironment) return { status: 'blocked', message: `Environment ${params.from} has never been deployed by Hypervibe.` };
+  const suppliedPlan = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined;
+  if (suppliedPlan && 'error' in suppliedPlan) return { status: 'blocked', message: suppliedPlan.error };
+  if (params.inspectSource || suppliedPlan?.document.scope === 'migration-source-version') {
+    if (params.copyData || params.refreshData || params.cutover || params.confirmCutover || params.verifyOnly
+      || params.importSecrets || params.approveAccess?.length || params.gcpSetupPlanId || params.billingAccountName || params.domain || params.region || params.gcpProjectId) {
+      return { status: 'blocked', message: 'Review the source inspection separately from target changes, data transfer and cutover.' };
+    }
+    if (suppliedPlan && params.planId) {
+      const action = suppliedPlan.document.actions[0];
+      if (suppliedPlan.document.scope !== 'migration-source-version' || suppliedPlan.run.projectId !== params.project.id
+        || suppliedPlan.run.environmentId !== sourceEnvironment.id || suppliedPlan.document.environmentName !== params.from || action?.metadata?.targetEnvironment !== params.to) {
+        return { status: 'blocked', message: 'This saved plan belongs to a different migration or operation.' };
+      }
+      const applied = await createCommandRegistry(ctx).get('hv_apply')!.execute({ project: params.project.id, planId: params.planId, confirmActions: params.confirmActions ?? [] });
+      const outcome = applied.data as { applied?: boolean; error?: string; receipts?: Array<{ actionId: string; data?: Record<string, unknown> }> } | undefined;
+      const receipt = migrationVersionReceiptSchema.safeParse(outcome?.receipts?.find(item => item.actionId === action.id)?.data?.sourceVersion);
+      if (!applied.ok || !outcome?.applied || !receipt.success || receipt.data.planId !== params.planId || receipt.data.actionId !== action.id) {
+        return { status: 'blocked', message: applied.error?.message ?? outcome?.error ?? 'The private source inspection did not produce a verified receipt. Review the saved apply result.' };
+      }
+      return { status: 'source_inspected', source: params.from, inventory: receipt.data.inventory };
+    }
+    if (params.confirmActions?.length) return { status: 'blocked', message: 'Review a saved source inspection plan before confirming its action.' };
+    return planMigrationSourceVersion(ctx, { project: params.project, source: sourceEnvironment, targetName: params.to,
+      spec: specResult.spec, revision: specResult.revision, fresh: true });
+  }
   const liveTarget = await protectForwardingTarget(params.project, specResult.spec, sourceEnvironment,
     ctx.repos.environments.findByProjectAndName(params.project.id, params.to), params.to, params);
   if (store.get(params.project)?.revision !== specResult.revision) return { status: 'blocked', message: `The routing configuration changed during the migration check. Verify the current route first. ${targetWriteRecovery}` };
@@ -308,13 +337,11 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   }
   const pendingTransfer = lease.pending();
   let sourcePlanApproval = false;
-  if (params.planId) {
-    const loaded = new ConvergeExecutor().loadPlan(params.planId);
-    if ('error' in loaded) return { status: 'blocked', message: loaded.error };
-    if (loaded.run.projectId !== params.project.id || ![params.from, params.to].includes(loaded.document.environmentName)) {
+  if (suppliedPlan) {
+    if (suppliedPlan.run.projectId !== params.project.id || ![params.from, params.to].includes(suppliedPlan.document.environmentName)) {
       return { status: 'blocked', message: 'The saved migration plan belongs to another project or environment.' };
     }
-    sourcePlanApproval = loaded.document.environmentName === params.from;
+    sourcePlanApproval = suppliedPlan.document.environmentName === params.from;
     if (sourcePlanApproval && !params.cutover) return { status: 'blocked', message: 'A source-environment plan can be confirmed only during the reviewed cutover.' };
   }
   let spec = specResult.spec;
@@ -464,14 +491,15 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   if (sourceSpec.database && spec.environments[params.to]!.database) {
     // An earlier observation can size an independently prepared target while data
     // transfer is unavailable. It cannot establish the source version for a new copy.
-    const known = reuseCopy || (sourceSpec.database.provider === 'railway' && copyHandoff) ? migration()?.sourceMajor : undefined;
+    const known = reuseCopy || (completedCopy && sourceSpec.database.provider === 'railway' && copyHandoff) ? migration()?.sourceMajor : undefined;
     const hasKnownMajor = typeof known === 'number' && Number.isSafeInteger(known) && known > 0;
-    if (!hasKnownMajor && sourceSpec.database.provider === 'railway') {
-      return { status: 'blocked', message: `Checking the private Railway PostgreSQL version requires a reviewed task that Hypervibe does not yet plan. Use hv_launch for ${params.to} to prepare and test the empty target with its configured database version.` };
-    }
-    const sourceMajor = hasKnownMajor ? { major: known } : await sourceDatabaseMajor(params.project, sourceEnvironment);
+    const privateInspection = sourceSpec.database.provider === 'railway' && !hasKnownMajor;
+    const sourceMajor = hasKnownMajor ? { major: known } : privateInspection
+      ? await planMigrationSourceVersion(ctx, { project: params.project, source: sourceEnvironment, targetName: params.to, spec, revision: specResult.revision })
+      : await sourceDatabaseMajor(params.project, sourceEnvironment);
+    if ('status' in sourceMajor) return sourceMajor;
     if ('blocked' in sourceMajor) return { status: 'blocked', message: sourceMajor.blocked };
-    recordMigration({ sourceMajor: sourceMajor.major });
+    if (!privateInspection) recordMigration({ sourceMajor: sourceMajor.major });
     const targetMajor = spec.environments[params.to]!.database!.version ?? 16;
     if (sourceMajor.major > targetMajor) {
       if (sourceMajor.major > 18) return { status: 'blocked', message: `The source runs PostgreSQL ${sourceMajor.major}, which Cloud SQL does not offer yet.` };

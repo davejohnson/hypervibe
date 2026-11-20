@@ -128,7 +128,11 @@ instantly or does not use the app database.
 
 `hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
 and bucket transfers require a planned private credential handoff that is still
-unavailable. A fresh comparison of private Railway and Cloud SQL databases also
+unavailable. For private PostgreSQL source inventory, use `hv_migrate` with
+`inspectSource=true` to plan one fixed query on the exact running Railway database
+using the connection's pre-registered SSH identity and trusted host keys. Show
+the saved action before applying it. It returns a version, user-table count and
+estimated live rows; an estimate cannot verify a copy. A fresh comparison of private Railway and Cloud SQL databases also
 requires reviewed verification jobs. Historical receipts record what matched at
 the time of the copy. Report these limits before requesting a maintenance window.
 For supported operations the workflow also stops at

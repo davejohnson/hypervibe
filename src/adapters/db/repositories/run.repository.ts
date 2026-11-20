@@ -193,6 +193,17 @@ export class RunRepository {
     return rows.map((row) => this.mapRow(row));
   }
 
+  findSuccessfulApplyForStep(projectId: string, environmentId: string, step: string): Run | null {
+    const row = getDb().prepare(`
+      SELECT runs.* FROM runs WHERE project_id = ? AND environment_id = ?
+        AND type = 'apply' AND status = 'succeeded'
+        AND EXISTS (SELECT 1 FROM json_each(runs.receipts) WHERE json_extract(value, '$.step') = ?
+          AND json_extract(value, '$.status') = 'success')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(projectId, environmentId, step) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
   /** Durable release provenance must not expire behind unrelated recent activity. */
   findSuccessfulReleases(projectId: string, environmentIds: readonly string[]): Run[] {
     if (environmentIds.length === 0) return [];

@@ -24,6 +24,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       approveAccess: z.array(z.enum(['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'])).optional(),
       planId: z.string().min(1).optional().describe('Exact saved planId returned by needs_confirmation or pending. Required when supplying infrastructure confirmActions.'),
       confirmActions: z.array(z.string().min(1)).optional(),
+      inspectSource: z.boolean().optional().describe('Review only a private Railway PostgreSQL inspection of the current server version, user-table count and estimated live rows. Requires existing trusted Railway SSH access. No target preparation.'),
       importSecrets: z.boolean().optional().describe('true only after the user approved copying the listed runtime settings.'),
       copyData: z.boolean().optional().describe('true only after the user approved copying the data, replacing anything in the target.'),
       cutover: z.boolean().optional().describe('Final move after the copy was checked: pause the source behind its maintenance page, copy and verify the data again, then forward its domain to the target. Returns needs_cutover_approval first.'),
@@ -31,7 +32,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       verifyOnly: z.boolean().optional().describe('Read-only: compare the source and the copy (row counts, per-table content checksums and downloaded file contents) without copying or releasing anything. Returns verified, differs, or blocked when required access or verification jobs are unavailable.'),
       refreshData: z.boolean().optional().describe('true only after the user approved copying the data again over an earlier verified copy. Without it, a re-run releases using the existing copy.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, approveAccess, planId, confirmActions, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
+    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, approveAccess, planId, confirmActions, inspectSource, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
       if (gcpSetupPlanId && (!approveAccess?.includes('gcp-setup') || !billingAccountName)) {
         return commandError('VALIDATION', 'Use gcpSetupPlanId with the selected billing account and approval for gcp-setup.');
       }
@@ -39,7 +40,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
       const result = await migrateEnvironment(ctx, {
-        project, from, to, gcpProjectId,
+        project, from, to, gcpProjectId, ...(inspectSource ? { inspectSource } : {}),
         ...(region ? { region } : {}), ...(domain ? { domain } : {}),
         ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
         ...(billingAccountName ? { billingAccountName } : {}), ...(approveAccess ? { approveAccess } : {}),
@@ -65,6 +66,8 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
           return commandSuccess(result, ask('Ask which billing account should pay for the new environment, then call again with billingAccountName. Billing selection does not approve infrastructure or permissions; review the saved plan at needs_access.'));
         case 'needs_access':
           return commandSuccess(result, ask(result.confirmationHint ?? `Explain this Google Cloud access, then call again with approveAccess including "${result.accessId}".`));
+        case 'source_inspected':
+          return commandSuccess(result);
         case 'needs_confirmation':
           return commandSuccess(result, ask(`Show the changes and estimated monthly cost, then call again with planId ${JSON.stringify(result.planId)} and confirmActions ${JSON.stringify(result.confirmActions)}.`));
         case 'needs_connection':
