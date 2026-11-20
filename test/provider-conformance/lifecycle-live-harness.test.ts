@@ -43,6 +43,23 @@ describe('disposable fixture lifecycle boundary', () => {
     expect(f.journal).toMatchObject({ phase: 'cleaned', checks: { created: true, noop: true, updated: true, absent: true } });
   });
 
+  // Observed on AWS on 2026-11-19: an update restarts containers, and each new container gets a new network interface.
+  it('accepts resources a restart replaces during an update, and names any other new resource', async () => {
+    const eni = (id: string): NativeFixtureResource => ({ provider: 'aws', type: 'network-interface', address: `network-interface/${id}`, id });
+    const extra: NativeFixtureResource = { provider: 'aws', type: 'ecs-cluster', address: 'ecs-cluster/second', id: 'second' };
+    const run = (added: NativeFixtureResource[]) => {
+      const phases: string[] = [];
+      const f = fixture({ replacedOnRestart: (entry) => entry.type === 'network-interface',
+        converge: vi.fn(async (revision) => { phases.push(revision); }),
+        inventory: vi.fn(async () => phases.at(-1) === 'create' ? [resource, eni('eni-1')] : phases.at(-1) === 'update' ? [resource, eni('eni-2'), ...added] : []) });
+      return { f, done: runDisposableFixture(f) };
+    };
+    const ok = run([]);
+    await ok.done;
+    expect(ok.f.journal.checks.updated).toBe(true);
+    await expect(run([extra]).done).rejects.toThrow('new native resource instead of updating the fixture: ecs-cluster second.');
+  });
+
   it.each(['present', 'unknown'] as const)('does not treat empty bindings or an empty plan as native absence: %s', async (state) => {
     const f = fixture({ observe: vi.fn(async () => state) });
     await expect(runDisposableFixture(f)).rejects.toThrow(/cleanup is unverified/);

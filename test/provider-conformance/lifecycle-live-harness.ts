@@ -34,6 +34,8 @@ export interface LifecycleFixtureDriver {
   verifyRunning(revision: 'create' | 'update'): Promise<void>;
   /** Read the exact saved native identity; state/binding disappearance is insufficient. */
   observe(resource: NativeFixtureResource): Promise<'present' | 'absent' | 'unknown' | 'retained'>;
+  /** Resources the provider replaces whenever a workload restarts (a container's network interface); an update may bring new ones. */
+  replacedOnRestart?(resource: NativeFixtureResource): boolean;
 }
 
 export function resourceKey(resource: NativeFixtureResource): string {
@@ -117,8 +119,9 @@ export async function runDisposableFixture(params: {
       journal.phase = 'updating';
       persist();
       try { await driver.converge('update'); } finally { await remember(); }
-      if (journal.resources.some((resource) => !identities.has(resourceKey(resource)))) {
-        throw new Error('The update created a new native resource instead of updating the fixture.');
+      const added = journal.resources.filter((resource) => !identities.has(resourceKey(resource)) && !driver.replacedOnRestart?.(resource));
+      if (added.length) {
+        throw new Error(`The update created a new native resource instead of updating the fixture: ${added.map((resource) => `${resource.type} ${resource.id}`).join(', ')}.`);
       }
       interrupted();
       await driver.verifyRunning('update');
