@@ -81,8 +81,12 @@ export function estimateAwsMonthlyCost(environment: EnvironmentSpec): CostLine[]
   const workloads = Object.values(environment.services);
   const web = workloads.filter((service) => (service.workloadKind ?? 'web') === 'web').length;
   if (web) lines.push({ item: `${web} web service(s) on Fargate, always running`, estimate: 'about $15 a month each (a quarter CPU, 1 GB and a public address), plus about $25 a month for one load balancer shared by every web service in the AWS account' });
-  const workers = workloads.filter((service) => service.workloadKind === 'worker').length;
-  if (workers) lines.push({ item: `${workers} worker(s) on Fargate that start when jobs are due`, estimate: '$0 while idle; about 1–2 cents per hour while working' });
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (service.workloadKind !== 'worker') continue;
+    if (service.workerPaused) lines.push({ item: `Worker ${name} (paused)`, estimate: '$0 for worker compute after all its tasks stop' });
+    else if (service.onDemand) lines.push({ item: `Worker ${name} (on demand)`, estimate: '$0 for worker compute while idle, about 1–2 cents per hour while working' });
+    else lines.push({ item: `Worker ${name} (always on)`, estimate: 'one Fargate task running around the clock at about 1–2 cents per hour' });
+  }
   const cron = workloads.filter((service) => service.workloadKind === 'cron').length;
   if (cron) lines.push({ item: `${cron} scheduled job(s) on Fargate`, estimate: '$0 between runs; a few cents a month for short runs' });
   if (environment.database) lines.push({ item: 'Aurora Serverless Postgres that pauses when idle', estimate: '$0 compute while paused, plus about $0.10 per GB stored per month; about 6–12 cents per hour while in use' });
@@ -98,8 +102,11 @@ export function estimateAzureMonthlyCost(environment: EnvironmentSpec): CostLine
   const workloads = Object.values(environment.services);
   const web = workloads.filter((service) => (service.workloadKind ?? 'web') === 'web').length;
   if (web) lines.push({ item: `${web} Container App(s) that scale to zero`, estimate: '$0 while idle; the first 2 million requests and 180,000 vCPU-seconds a month are free, then about $0.40 per million requests plus CPU time' });
-  const workers = workloads.filter((service) => service.workloadKind === 'worker').length;
-  if (workers) lines.push({ item: `${workers} worker(s) that start when jobs are due`, estimate: '$0 while idle; about 3 cents per hour while working (0.25 vCPU)' });
+  for (const [name, service] of Object.entries(environment.services)) {
+    if (service.workloadKind !== 'worker') continue;
+    if (service.onDemand) lines.push({ item: `Worker ${name} (on demand)`, estimate: '$0 for worker compute at zero replicas, about 3 cents per hour while working (0.25 vCPU)' });
+    else lines.push({ item: `Worker ${name} (always on)`, estimate: 'one replica running around the clock, subject to Container Apps active and idle rates and the monthly free grant' });
+  }
   const cron = workloads.filter((service) => service.workloadKind === 'cron').length;
   if (cron) lines.push({ item: `${cron} scheduled job(s)`, estimate: '$0 between runs; a few cents a month for short runs' });
   lines.push({ item: 'Private network for the apps (load balancer and two public addresses), shared by all of the project\'s testing environments', estimate: 'about $26 per month for the project' });

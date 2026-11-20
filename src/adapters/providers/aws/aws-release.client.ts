@@ -217,7 +217,9 @@ export async function releaseTask(target: AwsReleaseTarget, name: string, resour
   await ecs.send(new UpdateServiceCommand({ cluster: exact?.clusterArn ?? target.prefix, service: exact?.serviceArn ?? resource, taskDefinition: registered }));
   const service = (await ecs.send(new DescribeServicesCommand({ cluster: exact?.clusterArn ?? target.prefix, services: [exact?.serviceArn ?? resource] }))).services?.[0];
   if (service?.taskDefinition !== registered || exact && (service?.serviceArn !== exact.serviceArn || service.clusterArn !== exact.clusterArn)) return { service: name, imageUri, status: 'unknown', message: `${resource} did not report the new revision.` };
-  return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: service.desiredCount ? `Released to ${resource}; its tasks are being replaced.` : `Released to ${resource}; it starts with the new image when work is queued.` };
+  return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: service.desiredCount === 0
+    ? `Released to ${resource} at zero desired tasks. The next task will use the new image.`
+    : `Updated the task definition for ${resource}.` };
 }
 
 /** Whether a web service exists: a public one through Express Mode, a private one as an ordinary service. */

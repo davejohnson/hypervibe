@@ -32,14 +32,25 @@ a recorded, completed Cloud Run execution after an interruption. If its
 ownership, completion, or cleanup is uncertain, the next copy remains blocked.
 Independent installations do not share this local execution lock.
 
-Before restoring queued work onto an already running Google Cloud target, let
-its current work finish. For a fixed-size worker pool, set
-`services.<name>.workerPaused` to `true` on the target through `hv_spec`.
-Review and apply the infrastructure plan. Use `hv_status` to check that the
-pool has zero configured instances. Independently check that jobs have drained
-and that other writers, including the web service, are quiet. To resume, set
-`workerPaused` to `false`, review the plan for one running instance, and apply
-when the target should process jobs. On-demand workers use a separate scheduler.
+### Hold a destination worker before restoring queued work
+
+Let current jobs finish first. On Google Cloud and AWS, a fixed-size worker
+can be held at zero with `services.<name>.workerPaused: true` in `hv_spec`.
+Review the count change in the infrastructure plan and apply it. On Google
+Cloud, use `hv_status` to verify the worker pool has zero configured
+instances. On AWS, verify that the exact ECS worker has zero desired, running
+and pending tasks. A pause request or missing observation leaves that check
+open. Check separately that no job is in flight and that other writers,
+including web services and scheduled jobs, are quiet. Set `workerPaused` to
+`false` and approve the plan for one instance when processing should resume.
+
+On-demand workers have independent wake-up mechanisms. If changing an
+on-demand worker to fixed size, retire the wake-up mechanism and confirm its
+outstanding executions have finished before relying on a fixed-worker pause.
+Azure fixed workers run one Container Apps replica. Its managed engine
+rejects the per-worker pause setting. Azure's zero minimum permits scaling
+down, while changes to an image or scaling settings can provision a new
+revision. [Azure worker pause follow-up](https://github.com/davejohnson/hypervibe/issues/791)
 
 ## Pause the app for a manual move
 
@@ -239,8 +250,9 @@ Workload suspension is currently:
 | Hosting provider | Maintenance behavior |
 | --- | --- |
 | Railway | Removes the exact active deployment, preserves replicas/sleep/cron settings, and redeploys it on exit. This does not prove application jobs or uploads finished gracefully. |
-| GCP Cloud Run | Sets manual service scaling to zero, pauses scheduler jobs, waits for current native job executions to finish, and restores the exact prior scaling/schedule state. |
-| Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
+| GCP Cloud Run | Supports the fixed-worker setting above. Whole-app workload maintenance is unavailable on the managed engine. |
+| AWS ECS | Supports the fixed-worker setting above. Whole-app workload maintenance is unavailable on the managed engine. |
+| Azure Container Apps | Whole-app workload maintenance and individual fixed-worker pause are unavailable on the managed engine. |
 
 This matrix is deliberate. A provider is not marked supported until Hypervibe
 can stop background work and direct origins, retain exact restoration state,

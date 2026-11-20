@@ -17,7 +17,7 @@ import {
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
+import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
@@ -1172,14 +1172,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }] : [];
   // The complete engine segment creates containers before operational value writes.
   const actions = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
-  for (const action of serviceActions) {
-    const worker = environmentSpec!.services[action.resource.name];
-    if (action.type === 'update' && worker?.workloadKind === 'worker' && !worker.onDemand
-      && action.diff?.some(change => change.field === 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count')) {
-      const effect = worker.workerPaused ? 'pause this worker by setting its instance count to zero' : 'run one instance of this worker';
-      action.reason = `Hypervibe will ${effect}. ${action.reason}`;
-    }
-  }
+  describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   const warnings = [
     gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),

@@ -41,6 +41,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | --- | --- | --- | --- |
 | Web services | yes | yes: always-on containers with an HTTPS address; built 2026-11-17, not yet run live | yes |
 | Background workers, on-demand workers | yes | yes | yes |
+| Pause one fixed-size worker (`workerPaused`) | yes, Cloud Run worker pool manual count | yes, ECS service desired count. Offline plan and CI release coverage | blocked ([#791](https://github.com/davejohnson/hypervibe/issues/791)) |
 | Scheduled jobs | yes | yes | yes, UTC schedules only |
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
 | Managed database query and inspection | Cloud SQL connector; retained regression coverage, live query unverified here | Aurora Data API with environment app login; offline contracts and local SQL isolation regression, live unverified | Shared Flexible Server, exact environment database and private credential; offline contracts, live unverified |

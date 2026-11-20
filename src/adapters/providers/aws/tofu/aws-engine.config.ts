@@ -48,6 +48,7 @@ export interface AwsTaskInput {
 }
 
 export interface AwsWorkerInput extends AwsTaskInput {
+  paused?: boolean;
   /** Run only while this read-only count of pending work is above zero (uses the Aurora Data API). */
   pendingWorkQuery?: string;
   /** Earliest time future work is due; the waker sets a one-time wake for it so a paused database can stay paused. */

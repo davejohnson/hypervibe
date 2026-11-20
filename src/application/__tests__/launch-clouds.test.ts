@@ -85,6 +85,14 @@ describe('hv_launch on AWS and Azure', () => {
     expect(lines).not.toMatch(/Cloud Run|Cloud SQL/);
   });
 
+  it('prices fixed Azure workers separately from workers with a queue-based scale rule', () => {
+    const lines = estimateAzureMonthlyCost(environment('azure', { services: {
+      fixed: { workloadKind: 'worker' }, queue: { workloadKind: 'worker', onDemand: { pendingWorkQuery: 'SELECT 1' } },
+    } }) as never);
+    expect(lines).toContainEqual({ item: 'Worker fixed (always on)', estimate: expect.stringContaining('one replica') });
+    expect(lines).toContainEqual({ item: 'Worker queue (on demand)', estimate: expect.stringContaining('$0') });
+  });
+
   it('prices Azure with Azure resources', () => {
     const lines = estimateAzureMonthlyCost(environment('azure', { database: { provider: 'postgres' } }) as never).map((line) => line.item).join('\n');
     expect(lines).toMatch(/Container App/);
