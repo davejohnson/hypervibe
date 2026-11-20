@@ -1,6 +1,6 @@
 import { scramVerifier } from '../../../utils/scram.js';
 import crypto from 'crypto';
-import pg from 'pg';
+import { AZURE_DATABASE_ROOTS } from './azure-database-roots.js';
 import type { AzureEngineCredentials } from './azure-engine.adapter.js';
 import { azureSecretName } from './tofu/azure-engine.config.js';
 
@@ -181,119 +181,109 @@ export function azureDatabaseNames(environmentName: string): { database: string;
   return { database: `app_${slug}`, login: `app_${slug}`, waker: `waker_${slug}` };
 }
 
-export type SqlRunner = (database: string, statements: (query: (sql: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>) => Promise<void>) => Promise<void>;
-
 /**
- * Runs statements on the server as the deploy identity (its Entra administrator)
- * with a short-lived Entra token as the password, over TLS with the certificate
- * verified against the host name. The server is closed to the internet, so this
- * only connects inside withAzureSetupAccess.
+ * Microsoft's own PostgreSQL image (Azure Linux) from Microsoft's registry, pinned by digest.
+ * Only its psql client is used.
  */
-export function entraSqlRunner(tokens: AzureTokenProvider, host: string, user: string): SqlRunner {
-  return async (database, statements) => {
-    const client = new pg.Client({
-      host, port: 5432, database, user, password: await tokens.get(AZURE_SCOPES.postgres),
-      ssl: { rejectUnauthorized: true, servername: host }, connectionTimeoutMillis: 30_000,
-    });
-    await client.connect();
-    try { await statements((sql, values) => client.query(sql, values)); } finally { await client.end().catch(() => undefined); }
-  };
+export const AZURE_SETUP_IMAGE = 'mcr.microsoft.com/azurelinux/base/postgres@sha256:c1a4225eedf956a6ec2152efcf250aee3fec8281ffb3db6ee2b2a2b8b5a69f21';
+const APPS_API = 'api-version=2024-03-01';
+/** A new server's Entra administrator takes a minute to be usable, so the job waits for a connection before it runs the script. */
+/** The certificate authorities the setup job trusts for the database connection; see azure-database-roots.ts. */
+export function azureDatabaseRoots(): string {
+  return AZURE_DATABASE_ROOTS.map((root) => root.pem).join('');
 }
+const SETUP_COMMAND = 'printf "%s" "$HV_SETUP_CA" > /tmp/hv-ca.pem; n=0; until psql -qAtc "select 1" >/dev/null 2>&1 || [ "$n" -ge 12 ]; do n=$((n+1)); sleep 10; done; printf "%s" "$HV_SETUP_SQL" | psql -q -v ON_ERROR_STOP=1 -f -';
 
-/** The one firewall rule Hypervibe ever adds: this computer's address, only while it runs setup SQL. */
-export const AZURE_SETUP_RULE = 'hypervibe-setup';
-const POSTGRES_API = 'api-version=2024-08-01';
-/** A connection failure in a line: its code and message, or those of the first address tried. Connection errors carry no password. */
-function connectionAnswer(error: unknown): string {
-  const inner = error instanceof AggregateError && error.errors.length ? error.errors[0] : error;
-  const code = (error as { code?: unknown } | null)?.code ?? (inner as { code?: unknown } | null)?.code;
-  const message = (inner instanceof Error ? inner.message : '') || (error instanceof Error ? error.message : String(error));
-  return `${typeof code === 'string' ? `${code}: ` : ''}${message}`.slice(0, 300);
-}
-/** This computer's public IPv4 address as an AWS-run echo service sees it; undefined when it cannot be read. */
-export async function lookupPublicAddress(fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
-  try {
-    const response = await fetchImpl('https://checkip.amazonaws.com/', { signal: AbortSignal.timeout(10_000) });
-    const text = (await response.text()).trim();
-    return response.ok && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(text) ? text : undefined;
-  } catch { return undefined; }
-}
-
-export interface AzureSetupAccessOptions {
-  pollMs?: number;
-  /** This computer's public address; the default asks an address service. */
-  lookupAddress?: () => Promise<string | undefined>;
+export interface AzureSetupJob {
+  /** ARM id of the job to create and delete; one per environment, so two environments can set up at once. */
+  id: string;
+  /** The Container Apps environment inside the project's private network. */
+  environmentId: string;
+  host: string;
+  /** The deploy identity's name, which is its PostgreSQL administrator login. */
+  user: string;
 }
 
 /**
- * Flexible Server has no SQL-over-HTTPS API, and the server is closed to the
- * internet. To create or drop a login, Hypervibe turns public access on, allows
- * exactly this computer's address, runs `work`, then removes the rule and turns
- * public access off again. Closing is attempted whatever happened before it,
- * and a failure to close is an error.
- *
- * Azure never says which address it turned away: with or without a firewall
- * rule it drops the connection (observed live 2026-11-18, West US 2). So the
- * address comes from an address service. The probe must then connect, which a
- * wrong address cannot do.
+ * Flexible Server has no SQL-over-HTTPS API, and the server is never opened to
+ * the internet. Setup SQL runs where the apps run: Hypervibe creates a one-off
+ * Container Apps job in the project's private network, starts it, waits for it
+ * to finish and deletes it. The job logs in as the deploy identity with a
+ * short-lived Entra token; the token and the script are job secrets. Azure
+ * leaves secrets out of ordinary reads, but someone who may manage the resource
+ * group can list them while the job exists, so the job is deleted whatever
+ * happened and a failure to delete it is an error. The job carries a tag, and
+ * Hypervibe never deletes or replaces a job of that name without it.
  */
-export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, serverId: string, probe: () => Promise<void>, work: () => Promise<T>, options: AzureSetupAccessOptions = {}): Promise<T> {
+const SETUP_TAG = { 'hv-setup': 'database' };
+export async function runAzureSetupSql(tokens: AzureTokenProvider, job: AzureSetupJob, script: string, options: { pollMs?: number } = {}): Promise<void> {
   const pollMs = options.pollMs ?? 5000;
-  const lookupAddress = options.lookupAddress ?? (() => lookupPublicAddress());
-  const server = `${ARM}${serverId}`;
-  const rule = `${server}/firewallRules/${AZURE_SETUP_RULE}?${POSTGRES_API}`;
   const wait = () => new Promise((done) => setTimeout(done, pollMs));
-  const allow = (address: string) => azureRest(tokens, AZURE_SCOPES.arm, 'PUT', rule, { properties: { startIpAddress: address, endIpAddress: address } });
-  /** Sets public access and waits until Azure reports the server ready with that setting. */
-  const publicAccess = async (wanted: 'Enabled' | 'Disabled'): Promise<string | undefined> => {
-    const patched = await azureRest(tokens, AZURE_SCOPES.arm, 'PATCH', `${server}?${POSTGRES_API}`, { properties: { network: { publicNetworkAccess: wanted } } });
-    if (![200, 201, 202].includes(patched.status)) return azureError(patched);
-    for (let attempt = 0; attempt < 120; attempt++) {
-      const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${server}?${POSTGRES_API}`);
-      const properties = (read.body.properties ?? {}) as { state?: string; network?: { publicNetworkAccess?: string } };
-      if (read.status === 200 && properties.state === 'Ready' && properties.network?.publicNetworkAccess === wanted) return undefined;
-      await wait();
-    }
-    return 'Azure did not confirm the change in time';
-  };
-  const close = async (): Promise<string | undefined> => {
-    const removed = await azureRest(tokens, AZURE_SCOPES.arm, 'DELETE', rule).catch(() => undefined);
-    // A dropped request must not leave the server open: closing is tried three times.
-    let closed: string | undefined;
+  const url = `${ARM}${job.id}?${APPS_API}`;
+  const name = job.id.split('/').at(-1)!;
+  const remove = async (): Promise<string | undefined> => {
+    let last = 'Azure did not answer';
     for (let attempt = 0; attempt < 3; attempt++) {
-      closed = await publicAccess('Disabled').catch((error: unknown) => error instanceof Error ? error.message : 'error');
-      if (!closed) break;
+      const deleted = await azureRest(tokens, AZURE_SCOPES.arm, 'DELETE', url).catch(() => undefined);
+      if (deleted && [204, 404].includes(deleted.status)) return undefined;
+      if (deleted && [200, 202].includes(deleted.status)) {
+        for (let poll = 0; poll < 60; poll++) {
+          const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', url).catch(() => undefined);
+          if (read?.status === 404) return undefined;
+          await wait();
+        }
+        last = 'Azure did not confirm the deletion in time';
+      } else if (deleted) last = azureError(deleted);
       await wait();
     }
-    if (closed) return `Hypervibe could not turn the database server's public access off again (${closed}). Run hv_plan and hv_apply to close it.`;
-    if (!removed || ![200, 202, 204, 404].includes(removed.status)) return `The database server is closed to the internet again, but its unused ${AZURE_SETUP_RULE} firewall rule could not be removed${removed ? ` (${azureError(removed)})` : ''}.`;
-    return undefined;
+    return last;
   };
-  let result: T | undefined;
+  const existing = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', url);
+  if (existing.status === 200 && (existing.body.tags as Record<string, string> | undefined)?.['hv-setup'] !== SETUP_TAG['hv-setup']) {
+    throw new Error(`A job named ${name} already exists and Hypervibe did not create it, so database setup did not run. Rename the service that uses that name.`);
+  }
+  if (existing.status !== 200 && existing.status !== 404) throw new Error(`Hypervibe could not check for an earlier database setup job (${azureError(existing)}).`);
+  const stale = existing.status === 404 ? undefined : await remove();
+  if (stale) throw new Error(`Hypervibe could not remove an earlier database setup job, ${name} (${stale}).`);
   let failure: unknown;
   try {
-    const opened = await publicAccess('Enabled');
-    if (opened) throw new Error(`Hypervibe could not open the database server to this computer (${opened}).`);
-    const address = await lookupAddress();
-    if (!address) throw new Error('Hypervibe could not learn this computer\'s public address, so it did not open the database server to anything. Check the internet connection and run the plan again.');
-    const added = await allow(address);
-    if (![200, 201, 202].includes(added.status)) throw new Error(`Hypervibe could not allow this computer to reach the database server (${azureError(added)}).`);
-    // The rule takes up to a few minutes to apply; until then connections are dropped. The probe asks one
-    // thing: does the server answer this computer? Any PostgreSQL error (a login a new server does not
-    // know yet, say) is an answer, and `work` deals with it.
+    // A job must be in its environment's region, which is the shared network's and not always the app's.
+    const environment = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${job.environmentId}?${APPS_API}`);
+    if (environment.status !== 200 || typeof environment.body.location !== 'string') throw new Error(`Hypervibe could not read the project's Container Apps environment (${azureError(environment)}).`);
+    const created = await azureRest(tokens, AZURE_SCOPES.arm, 'PUT', url, { location: environment.body.location, tags: SETUP_TAG, properties: {
+      environmentId: job.environmentId, workloadProfileName: 'Consumption',
+      configuration: { triggerType: 'Manual', replicaTimeout: 600, replicaRetryLimit: 0, manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 },
+        secrets: [{ name: 'token', value: await tokens.get(AZURE_SCOPES.postgres) }, { name: 'script', value: script }] },
+      template: { containers: [{ name: 'setup', image: AZURE_SETUP_IMAGE, command: ['/bin/sh', '-c', SETUP_COMMAND], resources: { cpu: 0.25, memory: '0.5Gi' },
+        env: [{ name: 'PGHOST', value: job.host }, { name: 'PGPORT', value: '5432' }, { name: 'PGUSER', value: job.user }, { name: 'PGDATABASE', value: 'postgres' },
+          // The certificate is verified against the host name and the roots Azure databases use.
+          { name: 'PGSSLMODE', value: 'verify-full' }, { name: 'PGSSLROOTCERT', value: '/tmp/hv-ca.pem' }, { name: 'HV_SETUP_CA', value: azureDatabaseRoots() }, { name: 'PGCONNECT_TIMEOUT', value: '15' },
+          { name: 'PGPASSWORD', secretRef: 'token' }, { name: 'HV_SETUP_SQL', secretRef: 'script' }] }] },
+    } });
+    if (![200, 201].includes(created.status)) throw new Error(`Hypervibe could not create the database setup job (${azureError(created)}).`);
     for (let attempt = 0; ; attempt++) {
-      try { await probe(); break; } catch (error) {
-        if (/^[0-9A-Z]{5}$/.test(String((error as { code?: unknown } | null)?.code ?? ''))) break;
-        if (attempt >= 23) throw new Error(`The database server did not answer this computer after allowing ${address}. Last answer: ${connectionAnswer(error)}`);
-        await wait();
-      }
+      const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', url);
+      const state = (read.body.properties as { provisioningState?: string } | undefined)?.provisioningState;
+      if (read.status === 200 && state === 'Succeeded') break;
+      if (state === 'Failed' || state === 'Canceled' || attempt >= 60) throw new Error(`Azure did not finish creating the database setup job${state ? ` (${state})` : ''}.`);
+      await wait();
     }
-    result = await work();
+    const started = await azureRest(tokens, AZURE_SCOPES.arm, 'POST', `${ARM}${job.id}/start?${APPS_API}`);
+    if (![200, 202].includes(started.status)) throw new Error(`Hypervibe could not start the database setup job (${azureError(started)}).`);
+    // The job is new and started once, so its only run is this one; Azure may accept the start without naming it.
+    for (let attempt = 0; ; attempt++) {
+      // One unanswered status read must not end a script that may be half way through.
+      const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${job.id}/executions?${APPS_API}`).catch(() => ({ status: 0, body: {} as Record<string, unknown> }));
+      const status = ((read.body.value ?? []) as Array<{ properties?: { status?: string } }>)[0]?.properties?.status;
+      if (status === 'Succeeded') break;
+      if (status === 'Failed' || status === 'Stopped' || status === 'Degraded') throw new Error(`The database setup job ${status === 'Failed' ? 'failed' : `ended as ${status}`}. Its output is in the project's Container Apps logs under ${name}.`);
+      if (attempt >= 180) throw new Error(`The database setup job did not finish in time${status ? ` (${status})` : ''}.`);
+      await wait();
+    }
   } catch (error) { failure = error; }
-  const unclosed = await close();
-  if (unclosed) throw new Error(`${failure instanceof Error ? `${failure.message} ` : ''}${unclosed}`);
+  const left = await remove();
+  if (left) throw new Error(`${failure instanceof Error ? `${failure.message} ` : ''}Hypervibe could not delete the database setup job ${name} (${left}). It holds a login token that expires within the hour; run hv_plan and hv_apply again to remove it.`);
   if (failure) throw failure;
-  return result as T;
 }
 
 const ident = (name: string) => {
@@ -302,47 +292,45 @@ const ident = (name: string) => {
 };
 
 /**
- * Creates (or rotates) one environment's login and database on the server and
- * returns its connection URLs. Only its own logins may connect to its database,
- * so environments sharing a server cannot read each other's data.
+ * The psql script that creates (or rotates) one environment's login and
+ * database on the server, and the connection URLs it makes valid. Only its own
+ * logins may connect to its database, so environments sharing a server cannot
+ * read each other's data. Passwords appear in the script only as SCRAM verifiers.
  */
-export async function ensureEnvironmentDatabase(sql: SqlRunner, params: { host: string; environmentName: string; waker: boolean }): Promise<{ databaseUrl: string; wakerUrl?: string }> {
+export function environmentDatabaseSetup(params: { host: string; environmentName: string; waker: boolean }): { script: string; databaseUrl: string; wakerUrl?: string } {
   const names = azureDatabaseNames(params.environmentName);
   const login = ident(names.login); const database = ident(names.database); const waker = ident(names.waker);
   const password = crypto.randomBytes(24).toString('base64url');
   const wakerPassword = crypto.randomBytes(24).toString('base64url');
-  await sql('postgres', async (query) => {
-    const role = async (name: string, secret: string) => {
-      const exists = (await query('SELECT 1 FROM pg_roles WHERE rolname = $1', [name])).rows.length > 0;
-      await query(`${exists ? 'ALTER' : 'CREATE'} ROLE ${name} LOGIN PASSWORD '${scramVerifier(secret)}'`);
-    };
-    await role(login, password);
+  const role = (name: string, secret: string) => {
+    const verifier = scramVerifier(secret);
+    if (!/^[A-Za-z0-9+/=$:-]+$/.test(verifier)) throw new Error('Unexpected SCRAM verifier format.');
+    return `SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN 'ALTER' ELSE 'CREATE' END || ' ROLE ${name} LOGIN PASSWORD ''${verifier}''' \\gexec`;
+  };
+  const script = [
+    role(login, password),
     // The administrator must be a member to hand the database over to the login.
-    await query(`GRANT ${login} TO CURRENT_USER`);
-    if (!(await query('SELECT 1 FROM pg_database WHERE datname = $1', [database])).rows.length) await query(`CREATE DATABASE ${database} OWNER ${login}`);
-    else await query(`ALTER DATABASE ${database} OWNER TO ${login}`);
-    await query(`REVOKE CONNECT, TEMPORARY ON DATABASE ${database} FROM PUBLIC`);
-    await query(`GRANT CONNECT, TEMPORARY ON DATABASE ${database} TO ${login}`);
-    if (params.waker) {
-      await role(waker, wakerPassword);
-      await query(`GRANT CONNECT ON DATABASE ${database} TO ${waker}`);
-      await query(`GRANT pg_read_all_data TO ${waker}`);
-    }
-  });
-  await sql(database, async (query) => { await query(`ALTER SCHEMA public OWNER TO ${login}`); });
+    `GRANT ${login} TO CURRENT_USER;`,
+    `SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname = '${database}') THEN 'ALTER DATABASE ${database} OWNER TO ${login}' ELSE 'CREATE DATABASE ${database} OWNER ${login}' END \\gexec`,
+    `REVOKE CONNECT, TEMPORARY ON DATABASE ${database} FROM PUBLIC;`,
+    `GRANT CONNECT, TEMPORARY ON DATABASE ${database} TO ${login};`,
+    ...(params.waker ? [role(waker, wakerPassword), `GRANT CONNECT ON DATABASE ${database} TO ${waker};`, `GRANT pg_read_all_data TO ${waker};`] : []),
+    `\\connect ${database}`,
+    `ALTER SCHEMA public OWNER TO ${login};`,
+  ].join('\n') + '\n';
   const url = (user: string, secret: string) => `postgresql://${user}:${secret}@${params.host}:5432/${database}?sslmode=require`;
-  return { databaseUrl: url(login, password), ...(params.waker ? { wakerUrl: url(waker, wakerPassword) } : {}) };
+  return { script, databaseUrl: url(login, password), ...(params.waker ? { wakerUrl: url(waker, wakerPassword) } : {}) };
 }
 
-/** Removes one environment's database and logins, leaving the rest of a shared server untouched. */
-export async function dropEnvironmentDatabase(sql: SqlRunner, environmentName: string): Promise<void> {
+/** The psql script that removes one environment's database and logins, leaving the rest of a shared server untouched. */
+export function environmentDatabaseDrop(environmentName: string): string {
   const names = azureDatabaseNames(environmentName);
   const database = ident(names.database);
-  await sql('postgres', async (query) => {
-    await query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [database]);
-    await query(`DROP DATABASE IF EXISTS ${database}`);
-    for (const role of [ident(names.login), ident(names.waker)]) await query(`DROP ROLE IF EXISTS ${role}`);
-  });
+  return [
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${database}' AND pid <> pg_backend_pid();`,
+    `DROP DATABASE IF EXISTS ${database};`,
+    ...[ident(names.login), ident(names.waker)].map((role) => `DROP ROLE IF EXISTS ${role};`),
+  ].join('\n') + '\n';
 }
 
 // ------------------------------------------------------------------ Storage and absence

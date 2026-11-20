@@ -160,7 +160,7 @@ describe('Azure apply actions', () => {
     const azure = setup(() => json(200));
     const statements: string[] = [];
     const result = await runAzureAction(azure.ctx, azure.context, action(AZURE_DATABASE_LOGIN_OPERATION, { host: 'srv.postgres.database.azure.com', waker: true }), { project: project as never, spec: spec({ test: testing() }) },
-      { sqlRunner: () => async (_database, run) => { await run(async (sql) => { statements.push(sql); return { rows: [] }; }); }, setupAccess: (_context, _sql, work) => work() });
+      { setupSql: async (_context, host, script) => { statements.push(host, ...script.split('\n')); } });
     expect(result).toMatchObject({ success: true });
     expect(azure.calls.filter((call) => call.method === 'PUT').map((call) => new URL(call.url).pathname)).toEqual(['/secrets/test--database-url', '/secrets/test--hv-waker-url']);
     expect(azure.bindings().azure).toMatchObject({ databaseLoginAt: expect.any(String), wakerLoginAt: expect.any(String), database: {
@@ -168,7 +168,8 @@ describe('Azure apply actions', () => {
       subscriptionId: connection.subscriptionId, resourceGroup: connection.resourceGroup, host: 'srv.postgres.database.azure.com',
       name: 'app_test', owner: 'app_test', secretUrl: `${azure.context.vault.uri}secrets/test--database-url`,
     } });
-    expect(statements).toContain('CREATE DATABASE app_test OWNER app_test');
+    expect(statements[0]).toBe('srv.postgres.database.azure.com');
+    expect(statements).toContain('GRANT CONNECT, TEMPORARY ON DATABASE app_test TO app_test;');
   });
 
   it('records the digest-pinned image a build produced', async () => {
