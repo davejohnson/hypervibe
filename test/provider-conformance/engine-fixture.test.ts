@@ -4,7 +4,7 @@ import { azureEngineProblems } from '../../src/application/infrastructure-engine
 import type { AzureTokenProvider } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import { environmentProfile } from '../../src/domain/services/infrastructure-engine-selection.js';
-import { classifyDatabaseProbe, engineFixtureEmptiedEnvironment, engineFixtureEnvironment, readGcpDatabaseExposure, readGcpInventory, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
+import { classifyDatabaseProbe, engineFixtureEnvironment, readGcpDatabaseExposure, readGcpInventory, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
   readAzureInventory, sinceBaseline } from './engine-fixture.js';
 import { resourceKey, runDisposableFixture, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -166,12 +166,10 @@ describe('Google Cloud fixture readers', () => {
   const instance = (networks: Array<{ value: string }>) => ({ settings: { ipConfiguration: { ipv4Enabled: true, authorizedNetworks: networks } }, ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.7' }] });
   const created: NativeFixtureResource[] = ['hv-fx-1-db-aaaaaa', 'hv-fs-1-db-bbbbbb'].map((id) => ({ provider: 'gcp', type: 'sql-instance', id, address: `sql-instance/${id}` }));
 
-  it('builds a spec the schema accepts, and an emptied one with nothing to run or keep', () => {
+  it('builds a spec the schema accepts', () => {
     const spec = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: {
-      one: engineFixtureEnvironment('gcp', 'create', 'us-central1'), two: engineFixtureSiblingEnvironment('gcp'), gone: engineFixtureEmptiedEnvironment('us-central1') } });
+      one: engineFixtureEnvironment('gcp', 'create', 'us-central1'), two: engineFixtureSiblingEnvironment('gcp') } });
     expect(spec.environments.one).toMatchObject({ hosting: { provider: 'cloudrun', region: 'us-central1' }, database: { provider: 'cloudsql' }, storage: { files: { provider: 'gcs' } } });
-    expect(spec.environments.gone).toMatchObject({ services: {} });
-    expect(spec.environments.gone!.database).toBeUndefined();
   });
 
   it('reports any network allowed to connect, on either environment, and refuses an unreadable or missing answer', async () => {

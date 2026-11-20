@@ -159,11 +159,6 @@ export async function readAzureDatabaseExposure(tokens: AzureTokenProvider, serv
   return { host: properties.fullyQualifiedDomainName, problems };
 }
 
-/** Google Cloud has no teardown plan: an environment is emptied (no services, database or storage), applied, then dropped from the spec. */
-export function engineFixtureEmptiedEnvironment(region: string): Record<string, unknown> {
-  return { hosting: { ...SPEC_NAMES.gcp.hosting, region }, services: {}, email: { enabled: false }, envVars: {}, deploy: { strategy: 'manual' } };
-}
-
 export interface GcpFixtureAccess { projectId: string; region: string; token: () => Promise<string> }
 
 async function gcpList(access: GcpFixtureAccess, url: string, key: string): Promise<Array<Record<string, unknown>>> {
