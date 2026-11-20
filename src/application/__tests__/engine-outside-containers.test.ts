@@ -119,11 +119,13 @@ describe('resources left only in engine state by an apply that was cut off', () 
 describe('Google Cloud teardown plan', () => {
   it('plans toward an emptied environment: buckets are emptied first, everything recorded is removed, and a last step checks nothing is left', async () => {
     const f = fixture();
-    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { services: { web: { serviceId: 'web-1' } }, engine: { kind: 'opentofu', storage: ['files'] } });
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { services: { web: { serviceId: 'web-1' } },
+      engine: { kind: 'opentofu', storage: ['files'], secrets: ['hv-staging-legacy-key'], importedSecrets: ['LEGACY_KEY'] } });
     f.enginePlan.mockImplementation(async ({ configuration }) => {
       f.configurations.push(configuration);
       const segment = { id: 'engine-segment', engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
-      const mapped = [...new Map(Object.values(configuration.resources).map((resource) => [resource.actionId, resource])).values()];
+      const mapped = [...new Map(Object.values(configuration.resources).map((resource) => [resource.actionId, resource])).values()]
+        .filter((resource) => !resource.actionId.startsWith('secret-runtime-access:'));
       return { ok: true, segmentId: segment.id, segment, planFile: '/not-executed', blockers: [], unmanagedDeletes: [],
         actions: mapped.map((resource) => ({ id: resource.actionId, type: 'destroy' as const, resource: { kind: resource.kind, name: resource.name, provider: 'gcp' }, verified: true, reason: 'engine preview', metadata: { engineSegment: { ...segment, addresses: [] } } })) };
     });
@@ -139,6 +141,9 @@ describe('Google Cloud teardown plan', () => {
       metadata: { workloads: [{ name: 'web', kind: 'services', resource: 'web-1' }], buckets: [expect.stringMatching(/staging-files$/)] } });
     // Nothing the spec declares is kept: no service is configured and the delegated secret no longer targets the environment.
     expect(ids).not.toContain('secret-container:hv-staging-api-key');
+    // A value imported during a migration is not kept either: its container is mapped for removal but no longer declared.
+    expect(ids).toContain('secret-container:hv-staging-legacy-key');
+    expect(JSON.stringify(f.configurations.at(-1)!.files)).not.toContain('hv-staging-legacy-key');
     expect(f.configurations.at(-1)!.resources['google_cloud_run_v2_service.web']).toMatchObject({ actionId: 'service:web' });
     expect(planned.warnings[0]).toContain('cannot be undone');
     // The saved spec still has the environment until the last step runs.

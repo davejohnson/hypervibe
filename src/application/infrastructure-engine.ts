@@ -684,7 +684,10 @@ function lastAttemptedDatabaseInstance(environmentId: string): string | undefine
     if (run.type !== 'apply') continue;
     const planRunId = (run.plan as { planRunId?: unknown } | undefined)?.planRunId;
     if (typeof planRunId !== 'string') continue;
-    const name = (runs.findById(planRunId)?.plan as { engine?: { database?: { instanceName?: unknown } } } | undefined)?.engine?.database?.instanceName;
+    const engine = (runs.findById(planRunId)?.plan as { engine?: { teardown?: unknown; database?: { instanceName?: unknown } } } | undefined)?.engine;
+    // After a teardown the earlier instance is gone, and Google holds its name back for days.
+    if (engine?.teardown === true) return undefined;
+    const name = engine?.database?.instanceName;
     if (typeof name === 'string') return name;
   }
   return undefined;
@@ -808,9 +811,10 @@ function gcpTeardownActions(planned: PlanAction[], context: EngineContext, envir
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'gcp' },
-    reason: `Hypervibe will confirm that none of ${environmentName}'s services, jobs, workers, database, buckets or secrets remain in ${context.gcpProjectId}, then remove ${environmentName} from the spec.`,
+    reason: `Hypervibe will confirm with Google that ${environmentName}'s recorded services, jobs, workers, database, buckets and secrets are gone from ${context.gcpProjectId}, then remove ${environmentName} from the spec. Schedules, queues and a cache are removed by the steps above and are not read again.`,
     ...(changing.length ? { dependsOn: changing } : {}),
-    metadata: { operation: GCP_TEARDOWN_CLEANUP_OPERATION, gcpProjectId: context.gcpProjectId, workloads: boundWorkloads(context.environment),
+    metadata: { operation: GCP_TEARDOWN_CLEANUP_OPERATION, gcpProjectId: context.gcpProjectId,
+      workloads: [...boundWorkloads(context.environment), ...(binding.releaseJob ? [{ name: 'release-command', kind: 'jobs' as const, resource: binding.releaseJob }] : [])],
       ...(binding.database?.instanceName ? { instanceName: binding.database.instanceName } : {}), buckets: (binding.storage ?? []).map(bucketOf) },
   };
   return [...empties, ...ordered, cleanup];
@@ -871,7 +875,7 @@ export async function finishGcpTeardown(ctx: CommandContext, token: string, cont
   ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, services: {}, engine: {}, gcp: { tornDownAt: new Date().toISOString() } });
   // The environment is gone; removing it from the spec keeps the next plan from recreating it.
   new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, environmentName));
-  return { success: true, message: `Nothing of ${environmentName} remains in ${context.gcpProjectId}. It was removed from the spec.` };
+  return { success: true, message: `Google confirms ${environmentName}'s services, jobs, workers, database, buckets and secrets are gone from ${context.gcpProjectId}. It was removed from the spec.` };
 }
 
 export const GCP_STORAGE_EMPTY_OPERATION = 'gcpStorageEmpty';
@@ -995,8 +999,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }
   // Outside values arrive only after the engine creates their reviewed containers.
   // Migration imports keep their private transfer stage instead of opening a collection page.
-  const pendingImportedSecrets = engineBinding.pendingImportedSecrets ?? [];
-  const importedSecrets = engineOutsideKeys(spec, environmentName, engineBinding.importedSecrets)
+  // A teardown keeps nothing, imported values included.
+  const pendingImportedSecrets = options.teardown ? [] : engineBinding.pendingImportedSecrets ?? [];
+  const importedSecrets = options.teardown ? [] : engineOutsideKeys(spec, environmentName, engineBinding.importedSecrets)
     .filter((key) => !pendingImportedSecrets.includes(key));
   const missingKeys: string[] = [];
   let outsideContainersMissing = false;
@@ -1238,7 +1243,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (repository.state === 'unknown') return { blocked: [repository.reason] };
   let imageRepository: { planId: string; state: EngineStateIdentity } | undefined;
   let imageRepositoryActions: PlanAction[] = [];
-  if (repository.state === 'absent') {
+  // A teardown never creates the shared image repository.
+  if (repository.state === 'absent' && !options.teardown) {
     imageRepository = { planId: crypto.randomUUID(), state: imageRepositoryState(project.id, context.region, environmentProjectId) };
     const repositoryPlanned = await engine.plan({ backend: gcpEngineBackend, configuration: imageRepositoryConfiguration(context.gcpProjectId, context.region),
       auth: context.auth, state: imageRepository.state, planId: imageRepository.planId });
@@ -1517,7 +1523,18 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
           return { success: true, message: 'Verified the cancelled domain is absent and finished its cleanup.' };
         });
       }
-      if (operation === GCP_STORAGE_EMPTY_OPERATION) return emptyGcpBucket(token, action);
+      if (operation === GCP_STORAGE_EMPTY_OPERATION) {
+        // Files go first, so everything that could stop the rest of the teardown is checked before any is deleted.
+        if ((action.metadata as { environmentLabel?: string }).environmentLabel !== labelValue(context.environment.id)) {
+          return { success: false, status: 'blocked', message: 'The bucket belongs to a different environment than this plan; re-run hv_plan.' };
+        }
+        const current = await serviceGenerations(token, context, environmentName);
+        if ('blocked' in current) return { success: false, status: 'blocked', message: current.blocked };
+        if (JSON.stringify(current.generations) !== JSON.stringify(reviewed.observedGenerations ?? {})) {
+          return { success: false, status: 'blocked', message: 'A service changed since this plan (for example, a release). Nothing was deleted; re-run hv_plan.' };
+        }
+        return applyToTarget(() => emptyGcpBucket(token, action));
+      }
       if (operation === GCP_TEARDOWN_CLEANUP_OPERATION) return finishGcpTeardown(ctx, token, context, params, environmentName, action);
       if (operation === ENGINE_SECRET_OPERATION) return applyToTarget(() => ensureSecret(token, action));
       if (operation === 'gcpSecretManagerDelete') return { success: false, status: 'blocked', message: 'Secret containers are managed by OpenTofu. Run hv_plan again.' };
