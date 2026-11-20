@@ -708,7 +708,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (cloudRunEnvironment && retainedExecution && scope === 'infrastructure') {
         return commandError('VALIDATION', 'An acknowledged database task needs observation or cleanup before new infrastructure. Run hv_plan without scope to recover its exact execution.', { next: ['hv_plan'] });
       }
-      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'credentials') {
+      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'teardown' && scope !== 'credentials') {
         return commandError('VALIDATION', `scope="${scope}" is not supported for Cloud Run environments. Run hv_plan without scope to review OpenTofu infrastructure.`, { next: ['hv_plan'] });
       }
       // AWS and Azure plan through the engine by default too; their other scopes keep their own planners.
