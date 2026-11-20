@@ -1,0 +1,145 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.9",
+  "resource_changes": [
+    {
+      "address": "google_project_iam_member.grant_8962be5b71153f79f50b",
+      "mode": "managed",
+      "type": "google_project_iam_member",
+      "name": "grant_8962be5b71153f79f50b",
+      "provider_name": "registry.opentofu.org/hashicorp/google",
+      "change": {
+        "actions": [
+          "create",
+          "delete"
+        ],
+        "before": {
+          "condition": [],
+          "etag": "Bw==",
+          "id": "test-project/roles/secretmanager.secretAccessor/serviceAccount:runtime@test-project.iam.gserviceaccount.com",
+          "member": "serviceAccount:runtime@test-project.iam.gserviceaccount.com",
+          "project": "test-project",
+          "role": "roles/secretmanager.secretAccessor"
+        },
+        "after": {
+          "condition": [
+            {
+              "description": "Keep the app runtime out of the Railway copy secret and its versions.",
+              "expression": "(resource.type != \"secretmanager.googleapis.com/Secret\" && resource.type != \"secretmanager.googleapis.com/SecretVersion\") || (resource.name != \"projects/123456/secrets/hv-transfer-eb8be87991cb57305891\" && !resource.name.startsWith(\"projects/123456/secrets/hv-transfer-eb8be87991cb57305891/versions/\"))",
+              "title": "hv-copy-secret-eb8be87991cb57305891"
+            }
+          ],
+          "member": "serviceAccount:runtime@test-project.iam.gserviceaccount.com",
+          "project": "test-project",
+          "role": "roles/secretmanager.secretAccessor"
+        },
+        "after_unknown": {
+          "condition": [
+            {}
+          ],
+          "etag": true,
+          "id": true
+        },
+        "before_sensitive": {
+          "condition": []
+        },
+        "after_sensitive": {
+          "condition": [
+            {}
+          ]
+        },
+        "replace_paths": [
+          [
+            "condition",
+            0,
+            "description"
+          ],
+          [
+            "condition",
+            0,
+            "title"
+          ],
+          [
+            "condition"
+          ],
+          [
+            "condition",
+            0,
+            "expression"
+          ]
+        ]
+      },
+      "action_reason": "replace_because_cannot_update"
+    },
+    {
+      "address": "google_project_iam_member.grant_d659199810ab7cc52a6b",
+      "mode": "managed",
+      "type": "google_project_iam_member",
+      "name": "grant_d659199810ab7cc52a6b",
+      "provider_name": "registry.opentofu.org/hashicorp/google",
+      "change": {
+        "actions": [
+          "create",
+          "delete"
+        ],
+        "before": {
+          "condition": [],
+          "etag": "Bw==",
+          "id": "test-project/roles/storage.objectUser/serviceAccount:runtime@test-project.iam.gserviceaccount.com",
+          "member": "serviceAccount:runtime@test-project.iam.gserviceaccount.com",
+          "project": "test-project",
+          "role": "roles/storage.objectUser"
+        },
+        "after": {
+          "condition": [
+            {
+              "description": "Keep the app runtime out of temporary database export objects. Bucket listing stays available.",
+              "expression": "resource.type != \"storage.googleapis.com/Object\" || !resource.name.startsWith(\"projects/_/buckets/test-project-hv-build-source/objects/migrations/production/\")",
+              "title": "hv-copy-exports-eb8be87991cb57305891"
+            }
+          ],
+          "member": "serviceAccount:runtime@test-project.iam.gserviceaccount.com",
+          "project": "test-project",
+          "role": "roles/storage.objectUser"
+        },
+        "after_unknown": {
+          "condition": [
+            {}
+          ],
+          "etag": true,
+          "id": true
+        },
+        "before_sensitive": {
+          "condition": []
+        },
+        "after_sensitive": {
+          "condition": [
+            {}
+          ]
+        },
+        "replace_paths": [
+          [
+            "condition",
+            0,
+            "description"
+          ],
+          [
+            "condition",
+            0,
+            "title"
+          ],
+          [
+            "condition"
+          ],
+          [
+            "condition",
+            0,
+            "expression"
+          ]
+        ]
+      },
+      "action_reason": "replace_because_cannot_update"
+    }
+  ],
+  "errored": false
+}

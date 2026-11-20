@@ -165,6 +165,10 @@ function matchesResource(address: string, raw: unknown, slot: Slot, evidence: Tr
     (value.condition == null || isDeepStrictEqual(value.condition, []))
   );
 }
+/** Require the already-owned native secret, including its original creation time and configuration. */
+export function matchesExistingTransferSecret(slot: Slot, evidence: TransferSlotEvidence, value: unknown): boolean {
+  return !!evidence.secret && matchesResource(slot.addresses.secret, value, slot, evidence, true);
+}
 function validRow(row: Record<string, unknown>, address: string) {
   return (
     row.mode === 'managed' &&

@@ -27,7 +27,7 @@ export interface PlanReport {
   project: string;
   environment?: string;
   scope: string;
-  setupPurpose?: 'railway-transfer';
+  setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation';
   target?: string;
   cloudTarget?: ReportCloudTarget;
   billingAccount?: string;
@@ -130,7 +130,8 @@ export function makePlanReport(input: Omit<PlanReport, 'actions' | 'blocked' | '
     ...(input.billingAccount ? { billingAccount: display(input.billingAccount) } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.approval ? { approval: input.approval } : {}),
-    ...(input.setupPurpose === 'railway-transfer' ? { setupPurpose: input.setupPurpose } : {}),
+    ...((input.setupPurpose === 'railway-transfer' || input.setupPurpose === 'railway-transfer-isolation')
+      ? { setupPurpose: input.setupPurpose } : {}),
     actions, blocked: [...blocked], warnings,
   };
 }

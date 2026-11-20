@@ -98,6 +98,17 @@ describe('standalone infrastructure plan report', () => {
     expect(renderPlanReportHtml(report([]))).not.toContain('Approve the whole plan');
   });
 
+  it('explains replacing app access grants without reporting a data replacement or suppressing a real warning', () => {
+    const actions = [action('runtime-access', 'App access to secrets', { type: 'replace' }),
+      action('transfer-slot:secret:fixture', 'The copy job’s secret', { kind: 'secret', type: 'noop' })];
+    const html = renderPlanReportHtml(report(actions, { scope: 'Google Cloud project setup',
+      setupPurpose: 'railway-transfer-isolation', warnings: ['A separate permission requires review.'] }));
+    expect(html).toContain('The two permissions reviewed here belong to the app');
+    expect(html).toContain('the contents of temporary database exports');
+    expect(html).toContain('A separate permission requires review.');
+    expect(html).not.toContain('This plan reserves an empty Google Cloud secret');
+  });
+
   it('takes the reader from the copy explanation to the reserved secret when its row is unambiguous', () => {
     const scope = { scope: 'Google Cloud project setup', setupPurpose: 'railway-transfer' as const };
     const unrelated = action('secret:app', 'App API key', { kind: 'secret', type: 'noop' });

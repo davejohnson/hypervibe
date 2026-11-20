@@ -657,14 +657,14 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('previews an empty transfer slot through MCP and confirms only its reviewed plan through the CLI', async () => {
+  it.each(['empty-transfer-slot', 'restrict-app-access'])('previews %s through MCP and confirms only its reviewed plan through the CLI', async migrationAccess => {
     const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
     new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
       destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project', region: 'us-central1' }, services: {} },
       source: { hosting: { provider: 'railway' }, services: {} },
     } });
     const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
-      migrationAccess: 'empty-transfer-slot', migrationSourceEnvironment: 'source' };
+      migrationAccess, migrationSourceEnvironment: 'source' };
     const planId = 'setup-reviewed-slot';
     const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId });
     const client = await makeClient();
@@ -676,8 +676,13 @@ describe('hv_connections', () => {
         migrationSourceEnvironment: input.migrationSourceEnvironment, confirm: undefined }));
       expect(preview.confirmation.completeInput).toBe(true);
       expect(preview.confirmation.retryInput).toEqual({ ...input, confirm: true, gcpSetupPlanId: planId });
-      expect(preview.confirmation.message).toContain('future data copy from source to destination in transfer-app');
-      expect(preview.hint).toContain('the copy job');
+      if (migrationAccess === 'restrict-app-access') {
+        expect(preview.confirmation.message).toMatch(/app.*secret.*dump/i);
+        expect(preview.hint).toContain('two project');
+      } else {
+        expect(preview.confirmation.message).toContain('future data copy from source to destination in transfer-app');
+        expect(preview.hint).toContain('the copy job');
+      }
       expect(preview.hint).toContain('--gcp-setup-plan-id ' + planId);
       prepare.mockResolvedValueOnce({ success: true, mode: 'confirm' });
       const output: string[] = [];
@@ -699,7 +704,7 @@ describe('hv_connections', () => {
     } finally { await client.close(); }
   });
 
-  it('rejects ambiguous targets, other actions, credentials and extra grants for empty transfer slots', async () => {
+  it.each(['empty-transfer-slot', 'restrict-app-access'])('rejects ambiguous targets, other actions, credentials and extra grants for %s', async migrationAccess => {
     const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
     new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
       destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project' }, services: {} },
@@ -709,11 +714,12 @@ describe('hv_connections', () => {
     const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId: 'some-plan' });
     const client = await makeClient();
     const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
-      migrationAccess: 'empty-transfer-slot', migrationSourceEnvironment: 'source' };
+      migrationAccess, migrationSourceEnvironment: 'source' };
     const confirmed = { confirm: true, gcpSetupPlanId: 'some-plan' };
     try {
       for (const override of [
         { action: 'bootstrap' }, { action: 'describe' }, { action: 'add' }, { action: 'connect' }, { provider: 'railway' },
+        { provider: 'aws' }, { provider: 'azure' },
         { project: undefined }, { environment: undefined }, { environment: 'source' }, { environment: 'other' },
         { migrationSourceEnvironment: undefined }, { migrationSourceEnvironment: 'missing' }, { migrationSourceEnvironment: 'unrelated' },
         { migrationSourceEnvironment: 'destination' }, { migrationAccess: undefined },

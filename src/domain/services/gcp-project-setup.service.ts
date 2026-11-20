@@ -4,7 +4,7 @@ import {
 } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 
 export {
-  composeGcpProjectConfiguration, getGcpProjectSetupContribution, getGcpProjectSetupContributions,
+  composeGcpProjectConfiguration, getGcpProjectSetupContribution, getGcpProjectSetupContributions, getGcpRuntimeIsolation,
   hasGcpProjectSetup, type GcpProjectSetupContribution, type GcpProjectSetupDependencies,
   type GcpProjectSetupParams, type GcpProjectSetupResult,
 } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';

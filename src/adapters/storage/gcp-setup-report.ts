@@ -13,7 +13,7 @@ const intentFile = /^setup-([a-f0-9]{64})\.json$/;
 type SetupScope = { projectId: string; gcpProjectId: string; projectName?: string; dataDir?: string };
 interface ReportSource {
   planId: string;
-  setupPurpose?: 'railway-transfer';
+  setupPurpose?: PlanReport['setupPurpose'];
   projectName?: string;
   createdAt?: string;
   planned: { actions: unknown; blockers?: unknown };
@@ -147,7 +147,8 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
     if (saved?.planId !== planId || saved.intent !== intent) continue;
     return saveSetupReport(scope, {
       planId, planned: { actions: record(saved.planned).actions, blockers: record(saved.planned).blockers },
-      setupPurpose: saved.setupPurpose === 'railway-transfer' ? saved.setupPurpose : undefined,
+      setupPurpose: saved.setupPurpose === 'railway-transfer' || saved.setupPurpose === 'railway-transfer-isolation'
+        ? saved.setupPurpose : undefined,
       configuration: saved.configuration, projectName: typeof saved.projectName === 'string' ? saved.projectName : undefined,
       createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : fs.statSync(file).mtime.toISOString(),
     });

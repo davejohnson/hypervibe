@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { reviewGcpPreparationAdoption } from './gcp-preparation-adoption.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
@@ -5,10 +6,10 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
 import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
-import { providerRegistry } from '../registry/provider.registry.js';
+import { providerRegistry, type MigrationAccess } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
-import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
-import { getGcpProjectSetupContribution, runGcpProjectSetup } from './gcp-project-setup.service.js';
+import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { getGcpProjectSetupContribution, getGcpRuntimeIsolation, runGcpProjectSetup } from './gcp-project-setup.service.js';
 import type { Project } from '../entities/project.entity.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { GCP_PROJECT_ID_PATTERN, gcpConnectionScope } from './gcp-environment-target.js';
@@ -131,7 +132,7 @@ export async function runCloudPrepare(params: {
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
   workerAccess?: WorkerPrepareAccess;
-  migrationAccess?: 'empty-transfer-slot';
+  migrationAccess?: MigrationAccess;
   migrationSourceEnvironment?: string;
   gcpSetupPlanId?: string;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
@@ -171,14 +172,18 @@ export async function runCloudPrepare(params: {
   }
 
   if (params.migrationAccess) {
+    if (!['empty-transfer-slot', 'restrict-app-access'].includes(params.migrationAccess)) {
+      return { success: false, error: 'Select a supported migration access operation.' };
+    }
     if (!params.environmentName || !params.migrationSourceEnvironment || params.environmentName === params.migrationSourceEnvironment ||
       !resolved.runtimeServiceAccountEmail || gcsAccess || memorystoreAccess || queueAccess || workerAccess || deployServiceAccountEmail ||
-      adminCredentialsJson || adminAccessToken || (confirm !== !!params.gcpSetupPlanId)) {
+      adminCredentialsJson || adminAccessToken || adminAuth || (confirm !== !!params.gcpSetupPlanId)) {
       return { success: false, error: 'Select distinct source and target environments for the transfer slot. Confirm only with the saved migration setup plan ID.' };
     }
-    const capability = providerRegistry.get(provider)?.emptyTransferSlot;
-    if (!capability) return { success: false, error: 'This provider cannot prepare an empty transfer slot.' };
+    const capability = providerRegistry.get(provider)?.migrationAccess;
+    if (!capability) return { success: false, error: 'This provider cannot prepare migration access.' };
     return capability.prepare({
+      mode: params.migrationAccess,
       project,
       sourceEnvironment: params.migrationSourceEnvironment,
       targetEnvironment: params.environmentName,
@@ -313,6 +318,9 @@ export async function runCloudPrepare(params: {
   }
 
   try {
+    if (getGcpRuntimeIsolation(project.id, resolved.gcpProjectId, resolved.deployServiceAccountEmail)) {
+      return { success: false, error: 'The restricted app runtime cannot receive deployment permissions. Select the deployment service account for this project.' };
+    }
     const token = adminAccessToken
       ?? (adminAuth === 'default' || (!confirm && !adminCredentialsJson)
         ? await (params.defaultAdminAccessTokenProvider ?? getDefaultAdminAccessToken)()
@@ -335,7 +343,7 @@ export async function runCloudPrepare(params: {
     if (!setup.success) return { ...setup, plan };
     if (!confirm) return { ...setup, plan, requiresConfirmation: true,
       message: 'Review these exact Google Cloud setup actions, then confirm the saved preview.' };
-    const observed = await verifyPreparedInfrastructure(token, plan);
+    const observed = await verifyPreparedInfrastructure(token, plan, project.id);
     const { enabledApis, runtimeServiceAccountIamResult, runtimeSelfIamResult, iamResult, runtimeIamResult } = observed;
     const updatedProject = projectRepo.updatePolicies(project.id, (currentProject) => {
       const previous = getCloudPreparation(currentProject, profile.provider, params.environmentProjectId);
@@ -805,7 +813,7 @@ export async function verifyAndRecordBootstrapPreparation(project: Project, toke
   const profile = getCloudPrepareProfile('cloudrun')!;
   const plan: CloudPreparePlan = { ...input, region, projectName: project.name, provider: 'cloudrun', version: profile.version,
     member: `serviceAccount:${deployEmail}`, runtimeMember: `serviceAccount:${runtimeEmail}`, revokeRoles: [], runtimeRevokeRoles: [] };
-  const observed = await verifyPreparedInfrastructure(token, plan);
+  const observed = await verifyPreparedInfrastructure(token, plan, project.id);
   projectRepo.updatePolicies(project.id, (currentProject) => {
     const previous = getCloudPreparation(currentProject, 'cloudrun', environmentProjectId);
     const sameTarget = previous?.gcpProjectId === projectId && previous.deployServiceAccountEmail === deployEmail && previous.runtimeServiceAccountEmail === runtimeEmail;
@@ -824,7 +832,9 @@ export async function verifyAndRecordBootstrapPreparation(project: Project, toke
 }
 
 /** Read-only confirmation of the exact policy and identities after engine apply. */
-async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePlan) {
+async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePlan, localProjectId: string) {
+  const isolation = plan.runtimeServiceAccountEmail
+    ? getGcpRuntimeIsolation(localProjectId, plan.gcpProjectId, plan.runtimeServiceAccountEmail) : undefined;
   const client = new GcpBootstrapClient({ accessToken: token, fetch,
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) });
   const enabledApis = [];
@@ -833,8 +843,18 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
     enabledApis.push({ service, status: 'enabled' });
   }
   const policy = await getProjectIamPolicy(token, plan.gcpProjectId);
+  const restricted = isolation ? verifyRuntimeRestrictions(policy, isolation) : new Set<string>();
+  if (isolation) {
+    const account = await client.getServiceAccount(plan.gcpProjectId, isolation.runtimeEmail.split('@')[0]!);
+    const project = await client.getProject(plan.gcpProjectId);
+    if (project?.name !== 'projects/' + isolation.projectNumber || account?.email !== isolation.runtimeEmail
+      || account.uniqueId !== isolation.runtimeUniqueId || account.disabled) {
+      throw new Error('The project or app identity no longer matches the saved migration access restriction.');
+    }
+  }
   const verifyRoles = (member: string, roles: string[]) => {
-    for (const role of roles) if (!(policy.bindings ?? []).some((binding) => binding.role === role && !binding.condition && binding.members?.includes(member))) {
+    for (const role of roles) if (!(member === plan.runtimeMember && restricted.has(role))
+      && !(policy.bindings ?? []).some((binding) => binding.role === role && !binding.condition && binding.members?.includes(member))) {
       throw new Error(`Google project access ${role} did not converge after OpenTofu apply.`);
     }
     return { updatedRoles: roles, existingRoles: [] as string[], removedRoles: [] as string[], absentRoles: [] as string[] };
@@ -867,8 +887,9 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
     const bucketName = plan.buildSourceBucket.name;
     const bucketResponse = await fetch(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucketName)}`, { headers });
     if (!bucketResponse.ok) throw new Error(`Build source bucket verification failed (HTTP ${bucketResponse.status}).`);
-    const bucket = await bucketResponse.json() as { name?: string; projectNumber?: string; iamConfiguration?: { uniformBucketLevelAccess?: { enabled?: boolean }; publicAccessPrevention?: string } };
+    const bucket = await bucketResponse.json() as { name?: string; projectNumber?: string; timeCreated?: string; iamConfiguration?: { uniformBucketLevelAccess?: { enabled?: boolean }; publicAccessPrevention?: string } };
     if (bucket.name !== bucketName || String(bucket.projectNumber) !== project.name.replace('projects/', '')
+      || (isolation && (bucket.name !== isolation.bucket || bucket.timeCreated !== isolation.bucketTimeCreated))
       || bucket.iamConfiguration?.uniformBucketLevelAccess?.enabled !== true || bucket.iamConfiguration.publicAccessPrevention !== 'enforced') {
       throw new Error('The build source bucket identity or private access configuration did not converge.');
     }
@@ -879,6 +900,19 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
     if (registry.name !== repository || registry.format !== 'DOCKER') throw new Error('The image repository identity or format did not converge.');
   }
   return { enabledApis, iamResult, runtimeIamResult, runtimeServiceAccountIamResult, runtimeSelfIamResult };
+}
+
+/** A second binding for the same app and role can restore access outside the reviewed condition. */
+function verifyRuntimeRestrictions(policy: IamPolicy, isolation: TransferIsolationScope): Set<string> {
+  const restricted = new Set<string>();
+  for (const grant of isolationGrants(isolation)) {
+    const bindings = (policy.bindings ?? []).filter(binding => binding.role === grant.role && binding.members?.includes(grant.member));
+    if (policy.version !== 3 || bindings.length !== 1 || !isDeepStrictEqual(bindings[0]?.condition, grant.condition)) {
+      throw new Error(`The app's ${grant.role} migration access restriction does not match the saved project setup.`);
+    }
+    restricted.add(grant.role);
+  }
+  return restricted;
 }
 
 async function getProjectIamPolicy(token: string, projectId: string): Promise<IamPolicy> {
