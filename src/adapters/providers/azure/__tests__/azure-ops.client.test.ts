@@ -99,14 +99,19 @@ describe('Azure database setup inside the private network', () => {
   const job = { id: `${group}/providers/Microsoft.App/jobs/hv-app-test-dbsetup`, environmentId: `${group}/providers/Microsoft.App/managedEnvironments/hv-app-shared-apps`,
     host: 'srv.postgres.database.azure.com', user: 'hypervibe-app' };
   /** Azure's job API as documented: a job is created, started, reports its execution's status, and is gone after deletion. */
-  const azureJobs = (options: { leftover?: boolean; status?: string; undeletable?: boolean } = {}) => {
-    const state = { job: options.leftover ? { stale: true } as Record<string, unknown> : undefined as Record<string, unknown> | undefined, created: [] as Array<Record<string, any>>, deleted: 0 };
+  const azureJobs = (options: { leftover?: boolean; status?: string; undeletable?: boolean; refuseCreate?: boolean; loseStart?: boolean } = {}) => {
+    const state = { job: options.leftover ? { stale: true } as Record<string, unknown> : undefined as Record<string, unknown> | undefined, created: [] as Array<Record<string, any>>, deleted: 0, starts: 0 };
     const azure = fake((method, url, body) => {
       const path = new URL(url).pathname;
       if (path === job.environmentId) return json(200, { location: 'westus2' });
-      if (path === `${job.id}/start` && method === 'POST') return state.job ? json(200, { name: 'run-1' }) : json(404);
+      if (path === `${job.id}/start` && method === 'POST') {
+        state.starts++;
+        if (options.loseStart) throw new TypeError('fetch failed');
+        return state.job ? json(200, { name: 'run-1' }) : json(404);
+      }
       if (path === `${job.id}/executions`) return json(200, { value: [{ name: 'earlier', properties: { status: 'Failed' } }, { name: 'run-1', properties: { status: options.status ?? 'Succeeded' } }] });
       if (path !== job.id) throw new Error(`Unexpected call ${method} ${url}`);
+      if (method === 'PUT' && options.refuseCreate) return json(403, { error: { code: 'AuthorizationFailed', message: 'no' } });
       if (method === 'PUT') { state.job = JSON.parse(body!); state.created.push(state.job!); return json(201); }
       if (method === 'DELETE') {
         if (options.undeletable) return json(409, { error: { code: 'JobBusy' } });
@@ -152,6 +157,19 @@ describe('Azure database setup inside the private network', () => {
   it('reports a failed script and still deletes the job', async () => {
     const { azure, state } = azureJobs({ status: 'Failed' });
     await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/database setup job failed.*logs under hv-app-test-dbsetup/);
+    expect(state.job).toBeUndefined();
+  });
+
+  it('stops with Azure\'s answer when the job is refused', async () => {
+    const { azure, state } = azureJobs({ refuseCreate: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/could not create the database setup job \(HTTP 403 AuthorizationFailed/);
+    expect(state.starts).toBe(0);
+  });
+
+  it('does not start the job a second time when the answer to starting it is lost, and deletes it', async () => {
+    const { azure, state } = azureJobs({ loseStart: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow('fetch failed');
+    expect(state.starts).toBe(1);
     expect(state.job).toBeUndefined();
   });
 

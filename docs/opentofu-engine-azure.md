@@ -31,7 +31,7 @@ testing environments, production profiles or subsequent revisions.
 | Outside keys, `needs_secrets` and `hv_secrets action="collect"` (Key Vault store) | Built; generated secrets verified live, outside keys not yet |
 | Testing environments: `hv_plan scope="infrastructure"` → `hv_apply` → `hv_deploy` for web, on-demand worker, cron, database, storage and secrets | Built; verified live on the demo app (westus2): web over HTTPS, database over verified TLS with the environment's own login, a Key Vault secret, Blob storage with the managed identity, the on-demand worker (jobs done 0.3–1.9 s after due), cron on time, two releases with an empty plan after |
 | Shared server and registry for testing environments (one database and login each) | Built; verified live with one environment |
-| Shared private network and Container Apps environment; database behind a private endpoint with public access off; login created through a one-address window | Built 2026-11-17; verified live 2026-11-18 (West US 2) by the `azure-engine` [live profile](provider-conformance.md): web service, worker and database created in one apply, both workloads writing to the database, the server refusing a connection from outside, a release, an update and a teardown that left the resource group as it was. A second run the same day added storage, a scheduled job and an on-demand worker |
+| Shared private network and Container Apps environment; database behind a private endpoint with public access off; login created by a job inside the network | Built 2026-11-17; verified live 2026-11-18 (West US 2) by the `azure-engine` [live profile](provider-conformance.md): web service, worker and database created in one apply, both workloads writing to the database, the server refusing a connection from outside, a release, an update and a teardown that left the resource group as it was. A second run the same day added storage, a scheduled job and an on-demand worker |
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
@@ -220,10 +220,10 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
   Aurora's Data API or Cloud SQL's, so there is no Azure-native way to create a login
   without connecting to the server.
   - Hypervibe connects as the deploy identity, which is the server's Entra
-    administrator, through the one-address window described under
+    administrator, from the job inside the network described under
     [database network](#database-network). It uses a short-lived Entra token as the password, so no password
-    is stored, and TLS with the certificate verified against the host name (Node's CA
-    store includes Azure's roots).
+    is stored, and TLS with the certificate verified against the host name (with the
+    image's trusted roots).
   - It creates `app_<env>` (login and database owner) and, for on-demand workers, a
     read-only `waker_<env>`. Only those logins may connect to the environment's
     database. Passwords travel only as SCRAM verifiers.
@@ -242,21 +242,23 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     A networked environment bills a load balancer and public addresses, so the
     project's testing environments share one instead of paying for one each.
     The apps subnet is a /23 delegated to `Microsoft.App/environments`.
-  - **The one-address window.** Azure has no way to run SQL except a connection to
-    the server. To create or drop a login, `withAzureSetupAccess` turns public
-    access on, learns this computer's address, allows it alone in the rule
-    `hypervibe-setup`, runs the SQL, then deletes the rule and turns public
-    access off. Azure never says which address it turned away: with or without a
-    rule it drops the connection (observed live 2026-11-18), so Hypervibe asks
-    `checkip.amazonaws.com` for this computer's public address. That request
-    carries nothing but itself, and a wrong answer cannot connect.
-    It closes whatever happened in between, and a
-    failure to close is reported as an error; the next plan also shows public
-    access as a change to turn off. The plan step says it does this. It happens
-    when an environment's database is first created, when a worker's counting
-    login is added, and when a database is dropped.
+  - **Setup runs inside the network.** Azure has no way to run SQL except a
+    connection to the server, and the server is never opened to the internet. To
+    create or drop a login, `runAzureSetupSql` creates a one-off Container Apps
+    job in the shared environment, starts it, waits for it and deletes it. The
+    job runs `psql` from Microsoft's own PostgreSQL image
+    (`mcr.microsoft.com/azurelinux/base/postgres`, pinned by digest) with the
+    script and the deploy identity's short-lived Entra token as job secrets,
+    which Azure does not return. The job is deleted whatever happened; a failure
+    to delete it is reported as an error, and the next run removes a leftover
+    before it starts. A failed script's output is in the environment's logs
+    under the job's name (`<environment prefix>-dbsetup`). This replaced a
+    window that turned public access on for this computer's address alone, which
+    needed an outside service (`checkip.amazonaws.com`) to learn that address.
+    It happens when an environment's database is first created, when a worker's
+    counting login is added, and when a database is dropped.
   - **`hv_db_query` is refused** for Azure engine databases: a query never
-    changes network access, and nothing runs SQL from inside the network yet.
+    changes network access, and only Hypervibe's own setup script runs inside the network.
   - **Older projects.** The next plan removes the all-address firewall rule, turns
     public access off, and moves each environment's apps into the shared
     environment: they are recreated, are briefly unavailable (the database
@@ -334,7 +336,7 @@ every destructive action confirmed separately:
 1. Hypervibe empties each storage container.
 2. OpenTofu destroys the environment's resources.
 3. Hypervibe drops the environment's database and logins from the shared server,
-   through the one-address window. Other environments' databases are untouched.
+   from a job inside the network. Other environments' databases are untouched.
 4. When no other testing environment remains in the spec, OpenTofu also destroys
    the shared network, Container Apps environment, server and registry.
 5. Hypervibe deletes and purges the environment's Key Vault secrets, confirms nothing
