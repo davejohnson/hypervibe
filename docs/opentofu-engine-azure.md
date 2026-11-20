@@ -222,8 +222,9 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
   - Hypervibe connects as the deploy identity, which is the server's Entra
     administrator, from the job inside the network described under
     [database network](#database-network). It uses a short-lived Entra token as the password, so no password
-    is stored, and TLS with the certificate verified against the host name (with the
-    image's trusted roots).
+    is stored, and TLS with the certificate verified against the host name. The job
+    is given the three roots Microsoft documents for these servers, taken from Node's
+    bundled list, because the image trusts only a short Microsoft list without them.
   - It creates `app_<env>` (login and database owner) and, for on-demand workers, a
     read-only `waker_<env>`. Only those logins may connect to the environment's
     database. Passwords travel only as SCRAM verifiers.

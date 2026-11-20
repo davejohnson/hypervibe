@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AZURE_SETUP_IMAGE, AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, purgeVaultSecrets, runAzureSetupSql, taggedResources } from '../azure-ops.client.js';
+import { AZURE_SETUP_IMAGE, AzureTokens, azureDatabaseNames, azureDatabaseRoots, azureKeyVaultSecretStore, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, purgeVaultSecrets, runAzureSetupSql, taggedResources } from '../azure-ops.client.js';
 
 const access = { tenantId: 't', clientId: 'c', clientSecret: 'client-secret-value' };
 const json = (status: number, body: unknown = {}) => new Response(status === 204 ? null : JSON.stringify(body), { status });
@@ -145,6 +145,13 @@ describe('Azure database setup inside the private network', () => {
     expect(container.env).toEqual(expect.arrayContaining([{ name: 'PGHOST', value: job.host }, { name: 'PGUSER', value: 'hypervibe-app' }, { name: 'PGSSLMODE', value: 'verify-full' },
       { name: 'PGPASSWORD', secretRef: 'token' }, { name: 'HV_SETUP_SQL', secretRef: 'script' }]));
     expect(JSON.stringify(properties.template)).not.toContain('token-for-');
+    // The image trusts only a short Microsoft list, so the job brings the roots Azure databases chain to.
+    const roots = container.env.find((entry: { name: string }) => entry.name === 'HV_SETUP_CA').value as string;
+    expect(roots.match(/BEGIN CERTIFICATE/g)).toHaveLength(3);
+    expect(roots).toBe(azureDatabaseRoots());
+    expect(container.env).toContainEqual({ name: 'PGSSLROOTCERT', value: '/tmp/hv-ca.pem' });
+    expect(container.command.at(-1)).toMatch(/^printf "%s" "\$HV_SETUP_CA" > \/tmp\/hv-ca\.pem;/);
+    expect(() => azureDatabaseRoots([])).toThrow(/lacks a certificate authority/);
     expect(container.command.at(-1)).toContain('psql -q -v ON_ERROR_STOP=1 -f -');
     // Nothing is left behind.
     expect(state.job).toBeUndefined();

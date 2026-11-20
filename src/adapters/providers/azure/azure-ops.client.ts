@@ -1,5 +1,6 @@
 import { scramVerifier } from '../../../utils/scram.js';
 import crypto from 'crypto';
+import tls from 'tls';
 import type { AzureEngineCredentials } from './azure-engine.adapter.js';
 import { azureSecretName } from './tofu/azure-engine.config.js';
 
@@ -187,7 +188,21 @@ export function azureDatabaseNames(environmentName: string): { database: string;
 export const AZURE_SETUP_IMAGE = 'mcr.microsoft.com/azurelinux/base/postgres@sha256:c1a4225eedf956a6ec2152efcf250aee3fec8281ffb3db6ee2b2a2b8b5a69f21';
 const APPS_API = 'api-version=2024-03-01';
 /** A new server's Entra administrator takes a minute to be usable, so the job waits for a connection before it runs the script. */
-const SETUP_COMMAND = 'n=0; until psql -qAtc "select 1" >/dev/null 2>&1 || [ "$n" -ge 12 ]; do n=$((n+1)); sleep 10; done; printf "%s" "$HV_SETUP_SQL" | psql -q -v ON_ERROR_STOP=1 -f -';
+/**
+ * The roots Microsoft documents for Flexible Server certificates. The setup image
+ * trusts only a short Microsoft list that leaves out the DigiCert roots, so the
+ * job is given these from Node's bundled list instead of relying on the image.
+ */
+const SETUP_ROOT_NAMES = ['DigiCert Global Root G2', 'DigiCert Global Root CA', 'Microsoft RSA Root Certificate Authority 2017'];
+export function azureDatabaseRoots(certificates: readonly string[] = tls.rootCertificates): string {
+  const found = certificates.filter((pem) => {
+    const subject = new crypto.X509Certificate(pem).subject;
+    return SETUP_ROOT_NAMES.some((name) => subject.split('\n').includes(`CN=${name}`));
+  });
+  if (found.length !== SETUP_ROOT_NAMES.length) throw new Error('This Node.js build lacks a certificate authority that Azure databases use, so the database connection cannot be verified.');
+  return found.join('\n') + '\n';
+}
+const SETUP_COMMAND = 'printf "%s" "$HV_SETUP_CA" > /tmp/hv-ca.pem; n=0; until psql -qAtc "select 1" >/dev/null 2>&1 || [ "$n" -ge 12 ]; do n=$((n+1)); sleep 10; done; printf "%s" "$HV_SETUP_SQL" | psql -q -v ON_ERROR_STOP=1 -f -';
 
 export interface AzureSetupJob {
   /** ARM id of the job to create and delete; one per environment, so two environments can set up at once. */
@@ -251,8 +266,8 @@ export async function runAzureSetupSql(tokens: AzureTokenProvider, job: AzureSet
         secrets: [{ name: 'token', value: await tokens.get(AZURE_SCOPES.postgres) }, { name: 'script', value: script }] },
       template: { containers: [{ name: 'setup', image: AZURE_SETUP_IMAGE, command: ['/bin/sh', '-c', SETUP_COMMAND], resources: { cpu: 0.25, memory: '0.5Gi' },
         env: [{ name: 'PGHOST', value: job.host }, { name: 'PGPORT', value: '5432' }, { name: 'PGUSER', value: job.user }, { name: 'PGDATABASE', value: 'postgres' },
-          // The certificate is verified against the host name with the image's own trusted roots.
-          { name: 'PGSSLMODE', value: 'verify-full' }, { name: 'PGSSLROOTCERT', value: 'system' }, { name: 'PGCONNECT_TIMEOUT', value: '15' },
+          // The certificate is verified against the host name and the roots Azure databases use.
+          { name: 'PGSSLMODE', value: 'verify-full' }, { name: 'PGSSLROOTCERT', value: '/tmp/hv-ca.pem' }, { name: 'HV_SETUP_CA', value: azureDatabaseRoots() }, { name: 'PGCONNECT_TIMEOUT', value: '15' },
           { name: 'PGPASSWORD', secretRef: 'token' }, { name: 'HV_SETUP_SQL', secretRef: 'script' }] }] },
     } });
     if (![200, 201].includes(created.status)) throw new Error(`Hypervibe could not create the database setup job (${azureError(created)}).`);
