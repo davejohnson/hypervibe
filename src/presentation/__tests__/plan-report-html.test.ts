@@ -14,6 +14,38 @@ const report = (actions: PlanReportAction[], extra: Partial<PlanReport> = {}): P
 });
 
 describe('standalone infrastructure plan report', () => {
+  it('distinguishes the stored secret and its read permission, including previously saved plans', () => {
+    const key = 'hv-example-api-key';
+    const stored = action('secret-container:' + key, key, { kind: 'secret', type: 'noop' });
+    const grant = action('secret-runtime-access:' + key, key, { kind: 'secret', requiresConfirm: true });
+    const html = renderPlanReportHtml(report([stored, grant]));
+    expect(html).toContain('data-type="create"><strong>0</strong>');
+    expect(html).toContain('data-type="grant"><strong>1</strong>');
+    expect(html).toContain('<option value="grant">Grant access</option>');
+    expect(html).toContain('<span class="status">Grant access</span>');
+    expect(html).toContain('<span class="action-name">App read access to ' + key + '</span>');
+    expect(html).toContain('<span class="node-title">Secret permissions</span>');
+    expect(html).toContain('<span class="node-title">Secrets</span>');
+    expect(html).toContain('<code>' + grant.id + '</code>');
+    expect(html).toContain('Confirmation required');
+
+    const mixed = renderPlanReportHtml(report([{ ...stored, type: 'create' }, { ...grant, type: 'destroy' }]));
+    expect(mixed).toContain('data-type="create"><strong>1</strong>');
+    expect(mixed).toContain('data-type="revoke"><strong>1</strong>');
+    expect(mixed).toContain('<span class="status">Revoke access</span>');
+  });
+
+  it.each(['azure', 'aws'])('distinguishes the bundled %s app identity from a service named runtime', provider => {
+    const appIdentity = action('identity:runtime', 'runtime', { kind: 'service', provider });
+    const service = action('service:runtime', 'runtime', { kind: 'service', provider });
+    const html = renderPlanReportHtml(report([appIdentity, service]));
+    expect(html).toContain('<span class="node-title">App identity and permissions</span>');
+    expect(html).toContain('<span class="node-title">runtime</span>');
+    expect(html).toContain('<span class="action-name">App runtime identity</span>');
+    expect(html).toContain('data-type="create"><strong>2</strong>');
+    expect(html).not.toContain('<option value="grant">');
+  });
+
   it('groups Google Cloud setup by purpose and wires only explicit cross-group dependencies', () => {
     const api1 = action('project-setup:google_project_service:run', 'Enable run.googleapis.com');
     const api2 = action('project-setup:google_project_service:build', 'Enable cloudbuild.googleapis.com', { dependsOn: [api1.id] });

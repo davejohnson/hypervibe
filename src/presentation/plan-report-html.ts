@@ -1,14 +1,24 @@
 import { createHash } from 'node:crypto';
 import type { PlanReport, PlanReportAction } from '../domain/plan/plan-report.js';
 import type { PlanActionType } from '../domain/plan/plan.types.js';
-import { actionTitle, buildReportMap, humanize, lanes, namedResourceKinds, providerName, type MapGroup } from './plan-report-map.js';
+import { actionTitle, buildReportMap, humanize, isNamedResource, isSecretReadPermission, lanes, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
 import { groupPlanNotices } from './plan-report-notices.js';
 import { planReportStyle } from './plan-report-style.js';
 
-const types: Record<PlanActionType, string> = {
+type ReviewActionType = PlanActionType | 'grant' | 'revoke';
+const types: Record<ReviewActionType, string> = {
   create: 'Create', update: 'Update', replace: 'Replace', destroy: 'Destroy', noop: 'No change',
+  grant: 'Grant access', revoke: 'Revoke access',
 };
+
+function reviewType(action: PlanReportAction): ReviewActionType {
+  if (isSecretReadPermission(action)) {
+    if (action.type === 'create') return 'grant';
+    if (action.type === 'destroy') return 'revoke';
+  }
+  return action.type;
+}
 
 // Hypercloud's resource-map buttons use small line icons and a text description
 // for every resource. SVGs here are fixed markup and require no external assets.
@@ -37,12 +47,14 @@ function notice(label: string, messages: string[], className: string) {
 function node(group: MapGroup) {
   const provider = providerName(group.provider);
   const first = group.actions[0];
-  const named = namedResourceKinds.has(first.kind);
+  const named = isNamedResource(first);
   const title = named ? first.name : group.title;
   const subtitle = [provider, named ? humanize(first.kind) : '', quantity(group.actions.length, 'action')].filter(Boolean).join(' · ');
   const changes = Object.entries(types).flatMap(([type, label]) => {
-    const count = group.actions.filter(action => action.type === type).length;
-    return count ? [`<span class="status" data-type="${type}">${count} ${label.toLowerCase()}</span>`] : [];
+    const count = group.actions.filter(action => reviewType(action) === type).length;
+    if (!count) return [];
+    const summary = type === 'grant' ? quantity(count, 'new permission') : type === 'revoke' ? quantity(count, 'permission removal') : `${count} ${label.toLowerCase()}`;
+    return [`<span class="status" data-type="${type}">${summary}</span>`];
   }).join(' · ');
   return `<a class="map-node" href="#group-${group.index}" data-group="${group.index}">
     <span class="map-node-icon"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7">${icons[group.icon]}</svg></span>
@@ -69,6 +81,7 @@ function mapSection(map: ReturnType<typeof buildReportMap>) {
 const codeList = (values: string[]) => values.length ? `<ul>${values.map(value => `<li><code>${escape(value)}</code></li>`).join('')}</ul>` : '';
 
 function actionRow(action: PlanReportAction, index: number, group: MapGroup, indexes: Map<string, number | null>) {
+  const type = reviewType(action);
   const title = actionTitle(action);
   const name = title !== action.name ? fact('Resource name', escape(action.name)) : '';
   const flags = [
@@ -80,8 +93,8 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
     return `<li>${typeof target === 'number' ? `<a href="#action-${target}">${code}</a>` : code}</li>`;
   });
   const anchor = group.actions[0] === action ? `<span id="group-${group.index}"></span>` : '';
-  return `<li id="action-${index}" class="action-row" data-type="${escape(action.type)}" data-group="${group.index}">${anchor}
-    <details><summary><span class="status">${types[action.type]}</span>
+  return `<li id="action-${index}" class="action-row" data-type="${escape(type)}" data-group="${group.index}">${anchor}
+    <details><summary><span class="status">${types[type]}</span>
     <span class="action-main"><span class="action-name">${escape(title)}</span><span class="action-kind">${escape(group.title)} · ${escape(providerName(action.provider))}</span></span></summary>
     <div class="detail"><div class="bits">${flags.map(label => `<span>${label}</span>`).join('')}</div>
     ${action.reason ? `<p>${escape(action.reason)}</p>` : ''}<dl>
@@ -95,8 +108,10 @@ export function renderPlanReportHtml(report: PlanReport): string {
   const map = buildReportMap(report.actions);
   const indexes = new Map<string, number | null>();
   report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
-  const stats = Object.entries(types).map(([type, label]) => {
-    const count = report.actions.filter(action => action.type === type).length;
+  const visibleTypes = Object.entries(types).filter(([type]) =>
+    (type !== 'grant' && type !== 'revoke') || report.actions.some(action => reviewType(action) === type));
+  const stats = visibleTypes.map(([type, label]) => {
+    const count = report.actions.filter(action => reviewType(action) === type).length;
     return `<div class="stat${count ? ' has-actions' : ''}" data-type="${type}"><strong>${count}</strong><span>${label}</span></div>`;
   }).join('');
   const rows = report.actions.map((action, index) =>
@@ -130,7 +145,7 @@ ${mapSection(map)}
 <section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(report.actions.length, 'action')}</span></div>
 ${rows ? `<div class="review-scope" id="selected-group" hidden><a id="back-map" class="button" href="#resource-map">← Back to map</a><strong id="group-name"></strong></div>
 <div class="tools" data-interactive hidden><label>Search actions<input type="search" id="search" placeholder="Name, field or action ID"></label>
-<label>Action type<select id="action-type"><option value="">All types</option>${Object.entries(types).map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
+<label>Action type<select id="action-type"><option value="">All types</option>${visibleTypes.map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
 <button class="button" id="reset" type="button">Clear filters</button></div>
 <p class="result-count" role="status" aria-live="polite" id="result-count"></p>
 <p id="empty-filter" class="empty-filter" hidden>No actions match these filters.</p><ol class="action-list">${rows}</ol>` : '<p>No actions are recorded in this plan.</p>'}
