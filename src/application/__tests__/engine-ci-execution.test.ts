@@ -209,11 +209,11 @@ it.each(['ready', 'web-ready', 'web-private', 'worker-ready', 'registry-403', 'r
   expect(calls.find((r) => r.method === 'PATCH')?.body.properties.template.containers[0].env).toEqual([{ name: 'UNCHANGED', secretRef: 'private-ref' }]);
   expect(JSON.stringify(result)).not.toMatch(/private-azure|private-upload|private-ref|client_assertion/);
 });
-it('releases an exact ECS worker from its current native revision and waits for the acknowledged rollout', async () => {
+it('releases a paused ECS worker at zero and waits for the acknowledged rollout', async () => {
   const base = fixture(); const ecs = `arn:aws:ecs:${region}:${account}`; const clusterArn = `${ecs}:cluster/${prefix}`; const serviceId = `${ecs}:service/${prefix}/${prefix}-worker`;
   const family = `${prefix}-worker`; const old = `${ecs}:task-definition/${family}:5`; const next = `${ecs}:task-definition/${family}:6`;
   const binding = { ...base.binding, services: { worker: { serviceId, clusterArn, taskDefinitionArn: `${ecs}:task-definition/${family}:4`, workloadKind: 'worker', resourceType: 'ecs-service', region } } };
-  const rawSpec = { ...base.rawSpec, environments: { preview: { ...base.rawSpec.environments.preview, services: { worker: { workloadKind: 'worker', startCommand: 'npm run worker' } } } } };
+  const rawSpec = { ...base.rawSpec, environments: { preview: { ...base.rawSpec.environments.preview, services: { worker: { workloadKind: 'worker', startCommand: 'npm run worker', workerPaused: true } } } } };
   const f = replaceCommitted(base, rawSpec, binding); const calls = transport(f.github); const original = vi.mocked(NodeHttpHandler.prototype.handle).getMockImplementation()!; let active = old;
   vi.spyOn(NodeHttpHandler.prototype, 'handle').mockImplementation(async (r: any, opts: any) => {
     const target = r.headers['x-amz-target'] ?? ''; const text = String(r.body ?? ''); const body = text.startsWith('{') ? JSON.parse(text) : text; let data: unknown;
@@ -227,7 +227,7 @@ it('releases an exact ECS worker from its current native revision and waits for 
   });
   const result = await executeEngineCiRelease(f);
   expect(result).toMatchObject({ status: 'released', results: [{ service: 'worker', serviceId, taskDefinitionArn: next }] });
-  expect(calls.find((r) => r.target.endsWith('UpdateService'))?.body).toMatchObject({ cluster: clusterArn, service: serviceId, taskDefinition: next });
+  expect(calls.find((r) => r.target.endsWith('UpdateService'))?.body).toEqual({ cluster: clusterArn, service: serviceId, taskDefinition: next });
   expect(calls.find((r) => r.target.endsWith('RegisterTaskDefinition'))?.body.containerDefinitions[0].environment).toEqual([{ name: 'UNCHANGED', value: 'retained' }]);
   expect(calls.filter((r) => r.target.endsWith('DescribeTaskDefinition')).every((r) => r.body.taskDefinition === old)).toBe(true);
 });

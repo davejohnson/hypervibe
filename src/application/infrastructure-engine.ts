@@ -17,7 +17,7 @@ import {
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
+import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
@@ -323,6 +323,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
         ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
+        ...(service.workerPaused ? { minInstances: 0 } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -1171,6 +1172,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }] : [];
   // The complete engine segment creates containers before operational value writes.
   const actions = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   const warnings = [
     gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
@@ -1824,7 +1826,7 @@ async function releaseOne(
 
 export interface EngineWorkerStatus {
   service: string;
-  mode: 'on-demand' | 'always-on';
+  mode: 'on-demand' | 'always-on' | 'pause-requested';
   instances?: number;
   waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: WakerReadFailure };
 }
@@ -1846,10 +1848,13 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
   for (const [name, service] of Object.entries(environmentSpec.services)) {
     if (service.workloadKind !== 'worker') continue;
     const resource = bound[name]?.workerPoolName;
-    const status: EngineWorkerStatus = { service: name, mode: service.onDemand ? 'on-demand' : 'always-on' };
+    const status: EngineWorkerStatus = { service: name, mode: service.workerPaused ? 'pause-requested' : service.onDemand ? 'on-demand' : 'always-on' };
     if (resource) {
       const pool = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'workerPools');
-      if (pool.state === 'present') status.instances = Number(pool.value.scaling?.manualInstanceCount ?? 0);
+      if (pool.state === 'present') {
+        const scaling = pool.value.scaling;
+        if (Number.isSafeInteger(scaling?.manualInstanceCount) && scaling.manualInstanceCount >= 0) status.instances = scaling.manualInstanceCount;
+      }
       if (service.onDemand) {
         const response = await latestWakerExecution(token, context, resource);
         const latest = response.ok ? ((await response.json()) as { executions?: Array<{ state?: string; startTime?: string; result?: string }> }).executions?.[0] : undefined;

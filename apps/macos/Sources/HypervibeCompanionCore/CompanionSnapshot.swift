@@ -167,7 +167,13 @@ public struct WorkerObservation: Codable, Equatable, Identifiable, Sendable {
     public var workloadFailed: Bool { activity == "failed" }
 
     public var configurationSummary: String {
-        let modeLabel = mode == "on-demand" ? "On demand" : mode == "always-on" ? "Always on" : "Unknown mode"
+        let modeLabel: String
+        switch mode {
+        case "on-demand": modeLabel = "On demand"
+        case "always-on": modeLabel = "Always on"
+        case "pause-requested": modeLabel = "Pause requested"
+        default: modeLabel = "Unknown mode"
+        }
         let replicas = instances.map { "\($0) configured \($0 == 1 ? "instance" : "instances")" } ?? "Instance count not observed"
         return "\(modeLabel) · \(replicas)"
     }
