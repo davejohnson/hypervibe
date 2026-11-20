@@ -126,9 +126,15 @@ describe('engine-owned Secret Manager containers', () => {
     expect(resources('workerpools.tf.json').google_cloud_run_v2_worker_pool!.worker!.depends_on).toEqual(grantsFor([...app]));
     expect(resources('jobs.tf.json').google_cloud_run_v2_job!.schedule!.depends_on).toEqual(grantsFor([...app]));
     expect(resources('jobs.tf.json').google_cloud_run_v2_job!.release_command!.depends_on).toEqual(grantsFor([...ids]));
-    expect(projectSpecSchema.safeParse({ ...spec, environments: { staging: {
-      ...spec.environments.staging, hosting: { provider: 'aws', gcpRuntimeSecretGrants: 'per-secret' },
-    } } }).success).toBe(false);
+  });
+
+  it.each(['aws', 'azure'])('accepts ordinary %s hosting and rejects the Cloud Run grant setting', (provider) => {
+    const spec = { version: 1, project: 'example', environments: { staging: { hosting: { provider }, services: { web: {} } } } };
+    expect(projectSpecSchema.safeParse(spec).success).toBe(true);
+    const result = projectSpecSchema.safeParse({ ...spec, environments: { staging: {
+      ...spec.environments.staging, hosting: { provider, gcpRuntimeSecretGrants: 'per-secret' },
+    } } });
+    expect(result.error?.issues.map(issue => issue.path)).toEqual([['environments', 'staging', 'hosting', 'gcpRuntimeSecretGrants']]);
   });
 
   it('plans containers before value writes and wires services only after enabled versions exist', async () => {

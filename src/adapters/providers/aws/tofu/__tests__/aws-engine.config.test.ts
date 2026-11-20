@@ -45,7 +45,10 @@ describe('AWS engine configuration', () => {
     const role = (config.files['base.tf.json'] as { resource: { aws_iam_role: { runtime: Record<string, string> }; aws_iam_role_policy: { runtime: { policy: string } } } }).resource;
     expect(role.aws_iam_role.runtime.path).toBe('/hypervibe/app/');
     expect(role.aws_iam_role.runtime.permissions_boundary).toBe('arn:aws:iam::111122223333:policy/hypervibe/hypervibe-app-boundary');
-    expect(role.aws_iam_role_policy.runtime.policy).toContain('parameter/hypervibe/env1/API_KEY');
+    const statements: Array<{ Action: string[] | string; Resource: unknown }> = JSON.parse(role.aws_iam_role_policy.runtime.policy).Statement;
+    const parameterPermissions = statements.filter(statement => [statement.Action].flat().some(action => action === '*' || action.startsWith('ssm:')));
+    expect(parameterPermissions).toEqual([{ Sid: 'Secrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters'],
+      Resource: ['arn:aws:ssm:us-west-2:111122223333:parameter/hypervibe/env1/API_KEY'] }]);
     expect(config.resources['aws_s3_bucket.documents']).toMatchObject({ dataBearing: true });
   });
 });
