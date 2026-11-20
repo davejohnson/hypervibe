@@ -323,6 +323,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
         ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
+        ...(service.workerPaused ? { minInstances: 0 } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -1099,6 +1100,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
 
   const domainBefore = [...new Map([...domainPlans.values()].flatMap(plan => plan.before).map(action => [action.id, action])).values()];
   const serviceActions = planned.actions.map(action => {
+    const worker = environmentSpec!.services[action.resource.name];
+    if (action.type === 'update' && worker?.workloadKind === 'worker' && !worker.onDemand
+      && action.diff?.some(change => change.field === 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count')) {
+      const effect = worker.workerPaused ? 'pause this worker by setting its instance count to zero' : 'run one instance of this worker';
+      return { ...action, reason: `Hypervibe will ${effect}. ${action.reason}` };
+    }
     if (!action.id.startsWith('domain:') || !['create', 'update', 'replace'].includes(action.type)) return action;
     const extra = domainPlans.get(action.resource.name)?.before.filter(before => before.type !== 'noop').map(before => before.id) ?? [];
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
@@ -1824,7 +1831,7 @@ async function releaseOne(
 
 export interface EngineWorkerStatus {
   service: string;
-  mode: 'on-demand' | 'always-on';
+  mode: 'on-demand' | 'always-on' | 'pause-requested';
   instances?: number;
   waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: WakerReadFailure };
 }
@@ -1846,10 +1853,14 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
   for (const [name, service] of Object.entries(environmentSpec.services)) {
     if (service.workloadKind !== 'worker') continue;
     const resource = bound[name]?.workerPoolName;
-    const status: EngineWorkerStatus = { service: name, mode: service.onDemand ? 'on-demand' : 'always-on' };
+    const status: EngineWorkerStatus = { service: name, mode: service.workerPaused ? 'pause-requested' : service.onDemand ? 'on-demand' : 'always-on' };
     if (resource) {
       const pool = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'workerPools');
-      if (pool.state === 'present') status.instances = Number(pool.value.scaling?.manualInstanceCount ?? 0);
+      if (pool.state === 'present') {
+        const scaling = pool.value.scaling;
+        if (Number.isSafeInteger(scaling?.manualInstanceCount) && scaling.manualInstanceCount >= 0) status.instances = scaling.manualInstanceCount;
+        else if (scaling?.scalingMode === 'MANUAL' && scaling.manualInstanceCount === undefined) status.instances = 0;
+      }
       if (service.onDemand) {
         const response = await latestWakerExecution(token, context, resource);
         const latest = response.ok ? ((await response.json()) as { executions?: Array<{ state?: string; startTime?: string; result?: string }> }).executions?.[0] : undefined;

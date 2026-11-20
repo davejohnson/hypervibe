@@ -46,6 +46,33 @@ describe('production settings on Google Cloud', () => {
   const services = files['cloudrun.tf.json'].resource.google_cloud_run_v2_service;
   const buckets = files['storage.tf.json'].resource.google_storage_bucket;
 
+  it.each([[true, 0], [false, 1], [undefined, 1]] as const)('plans the fixed worker count with workerPaused=%s', (workerPaused, count) => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'studio', environments: { staging: {
+      hosting: { provider: 'cloudrun' }, services: { web: {}, worker: { workloadKind: 'worker', workerPaused } },
+    } } });
+    const input = engineInput(spec);
+    const files = buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' }).files as Record<string, any>;
+    const resources = files['workerpools.tf.json'].resource;
+    const pool = resources.google_cloud_run_v2_worker_pool.worker;
+    expect(pool.name).toBe('worker-staging');
+    expect(pool.scaling).toEqual([{ scaling_mode: 'MANUAL', manual_instance_count: count }]);
+    expect(pool.lifecycle[0].ignore_changes).not.toContain('scaling[0].manual_instance_count');
+    expect(resources.google_cloud_scheduler_job).toBeUndefined();
+    expect(files['cloudrun.tf.json'].resource.google_cloud_run_v2_service.web).toBeDefined();
+  });
+
+  it.each([
+    ['cloudrun', { workloadKind: 'web' }],
+    ['cloudrun', { workloadKind: 'worker', onDemand: { pendingWorkQuery: 'SELECT 1' } }],
+    ['railway', { workloadKind: 'worker' }], ['aws', { workloadKind: 'worker' }], ['azure', { workloadKind: 'worker' }],
+  ])('rejects workerPaused when %s cannot hold that workload at zero', (provider, service) => {
+    const result = projectSpecSchema.safeParse({ version: 1, project: 'studio', environments: { staging: {
+      hosting: { provider }, services: { worker: { ...service as object, workerPaused: true } },
+    } } });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues.map(issue => issue.path.at(-1))).toContain('workerPaused');
+  });
+
   it('keeps an always-on web service running with its CPU available, and leaves others to scale to zero', () => {
     expect(services.web.template[0].scaling[0].min_instance_count).toBe(1);
     expect(services.web.template[0].containers[0].resources[0]).toEqual({ limits: { cpu: '2', memory: '2Gi' }, cpu_idle: false });
